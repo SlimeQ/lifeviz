@@ -4,11 +4,15 @@ The UI stays invisible until you right-click anywhere on the canvas, revealing t
 
 ## Menu Actions
 
-- **Pause Simulation / Resume Simulation** – toggles the dispatcher tick loop.
-- **Randomize** – re-seeds every frame in the depth stack to a fresh random state.
-- **Columns** – quick presets (64–256) plus a *Custom...* dialog to pick any value between 32 and 512.
-- **Depth** – quick presets (12–48) plus a *Custom...* dialog for 3–96 layers.
-- **Window Input** – dynamically lists every visible, non-minimized top-level window. Selecting one locks the aspect ratio to that window and injects its live capture into the simulation. Choosing **None** clears the capture and restores the default 16:9 ratio.
+- **Pause Simulation / Resume Simulation** - toggles the dispatcher tick loop.
+- **Randomize** - re-seeds every frame in the depth stack to a fresh random state.
+- **Columns** - quick presets (64-256) plus a *Custom...* dialog to pick any value between 32 and 512.
+- **Depth** - quick presets (12-48) plus a *Custom...* dialog for 3-96 layers.
+- **Window Input** - dynamically lists every visible, non-minimized top-level window. Selecting one locks the aspect ratio to that window and injects its live capture into the simulation. Choosing **None** clears the capture and restores the default 16:9 ratio.
+- **Passthrough Underlay** - when a window input is active, enable a live underlay of that window behind the Game of Life output.
+- **Blend Mode** - choose how the underlay mixes with the simulation (Additive default; Normal, Multiply, Screen, Overlay, Lighten, Darken).
+- **Preserve Window Resolution** - renders the scene at the source window's resolution (bilinear sampling) instead of snapping to the grid size to reduce pixelation.
+- **Framerate** - lock the render loop to 15 / 30 / 60 fps to tune performance.
 
 ## Custom Inputs
 

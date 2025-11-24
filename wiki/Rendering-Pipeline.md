@@ -7,22 +7,30 @@
 
 ## Simulation Loop
 
-- `DispatcherTimer` in `MainWindow.xaml.cs` ticks every ~60?ms.
+- `DispatcherTimer` in `MainWindow.xaml.cs` ticks at a user-selectable rate (15 / 30 / 60 fps) via the context menu.
 - Each tick invokes `_engine.Step()` (unless paused), grabs a window capture (if selected), injects it into the stack, then calls `RenderFrame()`.
 - The engine maintains a depth stack (`List<bool[,]>`) where index 0 is the newest frame.
 
 ## Color Encoding
 
 - The depth is partitioned into three slices (R/G/B). If depth = 24, each slice gets 8 layers; remainders are distributed so `Depth % 3` spreads extra layers across R and G first.
-- For each slice, the engine walks the relevant frames and treats alive cells as set bits, forming a binary number. That integer is normalized against the maximum for that bit-length to derive a 0–255 channel value.
+- For each slice, the engine walks the relevant frames and treats alive cells as set bits, forming a binary number. That integer is normalized against the maximum for that bit-length to derive a 0-255 channel value.
 - The renderer writes BGRA bytes into `_pixelBuffer`, then blits the buffer via `WriteableBitmap.WritePixels`.
 
 ## Window Capture Injection
 
-1. `WindowCaptureService` enumerates all visible, non-minimized windows (excluding LifeViz itself) and captures the chosen handle via BitBlt into a `System.Drawing.Bitmap`.
-2. The bitmap is downscaled to the grid size, converted to grayscale, thresholded (default 0.55), and turned into a `bool[,]` mask.
+1. `WindowCaptureService` enumerates all visible, non-minimized windows (excluding LifeViz itself), grabs their DWM extended frame bounds to get physical pixel sizes (avoids DPI virtualization cropping), and captures the chosen handle via BitBlt into a `System.Drawing.Bitmap`.
+2. The bitmap is downscaled to the grid size, converted to grayscale, thresholded (default 0.55), and turned into a `bool[,]` mask using the full window extents so Picture-in-Picture or scaled windows map correctly to the grid.
 3. `_engine.InjectFrame(mask)` inserts the capture as the newest depth layer (z=0), pushing older frames down the stack.
 4. If the window disappears, selection is automatically cleared and the aspect ratio reverts to default.
+
+## Passthrough Underlay
+
+- When **Passthrough Underlay** is enabled, the capture step also keeps a BGRA buffer of the downscaled window. That buffer matches the grid dimensions so it aligns 1:1 under the Game of Life pixels.
+- Rendering blends the underlay with the simulation output per-pixel. Supported blend modes: Additive (default), Normal, Multiply, Screen, Overlay, Lighten, Darken.
+- Underlay rendering is skipped when no window is selected or the buffer dimensions disagree with the current grid (e.g., immediately after resizing).
+- **Preserve Window Resolution** renders the composite at the window's native resolution and samples the underlay bilinearly, then scales the Game of Life grid up to that size, reducing underlay pixelation.
+- Blend happens in a WPF pixel shader (GPU) so passthrough stays responsive even when rendering at source resolution.
 
 ## Z-Stack Effect
 
@@ -30,6 +38,6 @@ Because every new frame pushes down the history stack, movement leaves chromatic
 
 ## Performance Notes
 
-- Rows = round(columns / aspectRatio). Window selections replace the default 16:9 ratio with the source window’s ratio.
+- Rows = round(columns / aspectRatio). Window selections replace the default 16:9 ratio with the source window's ratio.
 - Random fill uses 35% seed density to encourage interesting evolution when no window input is selected.
-- All rendering is CPU-side; WPF’s scaling handles presentation without smoothing (`NearestNeighbor`). Window capture uses GDI BitBlt, so extremely large sources may require pausing or smaller grids if ticks fall behind.
+- All rendering is CPU-side; WPF's scaling handles presentation without smoothing (`NearestNeighbor`). Window capture uses GDI BitBlt, so extremely large sources may require pausing or smaller grids if ticks fall behind.

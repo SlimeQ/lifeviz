@@ -39,6 +39,32 @@
                 <Separator />
                 <MenuItem Header="Window Input"
                           x:Name="WindowInputMenu" />
+                <Separator />
+                <MenuItem x:Name="PassthroughMenuItem"
+                          Header="Passthrough Underlay"
+                          IsCheckable="True"
+                          Click="TogglePassthrough_Click" />
+                <MenuItem x:Name="PreserveResolutionMenuItem"
+                          Header="Preserve Window Resolution"
+                          IsCheckable="True"
+                          Click="TogglePreserveResolution_Click" />
+                <MenuItem Header="Blend Mode"
+                          x:Name="BlendModeMenu">
+                    <MenuItem Header="Additive" IsCheckable="True" Click="BlendModeItem_Click" />
+                    <MenuItem Header="Normal" IsCheckable="True" Click="BlendModeItem_Click" />
+                    <MenuItem Header="Multiply" IsCheckable="True" Click="BlendModeItem_Click" />
+                    <MenuItem Header="Screen" IsCheckable="True" Click="BlendModeItem_Click" />
+                    <MenuItem Header="Overlay" IsCheckable="True" Click="BlendModeItem_Click" />
+                    <MenuItem Header="Lighten" IsCheckable="True" Click="BlendModeItem_Click" />
+                    <MenuItem Header="Darken" IsCheckable="True" Click="BlendModeItem_Click" />
+                </MenuItem>
+                <Separator />
+                <MenuItem Header="Framerate"
+                          x:Name="FramerateMenu">
+                    <MenuItem Header="15 fps" IsCheckable="True" Click="FramerateItem_Click" />
+                    <MenuItem Header="30 fps" IsCheckable="True" Click="FramerateItem_Click" />
+                    <MenuItem Header="60 fps" IsCheckable="True" Click="FramerateItem_Click" />
+                </MenuItem>
             </ContextMenu>
         </Grid.ContextMenu>
 
