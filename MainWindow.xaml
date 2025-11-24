@@ -1,0 +1,54 @@
+<Window x:Class="lifeviz.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+        xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+        mc:Ignorable="d"
+        Title="LifeViz"
+        Width="1200"
+        Height="675"
+        Background="#0B0B0B"
+        WindowStartupLocation="CenterScreen">
+    <Grid x:Name="Root" Background="#0B0B0B">
+        <Grid.ContextMenu>
+            <ContextMenu x:Name="RootContextMenu">
+                <MenuItem x:Name="PauseMenuItem"
+                          Header="Pause Simulation"
+                          Click="TogglePause_Click" />
+                <MenuItem Header="Randomize"
+                          Click="Randomize_Click" />
+                <Separator />
+                <MenuItem Header="Columns">
+                    <MenuItem Header="64" Click="PresetColumns_Click" />
+                    <MenuItem Header="96" Click="PresetColumns_Click" />
+                    <MenuItem Header="128" Click="PresetColumns_Click" />
+                    <MenuItem Header="192" Click="PresetColumns_Click" />
+                    <MenuItem Header="256" Click="PresetColumns_Click" />
+                    <Separator />
+                    <MenuItem Header="Custom..." Click="SetColumns_Click" />
+                </MenuItem>
+                <MenuItem Header="Depth">
+                    <MenuItem Header="12" Click="PresetDepth_Click" />
+                    <MenuItem Header="24" Click="PresetDepth_Click" />
+                    <MenuItem Header="36" Click="PresetDepth_Click" />
+                    <MenuItem Header="48" Click="PresetDepth_Click" />
+                    <Separator />
+                    <MenuItem Header="Custom..." Click="SetDepth_Click" />
+                </MenuItem>
+            </ContextMenu>
+        </Grid.ContextMenu>
+
+        <Viewbox Stretch="Uniform"
+                 HorizontalAlignment="Center"
+                 VerticalAlignment="Center">
+            <Border Background="Black"
+                    Padding="0"
+                    SnapsToDevicePixels="True">
+                <Image x:Name="GameImage"
+                       RenderOptions.BitmapScalingMode="NearestNeighbor"
+                       RenderOptions.EdgeMode="Aliased"
+                       SnapsToDevicePixels="True" />
+            </Border>
+        </Viewbox>
+    </Grid>
+</Window>
