@@ -1,6 +1,8 @@
 param(
     [string]$Configuration = 'Release',
-    [string]$PublishProfile = 'Properties/PublishProfiles/WinClickOnce.pubxml'
+    [string]$PublishProfile = 'Properties/PublishProfiles/WinClickOnce.pubxml',
+    [string]$ApplicationVersion,
+    [int]$ApplicationRevision
 )
 
 function Resolve-MsBuild {
@@ -43,27 +45,21 @@ $msbuild = Resolve-MsBuild
 Write-Host "Using MSBuild at $msbuild" -ForegroundColor Cyan
 
 $arguments = @(
-    (Resolve-Path 'lifeviz.csproj'),
+    (Resolve-Path 'lifeviz.csproj').Path,
     '/t:Publish',
     "/p:PublishProfile=$PublishProfile",
     "/p:Configuration=$Configuration"
 )
 
-$psi = New-Object System.Diagnostics.ProcessStartInfo
-$psi.FileName = $msbuild
-$psi.Arguments = $arguments -join ' '
-$psi.WorkingDirectory = (Get-Location)
-$psi.RedirectStandardOutput = $true
-$psi.RedirectStandardError = $true
-$psi.UseShellExecute = $false
+if ($ApplicationVersion) {
+    $arguments += "/p:ApplicationVersion=$ApplicationVersion"
+}
 
-$process = New-Object System.Diagnostics.Process
-$process.StartInfo = $psi
-$process.Start() | Out-Null
-$process.WaitForExit()
+if ($PSBoundParameters.ContainsKey('ApplicationRevision')) {
+    $arguments += "/p:ApplicationRevision=$ApplicationRevision"
+}
 
-Write-Output $process.StandardOutput.ReadToEnd()
-if ($process.ExitCode -ne 0) {
-    Write-Error $process.StandardError.ReadToEnd()
-    throw "MSBuild publish failed with exit code $($process.ExitCode)"
+& $msbuild @arguments
+if ($LASTEXITCODE -ne 0) {
+    throw "MSBuild publish failed with exit code $LASTEXITCODE"
 }

@@ -3,7 +3,7 @@
 ## Prerequisites
 
 - .NET SDK 9 (for local dev & running)
-- Visual Studio Build Tools 2022 or Visual Studio with MSBuild & ClickOnce components (for the installer)
+- Visual Studio Build Tools 2022 or Visual Studio with MSBuild & ClickOnce components (for publishing)
 
 ## Local Development
 
@@ -12,35 +12,43 @@ dotnet build
 dotnet run
 ```
 
-Hotkeys aren’t required—interact via right-click.
+Rider users can open `lifeviz.sln` and choose the built-in **lifeviz: Run App** configuration.
 
 ## Branded Icon
 
-The custom neon "LV" mark lives in `Assets/lifeviz.ico` and is referenced through the `<ApplicationIcon>` property in `lifeviz.csproj`, so binaries and installers pick it up automatically.
+The custom neon "LV" mark lives in `Assets/lifeviz.ico` and is referenced via `<ApplicationIcon>` inside `lifeviz.csproj`, so binaries and installers both pick it up.
 
 ## One-Click Installer (ClickOnce)
 
-1. Open a **Developer PowerShell** or command prompt that exposes `MSBuild.exe` from VS/Build Tools.
-2. Run the helper script from the repo root:
+1. Open a **Developer PowerShell** or Command Prompt that exposes `MSBuild.exe` from Visual Studio / Build Tools.
+2. From the repo root, run the deployment script:
 
    ```powershell
-   .\Publish-Installer.ps1
+   .\deploy.ps1
    ```
 
-   This script locates `MSBuild.exe` via registry + well-known paths and executes:
+   Behind the scenes this script:
+   - Executes `dotnet build -c Release`.
+   - Calls `Publish-Installer.ps1`, which locates `MSBuild.exe` and runs:
 
-   ```
-   msbuild lifeviz.csproj /t:Publish /p:PublishProfile=Properties/PublishProfiles/WinClickOnce.pubxml /p:Configuration=Release
-   ```
+     ```
+     msbuild lifeviz.csproj /t:Publish /p:PublishProfile=Properties/PublishProfiles/WinClickOnce.pubxml /p:Configuration=Release
+     ```
+
+     while stamping a time-based ClickOnce version so updates are always detected.
+   - Launches the newly published `lifeviz.application` manifest to trigger the ClickOnce update/install flow.
 
 3. Artifacts land in `bin\Release\net9.0-windows\publish\`:
-   - `setup.exe` – bootstrapper with desktop/start-menu shortcuts.
-   - `lifeviz.application` – ClickOnce manifest.
-   - `Application Files\lifeviz_*` – versioned payload.
+   - `lifeviz.application` – ClickOnce manifest (what the deploy script launches).
+   - `Application Files\lifeviz_<version>\` – versioned payload.
+   - `setup.exe` – optional bootstrapper for first-time installs.
 
-Distribute `setup.exe` for a true one-click install, or host the `.application` file if you prefer web-based ClickOnce deployment.
+## Updating Existing Installs
+
+Because `deploy.ps1` embeds a unique version for every publish and opens `lifeviz.application`, the installed app always refreshes to the latest build. Use `setup.exe` only when onboarding a clean machine that lacks prerequisites.
 
 ## Troubleshooting
 
-- Running `dotnet publish ...` alone won’t build the ClickOnce manifests; the .NET SDK MSBuild lacks those tasks (MSB4803). Always use full MSBuild.
-- If the publish step can’t find MSBuild, install **Visual Studio Build Tools** and ensure the "MSBuild" and ".NET desktop development" workloads are selected.
+- `MSB4803` or similar errors usually mean you ran `dotnet publish` instead of full MSBuild; re-run through `Publish-Installer.ps1`/`deploy.ps1`.
+- If Rider/VS doesn’t see the run configs, ensure the `.run/` folder and `.idea` contents are checked out.
+- Window capture requires desktop composition (Aero); minimized or hidden windows cannot be sampled.

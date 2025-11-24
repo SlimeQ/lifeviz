@@ -9,20 +9,33 @@ internal sealed class GameOfLifeEngine
     private const int MaxColumns = 512;
     private const int MinDepth = 3;
     private const int MaxDepth = 96;
+    private const double DefaultAspectRatio = 16d / 9d;
     private readonly Random _random = new();
     private readonly List<bool[,]> _history = new();
+    private double _aspectRatio = DefaultAspectRatio;
 
     public int Columns { get; private set; } = 128;
     public int Rows { get; private set; } = 72;
     public int Depth { get; private set; } = 24;
+    public double AspectRatio => _aspectRatio;
 
     public IReadOnlyList<bool[,]> Frames => _history;
 
-    public void Configure(int requestedColumns, int requestedDepth)
+    public void Configure(int requestedColumns, int requestedDepth, double? aspectRatio = null)
     {
+        if (aspectRatio.HasValue && aspectRatio.Value > 0.01)
+        {
+            _aspectRatio = aspectRatio.Value;
+        }
+
         Columns = Math.Clamp(requestedColumns, MinColumns, MaxColumns);
         Depth = Math.Clamp(requestedDepth, MinDepth, MaxDepth);
-        Rows = Math.Max(9, (int)Math.Round(Columns * 9.0 / 16.0));
+        Rows = Math.Max(9, (int)Math.Round(Columns / _aspectRatio));
+
+        if (Rows < 3)
+        {
+            Rows = 3;
+        }
 
         _history.Clear();
         for (int i = 0; i < Depth; i++)
@@ -92,7 +105,7 @@ internal sealed class GameOfLifeEngine
             return;
         }
 
-        Configure(Columns, Depth);
+        Configure(Columns, Depth, _aspectRatio);
     }
 
     private bool[,] CreateFrame() => new bool[Rows, Columns];
@@ -146,6 +159,20 @@ internal sealed class GameOfLifeEngine
         var b = (start: g.start + g.length, length: bLen);
 
         return (r, g, b);
+    }
+
+    public void InjectFrame(bool[,] frame)
+    {
+        if (frame.GetLength(0) != Rows || frame.GetLength(1) != Columns)
+        {
+            return;
+        }
+
+        _history.Insert(0, frame);
+        if (_history.Count > Depth)
+        {
+            _history.RemoveAt(_history.Count - 1);
+        }
     }
 
     private byte EvaluateSlice(int row, int col, int sliceStart, int sliceLength)

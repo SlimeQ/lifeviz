@@ -1,0 +1,253 @@
+using System;
+using System.Collections.Generic;
+using System.Drawing;
+using System.Drawing.Imaging;
+using System.Runtime.InteropServices;
+using System.Text;
+
+namespace lifeviz;
+
+internal sealed class WindowCaptureService
+{
+
+    public IReadOnlyList<WindowHandleInfo> EnumerateWindows(IntPtr excludeHandle)
+    {
+        var windows = new List<WindowHandleInfo>();
+
+        NativeMethods.EnumWindows((hWnd, _) =>
+        {
+            if (hWnd == excludeHandle)
+            {
+                return true;
+            }
+
+            if (!NativeMethods.IsWindowVisible(hWnd))
+            {
+                return true;
+            }
+
+            if (NativeMethods.IsIconic(hWnd))
+            {
+                return true;
+            }
+
+            int length = NativeMethods.GetWindowTextLength(hWnd);
+            if (length == 0)
+            {
+                return true;
+            }
+
+            var builder = new StringBuilder(length + 1);
+            NativeMethods.GetWindowText(hWnd, builder, builder.Capacity);
+            string title = builder.ToString().Trim();
+            if (string.IsNullOrWhiteSpace(title))
+            {
+                return true;
+            }
+
+            if (!NativeMethods.GetWindowRect(hWnd, out var rect))
+            {
+                return true;
+            }
+
+            int width = rect.Right - rect.Left;
+            int height = rect.Bottom - rect.Top;
+            if (width <= 0 || height <= 0)
+            {
+                return true;
+            }
+
+            windows.Add(new WindowHandleInfo(hWnd, title, width, height));
+            return true;
+        }, IntPtr.Zero);
+
+        windows.Sort((a, b) => string.Compare(a.Title, b.Title, StringComparison.OrdinalIgnoreCase));
+        return windows;
+    }
+
+    public bool[,]? CaptureMask(WindowHandleInfo info, int targetColumns, int targetRows, double threshold)
+    {
+        if (targetColumns <= 0 || targetRows <= 0)
+        {
+            return null;
+        }
+
+        if (!NativeMethods.IsWindow(info.Handle))
+        {
+            return null;
+        }
+
+        using var bitmap = CaptureWindowBitmap(info.Handle);
+        if (bitmap == null)
+        {
+            return null;
+        }
+
+        return DownscaleToMask(bitmap, targetColumns, targetRows, threshold);
+    }
+
+    private static Bitmap? CaptureWindowBitmap(IntPtr handle)
+    {
+        if (!NativeMethods.GetWindowRect(handle, out var rect))
+        {
+            return null;
+        }
+
+        int width = rect.Right - rect.Left;
+        int height = rect.Bottom - rect.Top;
+        if (width <= 0 || height <= 0)
+        {
+            return null;
+        }
+
+        IntPtr hdcWindow = NativeMethods.GetWindowDC(handle);
+        if (hdcWindow == IntPtr.Zero)
+        {
+            return null;
+        }
+
+        IntPtr hdcMem = NativeMethods.CreateCompatibleDC(hdcWindow);
+        IntPtr hBitmap = NativeMethods.CreateCompatibleBitmap(hdcWindow, width, height);
+        if (hBitmap == IntPtr.Zero)
+        {
+            NativeMethods.DeleteDC(hdcMem);
+            NativeMethods.ReleaseDC(handle, hdcWindow);
+            return null;
+        }
+
+        IntPtr hOld = NativeMethods.SelectObject(hdcMem, hBitmap);
+        NativeMethods.BitBlt(hdcMem, 0, 0, width, height, hdcWindow, 0, 0, NativeMethods.SRCCOPY);
+        NativeMethods.SelectObject(hdcMem, hOld);
+        NativeMethods.DeleteDC(hdcMem);
+        NativeMethods.ReleaseDC(handle, hdcWindow);
+
+        Bitmap? bmp = null;
+        try
+        {
+            bmp = Image.FromHbitmap(hBitmap);
+        }
+        finally
+        {
+            NativeMethods.DeleteObject(hBitmap);
+        }
+
+        return bmp;
+    }
+
+    private static bool[,] DownscaleToMask(Bitmap bitmap, int columns, int rows, double threshold)
+    {
+        bool[,] mask = new bool[rows, columns];
+        double scaleX = bitmap.Width / (double)columns;
+        double scaleY = bitmap.Height / (double)rows;
+        threshold = Math.Clamp(threshold, 0, 1);
+
+        var rect = new Rectangle(0, 0, bitmap.Width, bitmap.Height);
+        var data = bitmap.LockBits(rect, ImageLockMode.ReadOnly, PixelFormat.Format32bppArgb);
+        try
+        {
+            int stride = data.Stride;
+            bool bottomUp = stride < 0;
+            int absoluteStride = Math.Abs(stride);
+            int bufferLength = absoluteStride * bitmap.Height;
+            var buffer = new byte[bufferLength];
+            Marshal.Copy(data.Scan0, buffer, 0, bufferLength);
+
+            for (int row = 0; row < rows; row++)
+            {
+                int srcY = Math.Min(bitmap.Height - 1, (int)Math.Floor(row * scaleY));
+                int bufferRow = bottomUp ? (bitmap.Height - 1 - srcY) : srcY;
+                int rowOffset = bufferRow * absoluteStride;
+                for (int col = 0; col < columns; col++)
+                {
+                    int srcX = Math.Min(bitmap.Width - 1, (int)Math.Floor(col * scaleX));
+                    int index = rowOffset + (srcX * 4);
+                    if (index < 0 || index + 2 >= buffer.Length)
+                    {
+                        continue;
+                    }
+
+                    byte b = buffer[index];
+                    byte g = buffer[index + 1];
+                    byte r = buffer[index + 2];
+                    double luminance = (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255.0;
+                    mask[row, col] = luminance >= threshold;
+                }
+            }
+        }
+        finally
+        {
+            bitmap.UnlockBits(data);
+        }
+
+        return mask;
+    }
+
+    private static class NativeMethods
+    {
+        public const int SRCCOPY = 0x00CC0020;
+
+        public delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
+
+        [DllImport("user32.dll")]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        public static extern bool EnumWindows(EnumWindowsProc lpEnumFunc, IntPtr lParam);
+
+        [DllImport("user32.dll")]
+        public static extern int GetWindowText(IntPtr hWnd, StringBuilder lpString, int nMaxCount);
+
+        [DllImport("user32.dll")]
+        public static extern int GetWindowTextLength(IntPtr hWnd);
+
+        [DllImport("user32.dll")]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        public static extern bool IsWindowVisible(IntPtr hWnd);
+
+        [DllImport("user32.dll")]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        public static extern bool IsWindow(IntPtr hWnd);
+
+        [DllImport("user32.dll")]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        public static extern bool IsIconic(IntPtr hWnd);
+
+        [DllImport("user32.dll")]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        public static extern bool GetWindowRect(IntPtr hWnd, out RECT lpRect);
+
+        [DllImport("user32.dll")]
+        public static extern IntPtr GetWindowDC(IntPtr hWnd);
+
+        [DllImport("user32.dll")]
+        public static extern int ReleaseDC(IntPtr hWnd, IntPtr hDC);
+
+        [DllImport("gdi32.dll")]
+        public static extern IntPtr CreateCompatibleDC(IntPtr hdc);
+
+        [DllImport("gdi32.dll")]
+        public static extern bool DeleteDC(IntPtr hdc);
+
+        [DllImport("gdi32.dll")]
+        public static extern IntPtr CreateCompatibleBitmap(IntPtr hdc, int nWidth, int nHeight);
+
+        [DllImport("gdi32.dll")]
+        public static extern IntPtr SelectObject(IntPtr hdc, IntPtr hgdiobj);
+
+        [DllImport("gdi32.dll")]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        public static extern bool DeleteObject(IntPtr hObject);
+
+        [DllImport("gdi32.dll")]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        public static extern bool BitBlt(IntPtr hdcDest, int nXDest, int nYDest, int nWidth, int nHeight,
+            IntPtr hdcSrc, int nXSrc, int nYSrc, int dwRop);
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct RECT
+    {
+        public int Left;
+        public int Top;
+        public int Right;
+        public int Bottom;
+    }
+}

@@ -1,7 +1,9 @@
 using System;
+using System.Collections.Generic;
 using System.Globalization;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Interop;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using System.Windows.Threading;
@@ -12,12 +14,19 @@ public partial class MainWindow : Window
 {
     private const int DefaultColumns = 128;
     private const int DefaultDepth = 24;
+    private const double DefaultAspectRatio = 16d / 9d;
+    private const double CaptureThreshold = 0.55;
 
     private readonly GameOfLifeEngine _engine = new();
     private readonly DispatcherTimer _timer;
+    private readonly WindowCaptureService _windowCapture = new();
+    private IReadOnlyList<WindowHandleInfo> _cachedWindows = Array.Empty<WindowHandleInfo>();
     private WriteableBitmap? _bitmap;
     private byte[]? _pixelBuffer;
     private bool _isPaused;
+    private double _currentAspectRatio = DefaultAspectRatio;
+    private WindowHandleInfo? _selectedWindow;
+    private IntPtr _windowHandle;
 
     public MainWindow()
     {
@@ -30,11 +39,17 @@ public partial class MainWindow : Window
         _timer.Tick += (_, _) => OnTick();
 
         Loaded += (_, _) => InitializeVisualizer();
+        SourceInitialized += (_, _) =>
+        {
+            var helper = new WindowInteropHelper(this);
+            _windowHandle = helper.Handle;
+        };
     }
 
     private void InitializeVisualizer()
     {
-        _engine.Configure(DefaultColumns, DefaultDepth);
+        _currentAspectRatio = DefaultAspectRatio;
+        _engine.Configure(DefaultColumns, DefaultDepth, _currentAspectRatio);
         RebuildSurface();
         _timer.Start();
     }
@@ -44,6 +59,7 @@ public partial class MainWindow : Window
         if (!_isPaused)
         {
             _engine.Step();
+            InjectWindowCaptureFrame();
         }
 
         RenderFrame();
@@ -137,15 +153,17 @@ public partial class MainWindow : Window
         }
     }
 
-    private void ApplyDimensions(int? columns, int? depth)
+    private void ApplyDimensions(int? columns, int? depth, double? aspectOverride = null)
     {
         int nextColumns = columns ?? _engine.Columns;
         int nextDepth = depth ?? _engine.Depth;
+        double nextAspect = aspectOverride ?? _currentAspectRatio;
+        _currentAspectRatio = nextAspect;
 
         bool wasPaused = _isPaused;
         _isPaused = true;
 
-        _engine.Configure(nextColumns, nextDepth);
+        _engine.Configure(nextColumns, nextDepth, _currentAspectRatio);
         RebuildSurface();
 
         _isPaused = wasPaused;
@@ -241,5 +259,98 @@ public partial class MainWindow : Window
 
         bool? dialogResult = dialog.ShowDialog();
         return dialogResult == true ? result : null;
+    }
+
+    private void RootContextMenu_OnOpened(object sender, RoutedEventArgs e)
+    {
+        PopulateWindowMenu();
+    }
+
+    private void PopulateWindowMenu()
+    {
+        if (WindowInputMenu == null)
+        {
+            return;
+        }
+
+        WindowInputMenu.Items.Clear();
+
+        var noneItem = new MenuItem
+        {
+            Header = "None",
+            IsCheckable = true,
+            IsChecked = _selectedWindow == null
+        };
+        noneItem.Click += (_, _) => ClearWindowSelection();
+        WindowInputMenu.Items.Add(noneItem);
+        WindowInputMenu.Items.Add(new Separator());
+
+        _cachedWindows = _windowCapture.EnumerateWindows(_windowHandle);
+        if (_cachedWindows.Count == 0)
+        {
+            WindowInputMenu.Items.Add(new MenuItem
+            {
+                Header = "No windows detected",
+                IsEnabled = false
+            });
+            return;
+        }
+
+        foreach (var window in _cachedWindows)
+        {
+            var item = new MenuItem
+            {
+                Header = window.Title,
+                Tag = window,
+                IsCheckable = true,
+                IsChecked = _selectedWindow != null && window.Handle == _selectedWindow.Handle
+            };
+            item.Click += WindowInputItem_Click;
+            WindowInputMenu.Items.Add(item);
+        }
+    }
+
+    private void WindowInputItem_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is not MenuItem { Tag: WindowHandleInfo info })
+        {
+            return;
+        }
+
+        _selectedWindow = info;
+        _currentAspectRatio = info.AspectRatio;
+        ApplyDimensions(null, null, _currentAspectRatio);
+    }
+
+    private void ClearWindowSelection()
+    {
+        bool hadSelection = _selectedWindow != null;
+        _selectedWindow = null;
+        if (Math.Abs(_currentAspectRatio - DefaultAspectRatio) > 0.0001)
+        {
+            _currentAspectRatio = DefaultAspectRatio;
+            ApplyDimensions(null, null, _currentAspectRatio);
+        }
+        else if (hadSelection)
+        {
+            RenderFrame();
+        }
+    }
+
+    private void InjectWindowCaptureFrame()
+    {
+        if (_selectedWindow == null)
+        {
+            return;
+        }
+
+        var mask = _windowCapture.CaptureMask(_selectedWindow, _engine.Columns, _engine.Rows, CaptureThreshold);
+        if (mask == null)
+        {
+            ClearWindowSelection();
+            return;
+        }
+
+        _engine.InjectFrame(mask);
     }
 }

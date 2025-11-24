@@ -11,7 +11,8 @@
         WindowStartupLocation="CenterScreen">
     <Grid x:Name="Root" Background="#0B0B0B">
         <Grid.ContextMenu>
-            <ContextMenu x:Name="RootContextMenu">
+            <ContextMenu x:Name="RootContextMenu"
+                         Opened="RootContextMenu_OnOpened">
                 <MenuItem x:Name="PauseMenuItem"
                           Header="Pause Simulation"
                           Click="TogglePause_Click" />
@@ -35,6 +36,9 @@
                     <Separator />
                     <MenuItem Header="Custom..." Click="SetDepth_Click" />
                 </MenuItem>
+                <Separator />
+                <MenuItem Header="Window Input"
+                          x:Name="WindowInputMenu" />
             </ContextMenu>
         </Grid.ContextMenu>
 

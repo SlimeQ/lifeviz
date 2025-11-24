@@ -1,6 +1,6 @@
 # LifeViz Wiki
 
-Welcome to the documentation hub for LifeViz, a minimalist Windows 11 WPF experience that renders a depth-aware Game of Life stack on a pristine 16:9 canvas.
+Welcome to the documentation hub for LifeViz, a minimalist Windows 11 WPF experience that renders a depth-aware Game of Life stack on a pristine canvas.
 
 ## Pages
 
@@ -10,9 +10,9 @@ Welcome to the documentation hub for LifeViz, a minimalist Windows 11 WPF experi
 
 ## Quick Facts
 
-- **Tech stack:** .NET 9 WPF, WriteableBitmap rendering, dispatcher-driven simulation loop.
-- **Visual goals:** borderless feel, strict 16:9 ratio, no visible chrome—everything is mediated through a right-click context menu.
-- **Data model:** 3D Game of Life with configurable columns and depth; historical frames drive per-pixel RGB derived from binary slices.
+- **Tech stack:** .NET 9 WPF, WriteableBitmap rendering, dispatcher-driven simulation loop, optional live window injection via GDI capture.
+- **Visual goals:** borderless feel, aspect-locked canvas, no visible chrome—everything is mediated through a right-click context menu.
+- **Data model:** 3D Game of Life with configurable columns/depth; historical frames drive per-pixel RGB derived from binary slices. Window captures inject new frames directly into the stack.
 
 ## Using this Wiki on GitHub
 
