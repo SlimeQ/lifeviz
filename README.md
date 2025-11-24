@@ -11,10 +11,14 @@ dotnet run
 
 ## Packaging
 
-Generate a ClickOnce one-click installer (creates `setup.exe` plus application manifests):
+ClickOnce gives you the familiar one-click installer (desktop shortcut, start menu entry, automatic icon, etc.). Creating the bootstrapper (`setup.exe`) requires the full .NET Framework MSBuild that ships with Visual Studio or the Build Tools workload:
 
 ```powershell
-dotnet publish /p:PublishProfile=Properties/PublishProfiles/WinClickOnce.pubxml
+# From a Developer Command Prompt / PowerShell where msbuild.exe is available
+msbuild lifeviz.csproj `
+  /t:Publish `
+  /p:PublishProfile=Properties\PublishProfiles\WinClickOnce.pubxml `
+  /p:Configuration=Release
 ```
 
-Artifacts land in `publish/clickonce/`. Distribute `setup.exe`; clicking it walks through the familiar ClickOnce experience with shortcuts and automatic icon usage.
+Publishing drops the ClickOnce payload under `bin\Release\net9.0-windows\publish\` (subfolder `Application Files\lifeviz_*`). Share `setup.exe` for the true one-click experience or the `.application` manifest for framework-dependent installs. The .NET SDK CLI cannot run the ClickOnce manifest + bootstrapper tasks, so stick to the full MSBuild toolset when packaging.

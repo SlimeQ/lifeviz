@@ -1,5 +1,0 @@
-C:\Users\quinc\Programming\personal\lifeviz\bin\Release\net9.0-windows\app.publish\lifeviz.exe
-C:\Users\quinc\Programming\personal\lifeviz\bin\Release\net9.0-windows\app.publish\lifeviz.dll
-C:\Users\quinc\Programming\personal\lifeviz\bin\Release\net9.0-windows\app.publish\lifeviz.deps.json
-C:\Users\quinc\Programming\personal\lifeviz\bin\Release\net9.0-windows\app.publish\lifeviz.runtimeconfig.json
-C:\Users\quinc\Programming\personal\lifeviz\bin\Release\net9.0-windows\app.publish\lifeviz.pdb
