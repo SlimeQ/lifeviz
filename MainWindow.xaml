@@ -58,6 +58,26 @@
                     <MenuItem Header="Lighten" IsCheckable="True" Click="BlendModeItem_Click" />
                     <MenuItem Header="Darken" IsCheckable="True" Click="BlendModeItem_Click" />
                 </MenuItem>
+                <MenuItem Header="Life Modes"
+                          x:Name="LifeModeMenu">
+                    <MenuItem Header="Naive Grayscale" IsCheckable="True" Click="LifeModeItem_Click" />
+                    <MenuItem Header="RGB Channel Bins" IsCheckable="True" Click="LifeModeItem_Click" />
+                </MenuItem>
+                <MenuItem Header="Binning Mode"
+                          x:Name="BinningModeMenu">
+                    <MenuItem Header="Fill" IsCheckable="True" Click="BinningModeItem_Click" />
+                    <MenuItem Header="Binary" IsCheckable="True" Click="BinningModeItem_Click" />
+                </MenuItem>
+                <MenuItem Header="Capture Threshold" StaysOpenOnClick="True">
+                    <Slider x:Name="ThresholdSlider"
+                            Minimum="0"
+                            Maximum="1"
+                            Value="0.55"
+                            SmallChange="0.01"
+                            LargeChange="0.1"
+                            Width="160"
+                            ValueChanged="ThresholdSlider_OnValueChanged" />
+                </MenuItem>
                 <Separator />
                 <MenuItem Header="Framerate"
                           x:Name="FramerateMenu">

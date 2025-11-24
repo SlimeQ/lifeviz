@@ -59,6 +59,38 @@ namespace lifeviz;
             return true;
         }
 
+        private static bool TryGetClientBounds(IntPtr handle, out RECT clientRect, out int offsetX, out int offsetY)
+        {
+            clientRect = default;
+            offsetX = 0;
+            offsetY = 0;
+
+            if (!NativeMethods.GetClientRect(handle, out var localClient))
+            {
+                return false;
+            }
+
+            var topLeft = new POINT { X = 0, Y = 0 };
+            if (!NativeMethods.ClientToScreen(handle, ref topLeft))
+            {
+                return false;
+            }
+
+            if (!TryGetWindowBounds(handle, out var windowRect))
+            {
+                return false;
+            }
+
+            clientRect.Left = topLeft.X;
+            clientRect.Top = topLeft.Y;
+            clientRect.Right = topLeft.X + localClient.Right;
+            clientRect.Bottom = topLeft.Y + localClient.Bottom;
+
+            offsetX = clientRect.Left - windowRect.Left;
+            offsetY = clientRect.Top - windowRect.Top;
+            return true;
+        }
+
         public IReadOnlyList<WindowHandleInfo> EnumerateWindows(IntPtr excludeHandle)
         {
             var windows = new List<WindowHandleInfo>();
@@ -142,8 +174,15 @@ namespace lifeviz;
             return null;
         }
 
-        int width = rect.Right - rect.Left;
-        int height = rect.Bottom - rect.Top;
+        if (!TryGetClientBounds(handle, out var clientRect, out int offsetX, out int offsetY))
+        {
+            clientRect = rect;
+            offsetX = 0;
+            offsetY = 0;
+        }
+
+        int width = clientRect.Right - clientRect.Left;
+        int height = clientRect.Bottom - clientRect.Top;
         if (width <= 0 || height <= 0)
         {
             return null;
@@ -165,7 +204,7 @@ namespace lifeviz;
         }
 
         IntPtr hOld = NativeMethods.SelectObject(hdcMem, hBitmap);
-        NativeMethods.BitBlt(hdcMem, 0, 0, width, height, hdcWindow, 0, 0, NativeMethods.SRCCOPY);
+        NativeMethods.BitBlt(hdcMem, 0, 0, width, height, hdcWindow, offsetX, offsetY, NativeMethods.SRCCOPY);
         NativeMethods.SelectObject(hdcMem, hOld);
         NativeMethods.DeleteDC(hdcMem);
         NativeMethods.ReleaseDC(handle, hdcWindow);
@@ -370,6 +409,14 @@ namespace lifeviz;
 
         [DllImport("user32.dll")]
         public static extern uint GetDpiForWindow(IntPtr hWnd);
+
+        [DllImport("user32.dll")]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        public static extern bool GetClientRect(IntPtr hWnd, out RECT lpRect);
+
+        [DllImport("user32.dll")]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        public static extern bool ClientToScreen(IntPtr hWnd, ref POINT lpPoint);
     }
 
     [StructLayout(LayoutKind.Sequential)]
@@ -379,6 +426,13 @@ namespace lifeviz;
         public int Top;
         public int Right;
         public int Bottom;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct POINT
+    {
+        public int X;
+        public int Y;
     }
 
     internal sealed class WindowCaptureFrame

@@ -3,21 +3,43 @@ using System.Collections.Generic;
 
 namespace lifeviz;
 
-internal sealed class GameOfLifeEngine
-{
-    private const int MinColumns = 32;
-    private const int MaxColumns = 512;
-    private const int MinDepth = 3;
-    private const int MaxDepth = 96;
-    private const double DefaultAspectRatio = 16d / 9d;
-    private readonly Random _random = new();
-    private readonly List<bool[,]> _history = new();
-    private double _aspectRatio = DefaultAspectRatio;
+    internal sealed class GameOfLifeEngine
+    {
+        internal enum LifeMode
+        {
+            NaiveGrayscale,
+            RgbChannels
+        }
+
+        internal enum BinningMode
+        {
+            Fill,
+            Binary
+        }
+
+        private const int MinColumns = 32;
+        private const int MaxColumns = 512;
+        private const int MinDepth = 3;
+        private const int MaxDepth = 96;
+        private const double DefaultAspectRatio = 16d / 9d;
+        private readonly Random _random = new();
+        private readonly List<bool[,]> _history = new();
+        private readonly List<bool[,]> _historyR = new();
+        private readonly List<bool[,]> _historyG = new();
+        private readonly List<bool[,]> _historyB = new();
+        private double _aspectRatio = DefaultAspectRatio;
+        private LifeMode _mode = LifeMode.NaiveGrayscale;
+        private BinningMode _binningMode = BinningMode.Fill;
+        private int _rDepth;
+        private int _gDepth;
+        private int _bDepth;
 
     public int Columns { get; private set; } = 128;
     public int Rows { get; private set; } = 72;
     public int Depth { get; private set; } = 24;
     public double AspectRatio => _aspectRatio;
+    public LifeMode Mode => _mode;
+    public BinningMode BinMode => _binningMode;
 
     public IReadOnlyList<bool[,]> Frames => _history;
 
@@ -37,12 +59,24 @@ internal sealed class GameOfLifeEngine
             Rows = 3;
         }
 
-        _history.Clear();
-        for (int i = 0; i < Depth; i++)
+        (_rDepth, _gDepth, _bDepth) = CalculateChannelDepths();
+        ResetHistories();
+    }
+
+    public void SetBinningMode(BinningMode mode)
+    {
+        _binningMode = mode;
+    }
+
+    public void SetMode(LifeMode mode)
+    {
+        if (_mode == mode)
         {
-            _history.Add(CreateFrame());
+            return;
         }
 
+        _mode = mode;
+        ResetHistories();
         Randomize();
     }
 
@@ -50,9 +84,18 @@ internal sealed class GameOfLifeEngine
     {
         EnsureInitialized();
 
-        foreach (var frame in _history)
+        if (_mode == LifeMode.NaiveGrayscale)
         {
-            FillRandom(frame);
+            foreach (var frame in _history)
+            {
+                FillRandom(frame);
+            }
+        }
+        else
+        {
+            RandomizeChannel(_historyR);
+            RandomizeChannel(_historyG);
+            RandomizeChannel(_historyB);
         }
     }
 
@@ -60,23 +103,15 @@ internal sealed class GameOfLifeEngine
     {
         EnsureInitialized();
 
-        var current = _history[0];
-        var next = CreateFrame();
-
-        for (int row = 0; row < Rows; row++)
+        if (_mode == LifeMode.NaiveGrayscale)
         {
-            for (int col = 0; col < Columns; col++)
-            {
-                int neighbors = CountNeighbors(current, row, col);
-                bool alive = current[row, col];
-                next[row, col] = neighbors == 3 || (alive && neighbors == 2);
-            }
+            StepChannel(_history, Depth);
         }
-
-        _history.Insert(0, next);
-        if (_history.Count > Depth)
+        else
         {
-            _history.RemoveAt(_history.Count - 1);
+            StepChannel(_historyR, _rDepth);
+            StepChannel(_historyG, _gDepth);
+            StepChannel(_historyB, _bDepth);
         }
     }
 
@@ -89,18 +124,81 @@ internal sealed class GameOfLifeEngine
             return (0, 0, 0);
         }
 
-        var (rSlice, gSlice, bSlice) = CalculateSlices();
+        if (_mode == LifeMode.NaiveGrayscale)
+        {
+            var (rSlice, gSlice, bSlice) = CalculateSlices();
 
-        byte r = EvaluateSlice(row, col, rSlice.start, rSlice.length);
-        byte g = EvaluateSlice(row, col, gSlice.start, gSlice.length);
-        byte b = EvaluateSlice(row, col, bSlice.start, bSlice.length);
+            byte r = EvaluateSlice(row, col, rSlice.start, rSlice.length);
+            byte g = EvaluateSlice(row, col, gSlice.start, gSlice.length);
+            byte b = EvaluateSlice(row, col, bSlice.start, bSlice.length);
 
-        return (r, g, b);
+            return (r, g, b);
+        }
+
+        byte rChannel = EvaluateChannel(row, col, _historyR, _rDepth);
+        byte gChannel = EvaluateChannel(row, col, _historyG, _gDepth);
+        byte bChannel = EvaluateChannel(row, col, _historyB, _bDepth);
+        return (rChannel, gChannel, bChannel);
+    }
+
+    public void InjectFrame(bool[,] frame)
+    {
+        if (!ValidateFrame(frame))
+        {
+            return;
+        }
+
+        if (_mode == LifeMode.NaiveGrayscale)
+        {
+            var next = CloneTopOrEmpty(_history, Rows, Columns);
+            ApplyMask(next, frame);
+            _history.Insert(0, next);
+            TrimChannel(_history, Depth);
+        }
+        else
+        {
+            // Duplicate grayscale into all channels when in RGB mode without per-channel data.
+            InjectRgbFrame(frame, frame, frame);
+        }
+    }
+
+    public void InjectRgbFrame(bool[,] red, bool[,] green, bool[,] blue)
+    {
+        if (_mode != LifeMode.RgbChannels)
+        {
+            return;
+        }
+
+        if (!ValidateFrame(red) || !ValidateFrame(green) || !ValidateFrame(blue))
+        {
+            return;
+        }
+
+        var nextR = CloneTopOrEmpty(_historyR, Rows, Columns);
+        var nextG = CloneTopOrEmpty(_historyG, Rows, Columns);
+        var nextB = CloneTopOrEmpty(_historyB, Rows, Columns);
+
+        ApplyMask(nextR, red);
+        ApplyMask(nextG, green);
+        ApplyMask(nextB, blue);
+
+        _historyR.Insert(0, nextR);
+        _historyG.Insert(0, nextG);
+        _historyB.Insert(0, nextB);
+
+        TrimChannel(_historyR, _rDepth);
+        TrimChannel(_historyG, _gDepth);
+        TrimChannel(_historyB, _bDepth);
     }
 
     private void EnsureInitialized()
     {
-        if (_history.Count > 0)
+        if (_mode == LifeMode.NaiveGrayscale && _history.Count > 0)
+        {
+            return;
+        }
+
+        if (_mode == LifeMode.RgbChannels && (_historyR.Count > 0 || _historyG.Count > 0 || _historyB.Count > 0))
         {
             return;
         }
@@ -161,17 +259,103 @@ internal sealed class GameOfLifeEngine
         return (r, g, b);
     }
 
-    public void InjectFrame(bool[,] frame)
+    private void ResetHistories()
     {
-        if (frame.GetLength(0) != Rows || frame.GetLength(1) != Columns)
+        _history.Clear();
+        _historyR.Clear();
+        _historyG.Clear();
+        _historyB.Clear();
+
+        if (_mode == LifeMode.NaiveGrayscale)
         {
-            return;
+            for (int i = 0; i < Depth; i++)
+            {
+                _history.Add(CreateFrame());
+            }
+        }
+        else
+        {
+            for (int i = 0; i < _rDepth; i++)
+            {
+                _historyR.Add(CreateFrame());
+            }
+            for (int i = 0; i < _gDepth; i++)
+            {
+                _historyG.Add(CreateFrame());
+            }
+            for (int i = 0; i < _bDepth; i++)
+            {
+                _historyB.Add(CreateFrame());
+            }
+        }
+    }
+
+    private void RandomizeChannel(List<bool[,]> history)
+    {
+        foreach (var frame in history)
+        {
+            FillRandom(frame);
+        }
+    }
+
+    private static bool[,] CloneTopOrEmpty(List<bool[,]> history, int rows, int cols)
+    {
+        if (history.Count == 0)
+        {
+            return new bool[rows, cols];
         }
 
-        _history.Insert(0, frame);
-        if (_history.Count > Depth)
+        var source = history[0];
+        var clone = new bool[rows, cols];
+        Array.Copy(source, clone, source.Length);
+        return clone;
+    }
+
+    private static void ApplyMask(bool[,] target, bool[,] mask)
+    {
+        int rows = target.GetLength(0);
+        int cols = target.GetLength(1);
+        for (int r = 0; r < rows; r++)
         {
-            _history.RemoveAt(_history.Count - 1);
+            for (int c = 0; c < cols; c++)
+            {
+                if (mask[r, c])
+                {
+                    target[r, c] = true;
+                }
+            }
+        }
+    }
+
+    private void StepChannel(List<bool[,]> history, int depth)
+    {
+        if (history.Count == 0)
+        {
+            history.Add(CreateFrame());
+        }
+
+        var current = history[0];
+        var next = CreateFrame();
+
+        for (int row = 0; row < Rows; row++)
+        {
+            for (int col = 0; col < Columns; col++)
+            {
+                int neighbors = CountNeighbors(current, row, col);
+                bool alive = current[row, col];
+                next[row, col] = neighbors == 3 || (alive && neighbors == 2);
+            }
+        }
+
+        history.Insert(0, next);
+        TrimChannel(history, depth);
+    }
+
+    private void TrimChannel(List<bool[,]> history, int depth)
+    {
+        if (history.Count > depth)
+        {
+            history.RemoveAt(history.Count - 1);
         }
     }
 
@@ -182,29 +366,123 @@ internal sealed class GameOfLifeEngine
             return 0;
         }
 
-        long value = 0;
-        for (int i = 0; i < sliceLength; i++)
-        {
-            int historyIndex = sliceStart + i;
-            if (historyIndex >= _history.Count)
-            {
-                break;
-            }
-
-            if (_history[historyIndex][row, col])
-            {
-                int bit = sliceLength - 1 - i;
-                value |= 1L << bit;
-            }
-        }
-
-        long max = (1L << sliceLength) - 1;
-        if (max <= 0)
+        int frames = Math.Min(sliceLength, _history.Count);
+        if (frames <= 0)
         {
             return 0;
         }
 
-        double normalized = value / (double)max;
-        return (byte)Math.Round(normalized * 255);
+        if (_binningMode == BinningMode.Binary)
+        {
+            long value = 0;
+            for (int i = 0; i < frames; i++)
+            {
+                int historyIndex = sliceStart + i;
+                if (historyIndex >= _history.Count)
+                {
+                    break;
+                }
+
+                if (_history[historyIndex][row, col])
+                {
+                    int bit = frames - 1 - i;
+                    value |= 1L << bit;
+                }
+            }
+
+            long max = (1L << frames) - 1;
+            if (max <= 0)
+            {
+                return 0;
+            }
+
+            double normalized = value / (double)max;
+            return (byte)Math.Round(normalized * 255);
+        }
+        else
+        {
+            int alive = 0;
+            int considered = 0;
+            for (int i = 0; i < frames; i++)
+            {
+                int historyIndex = sliceStart + i;
+                if (historyIndex >= _history.Count)
+                {
+                    break;
+                }
+
+                considered++;
+                if (_history[historyIndex][row, col])
+                {
+                    alive++;
+                }
+            }
+
+            if (considered == 0)
+            {
+                return 0;
+            }
+
+            double normalized = alive / (double)considered;
+            return (byte)Math.Round(normalized * 255);
+        }
+    }
+
+    private byte EvaluateChannel(int row, int col, List<bool[,]> history, int channelDepth)
+    {
+        if (channelDepth <= 0 || history.Count == 0)
+        {
+            return 0;
+        }
+
+        int frames = Math.Min(channelDepth, history.Count);
+        if (frames <= 0)
+        {
+            return 0;
+        }
+
+        if (_binningMode == BinningMode.Binary)
+        {
+            long value = 0;
+            for (int i = 0; i < frames; i++)
+            {
+                if (history[i][row, col])
+                {
+                    int bit = frames - 1 - i;
+                    value |= 1L << bit;
+                }
+            }
+
+            long max = (1L << frames) - 1;
+            if (max <= 0)
+            {
+                return 0;
+            }
+
+            double normalized = value / (double)max;
+            return (byte)Math.Round(normalized * 255);
+        }
+        else
+        {
+            int alive = 0;
+            for (int i = 0; i < frames; i++)
+            {
+                if (history[i][row, col])
+                {
+                    alive++;
+                }
+            }
+
+            double normalized = alive / (double)frames;
+            return (byte)Math.Round(normalized * 255);
+        }
+    }
+
+    private bool ValidateFrame(bool[,] frame) => frame.GetLength(0) == Rows && frame.GetLength(1) == Columns;
+
+    private (int r, int g, int b) CalculateChannelDepths()
+    {
+        var (r, g, b) = CalculateSlices();
+        return (r.length, g.length, b.length);
     }
 }

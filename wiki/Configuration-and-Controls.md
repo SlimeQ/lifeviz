@@ -13,6 +13,9 @@ The UI stays invisible until you right-click anywhere on the canvas, revealing t
 - **Blend Mode** - choose how the underlay mixes with the simulation (Additive default; Normal, Multiply, Screen, Overlay, Lighten, Darken).
 - **Preserve Window Resolution** - renders the scene at the source window's resolution (bilinear sampling) instead of snapping to the grid size to reduce pixelation.
 - **Framerate** - lock the render loop to 15 / 30 / 60 fps to tune performance.
+- **Life Modes** - switch between *Naive Grayscale* (single simulation thresholded from luminance) and *RGB Channel Bins* (independent simulations in R/G/B bins, with per-channel capture injection).
+- **Binning Mode** - choose *Fill* (default; channel intensity = fraction of alive cells within the bin) or *Binary* (original bit-packed depth encoding).
+- **Capture Threshold** - slider (0-1) applied before each simulation tick; only pixels above the threshold set cells alive when injecting window captures.
 
 ## Custom Inputs
 

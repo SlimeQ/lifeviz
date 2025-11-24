@@ -32,6 +32,16 @@
 - **Preserve Window Resolution** renders the composite at the window's native resolution and samples the underlay bilinearly, then scales the Game of Life grid up to that size, reducing underlay pixelation.
 - Blend happens in a WPF pixel shader (GPU) so passthrough stays responsive even when rendering at source resolution.
 
+## Life Modes
+
+- **Naive Grayscale** (default): one simulation drives all channels, derived from a thresholded luminance mask of the capture.
+- **RGB Channel Bins:** three independent simulations occupy the R/G/B depth bins (same partition used for rendering). Window captures inject per-channel masks into their respective bin zero; propagation stays within each channel's slice (e.g., depth 24 yields bins 0-7, 8-15, 16-23).
+
+## Binning Modes
+
+- **Fill** (default) - channel intensity is the ratio of alive cells within the bin (frames in that channel slice). Produces smoother intensity ramps across depth.
+- **Binary** - original bit-packed depth encoding; most significant bits represent newer frames, normalized to 0-255.
+
 ## Z-Stack Effect
 
 Because every new frame pushes down the history stack, movement leaves chromatic trails. Injected window captures therefore colorize based on how recent pixels were alive, giving a time-scrubbed representation of the source window.

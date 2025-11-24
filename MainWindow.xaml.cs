@@ -1,12 +1,14 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.IO;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Interop;
 using System.Windows.Media;
 using System.Windows.Media.Effects;
 using System.Windows.Media.Imaging;
+using System.Text.Json;
 using System.Windows.Threading;
 
 namespace lifeviz;
@@ -16,7 +18,6 @@ public partial class MainWindow : Window
     private const int DefaultColumns = 128;
     private const int DefaultDepth = 24;
     private const double DefaultAspectRatio = 16d / 9d;
-    private const double CaptureThreshold = 0.55;
     private const double DefaultFps = 60;
 
     private readonly GameOfLifeEngine _engine = new();
@@ -41,7 +42,10 @@ public partial class MainWindow : Window
     private bool _passthroughEnabled;
     private bool _preserveResolution;
     private BlendMode _blendMode = BlendMode.Additive;
+    private GameOfLifeEngine.LifeMode _lifeMode = GameOfLifeEngine.LifeMode.NaiveGrayscale;
+    private GameOfLifeEngine.BinningMode _binningMode = GameOfLifeEngine.BinningMode.Fill;
     private double _currentFps = DefaultFps;
+    private double _captureThreshold = 0.55;
 
     public MainWindow()
     {
@@ -53,7 +57,11 @@ public partial class MainWindow : Window
         };
         _timer.Tick += (_, _) => OnTick();
 
-        Loaded += (_, _) => InitializeVisualizer();
+        Loaded += (_, _) =>
+        {
+            LoadConfig();
+            InitializeVisualizer();
+        };
         SourceInitialized += (_, _) =>
         {
             var helper = new WindowInteropHelper(this);
@@ -65,6 +73,10 @@ public partial class MainWindow : Window
     {
         _currentAspectRatio = DefaultAspectRatio;
         _engine.Configure(DefaultColumns, DefaultDepth, _currentAspectRatio);
+        _engine.SetMode(_lifeMode);
+        _engine.SetBinningMode(_binningMode);
+        _timer.Interval = TimeSpan.FromMilliseconds(1000.0 / _currentFps);
+        _engine.Randomize();
         UpdateDisplaySurface(force: true);
         InitializeEffect();
         _timer.Start();
@@ -74,8 +86,8 @@ public partial class MainWindow : Window
     {
         if (!_isPaused)
         {
-            _engine.Step();
             InjectWindowCaptureFrame();
+            _engine.Step();
         }
 
         RenderFrame();
@@ -309,6 +321,12 @@ public partial class MainWindow : Window
         }
 
         UpdateFramerateMenuChecks();
+        UpdateLifeModeMenuChecks();
+        UpdateBinningModeMenuChecks();
+        if (ThresholdSlider != null)
+        {
+            ThresholdSlider.Value = _captureThreshold;
+        }
     }
 
     private void PopulateWindowMenu()
@@ -396,7 +414,7 @@ public partial class MainWindow : Window
             return;
         }
 
-        var frame = _windowCapture.CaptureFrame(_selectedWindow, _engine.Columns, _engine.Rows, CaptureThreshold);
+        var frame = _windowCapture.CaptureFrame(_selectedWindow, _engine.Columns, _engine.Rows, _captureThreshold);
         if (frame == null)
         {
             ClearWindowSelection();
@@ -405,7 +423,19 @@ public partial class MainWindow : Window
 
         _lastCaptureFrame = frame;
         UpdateDisplaySurface();
-        _engine.InjectFrame(frame.Mask);
+        if (_lifeMode == GameOfLifeEngine.LifeMode.NaiveGrayscale)
+        {
+            _engine.InjectFrame(frame.Mask);
+        }
+        else
+        {
+            var downscaled = frame.OverlayDownscaled;
+            if (downscaled.Length >= _engine.Columns * _engine.Rows * 4)
+            {
+                var (rMask, gMask, bMask) = BuildChannelMasks(frame, _captureThreshold);
+                _engine.InjectRgbFrame(rMask, gMask, bMask);
+            }
+        }
     }
 
     private void TogglePassthrough_Click(object sender, RoutedEventArgs e)
@@ -416,6 +446,12 @@ public partial class MainWindow : Window
             PassthroughMenuItem.IsChecked = _passthroughEnabled;
         }
         RenderFrame();
+    }
+
+    private void ThresholdSlider_OnValueChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
+    {
+        _captureThreshold = Math.Clamp(e.NewValue, 0, 1);
+        SaveConfig();
     }
 
     private void FramerateItem_Click(object sender, RoutedEventArgs e)
@@ -448,6 +484,7 @@ public partial class MainWindow : Window
         }
         UpdateDisplaySurface(force: true);
         RenderFrame();
+        SaveConfig();
     }
 
     private void BlendModeItem_Click(object sender, RoutedEventArgs e)
@@ -626,12 +663,64 @@ public partial class MainWindow : Window
         };
     }
 
+    private void BinningModeItem_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is not MenuItem { Header: string header })
+        {
+            return;
+        }
+
+        if (header.StartsWith("Fill", StringComparison.OrdinalIgnoreCase))
+        {
+            SetBinningMode(GameOfLifeEngine.BinningMode.Fill);
+        }
+        else if (header.StartsWith("Binary", StringComparison.OrdinalIgnoreCase))
+        {
+            SetBinningMode(GameOfLifeEngine.BinningMode.Binary);
+        }
+    }
+
+    private void SetBinningMode(GameOfLifeEngine.BinningMode mode)
+    {
+        if (_binningMode == mode)
+        {
+            return;
+        }
+
+        _binningMode = mode;
+        _engine.SetBinningMode(mode);
+        UpdateBinningModeMenuChecks();
+        RenderFrame();
+        SaveConfig();
+    }
+
+    private void UpdateBinningModeMenuChecks()
+    {
+        if (BinningModeMenu == null)
+        {
+            return;
+        }
+
+        foreach (var item in BinningModeMenu.Items)
+        {
+            if (item is MenuItem menuItem && menuItem.Header is string header)
+            {
+                bool isFill = header.StartsWith("Fill", StringComparison.OrdinalIgnoreCase);
+                bool isBinary = header.StartsWith("Binary", StringComparison.OrdinalIgnoreCase);
+                menuItem.IsCheckable = true;
+                menuItem.IsChecked = (isFill && _binningMode == GameOfLifeEngine.BinningMode.Fill) ||
+                                     (isBinary && _binningMode == GameOfLifeEngine.BinningMode.Binary);
+            }
+        }
+    }
+
     private void SetFramerate(double fps)
     {
         fps = Math.Clamp(fps, 5, 120);
         _currentFps = fps;
         _timer.Interval = TimeSpan.FromMilliseconds(1000.0 / _currentFps);
         UpdateFramerateMenuChecks();
+        SaveConfig();
     }
 
     private void UpdateFramerateMenuChecks()
@@ -652,6 +741,161 @@ public partial class MainWindow : Window
                 menuItem.IsChecked = isChecked;
             }
         }
+    }
+
+    private void LifeModeItem_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is not MenuItem { Header: string header })
+        {
+            return;
+        }
+
+        if (header.StartsWith("Naive", StringComparison.OrdinalIgnoreCase))
+        {
+            SetLifeMode(GameOfLifeEngine.LifeMode.NaiveGrayscale);
+        }
+        else if (header.StartsWith("RGB", StringComparison.OrdinalIgnoreCase))
+        {
+            SetLifeMode(GameOfLifeEngine.LifeMode.RgbChannels);
+        }
+    }
+
+    private void SetLifeMode(GameOfLifeEngine.LifeMode mode)
+    {
+        if (_lifeMode == mode)
+        {
+            return;
+        }
+
+        _lifeMode = mode;
+        _engine.SetMode(mode);
+        UpdateDisplaySurface(force: true);
+        RenderFrame();
+        SaveConfig();
+    }
+
+    private void UpdateLifeModeMenuChecks()
+    {
+        if (LifeModeMenu == null)
+        {
+            return;
+        }
+
+        foreach (var item in LifeModeMenu.Items)
+        {
+            if (item is MenuItem menuItem && menuItem.Header is string header)
+            {
+                bool isNaive = header.StartsWith("Naive", StringComparison.OrdinalIgnoreCase);
+                bool isRgb = header.StartsWith("RGB", StringComparison.OrdinalIgnoreCase);
+                menuItem.IsCheckable = true;
+                menuItem.IsChecked = (isNaive && _lifeMode == GameOfLifeEngine.LifeMode.NaiveGrayscale) ||
+                                     (isRgb && _lifeMode == GameOfLifeEngine.LifeMode.RgbChannels);
+            }
+        }
+    }
+
+    private (bool[,] r, bool[,] g, bool[,] b) BuildChannelMasks(WindowCaptureService.WindowCaptureFrame frame, double threshold)
+    {
+        threshold = Math.Clamp(threshold, 0, 1);
+        int rows = frame.DownscaledHeight;
+        int cols = frame.DownscaledWidth;
+        var rMask = new bool[rows, cols];
+        var gMask = new bool[rows, cols];
+        var bMask = new bool[rows, cols];
+        var buffer = frame.OverlayDownscaled;
+
+        int stride = cols * 4;
+        for (int row = 0; row < rows; row++)
+        {
+            int rowOffset = row * stride;
+            for (int col = 0; col < cols; col++)
+            {
+                int index = rowOffset + (col * 4);
+                byte b = buffer[index];
+                byte g = buffer[index + 1];
+                byte r = buffer[index + 2];
+
+                rMask[row, col] = r / 255.0 >= threshold;
+                gMask[row, col] = g / 255.0 >= threshold;
+                bMask[row, col] = b / 255.0 >= threshold;
+            }
+        }
+
+        return (rMask, gMask, bMask);
+    }
+
+    private void LoadConfig()
+    {
+        try
+        {
+            if (!File.Exists(ConfigPath))
+            {
+                return;
+            }
+
+            string json = File.ReadAllText(ConfigPath);
+            var config = JsonSerializer.Deserialize<AppConfig>(json);
+            if (config == null)
+            {
+                return;
+            }
+
+            _captureThreshold = Math.Clamp(config.CaptureThreshold, 0, 1);
+            _currentFps = Math.Clamp(config.Framerate, 5, 120);
+            if (Enum.TryParse<GameOfLifeEngine.LifeMode>(config.LifeMode, out var lifeMode))
+            {
+                _lifeMode = lifeMode;
+            }
+            if (Enum.TryParse<GameOfLifeEngine.BinningMode>(config.BinningMode, out var binMode))
+            {
+                _binningMode = binMode;
+            }
+            _preserveResolution = config.PreserveResolution;
+        }
+        catch
+        {
+            // Ignore config load errors.
+        }
+    }
+
+    private void SaveConfig()
+    {
+        try
+        {
+            var config = new AppConfig
+            {
+                CaptureThreshold = _captureThreshold,
+                Framerate = _currentFps,
+                LifeMode = _lifeMode.ToString(),
+                BinningMode = _binningMode.ToString(),
+                PreserveResolution = _preserveResolution
+            };
+
+            string directory = Path.GetDirectoryName(ConfigPath) ?? string.Empty;
+            if (!Directory.Exists(directory))
+            {
+                Directory.CreateDirectory(directory);
+            }
+
+            string json = JsonSerializer.Serialize(config, new JsonSerializerOptions { WriteIndented = true });
+            File.WriteAllText(ConfigPath, json);
+        }
+        catch
+        {
+            // Ignore config save errors.
+        }
+    }
+
+    private string ConfigPath =>
+        Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "lifeviz", "config.json");
+
+    private sealed class AppConfig
+    {
+        public double CaptureThreshold { get; set; } = 0.55;
+        public double Framerate { get; set; } = DefaultFps;
+        public string LifeMode { get; set; } = GameOfLifeEngine.LifeMode.NaiveGrayscale.ToString();
+        public string BinningMode { get; set; } = GameOfLifeEngine.BinningMode.Fill.ToString();
+        public bool PreserveResolution { get; set; }
     }
 
     private void BuildMappings(int width, int height, int engineCols, int engineRows)

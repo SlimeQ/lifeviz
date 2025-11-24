@@ -22,6 +22,9 @@ Right-click the scene to pick **Window Input ? <any open window>**. Once selecte
 - Preserve resolution: optionally keep the capture at native resolution for the underlay (bilinear) and render the scene at that size to reduce pixelation.
 - Blending now runs on the GPU via a WPF pixel shader, keeping passthrough performance stable even at native window resolutions.
 - Framerate lock: choose 15 / 30 / 60 fps from the context menu to match capture needs or ease CPU/GPU load.
+- Life modes: select **Naive Grayscale** (single simulation, thresholded luminance) or **RGB Channel Bins** (three independent Game of Life simulations per R/G/B bin with channel-specific injection and propagation).
+- Binning mode: default **Fill** (per-channel intensity = live cells ratio across the bin); **Binary** keeps the original bit-packed depth encoding.
+- Capture threshold: adjustable slider (0-1) in the context menu; only pixels above the threshold set cells alive during injection, applied before each simulation step.
 - Choosing **Window Input ? None** releases the aspect ratio back to 16:9 and resumes fully procedural simulation.
 
 ## Packaging & Deployment

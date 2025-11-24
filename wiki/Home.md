@@ -12,7 +12,7 @@ Welcome to the documentation hub for LifeViz, a minimalist Windows 11 WPF experi
 
 - **Tech stack:** .NET 9 WPF, WriteableBitmap rendering, dispatcher-driven simulation loop, optional live window injection via GDI capture.
 - **Visual goals:** borderless feel, aspect-locked canvas, no visible chrome-everything is mediated through a right-click context menu.
-- **Data model:** 3D Game of Life with configurable columns/depth; historical frames drive per-pixel RGB derived from binary slices. Window captures inject new frames directly into the stack and can render as an underlay with selectable blend modes and optional native-resolution preservation; framerate is selectable (15/30/60 fps).
+- **Data model:** 3D Game of Life with configurable columns/depth; historical frames drive per-pixel RGB derived from binning modes (*Fill* default or *Binary*). Window captures inject new frames directly into the stack and can render as an underlay with selectable blend modes and optional native-resolution preservation; life modes include Naive Grayscale and RGB Channel Bins; framerate is selectable (15/30/60 fps).
 
 ## Using this Wiki on GitHub
 
