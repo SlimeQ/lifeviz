@@ -46,6 +46,7 @@ public partial class MainWindow : Window
     private GameOfLifeEngine.BinningMode _binningMode = GameOfLifeEngine.BinningMode.Fill;
     private double _currentFps = DefaultFps;
     private double _captureThreshold = 0.55;
+    private double _injectionNoise = 0.0;
 
     public MainWindow()
     {
@@ -327,6 +328,10 @@ public partial class MainWindow : Window
         {
             ThresholdSlider.Value = _captureThreshold;
         }
+        if (NoiseSlider != null)
+        {
+            NoiseSlider.Value = _injectionNoise;
+        }
     }
 
     private void PopulateWindowMenu()
@@ -432,7 +437,7 @@ public partial class MainWindow : Window
             var downscaled = frame.OverlayDownscaled;
             if (downscaled.Length >= _engine.Columns * _engine.Rows * 4)
             {
-                var (rMask, gMask, bMask) = BuildChannelMasks(frame, _captureThreshold);
+                var (rMask, gMask, bMask) = BuildChannelMasks(frame, _captureThreshold, _injectionNoise);
                 _engine.InjectRgbFrame(rMask, gMask, bMask);
             }
         }
@@ -451,6 +456,12 @@ public partial class MainWindow : Window
     private void ThresholdSlider_OnValueChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
     {
         _captureThreshold = Math.Clamp(e.NewValue, 0, 1);
+        SaveConfig();
+    }
+
+    private void NoiseSlider_OnValueChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
+    {
+        _injectionNoise = Math.Clamp(e.NewValue, 0, 1);
         SaveConfig();
     }
 
@@ -528,7 +539,8 @@ public partial class MainWindow : Window
         Screen,
         Overlay,
         Lighten,
-        Darken
+        Darken,
+        Subtractive
     }
 
     private void UpdateDisplaySurface(bool force = false)
@@ -659,7 +671,12 @@ public partial class MainWindow : Window
             BlendMode.Overlay => 4.0,
             BlendMode.Lighten => 5.0,
             BlendMode.Darken => 6.0,
+            BlendMode.Subtractive => 7.0,
             _ => 0.0
+        };
+        _blendEffect.Input = new ImageBrush(_bitmap)
+        {
+            Stretch = Stretch.Fill
         };
     }
 
@@ -794,15 +811,17 @@ public partial class MainWindow : Window
         }
     }
 
-    private (bool[,] r, bool[,] g, bool[,] b) BuildChannelMasks(WindowCaptureService.WindowCaptureFrame frame, double threshold)
+    private (bool[,] r, bool[,] g, bool[,] b) BuildChannelMasks(WindowCaptureService.WindowCaptureFrame frame, double threshold, double noiseProbability)
     {
         threshold = Math.Clamp(threshold, 0, 1);
+        noiseProbability = Math.Clamp(noiseProbability, 0, 1);
         int rows = frame.DownscaledHeight;
         int cols = frame.DownscaledWidth;
         var rMask = new bool[rows, cols];
         var gMask = new bool[rows, cols];
         var bMask = new bool[rows, cols];
         var buffer = frame.OverlayDownscaled;
+        var random = new Random();
 
         int stride = cols * 4;
         for (int row = 0; row < rows; row++)
@@ -815,9 +834,10 @@ public partial class MainWindow : Window
                 byte g = buffer[index + 1];
                 byte r = buffer[index + 2];
 
-                rMask[row, col] = r / 255.0 >= threshold;
-                gMask[row, col] = g / 255.0 >= threshold;
-                bMask[row, col] = b / 255.0 >= threshold;
+                bool noiseFail = noiseProbability > 0 && random.NextDouble() < noiseProbability;
+                rMask[row, col] = !noiseFail && r / 255.0 >= threshold;
+                gMask[row, col] = !noiseFail && g / 255.0 >= threshold;
+                bMask[row, col] = !noiseFail && b / 255.0 >= threshold;
             }
         }
 
@@ -851,6 +871,7 @@ public partial class MainWindow : Window
                 _binningMode = binMode;
             }
             _preserveResolution = config.PreserveResolution;
+            _injectionNoise = Math.Clamp(config.InjectionNoise, 0, 1);
         }
         catch
         {
@@ -868,7 +889,8 @@ public partial class MainWindow : Window
                 Framerate = _currentFps,
                 LifeMode = _lifeMode.ToString(),
                 BinningMode = _binningMode.ToString(),
-                PreserveResolution = _preserveResolution
+                PreserveResolution = _preserveResolution,
+                InjectionNoise = _injectionNoise
             };
 
             string directory = Path.GetDirectoryName(ConfigPath) ?? string.Empty;
@@ -896,6 +918,7 @@ public partial class MainWindow : Window
         public string LifeMode { get; set; } = GameOfLifeEngine.LifeMode.NaiveGrayscale.ToString();
         public string BinningMode { get; set; } = GameOfLifeEngine.BinningMode.Fill.ToString();
         public bool PreserveResolution { get; set; }
+        public double InjectionNoise { get; set; } = 0.0;
     }
 
     private void BuildMappings(int width, int height, int engineCols, int engineRows)

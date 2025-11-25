@@ -181,9 +181,11 @@ namespace lifeviz;
             offsetY = 0;
         }
 
-        int width = clientRect.Right - clientRect.Left;
-        int height = clientRect.Bottom - clientRect.Top;
-        if (width <= 0 || height <= 0)
+        int windowWidth = rect.Right - rect.Left;
+        int windowHeight = rect.Bottom - rect.Top;
+        int clientWidth = clientRect.Right - clientRect.Left;
+        int clientHeight = clientRect.Bottom - clientRect.Top;
+        if (windowWidth <= 0 || windowHeight <= 0 || clientWidth <= 0 || clientHeight <= 0)
         {
             return null;
         }
@@ -195,7 +197,7 @@ namespace lifeviz;
         }
 
         IntPtr hdcMem = NativeMethods.CreateCompatibleDC(hdcWindow);
-        IntPtr hBitmap = NativeMethods.CreateCompatibleBitmap(hdcWindow, width, height);
+        IntPtr hBitmap = NativeMethods.CreateCompatibleBitmap(hdcWindow, windowWidth, windowHeight);
         if (hBitmap == IntPtr.Zero)
         {
             NativeMethods.DeleteDC(hdcMem);
@@ -204,10 +206,29 @@ namespace lifeviz;
         }
 
         IntPtr hOld = NativeMethods.SelectObject(hdcMem, hBitmap);
-        NativeMethods.BitBlt(hdcMem, 0, 0, width, height, hdcWindow, offsetX, offsetY, NativeMethods.SRCCOPY);
+
+        bool captured = false;
+        // Try PrintWindow to render layered/offscreen content (common for PiP).
+        if (NativeMethods.PrintWindow(handle, hdcMem, NativeMethods.PW_RENDERFULLCONTENT))
+        {
+            captured = true;
+        }
+        else
+        {
+            // Fallback to BitBlt of the client area from the window DC.
+            captured = NativeMethods.BitBlt(hdcMem, 0, 0, windowWidth, windowHeight, hdcWindow, 0, 0,
+                NativeMethods.SRCCOPY | NativeMethods.CAPTUREBLT);
+        }
+
         NativeMethods.SelectObject(hdcMem, hOld);
         NativeMethods.DeleteDC(hdcMem);
         NativeMethods.ReleaseDC(handle, hdcWindow);
+
+        if (!captured)
+        {
+            NativeMethods.DeleteObject(hBitmap);
+            return null;
+        }
 
         Bitmap? bmp = null;
         try
@@ -219,7 +240,28 @@ namespace lifeviz;
             NativeMethods.DeleteObject(hBitmap);
         }
 
-        return bmp;
+        // Crop to client area to drop title bars/chrome.
+        if (offsetX == 0 && offsetY == 0 && clientWidth == windowWidth && clientHeight == windowHeight)
+        {
+            return bmp;
+        }
+
+        try
+        {
+            var crop = new Rectangle(offsetX, offsetY, Math.Min(clientWidth, bmp.Width - offsetX), Math.Min(clientHeight, bmp.Height - offsetY));
+            if (crop.Width <= 0 || crop.Height <= 0)
+            {
+                return bmp;
+            }
+
+            var clientBmp = bmp.Clone(crop, PixelFormat.Format32bppArgb);
+            bmp.Dispose();
+            return clientBmp;
+        }
+        catch
+        {
+            return bmp;
+        }
     }
 
     private static WindowCaptureFrame DownscaleToFrame(Bitmap bitmap, int columns, int rows, double threshold)
@@ -347,7 +389,9 @@ namespace lifeviz;
     private static class NativeMethods
     {
         public const int SRCCOPY = 0x00CC0020;
+        public const int CAPTUREBLT = 0x40000000;
         public const int DWMWA_EXTENDED_FRAME_BOUNDS = 9;
+        public const int PW_RENDERFULLCONTENT = 0x00000002;
 
         public delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
 
@@ -417,6 +461,10 @@ namespace lifeviz;
         [DllImport("user32.dll")]
         [return: MarshalAs(UnmanagedType.Bool)]
         public static extern bool ClientToScreen(IntPtr hWnd, ref POINT lpPoint);
+
+        [DllImport("user32.dll")]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        public static extern bool PrintWindow(IntPtr hwnd, IntPtr hdcBlt, int nFlags);
     }
 
     [StructLayout(LayoutKind.Sequential)]

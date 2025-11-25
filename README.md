@@ -25,6 +25,8 @@ Right-click the scene to pick **Window Input ? <any open window>**. Once selecte
 - Life modes: select **Naive Grayscale** (single simulation, thresholded luminance) or **RGB Channel Bins** (three independent Game of Life simulations per R/G/B bin with channel-specific injection and propagation).
 - Binning mode: default **Fill** (per-channel intensity = live cells ratio across the bin); **Binary** keeps the original bit-packed depth encoding.
 - Capture threshold: adjustable slider (0-1) in the context menu; only pixels above the threshold set cells alive during injection, applied before each simulation step.
+- Injection noise: adjustable slider (0-1) that randomly skips cell injection per pixel to introduce controlled noise.
+- Window capture uses client-area bounds plus layered rendering (`PrintWindow`) to handle Picture-in-Picture windows more reliably.
 - Choosing **Window Input ? None** releases the aspect ratio back to 16:9 and resumes fully procedural simulation.
 
 ## Packaging & Deployment

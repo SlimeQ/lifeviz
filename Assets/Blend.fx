@@ -1,7 +1,7 @@
 // Blend.fx
 sampler2D inputSampler : register(s0);
 sampler2D overlaySampler : register(s1);
-float mode; // 0=Additive,1=Normal,2=Multiply,3=Screen,4=Overlay,5=Lighten,6=Darken
+float mode; // 0=Additive,1=Normal,2=Multiply,3=Screen,4=Overlay,5=Lighten,6=Darken,7=Subtractive
 float useOverlay; // 0 or 1
 
 float3 Blend(float3 baseColor, float3 overlayColor)
@@ -34,6 +34,10 @@ float3 Blend(float3 baseColor, float3 overlayColor)
     else if (mode < 5.5) // Lighten
     {
         return max(baseColor, overlayColor);
+    }
+    else if (mode < 7.5) // Subtractive
+    {
+        return saturate(baseColor - overlayColor);
     }
     else // Darken
     {
