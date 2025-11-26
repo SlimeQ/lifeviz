@@ -69,15 +69,38 @@
                     <MenuItem Header="Fill" IsCheckable="True" Click="BinningModeItem_Click" />
                     <MenuItem Header="Binary" IsCheckable="True" Click="BinningModeItem_Click" />
                 </MenuItem>
+                <MenuItem Header="Injection Mode"
+                          x:Name="InjectionModeMenu">
+                    <MenuItem Header="Threshold" IsCheckable="True" Click="InjectionModeItem_Click" />
+                    <MenuItem Header="Random Pulse" IsCheckable="True" Click="InjectionModeItem_Click" />
+                    <MenuItem Header="Pulse Width Modulation" IsCheckable="True" Click="InjectionModeItem_Click" />
+                </MenuItem>
                 <MenuItem Header="Capture Threshold" StaysOpenOnClick="True">
-                    <Slider x:Name="ThresholdSlider"
-                            Minimum="0"
-                            Maximum="1"
-                            Value="0.55"
-                            SmallChange="0.01"
-                            LargeChange="0.1"
-                            Width="160"
-                            ValueChanged="ThresholdSlider_OnValueChanged" />
+                    <StackPanel Orientation="Vertical" Margin="4">
+                        <TextBlock Text="Min" Margin="0,0,0,2"/>
+                        <Slider x:Name="ThresholdMinSlider"
+                                Minimum="0"
+                                Maximum="1"
+                                Value="0.35"
+                                SmallChange="0.01"
+                                LargeChange="0.1"
+                                Width="160"
+                                ValueChanged="ThresholdSlider_OnValueChanged" />
+                        <TextBlock Text="Max" Margin="0,4,0,2"/>
+                        <Slider x:Name="ThresholdMaxSlider"
+                                Minimum="0"
+                                Maximum="1"
+                                Value="0.75"
+                                SmallChange="0.01"
+                                LargeChange="0.1"
+                                Width="160"
+                                ValueChanged="ThresholdSlider_OnValueChanged" />
+                        <CheckBox x:Name="InvertThresholdCheckBox"
+                                  Content="Invert Window"
+                                  Margin="0,6,0,0"
+                                  Checked="InvertThresholdCheckBox_OnChecked"
+                                  Unchecked="InvertThresholdCheckBox_OnChecked"/>
+                    </StackPanel>
                 </MenuItem>
                 <MenuItem Header="Injection Noise" StaysOpenOnClick="True">
                     <Slider x:Name="NoiseSlider"

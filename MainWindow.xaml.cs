@@ -44,9 +44,13 @@ public partial class MainWindow : Window
     private BlendMode _blendMode = BlendMode.Additive;
     private GameOfLifeEngine.LifeMode _lifeMode = GameOfLifeEngine.LifeMode.NaiveGrayscale;
     private GameOfLifeEngine.BinningMode _binningMode = GameOfLifeEngine.BinningMode.Fill;
+    private GameOfLifeEngine.InjectionMode _injectionMode = GameOfLifeEngine.InjectionMode.Threshold;
     private double _currentFps = DefaultFps;
-    private double _captureThreshold = 0.55;
+    private double _captureThresholdMin = 0.35;
+    private double _captureThresholdMax = 0.75;
+    private bool _invertThreshold;
     private double _injectionNoise = 0.0;
+    private int _pulseStep;
 
     public MainWindow()
     {
@@ -76,6 +80,7 @@ public partial class MainWindow : Window
         _engine.Configure(DefaultColumns, DefaultDepth, _currentAspectRatio);
         _engine.SetMode(_lifeMode);
         _engine.SetBinningMode(_binningMode);
+        _engine.SetInjectionMode(_injectionMode);
         _timer.Interval = TimeSpan.FromMilliseconds(1000.0 / _currentFps);
         _engine.Randomize();
         UpdateDisplaySurface(force: true);
@@ -324,13 +329,19 @@ public partial class MainWindow : Window
         UpdateFramerateMenuChecks();
         UpdateLifeModeMenuChecks();
         UpdateBinningModeMenuChecks();
-        if (ThresholdSlider != null)
+        UpdateInjectionModeMenuChecks();
+        if (ThresholdMinSlider != null && ThresholdMaxSlider != null)
         {
-            ThresholdSlider.Value = _captureThreshold;
+            ThresholdMinSlider.Value = _captureThresholdMin;
+            ThresholdMaxSlider.Value = _captureThresholdMax;
         }
         if (NoiseSlider != null)
         {
             NoiseSlider.Value = _injectionNoise;
+        }
+        if (InvertThresholdCheckBox != null)
+        {
+            InvertThresholdCheckBox.IsChecked = _invertThreshold;
         }
     }
 
@@ -419,7 +430,8 @@ public partial class MainWindow : Window
             return;
         }
 
-        var frame = _windowCapture.CaptureFrame(_selectedWindow, _engine.Columns, _engine.Rows, _captureThreshold);
+        double thresholdHint = Math.Min(_captureThresholdMin, _captureThresholdMax);
+        var frame = _windowCapture.CaptureFrame(_selectedWindow, _engine.Columns, _engine.Rows, thresholdHint);
         if (frame == null)
         {
             ClearWindowSelection();
@@ -430,17 +442,19 @@ public partial class MainWindow : Window
         UpdateDisplaySurface();
         if (_lifeMode == GameOfLifeEngine.LifeMode.NaiveGrayscale)
         {
-            _engine.InjectFrame(frame.Mask);
+            var grayMask = BuildLuminanceMask(frame, _captureThresholdMin, _captureThresholdMax, _invertThreshold, _injectionMode, _injectionNoise, _engine.Depth, _pulseStep);
+            _engine.InjectFrame(grayMask);
         }
         else
         {
             var downscaled = frame.OverlayDownscaled;
             if (downscaled.Length >= _engine.Columns * _engine.Rows * 4)
             {
-                var (rMask, gMask, bMask) = BuildChannelMasks(frame, _captureThreshold, _injectionNoise);
+                var (rMask, gMask, bMask) = BuildChannelMasks(frame, _captureThresholdMin, _captureThresholdMax, _invertThreshold, _injectionMode, _injectionNoise, _engine.RDepth, _engine.GDepth, _engine.BDepth, _pulseStep);
                 _engine.InjectRgbFrame(rMask, gMask, bMask);
             }
         }
+        _pulseStep++;
     }
 
     private void TogglePassthrough_Click(object sender, RoutedEventArgs e)
@@ -455,7 +469,8 @@ public partial class MainWindow : Window
 
     private void ThresholdSlider_OnValueChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
     {
-        _captureThreshold = Math.Clamp(e.NewValue, 0, 1);
+        _captureThresholdMin = ThresholdMinSlider?.Value ?? _captureThresholdMin;
+        _captureThresholdMax = ThresholdMaxSlider?.Value ?? _captureThresholdMax;
         SaveConfig();
     }
 
@@ -463,6 +478,73 @@ public partial class MainWindow : Window
     {
         _injectionNoise = Math.Clamp(e.NewValue, 0, 1);
         SaveConfig();
+    }
+
+    private void InvertThresholdCheckBox_OnChecked(object sender, RoutedEventArgs e)
+    {
+        _invertThreshold = InvertThresholdCheckBox?.IsChecked == true;
+        SaveConfig();
+    }
+
+    private static double ComputePwmSignal(double value, double min, double max, bool invert)
+    {
+        min = Math.Clamp(min, 0, 1);
+        max = Math.Clamp(max, 0, 1);
+        if (min > max)
+        {
+            (min, max) = (max, min);
+        }
+
+        if (value < min || value > max)
+        {
+            return 0;
+        }
+        double norm = (max > min) ? (value - min) / (max - min) : 1.0;
+        norm = Math.Clamp(norm, 0, 1);
+        if (invert)
+        {
+            return norm >= 0.5 ? 1.0 : 0.0;
+        }
+        return norm;
+    }
+
+    private static bool PulseWidthAlive(double value, int period, int pulseStep)
+    {
+        period = Math.Max(1, period);
+        value = Math.Clamp(value, 0, 1);
+        int aliveCount = (int)Math.Round(value * period);
+        if (aliveCount <= 0)
+        {
+            return false;
+        }
+        if (aliveCount >= period)
+        {
+            return true;
+        }
+
+        int phase = pulseStep % period;
+        // Evenly distribute alive slots across the period.
+        // Inspired by Bresenham: alive if scaled phase wraps under aliveCount.
+        return (phase * aliveCount) % period < aliveCount;
+    }
+
+    private static bool EvaluateThresholdValue(double value, double min, double max, bool invert)
+    {
+        min = Math.Clamp(min, 0, 1);
+        max = Math.Clamp(max, 0, 1);
+        if (min > max)
+        {
+            (min, max) = (max, min);
+        }
+
+        if (value < min) return false;
+        if (value > max) return true;
+        if (invert)
+        {
+            double mid = (min + max) / 2.0;
+            return value >= mid;
+        }
+        return true;
     }
 
     private void FramerateItem_Click(object sender, RoutedEventArgs e)
@@ -711,6 +793,64 @@ public partial class MainWindow : Window
         SaveConfig();
     }
 
+    private void InjectionModeItem_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is not MenuItem { Header: string header })
+        {
+            return;
+        }
+
+        if (header.StartsWith("Threshold", StringComparison.OrdinalIgnoreCase))
+        {
+            SetInjectionMode(GameOfLifeEngine.InjectionMode.Threshold);
+        }
+        else if (header.StartsWith("Random", StringComparison.OrdinalIgnoreCase))
+        {
+            SetInjectionMode(GameOfLifeEngine.InjectionMode.RandomPulse);
+        }
+        else if (header.StartsWith("Pulse", StringComparison.OrdinalIgnoreCase))
+        {
+            SetInjectionMode(GameOfLifeEngine.InjectionMode.PulseWidthModulation);
+        }
+    }
+
+    private void SetInjectionMode(GameOfLifeEngine.InjectionMode mode)
+    {
+        if (_injectionMode == mode)
+        {
+            return;
+        }
+
+        _injectionMode = mode;
+        _engine.SetInjectionMode(mode);
+        _pulseStep = 0;
+        UpdateInjectionModeMenuChecks();
+        RenderFrame();
+        SaveConfig();
+    }
+
+    private void UpdateInjectionModeMenuChecks()
+    {
+        if (InjectionModeMenu == null)
+        {
+            return;
+        }
+
+        foreach (var item in InjectionModeMenu.Items)
+        {
+            if (item is MenuItem menuItem && menuItem.Header is string header)
+            {
+                bool isThreshold = header.StartsWith("Threshold", StringComparison.OrdinalIgnoreCase);
+                bool isRandom = header.StartsWith("Random", StringComparison.OrdinalIgnoreCase);
+                bool isPwm = header.StartsWith("Pulse Width", StringComparison.OrdinalIgnoreCase);
+                menuItem.IsCheckable = true;
+                menuItem.IsChecked = (isThreshold && _injectionMode == GameOfLifeEngine.InjectionMode.Threshold) ||
+                                     (isRandom && _injectionMode == GameOfLifeEngine.InjectionMode.RandomPulse) ||
+                                     (isPwm && _injectionMode == GameOfLifeEngine.InjectionMode.PulseWidthModulation);
+            }
+        }
+    }
+
     private void UpdateBinningModeMenuChecks()
     {
         if (BinningModeMenu == null)
@@ -786,6 +926,7 @@ public partial class MainWindow : Window
 
         _lifeMode = mode;
         _engine.SetMode(mode);
+        _pulseStep = 0;
         UpdateDisplaySurface(force: true);
         RenderFrame();
         SaveConfig();
@@ -811,17 +952,16 @@ public partial class MainWindow : Window
         }
     }
 
-    private (bool[,] r, bool[,] g, bool[,] b) BuildChannelMasks(WindowCaptureService.WindowCaptureFrame frame, double threshold, double noiseProbability)
+    private bool[,] BuildLuminanceMask(WindowCaptureService.WindowCaptureFrame frame, double min, double max, bool invert, GameOfLifeEngine.InjectionMode mode, double noiseProbability, int period, int pulseStep)
     {
-        threshold = Math.Clamp(threshold, 0, 1);
+        min = Math.Clamp(min, 0, 1);
+        max = Math.Clamp(max, 0, 1);
         noiseProbability = Math.Clamp(noiseProbability, 0, 1);
+        period = Math.Max(1, period);
         int rows = frame.DownscaledHeight;
         int cols = frame.DownscaledWidth;
-        var rMask = new bool[rows, cols];
-        var gMask = new bool[rows, cols];
-        var bMask = new bool[rows, cols];
+        var mask = new bool[rows, cols];
         var buffer = frame.OverlayDownscaled;
-        var random = new Random();
 
         int stride = cols * 4;
         for (int row = 0; row < rows; row++)
@@ -834,10 +974,85 @@ public partial class MainWindow : Window
                 byte g = buffer[index + 1];
                 byte r = buffer[index + 2];
 
-                bool noiseFail = noiseProbability > 0 && random.NextDouble() < noiseProbability;
-                rMask[row, col] = !noiseFail && r / 255.0 >= threshold;
-                gMask[row, col] = !noiseFail && g / 255.0 >= threshold;
-                bMask[row, col] = !noiseFail && b / 255.0 >= threshold;
+                bool noiseFail = noiseProbability > 0 && Random.Shared.NextDouble() < noiseProbability;
+                double luminance = (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255.0;
+                bool alive = false;
+                if (mode == GameOfLifeEngine.InjectionMode.RandomPulse)
+                {
+                    double gate = ComputePwmSignal(luminance, min, max, invert);
+                    alive = gate > 0 && Random.Shared.NextDouble() < luminance;
+                }
+                else if (mode == GameOfLifeEngine.InjectionMode.PulseWidthModulation)
+                {
+                    double gate = ComputePwmSignal(luminance, min, max, invert);
+                    alive = gate > 0 && PulseWidthAlive(gate, period, pulseStep);
+                }
+                else
+                {
+                    alive = EvaluateThresholdValue(luminance, min, max, invert);
+                }
+                mask[row, col] = !noiseFail && alive;
+            }
+        }
+
+        return mask;
+    }
+
+    private (bool[,] r, bool[,] g, bool[,] b) BuildChannelMasks(WindowCaptureService.WindowCaptureFrame frame, double min, double max, bool invert, GameOfLifeEngine.InjectionMode mode, double noiseProbability, int rPeriod, int gPeriod, int bPeriod, int pulseStep)
+    {
+        min = Math.Clamp(min, 0, 1);
+        max = Math.Clamp(max, 0, 1);
+        noiseProbability = Math.Clamp(noiseProbability, 0, 1);
+        rPeriod = Math.Max(1, rPeriod);
+        gPeriod = Math.Max(1, gPeriod);
+        bPeriod = Math.Max(1, bPeriod);
+        int rows = frame.DownscaledHeight;
+        int cols = frame.DownscaledWidth;
+        var rMask = new bool[rows, cols];
+        var gMask = new bool[rows, cols];
+        var bMask = new bool[rows, cols];
+        var buffer = frame.OverlayDownscaled;
+
+        int stride = cols * 4;
+        for (int row = 0; row < rows; row++)
+        {
+            int rowOffset = row * stride;
+            for (int col = 0; col < cols; col++)
+            {
+                int index = rowOffset + (col * 4);
+                byte b = buffer[index];
+                byte g = buffer[index + 1];
+                byte r = buffer[index + 2];
+
+                double randomGate = Random.Shared.NextDouble();
+                bool noiseFail = noiseProbability > 0 && randomGate < noiseProbability;
+                double nr = r / 255.0;
+                double ng = g / 255.0;
+                double nb = b / 255.0;
+
+                double rGate = ComputePwmSignal(nr, min, max, invert);
+                double gGate = ComputePwmSignal(ng, min, max, invert);
+                double bGate = ComputePwmSignal(nb, min, max, invert);
+
+                bool rAlive = mode == GameOfLifeEngine.InjectionMode.RandomPulse
+                    ? rGate > 0 && randomGate < nr
+                    : mode == GameOfLifeEngine.InjectionMode.PulseWidthModulation
+                        ? rGate > 0 && PulseWidthAlive(nr, rPeriod, pulseStep)
+                    : EvaluateThresholdValue(nr, min, max, invert);
+                bool gAlive = mode == GameOfLifeEngine.InjectionMode.RandomPulse
+                    ? gGate > 0 && randomGate < ng
+                    : mode == GameOfLifeEngine.InjectionMode.PulseWidthModulation
+                        ? gGate > 0 && PulseWidthAlive(ng, gPeriod, pulseStep)
+                    : EvaluateThresholdValue(ng, min, max, invert);
+                bool bAlive = mode == GameOfLifeEngine.InjectionMode.RandomPulse
+                    ? bGate > 0 && randomGate < nb
+                    : mode == GameOfLifeEngine.InjectionMode.PulseWidthModulation
+                        ? bGate > 0 && PulseWidthAlive(nb, bPeriod, pulseStep)
+                    : EvaluateThresholdValue(nb, min, max, invert);
+
+                rMask[row, col] = !noiseFail && rAlive;
+                gMask[row, col] = !noiseFail && gAlive;
+                bMask[row, col] = !noiseFail && bAlive;
             }
         }
 
@@ -860,7 +1075,9 @@ public partial class MainWindow : Window
                 return;
             }
 
-            _captureThreshold = Math.Clamp(config.CaptureThreshold, 0, 1);
+            _captureThresholdMin = Math.Clamp(config.CaptureThresholdMin, 0, 1);
+            _captureThresholdMax = Math.Clamp(config.CaptureThresholdMax, 0, 1);
+            _invertThreshold = config.InvertThreshold;
             _currentFps = Math.Clamp(config.Framerate, 5, 120);
             if (Enum.TryParse<GameOfLifeEngine.LifeMode>(config.LifeMode, out var lifeMode))
             {
@@ -872,6 +1089,10 @@ public partial class MainWindow : Window
             }
             _preserveResolution = config.PreserveResolution;
             _injectionNoise = Math.Clamp(config.InjectionNoise, 0, 1);
+            if (Enum.TryParse<GameOfLifeEngine.InjectionMode>(config.InjectionMode, out var injMode))
+            {
+                _injectionMode = injMode;
+            }
         }
         catch
         {
@@ -885,10 +1106,13 @@ public partial class MainWindow : Window
         {
             var config = new AppConfig
             {
-                CaptureThreshold = _captureThreshold,
+                CaptureThresholdMin = _captureThresholdMin,
+                CaptureThresholdMax = _captureThresholdMax,
+                InvertThreshold = _invertThreshold,
                 Framerate = _currentFps,
                 LifeMode = _lifeMode.ToString(),
                 BinningMode = _binningMode.ToString(),
+                InjectionMode = _injectionMode.ToString(),
                 PreserveResolution = _preserveResolution,
                 InjectionNoise = _injectionNoise
             };
@@ -913,10 +1137,13 @@ public partial class MainWindow : Window
 
     private sealed class AppConfig
     {
-        public double CaptureThreshold { get; set; } = 0.55;
+        public double CaptureThresholdMin { get; set; } = 0.35;
+        public double CaptureThresholdMax { get; set; } = 0.75;
+        public bool InvertThreshold { get; set; }
         public double Framerate { get; set; } = DefaultFps;
         public string LifeMode { get; set; } = GameOfLifeEngine.LifeMode.NaiveGrayscale.ToString();
         public string BinningMode { get; set; } = GameOfLifeEngine.BinningMode.Fill.ToString();
+        public string InjectionMode { get; set; } = GameOfLifeEngine.InjectionMode.Threshold.ToString();
         public bool PreserveResolution { get; set; }
         public double InjectionNoise { get; set; } = 0.0;
     }

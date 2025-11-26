@@ -15,7 +15,8 @@ The UI stays invisible until you right-click anywhere on the canvas, revealing t
 - **Framerate** - lock the render loop to 15 / 30 / 60 fps to tune performance.
 - **Life Modes** - switch between *Naive Grayscale* (single simulation thresholded from luminance) and *RGB Channel Bins* (independent simulations in R/G/B bins, with per-channel capture injection).
 - **Binning Mode** - choose *Fill* (default; channel intensity = fraction of alive cells within the bin) or *Binary* (original bit-packed depth encoding).
-- **Capture Threshold** - slider (0-1) applied before each simulation tick; only pixels above the threshold set cells alive when injecting window captures.
+- **Capture Threshold Window** - two sliders (min/max) plus *Invert Window*. Pixels inside the window set cells alive when injecting captures; invert selects the wrapped outside range instead.
+- **Injection Noise** - slider (0-1) that randomly skips injection per pixel to introduce noise.
 
 ## Custom Inputs
 

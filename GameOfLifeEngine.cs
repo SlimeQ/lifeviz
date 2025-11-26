@@ -11,11 +11,18 @@ namespace lifeviz;
             RgbChannels
         }
 
-        internal enum BinningMode
-        {
-            Fill,
-            Binary
-        }
+    internal enum BinningMode
+    {
+        Fill,
+        Binary
+    }
+
+    internal enum InjectionMode
+    {
+        Threshold,
+        RandomPulse,
+        PulseWidthModulation
+    }
 
         private const int MinColumns = 32;
         private const int MaxColumns = 512;
@@ -28,8 +35,9 @@ namespace lifeviz;
         private readonly List<bool[,]> _historyG = new();
         private readonly List<bool[,]> _historyB = new();
         private double _aspectRatio = DefaultAspectRatio;
-        private LifeMode _mode = LifeMode.NaiveGrayscale;
-        private BinningMode _binningMode = BinningMode.Fill;
+    private LifeMode _mode = LifeMode.NaiveGrayscale;
+    private BinningMode _binningMode = BinningMode.Fill;
+    private InjectionMode _injectionMode = InjectionMode.Threshold;
         private int _rDepth;
         private int _gDepth;
         private int _bDepth;
@@ -40,6 +48,10 @@ namespace lifeviz;
     public double AspectRatio => _aspectRatio;
     public LifeMode Mode => _mode;
     public BinningMode BinMode => _binningMode;
+    public int RDepth => _rDepth;
+    public int GDepth => _gDepth;
+    public int BDepth => _bDepth;
+    public InjectionMode InjectMode => _injectionMode;
 
     public IReadOnlyList<bool[,]> Frames => _history;
 
@@ -66,6 +78,11 @@ namespace lifeviz;
     public void SetBinningMode(BinningMode mode)
     {
         _binningMode = mode;
+    }
+
+    public void SetInjectionMode(InjectionMode mode)
+    {
+        _injectionMode = mode;
     }
 
     public void SetMode(LifeMode mode)
@@ -311,7 +328,7 @@ namespace lifeviz;
         return clone;
     }
 
-    private static void ApplyMask(bool[,] target, bool[,] mask)
+    private void ApplyMask(bool[,] target, bool[,] mask)
     {
         int rows = target.GetLength(0);
         int cols = target.GetLength(1);
@@ -319,12 +336,22 @@ namespace lifeviz;
         {
             for (int c = 0; c < cols; c++)
             {
-                if (mask[r, c])
+                if (mask[r, c] && ShouldInject(mask[r, c], target[r, c]))
                 {
                     target[r, c] = true;
                 }
             }
         }
+    }
+
+    private bool ShouldInject(bool maskValue, bool existingValue)
+    {
+        if (!maskValue)
+        {
+            return false;
+        }
+
+        return true;
     }
 
     private void StepChannel(List<bool[,]> history, int depth)
