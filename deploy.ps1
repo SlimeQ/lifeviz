@@ -38,6 +38,10 @@ Invoke-Step 'Publishing ClickOnce installer via MSBuild' {
 }
 
 $publishDir = Join-Path $root "bin\$Configuration\net9.0-windows\publish"
+$installHelper = Join-Path $root 'Install-ClickOnce.ps1'
+if (Test-Path $installHelper) {
+    Copy-Item -Path $installHelper -Destination (Join-Path $publishDir 'Install-ClickOnce.ps1') -Force
+}
 $appManifest = Join-Path $publishDir 'lifeviz.application'
 if (!(Test-Path $appManifest)) {
     throw "lifeviz.application not found at $appManifest"

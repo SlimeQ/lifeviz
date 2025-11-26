@@ -40,9 +40,10 @@ The custom neon "LV" mark lives in `Assets/lifeviz.ico` and is referenced via `<
    - Launches the newly published `lifeviz.application` manifest to trigger the ClickOnce update/install flow.
 
 3. Artifacts land in `bin\Release\net9.0-windows\publish\`:
-   - `lifeviz.application` – ClickOnce manifest (what the deploy script launches).
+   - `lifeviz.application` - ClickOnce manifest (what the deploy script launches).
 - `Application Files\lifeviz_<version>\` - versioned payload.
 - `setup.exe` - optional bootstrapper for first-time installs.
+- `Install-ClickOnce.ps1` - helper script that stages the payload to `%LOCALAPPDATA%\lifeviz-clickonce`, clears the old ClickOnce cache, and launches the manifest from that stable path (prevents the "already installed from a different location" error when you install from different folders).
 
 ## Updating Existing Installs
 
@@ -64,10 +65,17 @@ What it does:
 - Creates a GitHub release for the supplied tag (draftable via `-Draft`) and uploads only the zip as the release asset. If the tag does not yet exist, `gh release create` will create it.
 
 Downloaders should pull that zip, extract it locally, and then run `setup.exe` (or `lifeviz.application`) from inside the extracted folder. Downloading `setup.exe` by itself will not include the ClickOnce payload.
+- To avoid ClickOnce location conflicts on target machines, run `Install-ClickOnce.ps1` from inside the extracted publish folder:
+
+  ```powershell
+  # From the extracted publish directory
+  powershell -ExecutionPolicy Bypass -File .\Install-ClickOnce.ps1
+  ```
 
 ## Troubleshooting
 
 - `MSB4803` or similar errors usually mean you ran `dotnet publish` instead of full MSBuild; re-run through `Publish-Installer.ps1`/`deploy.ps1`.
 - If Rider/VS doesn't see the run configs, ensure the `.run/` folder and `.idea` contents are checked out.
 - Window capture requires desktop composition (Aero); minimized or hidden windows cannot be sampled.
+- ClickOnce "already installed from a different location" error: use `Install-ClickOnce.ps1` to stage to `%LOCALAPPDATA%\lifeviz-clickonce`, which uses a stable deployment URI and clears the cache before installing. If you prefer manual cleanup, uninstall the previous LifeViz entry first.
 

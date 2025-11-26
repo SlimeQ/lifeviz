@@ -89,6 +89,12 @@ if (-not (Test-Path $appManifest)) {
     throw "Required asset missing: $appManifest"
 }
 
+# Ensure the installer helper script is packaged with the payload.
+$installHelper = Join-Path $root 'Install-ClickOnce.ps1'
+if (Test-Path $installHelper) {
+    Copy-Item -Path $installHelper -Destination (Join-Path $publishDir 'Install-ClickOnce.ps1') -Force
+}
+
 $artifactsDir = Join-Path $root 'artifacts/github-release'
 if (-not (Test-Path $artifactsDir)) {
     New-Item -ItemType Directory -Force -Path $artifactsDir | Out-Null

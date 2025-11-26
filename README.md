@@ -48,6 +48,7 @@ The repo now bundles three helper scripts:
 - `Publish-Installer.ps1` - resolves `MSBuild.exe`, runs the publish target, and writes manifests + installer assets into `bin/Release/net9.0-windows/publish/`.
 - `deploy.ps1` - builds, publishes with an auto-generated version (so ClickOnce always sees an update), then launches the `lifeviz.application` manifest to trigger an in-place update of the installed app.
 - `Publish-GitHubRelease.ps1` - builds, publishes a tagged ClickOnce payload, zips the publish folder into `artifacts/github-release/`, and creates a GitHub release that uploads that single zip asset (requires `gh` CLI authenticated to your repo).
+- `Install-ClickOnce.ps1` - bundled alongside published payloads; stages the ClickOnce files to `%LOCALAPPDATA%\lifeviz-clickonce`, clears the old ClickOnce cache, and launches the manifest from that stable path so future installs/updates don’t break when the zip is extracted to a new folder.
 
 Artifacts:
 
