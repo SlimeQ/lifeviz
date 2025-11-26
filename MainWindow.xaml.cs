@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Globalization;
 using System.IO;
 using System.Linq;
@@ -27,6 +28,8 @@ public partial class MainWindow : Window
     private readonly WindowCaptureService _windowCapture = new();
     private readonly WebcamCaptureService _webcamCapture = new();
     private readonly BlendEffect _blendEffect = new();
+    private int _configuredColumns = DefaultColumns;
+    private int _configuredDepth = DefaultDepth;
     private IReadOnlyList<WindowHandleInfo> _cachedWindows = Array.Empty<WindowHandleInfo>();
     private IReadOnlyList<WebcamCaptureService.CameraInfo> _cachedCameras = Array.Empty<WebcamCaptureService.CameraInfo>();
     private readonly List<CaptureSource> _sources = new();
@@ -34,9 +37,11 @@ public partial class MainWindow : Window
     private byte[]? _pixelBuffer;
     private WriteableBitmap? _underlayBitmap;
     private ImageBrush? _overlayBrush;
+    private ImageBrush? _inputBrush;
     private byte[]? _engineColorBuffer;
     private byte[]? _compositeDownscaledBuffer;
     private byte[]? _compositeHighResBuffer;
+    private byte[]? _invertScratchBuffer;
     private CompositeFrame? _lastCompositeFrame;
     private int _displayWidth;
     private int _displayHeight;
@@ -50,6 +55,10 @@ public partial class MainWindow : Window
     private BlendMode _blendMode = BlendMode.Additive;
     private double _lifeOpacity = 1.0;
     private bool _invertComposite;
+    private bool _showFps;
+    private readonly Stopwatch _fpsStopwatch = new();
+    private int _fpsFrames;
+    private double _displayFps;
     private GameOfLifeEngine.LifeMode _lifeMode = GameOfLifeEngine.LifeMode.NaiveGrayscale;
     private GameOfLifeEngine.BinningMode _binningMode = GameOfLifeEngine.BinningMode.Fill;
     private GameOfLifeEngine.InjectionMode _injectionMode = GameOfLifeEngine.InjectionMode.Threshold;
@@ -93,7 +102,7 @@ public partial class MainWindow : Window
     private void InitializeVisualizer()
     {
         _currentAspectRatio = DefaultAspectRatio;
-        _engine.Configure(DefaultColumns, DefaultDepth, _currentAspectRatio);
+        _engine.Configure(_configuredColumns, _configuredDepth, _currentAspectRatio);
         _engine.SetMode(_lifeMode);
         _engine.SetBinningMode(_binningMode);
         _engine.SetInjectionMode(_injectionMode);
@@ -101,6 +110,7 @@ public partial class MainWindow : Window
         _engine.Randomize();
         UpdateDisplaySurface(force: true);
         InitializeEffect();
+        UpdateFpsOverlay();
         _timer.Start();
     }
 
@@ -171,6 +181,23 @@ public partial class MainWindow : Window
         _bitmap.WritePixels(new Int32Rect(0, 0, width, height), _pixelBuffer, stride, 0);
         UpdateUnderlayBitmap(requiredLength);
         UpdateEffectInput();
+        UpdateFpsOverlay();
+
+        _fpsFrames++;
+        if (!_fpsStopwatch.IsRunning)
+        {
+            _fpsStopwatch.Start();
+        }
+        else if (_fpsStopwatch.ElapsedMilliseconds >= 500)
+        {
+            double seconds = _fpsStopwatch.Elapsed.TotalSeconds;
+            if (seconds > 0)
+            {
+                _displayFps = _fpsFrames / seconds;
+            }
+            _fpsFrames = 0;
+            _fpsStopwatch.Restart();
+        }
     }
 
     private void TogglePause_Click(object sender, RoutedEventArgs e)
@@ -219,7 +246,7 @@ public partial class MainWindow : Window
         }
     }
 
-    private void ApplyDimensions(int? columns, int? depth, double? aspectOverride = null)
+    private void ApplyDimensions(int? columns, int? depth, double? aspectOverride = null, bool persist = true)
     {
         int nextColumns = columns ?? _engine.Columns;
         int nextDepth = depth ?? _engine.Depth;
@@ -229,11 +256,17 @@ public partial class MainWindow : Window
         bool wasPaused = _isPaused;
         _isPaused = true;
 
-        _engine.Configure(nextColumns, nextDepth, _currentAspectRatio);
+        _configuredColumns = Math.Clamp(nextColumns, 32, 512);
+        _configuredDepth = Math.Clamp(nextDepth, 3, 96);
+        _engine.Configure(_configuredColumns, _configuredDepth, _currentAspectRatio);
         RebuildSurface();
 
         _isPaused = wasPaused;
         PauseMenuItem.Header = _isPaused ? "Resume Simulation" : "Pause Simulation";
+        if (persist)
+        {
+            SaveConfig();
+        }
     }
 
     private int? PromptForInteger(string label, int current, int min, int max)
@@ -353,6 +386,10 @@ public partial class MainWindow : Window
         if (InvertCompositeMenuItem != null)
         {
             InvertCompositeMenuItem.IsChecked = _invertComposite;
+        }
+        if (ShowFpsMenuItem != null)
+        {
+            ShowFpsMenuItem.IsChecked = _showFps;
         }
 
         UpdateFramerateMenuChecks();
@@ -610,19 +647,30 @@ public partial class MainWindow : Window
         var existing = _sources.FirstOrDefault(s => s.Type == CaptureSource.SourceType.Window && s.Window != null && s.Window.Handle == info.Handle);
         if (existing != null)
         {
-            _sources.Remove(existing);
             existing.Window = info;
-            _sources.Insert(0, existing);
-            Logger.Info($"Promoted existing window source: {info.Title}");
+            Logger.Info($"Updated existing window source: {info.Title}");
         }
         else
         {
-            _sources.Insert(0, CaptureSource.CreateWindow(info));
-            Logger.Info($"Inserted new window source: {info.Title}");
+            bool hadSources = _sources.Count > 0;
+            _sources.Add(CaptureSource.CreateWindow(info));
+            Logger.Info($"Inserted new window source (appended): {info.Title}");
+
+            if (!hadSources)
+            {
+                _currentAspectRatio = info.AspectRatio;
+                ApplyDimensions(null, null, _currentAspectRatio, persist: false);
+            }
         }
 
-        _currentAspectRatio = info.AspectRatio;
-        ApplyDimensions(null, null, _currentAspectRatio);
+        if (_sources.Count == 1)
+        {
+            _currentAspectRatio = info.AspectRatio;
+            ApplyDimensions(null, null, _currentAspectRatio, persist: false);
+        }
+
+        RenderFrame();
+        SaveConfig();
     }
 
     private void AddOrPromoteWebcamSource(WebcamCaptureService.CameraInfo camera)
@@ -630,18 +678,29 @@ public partial class MainWindow : Window
         var existing = _sources.FirstOrDefault(s => s.Type == CaptureSource.SourceType.Webcam && string.Equals(s.WebcamId, camera.Id, StringComparison.OrdinalIgnoreCase));
         if (existing != null)
         {
-            _sources.Remove(existing);
-            _sources.Insert(0, existing);
-            Logger.Info($"Promoted existing webcam source: {camera.Name}");
+            Logger.Info($"Updated existing webcam source: {camera.Name}");
         }
         else
         {
-            _sources.Insert(0, CaptureSource.CreateWebcam(camera.Id, camera.Name));
-            Logger.Info($"Inserted new webcam source: {camera.Name}");
+            bool hadSources = _sources.Count > 0;
+            _sources.Add(CaptureSource.CreateWebcam(camera.Id, camera.Name));
+            Logger.Info($"Inserted new webcam source (appended): {camera.Name}");
+
+            if (!hadSources && _sources.Count > 0)
+            {
+                _currentAspectRatio = _sources[0].AspectRatio;
+                ApplyDimensions(null, null, _currentAspectRatio, persist: false);
+            }
         }
 
-        _currentAspectRatio = _sources[0].AspectRatio;
-        ApplyDimensions(null, null, _currentAspectRatio);
+        if (_sources.Count == 1)
+        {
+            _currentAspectRatio = _sources[0].AspectRatio;
+            ApplyDimensions(null, null, _currentAspectRatio, persist: false);
+        }
+
+        RenderFrame();
+        SaveConfig();
         _webcamErrorShown = false;
     }
 
@@ -898,6 +957,7 @@ public partial class MainWindow : Window
             PassthroughMenuItem.IsChecked = _passthroughEnabled;
         }
         RenderFrame();
+        SaveConfig();
     }
 
     private void ThresholdSlider_OnValueChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
@@ -1025,6 +1085,7 @@ public partial class MainWindow : Window
             _blendMode = mode;
             UpdateBlendModeMenuChecks();
             RenderFrame();
+            SaveConfig();
         }
     }
 
@@ -1125,10 +1186,6 @@ public partial class MainWindow : Window
         {
             _compositeDownscaledBuffer = new byte[downscaledLength];
         }
-        else
-        {
-            Array.Clear(_compositeDownscaledBuffer, 0, _compositeDownscaledBuffer.Length);
-        }
 
         int targetWidth = _preserveResolution && _sources.Count > 0
             ? (_sources[0].LastFrame?.SourceWidth > 0
@@ -1155,16 +1212,14 @@ public partial class MainWindow : Window
             {
                 _compositeHighResBuffer = new byte[highResLength];
             }
-            else
-            {
-                Array.Clear(_compositeHighResBuffer, 0, _compositeHighResBuffer.Length);
-            }
 
             highResBuffer = _compositeHighResBuffer;
         }
 
         bool wroteDownscaled = false;
         bool wroteHighRes = false;
+        bool primedDownscaled = false;
+        bool primedHighRes = false;
 
         foreach (var source in _sources)
         {
@@ -1179,9 +1234,19 @@ public partial class MainWindow : Window
                 source.Window = source.Window.WithDimensions(frame.SourceWidth, frame.SourceHeight);
             }
 
-            CompositeIntoBuffer(_compositeDownscaledBuffer, downscaledWidth, downscaledHeight,
-                frame.Downscaled, frame.DownscaledWidth, frame.DownscaledHeight, source.BlendMode, source.Opacity, source.Mirror && source.Type == CaptureSource.SourceType.Webcam);
-            wroteDownscaled = true;
+            if (!primedDownscaled)
+            {
+                CopyIntoBuffer(_compositeDownscaledBuffer, downscaledWidth, downscaledHeight,
+                    frame.Downscaled, frame.DownscaledWidth, frame.DownscaledHeight, source.Opacity, source.Mirror && source.Type == CaptureSource.SourceType.Webcam);
+                primedDownscaled = true;
+                wroteDownscaled = true;
+            }
+            else
+            {
+                CompositeIntoBuffer(_compositeDownscaledBuffer, downscaledWidth, downscaledHeight,
+                    frame.Downscaled, frame.DownscaledWidth, frame.DownscaledHeight, source.BlendMode, source.Opacity, source.Mirror && source.Type == CaptureSource.SourceType.Webcam);
+                wroteDownscaled = true;
+            }
 
             if (highResBuffer != null && frame.Source != null)
             {
@@ -1189,8 +1254,17 @@ public partial class MainWindow : Window
                 int sourceWidth = frame.SourceWidth;
                 int sourceHeight = frame.SourceHeight;
 
-                CompositeIntoBuffer(highResBuffer, targetWidth, targetHeight, sourceBuffer, sourceWidth, sourceHeight, source.BlendMode, source.Opacity, source.Mirror && source.Type == CaptureSource.SourceType.Webcam);
-                wroteHighRes = true;
+                if (!primedHighRes)
+                {
+                    CopyIntoBuffer(highResBuffer, targetWidth, targetHeight, sourceBuffer, sourceWidth, sourceHeight, source.Opacity, source.Mirror && source.Type == CaptureSource.SourceType.Webcam);
+                    primedHighRes = true;
+                    wroteHighRes = true;
+                }
+                else
+                {
+                    CompositeIntoBuffer(highResBuffer, targetWidth, targetHeight, sourceBuffer, sourceWidth, sourceHeight, source.BlendMode, source.Opacity, source.Mirror && source.Type == CaptureSource.SourceType.Webcam);
+                    wroteHighRes = true;
+                }
             }
         }
 
@@ -1201,6 +1275,41 @@ public partial class MainWindow : Window
 
         return new CompositeFrame(_compositeDownscaledBuffer, downscaledWidth, downscaledHeight,
             wroteHighRes ? highResBuffer : null, targetWidth, targetHeight);
+    }
+
+    private void CopyIntoBuffer(byte[] destination, int destWidth, int destHeight, byte[] source, int sourceWidth, int sourceHeight, double opacity, bool mirror)
+    {
+        opacity = Math.Clamp(opacity, 0.0, 1.0);
+        int destStride = destWidth * 4;
+        int sourceStride = sourceWidth * 4;
+        var destSpan = new Span<byte>(destination);
+        var sourceSpan = new ReadOnlySpan<byte>(source);
+
+        double scaleX = sourceWidth / (double)destWidth;
+        double scaleY = sourceHeight / (double)destHeight;
+
+        for (int row = 0; row < destHeight; row++)
+        {
+            int srcY = Math.Min(sourceHeight - 1, (int)Math.Floor(row * scaleY));
+            int destRowOffset = row * destStride;
+            int srcRowOffset = srcY * sourceStride;
+            for (int col = 0; col < destWidth; col++)
+            {
+                int sampleX = Math.Min(sourceWidth - 1, (int)Math.Floor(col * scaleX));
+                int srcX = mirror ? (sourceWidth - 1 - sampleX) : sampleX;
+                int destIndex = destRowOffset + (col * 4);
+                int srcIndex = srcRowOffset + (srcX * 4);
+
+                byte sb = sourceSpan[srcIndex];
+                byte sg = sourceSpan[srcIndex + 1];
+                byte sr = sourceSpan[srcIndex + 2];
+
+                destSpan[destIndex] = ClampToByte((int)(sb * opacity));
+                destSpan[destIndex + 1] = ClampToByte((int)(sg * opacity));
+                destSpan[destIndex + 2] = ClampToByte((int)(sr * opacity));
+                destSpan[destIndex + 3] = 255;
+            }
+        }
     }
 
     private void CompositeIntoBuffer(byte[] destination, int destWidth, int destHeight, byte[] source, int sourceWidth, int sourceHeight, BlendMode mode, double opacity, bool mirror)
@@ -1358,6 +1467,12 @@ public partial class MainWindow : Window
             AlignmentY = AlignmentY.Center
         };
         _blendEffect.Overlay = _overlayBrush;
+        _inputBrush = new ImageBrush(_bitmap)
+        {
+            Stretch = Stretch.Fill,
+            Opacity = _lifeOpacity
+        };
+        _blendEffect.Input = _inputBrush;
         GameImage.Effect = _blendEffect;
         UpdateEffectInput();
     }
@@ -1400,8 +1515,12 @@ public partial class MainWindow : Window
 
         if (_invertComposite)
         {
-            // Work on a copy to avoid mutating cached buffers.
-            buffer = (byte[])buffer.Clone();
+            if (_invertScratchBuffer == null || _invertScratchBuffer.Length != buffer.Length)
+            {
+                _invertScratchBuffer = new byte[buffer.Length];
+            }
+            Buffer.BlockCopy(buffer, 0, _invertScratchBuffer, 0, buffer.Length);
+            buffer = _invertScratchBuffer;
             InvertBuffer(buffer);
         }
 
@@ -1423,11 +1542,29 @@ public partial class MainWindow : Window
             BlendMode.Subtractive => 7.0,
             _ => 0.0
         };
-        _blendEffect.Input = new ImageBrush(_bitmap)
+        if (_inputBrush != null && _bitmap != null)
         {
-            Stretch = Stretch.Fill,
-            Opacity = _lifeOpacity
-        };
+            _inputBrush.ImageSource = _bitmap;
+            _inputBrush.Opacity = _lifeOpacity;
+        }
+    }
+
+    private void UpdateFpsOverlay()
+    {
+        if (FpsText == null)
+        {
+            return;
+        }
+
+        if (_showFps)
+        {
+            FpsText.Text = $"{_displayFps:0.0} fps";
+            FpsText.Visibility = Visibility.Visible;
+        }
+        else
+        {
+            FpsText.Visibility = Visibility.Collapsed;
+        }
     }
 
     private void InvertBuffer(byte[] buffer)
@@ -1601,6 +1738,17 @@ public partial class MainWindow : Window
         }
         Logger.Info($"Invert composite toggled: {_invertComposite}");
         RenderFrame();
+        SaveConfig();
+    }
+
+    private void ToggleFps_Click(object sender, RoutedEventArgs e)
+    {
+        _showFps = !_showFps;
+        if (ShowFpsMenuItem != null)
+        {
+            ShowFpsMenuItem.IsChecked = _showFps;
+        }
+        UpdateFpsOverlay();
         SaveConfig();
     }
 
@@ -1807,6 +1955,14 @@ public partial class MainWindow : Window
                 _injectionMode = injMode;
             }
             _invertComposite = config.InvertComposite;
+            _showFps = config.ShowFps;
+            _configuredColumns = Math.Clamp(config.Columns, 32, 512);
+            _configuredDepth = Math.Clamp(config.Depth, 3, 96);
+            _passthroughEnabled = config.Passthrough;
+            if (Enum.TryParse<BlendMode>(config.BlendMode, out var blendMode))
+            {
+                _blendMode = blendMode;
+            }
         }
         catch
         {
@@ -1830,7 +1986,12 @@ public partial class MainWindow : Window
             PreserveResolution = _preserveResolution,
             InjectionNoise = _injectionNoise,
             LifeOpacity = _lifeOpacity,
-            InvertComposite = _invertComposite
+            InvertComposite = _invertComposite,
+            ShowFps = _showFps,
+            Columns = _configuredColumns,
+            Depth = _configuredDepth,
+            Passthrough = _passthroughEnabled,
+            BlendMode = _blendMode.ToString()
         };
 
             string directory = Path.GetDirectoryName(ConfigPath) ?? string.Empty;
@@ -1864,6 +2025,11 @@ public partial class MainWindow : Window
         public double InjectionNoise { get; set; } = 0.0;
         public double LifeOpacity { get; set; } = 1.0;
         public bool InvertComposite { get; set; }
+        public bool ShowFps { get; set; }
+        public int Columns { get; set; } = DefaultColumns;
+        public int Depth { get; set; } = DefaultDepth;
+        public bool Passthrough { get; set; }
+        public string BlendMode { get; set; } = MainWindow.BlendMode.Additive.ToString();
     }
 
     private void BuildMappings(int width, int height, int engineCols, int engineRows)
