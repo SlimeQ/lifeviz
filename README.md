@@ -25,6 +25,11 @@ Right-click the scene and use **Sources** to stack multiple windows, OBS-style:
 - Capture threshold window: adjustable min/max sliders (with optional invert) in the context menu; only pixels inside the window set cells alive during injection, applied before each simulation step.
 - Injection noise: adjustable slider (0-1) that randomly skips cell injection per pixel to introduce controlled noise.
 
+## Configuration
+
+- Settings persist to `%AppData%\lifeviz\config.json` after the app finishes loading (columns/depth, framerate, blend/composite toggles, thresholds, opacity, passthrough, etc.) and restore on next launch.
+- The source stack is restored too: window sources are matched by title, webcams by device id/name, keeping order plus per-layer blend mode, opacity, and mirror settings when the devices are available.
+
 
 ## Packaging & Deployment
 

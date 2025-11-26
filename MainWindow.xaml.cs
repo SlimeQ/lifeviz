@@ -69,6 +69,7 @@ public partial class MainWindow : Window
     private double _injectionNoise = 0.0;
     private int _pulseStep;
     private bool _webcamErrorShown;
+    private bool _configReady;
 
     public MainWindow()
     {
@@ -545,6 +546,7 @@ public partial class MainWindow : Window
                 source.Mirror = !source.Mirror;
                 Logger.Info($"Mirror toggled for {source.DisplayName}: {source.Mirror}");
                 RenderFrame();
+                SaveConfig();
             };
 
             var opacityItem = new MenuItem
@@ -573,6 +575,7 @@ public partial class MainWindow : Window
                 Logger.Info($"Source opacity changed: {source.DisplayName} ({source.Type}) = {source.Opacity:F2}");
                 opacityValueItem.Header = $"{source.Opacity:P0}";
                 RenderFrame();
+                SaveConfig();
             };
             opacityItem.Items.Add(opacityValueItem);
             opacityItem.Items.Add(opacitySlider);
@@ -639,6 +642,7 @@ public partial class MainWindow : Window
             source.BlendMode = mode;
             PopulateSourcesMenu();
             RenderFrame();
+            SaveConfig();
         }
     }
 
@@ -716,6 +720,7 @@ public partial class MainWindow : Window
         _currentAspectRatio = source.AspectRatio;
         Logger.Info($"Primary source set: {source.DisplayName} ({source.Type})");
         ApplyDimensions(null, null, _currentAspectRatio);
+        SaveConfig();
     }
 
     private void MoveSource(CaptureSource source, int delta)
@@ -740,6 +745,7 @@ public partial class MainWindow : Window
             _currentAspectRatio = source.AspectRatio;
             ApplyDimensions(null, null, _currentAspectRatio);
         }
+        SaveConfig();
     }
 
     private void RemoveSource(CaptureSource source)
@@ -773,6 +779,7 @@ public partial class MainWindow : Window
         {
             RenderFrame();
         }
+        SaveConfig();
     }
 
     private void ClearSources()
@@ -802,6 +809,7 @@ public partial class MainWindow : Window
         {
             RenderFrame();
         }
+        SaveConfig();
     }
 
     private void InjectCaptureFrames()
@@ -1963,15 +1971,27 @@ public partial class MainWindow : Window
             {
                 _blendMode = blendMode;
             }
+
+            RestoreSources(config.Sources);
         }
         catch
         {
             // Ignore config load errors.
         }
+        finally
+        {
+            // Allow saves after the first load attempt so startup events don't clobber existing config.
+            _configReady = true;
+        }
     }
 
     private void SaveConfig()
     {
+        if (!_configReady)
+        {
+            return;
+        }
+
         try
         {
             var config = new AppConfig
@@ -1980,19 +2000,20 @@ public partial class MainWindow : Window
                 CaptureThresholdMax = _captureThresholdMax,
                 InvertThreshold = _invertThreshold,
                 Framerate = _currentFps,
-            LifeMode = _lifeMode.ToString(),
-            BinningMode = _binningMode.ToString(),
-            InjectionMode = _injectionMode.ToString(),
-            PreserveResolution = _preserveResolution,
-            InjectionNoise = _injectionNoise,
-            LifeOpacity = _lifeOpacity,
-            InvertComposite = _invertComposite,
-            ShowFps = _showFps,
-            Columns = _configuredColumns,
-            Depth = _configuredDepth,
-            Passthrough = _passthroughEnabled,
-            BlendMode = _blendMode.ToString()
-        };
+                LifeMode = _lifeMode.ToString(),
+                BinningMode = _binningMode.ToString(),
+                InjectionMode = _injectionMode.ToString(),
+                PreserveResolution = _preserveResolution,
+                InjectionNoise = _injectionNoise,
+                LifeOpacity = _lifeOpacity,
+                InvertComposite = _invertComposite,
+                ShowFps = _showFps,
+                Columns = _configuredColumns,
+                Depth = _configuredDepth,
+                Passthrough = _passthroughEnabled,
+                BlendMode = _blendMode.ToString(),
+                Sources = BuildSourceConfigs()
+            };
 
             string directory = Path.GetDirectoryName(ConfigPath) ?? string.Empty;
             if (!Directory.Exists(directory))
@@ -2007,6 +2028,98 @@ public partial class MainWindow : Window
         {
             // Ignore config save errors.
         }
+    }
+
+    private List<AppConfig.SourceConfig> BuildSourceConfigs()
+    {
+        var configs = new List<AppConfig.SourceConfig>(_sources.Count);
+        foreach (var source in _sources)
+        {
+            configs.Add(new AppConfig.SourceConfig
+            {
+                Type = source.Type.ToString(),
+                WindowTitle = source.Window?.Title,
+                WebcamId = source.WebcamId,
+                DisplayName = source.DisplayName,
+                BlendMode = source.BlendMode.ToString(),
+                Opacity = source.Opacity,
+                Mirror = source.Mirror
+            });
+        }
+
+        return configs;
+    }
+
+    private void RestoreSources(IReadOnlyList<AppConfig.SourceConfig>? configs)
+    {
+        if (configs == null || configs.Count == 0)
+        {
+            return;
+        }
+
+        var windows = _windowCapture.EnumerateWindows(_windowHandle);
+        var webcams = _webcamCapture.EnumerateCameras();
+
+        foreach (var config in configs)
+        {
+            if (!Enum.TryParse<CaptureSource.SourceType>(config.Type, true, out var type))
+            {
+                continue;
+            }
+
+            CaptureSource? restored = null;
+            switch (type)
+            {
+                case CaptureSource.SourceType.Window:
+                    if (string.IsNullOrWhiteSpace(config.WindowTitle))
+                    {
+                        break;
+                    }
+
+                    var window = windows.FirstOrDefault(w =>
+                        string.Equals(w.Title, config.WindowTitle, StringComparison.OrdinalIgnoreCase));
+                    if (window != null)
+                    {
+                        restored = CaptureSource.CreateWindow(window);
+                    }
+                    break;
+
+                case CaptureSource.SourceType.Webcam:
+                    var camera = webcams.FirstOrDefault(c =>
+                        (!string.IsNullOrWhiteSpace(config.WebcamId) && string.Equals(c.Id, config.WebcamId, StringComparison.OrdinalIgnoreCase)) ||
+                        (!string.IsNullOrWhiteSpace(config.DisplayName) && string.Equals(c.Name, config.DisplayName, StringComparison.OrdinalIgnoreCase)));
+                    if (!string.IsNullOrWhiteSpace(camera.Id))
+                    {
+                        restored = CaptureSource.CreateWebcam(camera.Id, camera.Name);
+                    }
+                    break;
+            }
+
+            if (restored == null)
+            {
+                continue;
+            }
+
+            ApplySourceSettings(restored, config);
+            _sources.Add(restored);
+        }
+
+        if (_sources.Count > 0)
+        {
+            _currentAspectRatio = _sources[0].AspectRatio;
+            ApplyDimensions(null, null, _currentAspectRatio, persist: false);
+        }
+    }
+
+    private static void ApplySourceSettings(CaptureSource source, AppConfig.SourceConfig config)
+    {
+        if (Enum.TryParse<BlendMode>(config.BlendMode, true, out var blend))
+        {
+            source.BlendMode = blend;
+        }
+
+        source.Opacity = Math.Clamp(config.Opacity, 0, 1);
+        source.Mirror = config.Mirror;
     }
 
     private string ConfigPath =>
@@ -2030,6 +2143,18 @@ public partial class MainWindow : Window
         public int Depth { get; set; } = DefaultDepth;
         public bool Passthrough { get; set; }
         public string BlendMode { get; set; } = MainWindow.BlendMode.Additive.ToString();
+        public List<SourceConfig> Sources { get; set; } = new();
+
+        public sealed class SourceConfig
+        {
+            public string Type { get; set; } = CaptureSource.SourceType.Window.ToString();
+            public string? WindowTitle { get; set; }
+            public string? WebcamId { get; set; }
+            public string? DisplayName { get; set; }
+            public string BlendMode { get; set; } = MainWindow.BlendMode.Normal.ToString();
+            public double Opacity { get; set; } = 1.0;
+            public bool Mirror { get; set; }
+        }
     }
 
     private void BuildMappings(int width, int height, int engineCols, int engineRows)

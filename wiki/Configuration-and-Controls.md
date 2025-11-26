@@ -28,6 +28,11 @@ The UI stays invisible until you right-click anywhere on the canvas, revealing t
 - When you change columns, depth, or the source stack (including changing the primary), the simulation pauses, reconfigures the engine, rebuilds the `WriteableBitmap`, then resumes if it was running.
 - Reconfiguring columns automatically recomputes rows to maintain the current aspect ratio (either 16:9 or the current primary source's ratio).
 
+## Persistence
+
+- Columns, depth, thresholds, modes, opacity, framerate, blend/passthrough toggles, and preserve-res settings persist to `%AppData%\lifeviz\config.json` after the app finishes loading, so startup control events no longer overwrite prior configs.
+- The source stack (windows + webcams) is restored on launch when devices are present, including ordering plus per-source blend mode, opacity, and mirror; windows are matched by title and webcams by device id/name.
+
 ## Defaults
 
 | Setting  | Default |
