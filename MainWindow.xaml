@@ -52,6 +52,10 @@
                           Header="Show FPS"
                           IsCheckable="True"
                           Click="ToggleFps_Click" />
+                <MenuItem x:Name="FullscreenMenuItem"
+                          Header="Fullscreen"
+                          IsCheckable="True"
+                          Click="ToggleFullscreen_Click" />
                 <MenuItem Header="Composite Blend"
                           x:Name="BlendModeMenu">
                     <MenuItem Header="Additive" IsCheckable="True" Click="BlendModeItem_Click" />

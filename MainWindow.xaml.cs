@@ -70,6 +70,11 @@ public partial class MainWindow : Window
     private int _pulseStep;
     private bool _webcamErrorShown;
     private bool _configReady;
+    private bool _isFullscreen;
+    private bool _pendingFullscreen;
+    private WindowState _previousWindowState = WindowState.Normal;
+    private WindowStyle _previousWindowStyle = WindowStyle.SingleBorderWindow;
+    private ResizeMode _previousResizeMode = ResizeMode.CanResize;
 
     public MainWindow()
     {
@@ -86,6 +91,10 @@ public partial class MainWindow : Window
         {
             LoadConfig();
             InitializeVisualizer();
+            if (_pendingFullscreen)
+            {
+                EnterFullscreen(applyConfig: true);
+            }
             Logger.Info("Main window loaded and visualizer initialized.");
         };
         SourceInitialized += (_, _) =>
@@ -379,6 +388,10 @@ public partial class MainWindow : Window
         {
             BlendModeMenu.IsEnabled = _sources.Count > 0;
             UpdateBlendModeMenuChecks();
+        }
+        if (FullscreenMenuItem != null)
+        {
+            FullscreenMenuItem.IsChecked = _isFullscreen;
         }
         if (LifeOpacitySlider != null)
         {
@@ -966,6 +979,63 @@ public partial class MainWindow : Window
         }
         RenderFrame();
         SaveConfig();
+    }
+
+    private void ToggleFullscreen_Click(object sender, RoutedEventArgs e)
+    {
+        if (_isFullscreen)
+        {
+            ExitFullscreen();
+        }
+        else
+        {
+            EnterFullscreen();
+        }
+    }
+
+    private void EnterFullscreen(bool applyConfig = false)
+    {
+        if (_isFullscreen)
+        {
+            return;
+        }
+
+        _previousWindowState = WindowState;
+        _previousWindowStyle = WindowStyle;
+        _previousResizeMode = ResizeMode;
+
+        WindowStyle = WindowStyle.None;
+        ResizeMode = ResizeMode.NoResize;
+        WindowState = WindowState.Maximized;
+        _isFullscreen = true;
+        if (!applyConfig)
+        {
+            SaveConfig();
+        }
+        UpdateFullscreenMenuItem();
+    }
+
+    private void ExitFullscreen()
+    {
+        if (!_isFullscreen)
+        {
+            return;
+        }
+
+        WindowStyle = _previousWindowStyle;
+        ResizeMode = _previousResizeMode;
+        WindowState = _previousWindowState == WindowState.Minimized ? WindowState.Normal : _previousWindowState;
+        _isFullscreen = false;
+        SaveConfig();
+        UpdateFullscreenMenuItem();
+    }
+
+    private void UpdateFullscreenMenuItem()
+    {
+        if (FullscreenMenuItem != null)
+        {
+            FullscreenMenuItem.IsChecked = _isFullscreen;
+        }
     }
 
     private void ThresholdSlider_OnValueChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
@@ -1972,6 +2042,7 @@ public partial class MainWindow : Window
                 _blendMode = blendMode;
             }
 
+            _pendingFullscreen = config.Fullscreen;
             RestoreSources(config.Sources);
         }
         catch
@@ -2012,6 +2083,7 @@ public partial class MainWindow : Window
                 Depth = _configuredDepth,
                 Passthrough = _passthroughEnabled,
                 BlendMode = _blendMode.ToString(),
+                Fullscreen = _isFullscreen,
                 Sources = BuildSourceConfigs()
             };
 
@@ -2143,6 +2215,7 @@ public partial class MainWindow : Window
         public int Depth { get; set; } = DefaultDepth;
         public bool Passthrough { get; set; }
         public string BlendMode { get; set; } = MainWindow.BlendMode.Additive.ToString();
+        public bool Fullscreen { get; set; }
         public List<SourceConfig> Sources { get; set; } = new();
 
         public sealed class SourceConfig

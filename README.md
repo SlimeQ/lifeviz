@@ -19,6 +19,7 @@ Right-click the scene and use **Sources** to stack multiple windows, OBS-style:
 - Each source has its own blend mode applied during compositing (Normal, Additive, Multiply, Screen, Overlay, Lighten, Darken, Subtractive).
 - **Composite Blend** still controls how the finished composite mixes with the Game of Life output (Additive default via the pixel shader).
 - **Passthrough Underlay** shows that composite behind the simulation; **Preserve Window Resolution** renders at the primary source's native size before scaling.
+- **Fullscreen** toggle lives in the context menu and persists; it switches to a borderless, maximized view.
 - Capture uses DPI-correct window bounds (via DWM) so the full surface is normalized even for PiP/scaled windows, and the composited buffer feeds the injection path (threshold window + noise + life/binning modes) on every tick.
 - Webcam sources stream via WinRT `MediaCapture`; clearing sources or closing the app releases the camera.
 - Framerate lock: choose 15 / 30 / 60 fps from the context menu to match capture needs or ease CPU/GPU load.
@@ -29,6 +30,7 @@ Right-click the scene and use **Sources** to stack multiple windows, OBS-style:
 
 - Settings persist to `%AppData%\lifeviz\config.json` after the app finishes loading (columns/depth, framerate, blend/composite toggles, thresholds, opacity, passthrough, etc.) and restore on next launch.
 - The source stack is restored too: window sources are matched by title, webcams by device id/name, keeping order plus per-layer blend mode, opacity, and mirror settings when the devices are available.
+- Fullscreen preference is remembered and re-applied on launch.
 
 
 ## Packaging & Deployment

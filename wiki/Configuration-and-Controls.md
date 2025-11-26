@@ -17,6 +17,7 @@ The UI stays invisible until you right-click anywhere on the canvas, revealing t
 - **Binning Mode** - choose *Fill* (default; channel intensity = fraction of alive cells within the bin) or *Binary* (original bit-packed depth encoding).
 - **Capture Threshold Window** - two sliders (min/max) plus *Invert Window*. Pixels inside the window set cells alive when injecting captures; invert selects the wrapped outside range instead.
 - **Injection Noise** - slider (0-1) that randomly skips injection per pixel to introduce noise.
+- **Fullscreen** - toggles a borderless, maximized view; state is remembered between runs.
 
 ## Custom Inputs
 
@@ -32,6 +33,7 @@ The UI stays invisible until you right-click anywhere on the canvas, revealing t
 
 - Columns, depth, thresholds, modes, opacity, framerate, blend/passthrough toggles, and preserve-res settings persist to `%AppData%\lifeviz\config.json` after the app finishes loading, so startup control events no longer overwrite prior configs.
 - The source stack (windows + webcams) is restored on launch when devices are present, including ordering plus per-source blend mode, opacity, and mirror; windows are matched by title and webcams by device id/name.
+- Fullscreen preference is persisted and applied after startup.
 
 ## Defaults
 
