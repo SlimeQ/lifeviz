@@ -15,11 +15,12 @@ The new Rider solution (`lifeviz.sln`) includes a "lifeviz: Run App" configurati
 
 Right-click the scene and use **Sources** to stack multiple windows, OBS-style:
 
-- Add entries via **Sources > Add Window Source** (checked items are already in the stack). The top entry is the primary: it drives the canvas aspect ratio and the native-resolution target when preserve-res is on. Make Primary, Move Up/Down, or Remove/Remove All to resequence quickly; clearing all sources drops back to the 16:9 default.
+- Add entries via **Sources > Add Window Source** or **Add Webcam Source** (checked items are already in the stack). The top entry is the primary: it drives the canvas aspect ratio and the native-resolution target when preserve-res is on. Make Primary, Move Up/Down, or Remove/Remove All to resequence quickly; clearing all sources drops back to the 16:9 default.
 - Each source has its own blend mode applied during compositing (Normal, Additive, Multiply, Screen, Overlay, Lighten, Darken, Subtractive).
 - **Composite Blend** still controls how the finished composite mixes with the Game of Life output (Additive default via the pixel shader).
 - **Passthrough Underlay** shows that composite behind the simulation; **Preserve Window Resolution** renders at the primary source's native size before scaling.
 - Capture uses DPI-correct window bounds (via DWM) so the full surface is normalized even for PiP/scaled windows, and the composited buffer feeds the injection path (threshold window + noise + life/binning modes) on every tick.
+- Webcam sources stream via WinRT `MediaCapture`; clearing sources or closing the app releases the camera.
 - Framerate lock: choose 15 / 30 / 60 fps from the context menu to match capture needs or ease CPU/GPU load.
 - Capture threshold window: adjustable min/max sliders (with optional invert) in the context menu; only pixels inside the window set cells alive during injection, applied before each simulation step.
 - Injection noise: adjustable slider (0-1) that randomly skips cell injection per pixel to introduce controlled noise.

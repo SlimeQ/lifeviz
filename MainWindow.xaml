@@ -59,6 +59,20 @@
                     <MenuItem Header="Darken" IsCheckable="True" Click="BlendModeItem_Click" />
                     <MenuItem Header="Subtractive" IsCheckable="True" Click="BlendModeItem_Click" />
                 </MenuItem>
+                <MenuItem x:Name="InvertCompositeMenuItem"
+                          Header="Invert Composite"
+                          IsCheckable="True"
+                          Click="InvertComposite_Click" />
+                <MenuItem Header="Life Opacity" StaysOpenOnClick="True">
+                    <Slider x:Name="LifeOpacitySlider"
+                            Minimum="0"
+                            Maximum="1"
+                            Value="1"
+                            SmallChange="0.05"
+                            LargeChange="0.1"
+                            Width="160"
+                            ValueChanged="LifeOpacitySlider_OnValueChanged" />
+                </MenuItem>
                 <MenuItem Header="Life Modes"
                           x:Name="LifeModeMenu">
                     <MenuItem Header="Naive Grayscale" IsCheckable="True" Click="LifeModeItem_Click" />
