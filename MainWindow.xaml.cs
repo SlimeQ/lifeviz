@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
+using System.Linq;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Interop;
@@ -25,19 +26,21 @@ public partial class MainWindow : Window
     private readonly WindowCaptureService _windowCapture = new();
     private readonly BlendEffect _blendEffect = new();
     private IReadOnlyList<WindowHandleInfo> _cachedWindows = Array.Empty<WindowHandleInfo>();
+    private readonly List<CaptureSource> _sources = new();
     private WriteableBitmap? _bitmap;
     private byte[]? _pixelBuffer;
     private WriteableBitmap? _underlayBitmap;
     private ImageBrush? _overlayBrush;
     private byte[]? _engineColorBuffer;
-    private WindowCaptureService.WindowCaptureFrame? _lastCaptureFrame;
+    private byte[]? _compositeDownscaledBuffer;
+    private byte[]? _compositeHighResBuffer;
+    private CompositeFrame? _lastCompositeFrame;
     private int _displayWidth;
     private int _displayHeight;
     private int[] _rowMap = Array.Empty<int>();
     private int[] _colMap = Array.Empty<int>();
     private bool _isPaused;
     private double _currentAspectRatio = DefaultAspectRatio;
-    private WindowHandleInfo? _selectedWindow;
     private IntPtr _windowHandle;
     private bool _passthroughEnabled;
     private bool _preserveResolution;
@@ -92,7 +95,7 @@ public partial class MainWindow : Window
     {
         if (!_isPaused)
         {
-            InjectWindowCaptureFrame();
+            InjectWindowCaptureFrames();
             _engine.Step();
         }
 
@@ -308,21 +311,21 @@ public partial class MainWindow : Window
 
     private void RootContextMenu_OnOpened(object sender, RoutedEventArgs e)
     {
-        PopulateWindowMenu();
+        PopulateSourcesMenu();
         if (PassthroughMenuItem != null)
         {
             PassthroughMenuItem.IsChecked = _passthroughEnabled;
-            PassthroughMenuItem.IsEnabled = _selectedWindow != null;
+            PassthroughMenuItem.IsEnabled = _sources.Count > 0;
         }
         if (PreserveResolutionMenuItem != null)
         {
             PreserveResolutionMenuItem.IsChecked = _preserveResolution;
-            PreserveResolutionMenuItem.IsEnabled = _selectedWindow != null;
+            PreserveResolutionMenuItem.IsEnabled = _sources.Count > 0;
         }
 
         if (BlendModeMenu != null)
         {
-            BlendModeMenu.IsEnabled = _selectedWindow != null;
+            BlendModeMenu.IsEnabled = _sources.Count > 0;
             UpdateBlendModeMenuChecks();
         }
 
@@ -345,68 +348,247 @@ public partial class MainWindow : Window
         }
     }
 
-    private void PopulateWindowMenu()
+    private void PopulateSourcesMenu()
     {
-        if (WindowInputMenu == null)
+        if (SourcesMenu == null)
         {
             return;
         }
 
-        WindowInputMenu.Items.Clear();
+        SourcesMenu.Items.Clear();
 
-        var noneItem = new MenuItem
+        var addSourceMenu = new MenuItem
         {
-            Header = "None",
-            IsCheckable = true,
-            IsChecked = _selectedWindow == null
+            Header = "Add Window Source"
         };
-        noneItem.Click += (_, _) => ClearWindowSelection();
-        WindowInputMenu.Items.Add(noneItem);
-        WindowInputMenu.Items.Add(new Separator());
 
         _cachedWindows = _windowCapture.EnumerateWindows(_windowHandle);
         if (_cachedWindows.Count == 0)
         {
-            WindowInputMenu.Items.Add(new MenuItem
+            addSourceMenu.Items.Add(new MenuItem
             {
                 Header = "No windows detected",
+                IsEnabled = false
+            });
+        }
+        else
+        {
+            foreach (var window in _cachedWindows)
+            {
+                bool alreadyAdded = _sources.Any(s => s.Window.Handle == window.Handle);
+                var item = new MenuItem
+                {
+                    Header = window.Title,
+                    Tag = window,
+                    IsCheckable = true,
+                    IsChecked = alreadyAdded
+                };
+                item.Click += AddSourceMenuItem_Click;
+                addSourceMenu.Items.Add(item);
+            }
+        }
+
+        SourcesMenu.Items.Add(addSourceMenu);
+        SourcesMenu.Items.Add(new Separator());
+
+        if (_sources.Count == 0)
+        {
+            SourcesMenu.Items.Add(new MenuItem
+            {
+                Header = "No active sources",
                 IsEnabled = false
             });
             return;
         }
 
-        foreach (var window in _cachedWindows)
+        for (int i = 0; i < _sources.Count; i++)
         {
-            var item = new MenuItem
+            var source = _sources[i];
+            var sourceItem = new MenuItem
             {
-                Header = window.Title,
-                Tag = window,
-                IsCheckable = true,
-                IsChecked = _selectedWindow != null && window.Handle == _selectedWindow.Handle
+                Header = $"{i + 1}. {source.Window.Title}",
+                Tag = source
             };
-            item.Click += WindowInputItem_Click;
-            WindowInputMenu.Items.Add(item);
+
+            var blendMenu = new MenuItem { Header = "Blend Mode" };
+            foreach (var mode in Enum.GetValues(typeof(BlendMode)).Cast<BlendMode>())
+            {
+                var blendItem = new MenuItem
+                {
+                    Header = mode.ToString(),
+                    IsCheckable = true,
+                    IsChecked = source.BlendMode == mode,
+                    Tag = source
+                };
+                blendItem.Click += SourceBlendModeItem_Click;
+                blendMenu.Items.Add(blendItem);
+            }
+
+            var primaryItem = new MenuItem
+            {
+                Header = "Make Primary (adopt aspect)",
+                IsEnabled = i != 0
+            };
+            primaryItem.Click += (_, _) => MakePrimarySource(source);
+
+            var moveUpItem = new MenuItem
+            {
+                Header = "Move Up",
+                IsEnabled = i > 0
+            };
+            moveUpItem.Click += (_, _) => MoveSource(source, -1);
+
+            var moveDownItem = new MenuItem
+            {
+                Header = "Move Down",
+                IsEnabled = i < _sources.Count - 1
+            };
+            moveDownItem.Click += (_, _) => MoveSource(source, 1);
+
+            var removeItem = new MenuItem
+            {
+                Header = "Remove"
+            };
+            removeItem.Click += (_, _) => RemoveSource(source);
+
+            sourceItem.Items.Add(blendMenu);
+            sourceItem.Items.Add(primaryItem);
+            sourceItem.Items.Add(moveUpItem);
+            sourceItem.Items.Add(moveDownItem);
+            sourceItem.Items.Add(new Separator());
+            sourceItem.Items.Add(removeItem);
+
+            SourcesMenu.Items.Add(sourceItem);
         }
+
+        SourcesMenu.Items.Add(new Separator());
+        var clearItem = new MenuItem
+        {
+            Header = "Remove All Sources",
+            IsEnabled = _sources.Count > 0
+        };
+        clearItem.Click += (_, _) => ClearSources();
+        SourcesMenu.Items.Add(clearItem);
     }
 
-    private void WindowInputItem_Click(object sender, RoutedEventArgs e)
+    private void AddSourceMenuItem_Click(object sender, RoutedEventArgs e)
     {
         if (sender is not MenuItem { Tag: WindowHandleInfo info })
         {
             return;
         }
 
-        _selectedWindow = info;
+        AddOrPromoteSource(info);
+    }
+
+    private void SourceBlendModeItem_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is not MenuItem { Header: string header, Tag: CaptureSource source })
+        {
+            return;
+        }
+
+        if (Enum.TryParse<BlendMode>(header, ignoreCase: true, out var mode))
+        {
+            source.BlendMode = mode;
+            PopulateSourcesMenu();
+            RenderFrame();
+        }
+    }
+
+    private void AddOrPromoteSource(WindowHandleInfo info)
+    {
+        var existing = _sources.FirstOrDefault(s => s.Window.Handle == info.Handle);
+        if (existing != null)
+        {
+            _sources.Remove(existing);
+            existing.Window = info;
+            _sources.Insert(0, existing);
+        }
+        else
+        {
+            _sources.Insert(0, new CaptureSource(info));
+        }
+
         _currentAspectRatio = info.AspectRatio;
         ApplyDimensions(null, null, _currentAspectRatio);
     }
 
-    private void ClearWindowSelection()
+    private void MakePrimarySource(CaptureSource source)
     {
-        bool hadSelection = _selectedWindow != null;
-        _selectedWindow = null;
-        _lastCaptureFrame = null;
+        if (!_sources.Contains(source))
+        {
+            return;
+        }
+
+        _sources.Remove(source);
+        _sources.Insert(0, source);
+        _currentAspectRatio = source.Window.AspectRatio;
+        ApplyDimensions(null, null, _currentAspectRatio);
+    }
+
+    private void MoveSource(CaptureSource source, int delta)
+    {
+        int index = _sources.IndexOf(source);
+        if (index < 0)
+        {
+            return;
+        }
+
+        int next = Math.Clamp(index + delta, 0, _sources.Count - 1);
+        if (next == index)
+        {
+            return;
+        }
+
+        _sources.RemoveAt(index);
+        _sources.Insert(next, source);
+
+        if (next == 0)
+        {
+            _currentAspectRatio = source.Window.AspectRatio;
+            ApplyDimensions(null, null, _currentAspectRatio);
+        }
+    }
+
+    private void RemoveSource(CaptureSource source)
+    {
+        int index = _sources.IndexOf(source);
+        if (index < 0)
+        {
+            return;
+        }
+
+        _sources.RemoveAt(index);
+
+        if (_sources.Count == 0)
+        {
+            ClearSources();
+            return;
+        }
+
+        if (index == 0)
+        {
+            _currentAspectRatio = _sources[0].Window.AspectRatio;
+            ApplyDimensions(null, null, _currentAspectRatio);
+        }
+        else
+        {
+            RenderFrame();
+        }
+    }
+
+    private void ClearSources()
+    {
+        bool hadSources = _sources.Count > 0;
+        _sources.Clear();
+        _lastCompositeFrame = null;
         _preserveResolution = false;
+        _passthroughEnabled = false;
+        if (PassthroughMenuItem != null)
+        {
+            PassthroughMenuItem.IsChecked = false;
+        }
         if (PreserveResolutionMenuItem != null)
         {
             PreserveResolutionMenuItem.IsChecked = false;
@@ -417,43 +599,77 @@ public partial class MainWindow : Window
             _currentAspectRatio = DefaultAspectRatio;
             ApplyDimensions(null, null, _currentAspectRatio);
         }
-        else if (hadSelection)
+        else if (hadSources)
         {
             RenderFrame();
         }
     }
 
-    private void InjectWindowCaptureFrame()
+    private void InjectWindowCaptureFrames()
     {
-        if (_selectedWindow == null)
+        if (_sources.Count == 0)
         {
+            _lastCompositeFrame = null;
             return;
         }
 
         double thresholdHint = Math.Min(_captureThresholdMin, _captureThresholdMax);
-        var frame = _windowCapture.CaptureFrame(_selectedWindow, _engine.Columns, _engine.Rows, thresholdHint);
-        if (frame == null)
+        var removed = new List<CaptureSource>();
+        var primaryBeforeRemoval = _sources.Count > 0 ? _sources[0] : null;
+
+        foreach (var source in _sources.ToList())
         {
-            ClearWindowSelection();
+            var frame = _windowCapture.CaptureFrame(source.Window, _engine.Columns, _engine.Rows, thresholdHint);
+            if (frame == null)
+            {
+                removed.Add(source);
+                continue;
+            }
+
+            source.LastFrame = frame;
+        }
+
+        if (removed.Count > 0)
+        {
+            bool primaryRemoved = primaryBeforeRemoval != null && removed.Contains(primaryBeforeRemoval);
+            foreach (var source in removed)
+            {
+                _sources.Remove(source);
+            }
+
+            if (_sources.Count == 0)
+            {
+                ClearSources();
+                return;
+            }
+
+            if (primaryRemoved)
+            {
+                _currentAspectRatio = _sources[0].Window.AspectRatio;
+                ApplyDimensions(null, null, _currentAspectRatio);
+            }
+        }
+
+        var composite = BuildCompositeFrame();
+        if (composite == null)
+        {
             return;
         }
 
-        _lastCaptureFrame = frame;
+        _lastCompositeFrame = composite;
         UpdateDisplaySurface();
+
         if (_lifeMode == GameOfLifeEngine.LifeMode.NaiveGrayscale)
         {
-            var grayMask = BuildLuminanceMask(frame, _captureThresholdMin, _captureThresholdMax, _invertThreshold, _injectionMode, _injectionNoise, _engine.Depth, _pulseStep);
+            var grayMask = BuildLuminanceMask(composite.Downscaled, composite.DownscaledWidth, composite.DownscaledHeight, _captureThresholdMin, _captureThresholdMax, _invertThreshold, _injectionMode, _injectionNoise, _engine.Depth, _pulseStep);
             _engine.InjectFrame(grayMask);
         }
         else
         {
-            var downscaled = frame.OverlayDownscaled;
-            if (downscaled.Length >= _engine.Columns * _engine.Rows * 4)
-            {
-                var (rMask, gMask, bMask) = BuildChannelMasks(frame, _captureThresholdMin, _captureThresholdMax, _invertThreshold, _injectionMode, _injectionNoise, _engine.RDepth, _engine.GDepth, _engine.BDepth, _pulseStep);
-                _engine.InjectRgbFrame(rMask, gMask, bMask);
-            }
+            var (rMask, gMask, bMask) = BuildChannelMasks(composite.Downscaled, composite.DownscaledWidth, composite.DownscaledHeight, _captureThresholdMin, _captureThresholdMax, _invertThreshold, _injectionMode, _injectionNoise, _engine.RDepth, _engine.GDepth, _engine.BDepth, _pulseStep);
+            _engine.InjectRgbFrame(rMask, gMask, bMask);
         }
+
         _pulseStep++;
     }
 
@@ -627,8 +843,23 @@ public partial class MainWindow : Window
 
     private void UpdateDisplaySurface(bool force = false)
     {
-        int targetWidth = _preserveResolution && _lastCaptureFrame != null ? _lastCaptureFrame.SourceWidth : _engine.Columns;
-        int targetHeight = _preserveResolution && _lastCaptureFrame != null ? _lastCaptureFrame.SourceHeight : _engine.Rows;
+        int targetWidth = _engine.Columns;
+        int targetHeight = _engine.Rows;
+
+        if (_preserveResolution && _sources.Count > 0)
+        {
+            if (_lastCompositeFrame?.HighRes != null && _lastCompositeFrame.HighResWidth > 0 && _lastCompositeFrame.HighResHeight > 0)
+            {
+                targetWidth = _lastCompositeFrame.HighResWidth;
+                targetHeight = _lastCompositeFrame.HighResHeight;
+            }
+            else
+            {
+                var primary = _sources[0];
+                targetWidth = primary.Window.Width;
+                targetHeight = primary.Window.Height;
+            }
+        }
 
         if (targetWidth <= 0 || targetHeight <= 0)
         {
@@ -666,6 +897,206 @@ public partial class MainWindow : Window
         _rowMap = _displayHeight == _rowMap.Length ? _rowMap : new int[_displayHeight];
         _colMap = _displayWidth == _colMap.Length ? _colMap : new int[_displayWidth];
     }
+
+    private CompositeFrame? BuildCompositeFrame()
+    {
+        int downscaledWidth = _engine.Columns;
+        int downscaledHeight = _engine.Rows;
+        int downscaledLength = downscaledWidth * downscaledHeight * 4;
+
+        if (_compositeDownscaledBuffer == null || _compositeDownscaledBuffer.Length != downscaledLength)
+        {
+            _compositeDownscaledBuffer = new byte[downscaledLength];
+        }
+        else
+        {
+            Array.Clear(_compositeDownscaledBuffer, 0, _compositeDownscaledBuffer.Length);
+        }
+
+        int targetWidth = _preserveResolution && _sources.Count > 0
+            ? (_sources[0].LastFrame?.SourceWidth > 0 ? _sources[0].LastFrame!.SourceWidth : _sources[0].Window.Width)
+            : downscaledWidth;
+        int targetHeight = _preserveResolution && _sources.Count > 0
+            ? (_sources[0].LastFrame?.SourceHeight > 0 ? _sources[0].LastFrame!.SourceHeight : _sources[0].Window.Height)
+            : downscaledHeight;
+
+        if (targetWidth <= 0 || targetHeight <= 0)
+        {
+            targetWidth = downscaledWidth;
+            targetHeight = downscaledHeight;
+        }
+
+        byte[]? highResBuffer = null;
+        if (_preserveResolution)
+        {
+            int highResLength = targetWidth * targetHeight * 4;
+            if (_compositeHighResBuffer == null || _compositeHighResBuffer.Length != highResLength)
+            {
+                _compositeHighResBuffer = new byte[highResLength];
+            }
+            else
+            {
+                Array.Clear(_compositeHighResBuffer, 0, _compositeHighResBuffer.Length);
+            }
+
+            highResBuffer = _compositeHighResBuffer;
+        }
+
+        bool wroteDownscaled = false;
+        bool wroteHighRes = false;
+
+        foreach (var source in _sources)
+        {
+            var frame = source.LastFrame;
+            if (frame == null)
+            {
+                continue;
+            }
+
+            source.Window = source.Window.WithDimensions(frame.SourceWidth, frame.SourceHeight);
+
+            CompositeIntoBuffer(_compositeDownscaledBuffer, downscaledWidth, downscaledHeight,
+                frame.OverlayDownscaled, frame.DownscaledWidth, frame.DownscaledHeight, source.BlendMode);
+            wroteDownscaled = true;
+
+            if (highResBuffer != null)
+            {
+                var sourceBuffer = frame.OverlaySource;
+                int sourceWidth = frame.SourceWidth;
+                int sourceHeight = frame.SourceHeight;
+
+                CompositeIntoBuffer(highResBuffer, targetWidth, targetHeight, sourceBuffer, sourceWidth, sourceHeight, source.BlendMode);
+                wroteHighRes = true;
+            }
+        }
+
+        if (!wroteDownscaled)
+        {
+            return null;
+        }
+
+        return new CompositeFrame(_compositeDownscaledBuffer, downscaledWidth, downscaledHeight,
+            wroteHighRes ? highResBuffer : null, targetWidth, targetHeight);
+    }
+
+    private void CompositeIntoBuffer(byte[] destination, int destWidth, int destHeight, byte[] source, int sourceWidth, int sourceHeight, BlendMode mode)
+    {
+        if (destination == null || source == null || destWidth <= 0 || destHeight <= 0 || sourceWidth <= 0 || sourceHeight <= 0)
+        {
+            return;
+        }
+
+        int destLength = destWidth * destHeight * 4;
+        int sourceLength = sourceWidth * sourceHeight * 4;
+        if (destination.Length < destLength || source.Length < sourceLength)
+        {
+            return;
+        }
+
+        int destStride = destWidth * 4;
+        int sourceStride = sourceWidth * 4;
+        var destSpan = new Span<byte>(destination);
+        var sourceSpan = new ReadOnlySpan<byte>(source);
+
+        if (destWidth == sourceWidth && destHeight == sourceHeight)
+        {
+            for (int row = 0; row < destHeight; row++)
+            {
+                int destRowOffset = row * destStride;
+                int srcRowOffset = row * sourceStride;
+                for (int col = 0; col < destWidth; col++)
+                {
+                    int destIndex = destRowOffset + (col * 4);
+                    int srcIndex = srcRowOffset + (col * 4);
+                    BlendInto(destSpan, sourceSpan, destIndex, srcIndex, mode);
+                }
+            }
+            return;
+        }
+
+        double scaleX = sourceWidth / (double)destWidth;
+        double scaleY = sourceHeight / (double)destHeight;
+        for (int row = 0; row < destHeight; row++)
+        {
+            int srcY = Math.Min(sourceHeight - 1, (int)Math.Floor(row * scaleY));
+            int destRowOffset = row * destStride;
+            int srcRowOffset = srcY * sourceStride;
+            for (int col = 0; col < destWidth; col++)
+            {
+                int srcX = Math.Min(sourceWidth - 1, (int)Math.Floor(col * scaleX));
+                int destIndex = destRowOffset + (col * 4);
+                int srcIndex = srcRowOffset + (srcX * 4);
+                BlendInto(destSpan, sourceSpan, destIndex, srcIndex, mode);
+            }
+        }
+    }
+
+    private static void BlendInto(Span<byte> destination, ReadOnlySpan<byte> source, int destIndex, int srcIndex, BlendMode mode)
+    {
+        byte db = destination[destIndex];
+        byte dg = destination[destIndex + 1];
+        byte dr = destination[destIndex + 2];
+
+        byte sb = source[srcIndex];
+        byte sg = source[srcIndex + 1];
+        byte sr = source[srcIndex + 2];
+
+        int b;
+        int g;
+        int r;
+
+        switch (mode)
+        {
+            case BlendMode.Additive:
+                b = db + sb;
+                g = dg + sg;
+                r = dr + sr;
+                break;
+            case BlendMode.Multiply:
+                b = db * sb / 255;
+                g = dg * sg / 255;
+                r = dr * sr / 255;
+                break;
+            case BlendMode.Screen:
+                b = 255 - ((255 - db) * (255 - sb) / 255);
+                g = 255 - ((255 - dg) * (255 - sg) / 255);
+                r = 255 - ((255 - dr) * (255 - sr) / 255);
+                break;
+            case BlendMode.Overlay:
+                b = db < 128 ? (2 * db * sb) / 255 : 255 - (2 * (255 - db) * (255 - sb) / 255);
+                g = dg < 128 ? (2 * dg * sg) / 255 : 255 - (2 * (255 - dg) * (255 - sg) / 255);
+                r = dr < 128 ? (2 * dr * sr) / 255 : 255 - (2 * (255 - dr) * (255 - sr) / 255);
+                break;
+            case BlendMode.Lighten:
+                b = Math.Max(db, sb);
+                g = Math.Max(dg, sg);
+                r = Math.Max(dr, sr);
+                break;
+            case BlendMode.Darken:
+                b = Math.Min(db, sb);
+                g = Math.Min(dg, sg);
+                r = Math.Min(dr, sr);
+                break;
+            case BlendMode.Subtractive:
+                b = db - sb;
+                g = dg - sg;
+                r = dr - sr;
+                break;
+            case BlendMode.Normal:
+            default:
+                b = sb;
+                g = sg;
+                r = sr;
+                break;
+        }
+
+        destination[destIndex] = ClampToByte(b);
+        destination[destIndex + 1] = ClampToByte(g);
+        destination[destIndex + 2] = ClampToByte(r);
+        destination[destIndex + 3] = 255;
+    }
+
+    private static byte ClampToByte(int value) => (byte)(value < 0 ? 0 : value > 255 ? 255 : value);
 
     private void EnsureEngineColorBuffer()
     {
@@ -710,7 +1141,8 @@ public partial class MainWindow : Window
             return;
         }
 
-        bool hasOverlay = _passthroughEnabled && _lastCaptureFrame != null;
+        var composite = _lastCompositeFrame;
+        bool hasOverlay = _passthroughEnabled && composite != null;
         if (!hasOverlay)
         {
             return;
@@ -721,16 +1153,16 @@ public partial class MainWindow : Window
         byte[]? buffer = null;
         int stride = width * 4;
 
-        if (_preserveResolution && _lastCaptureFrame?.OverlaySource is { Length: > 0 } source &&
-            _lastCaptureFrame.SourceWidth == width && _lastCaptureFrame.SourceHeight == height)
+        if (_preserveResolution && composite?.HighRes is { Length: > 0 } highRes &&
+            composite.HighResWidth == width && composite.HighResHeight == height)
         {
-            buffer = source;
-            stride = _lastCaptureFrame.SourceWidth * 4;
+            buffer = highRes;
+            stride = composite.HighResWidth * 4;
         }
-        else if (_lastCaptureFrame?.OverlayDownscaled is { Length: > 0 } downscaled &&
-                 downscaled.Length >= requiredLength)
+        else if (composite != null && composite.Downscaled.Length >= requiredLength &&
+                 composite.DownscaledWidth == width && composite.DownscaledHeight == height)
         {
-            buffer = downscaled;
+            buffer = composite.Downscaled;
         }
 
         if (buffer == null || buffer.Length < stride * height)
@@ -743,7 +1175,7 @@ public partial class MainWindow : Window
 
     private void UpdateEffectInput()
     {
-        _blendEffect.UseOverlay = _passthroughEnabled && _lastCaptureFrame != null ? 1.0 : 0.0;
+        _blendEffect.UseOverlay = _passthroughEnabled && _lastCompositeFrame != null ? 1.0 : 0.0;
         _blendEffect.Mode = _blendMode switch
         {
             BlendMode.Additive => 0.0,
@@ -952,16 +1384,20 @@ public partial class MainWindow : Window
         }
     }
 
-    private bool[,] BuildLuminanceMask(WindowCaptureService.WindowCaptureFrame frame, double min, double max, bool invert, GameOfLifeEngine.InjectionMode mode, double noiseProbability, int period, int pulseStep)
+    private bool[,] BuildLuminanceMask(byte[] buffer, int width, int height, double min, double max, bool invert, GameOfLifeEngine.InjectionMode mode, double noiseProbability, int period, int pulseStep)
     {
         min = Math.Clamp(min, 0, 1);
         max = Math.Clamp(max, 0, 1);
         noiseProbability = Math.Clamp(noiseProbability, 0, 1);
         period = Math.Max(1, period);
-        int rows = frame.DownscaledHeight;
-        int cols = frame.DownscaledWidth;
+        int rows = Math.Max(0, height);
+        int cols = Math.Max(0, width);
         var mask = new bool[rows, cols];
-        var buffer = frame.OverlayDownscaled;
+
+        if (rows == 0 || cols == 0 || buffer.Length < rows * cols * 4)
+        {
+            return mask;
+        }
 
         int stride = cols * 4;
         for (int row = 0; row < rows; row++)
@@ -998,7 +1434,7 @@ public partial class MainWindow : Window
         return mask;
     }
 
-    private (bool[,] r, bool[,] g, bool[,] b) BuildChannelMasks(WindowCaptureService.WindowCaptureFrame frame, double min, double max, bool invert, GameOfLifeEngine.InjectionMode mode, double noiseProbability, int rPeriod, int gPeriod, int bPeriod, int pulseStep)
+    private (bool[,] r, bool[,] g, bool[,] b) BuildChannelMasks(byte[] buffer, int width, int height, double min, double max, bool invert, GameOfLifeEngine.InjectionMode mode, double noiseProbability, int rPeriod, int gPeriod, int bPeriod, int pulseStep)
     {
         min = Math.Clamp(min, 0, 1);
         max = Math.Clamp(max, 0, 1);
@@ -1006,12 +1442,16 @@ public partial class MainWindow : Window
         rPeriod = Math.Max(1, rPeriod);
         gPeriod = Math.Max(1, gPeriod);
         bPeriod = Math.Max(1, bPeriod);
-        int rows = frame.DownscaledHeight;
-        int cols = frame.DownscaledWidth;
+        int rows = Math.Max(0, height);
+        int cols = Math.Max(0, width);
         var rMask = new bool[rows, cols];
         var gMask = new bool[rows, cols];
         var bMask = new bool[rows, cols];
-        var buffer = frame.OverlayDownscaled;
+
+        if (rows == 0 || cols == 0 || buffer.Length < rows * cols * 4)
+        {
+            return (rMask, gMask, bMask);
+        }
 
         int stride = cols * 4;
         for (int row = 0; row < rows; row++)
@@ -1159,5 +1599,37 @@ public partial class MainWindow : Window
         {
             _colMap[col] = Math.Min(engineCols - 1, (int)((col / (double)width) * engineCols));
         }
+    }
+
+    private sealed class CaptureSource
+    {
+        public CaptureSource(WindowHandleInfo window)
+        {
+            Window = window;
+        }
+
+        public WindowHandleInfo Window { get; set; }
+        public BlendMode BlendMode { get; set; } = BlendMode.Normal;
+        public WindowCaptureService.WindowCaptureFrame? LastFrame { get; set; }
+    }
+
+    private sealed class CompositeFrame
+    {
+        public CompositeFrame(byte[] downscaled, int downscaledWidth, int downscaledHeight, byte[]? highRes, int highResWidth, int highResHeight)
+        {
+            Downscaled = downscaled;
+            DownscaledWidth = downscaledWidth;
+            DownscaledHeight = downscaledHeight;
+            HighRes = highRes;
+            HighResWidth = highResWidth;
+            HighResHeight = highResHeight;
+        }
+
+        public byte[] Downscaled { get; }
+        public int DownscaledWidth { get; }
+        public int DownscaledHeight { get; }
+        public byte[]? HighRes { get; }
+        public int HighResWidth { get; }
+        public int HighResHeight { get; }
     }
 }

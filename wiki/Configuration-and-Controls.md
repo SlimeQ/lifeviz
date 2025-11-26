@@ -8,10 +8,10 @@ The UI stays invisible until you right-click anywhere on the canvas, revealing t
 - **Randomize** - re-seeds every frame in the depth stack to a fresh random state.
 - **Columns** - quick presets (64-256) plus a *Custom...* dialog to pick any value between 32 and 512.
 - **Depth** - quick presets (12-48) plus a *Custom...* dialog for 3-96 layers.
-- **Window Input** - dynamically lists every visible, non-minimized top-level window. Selecting one locks the aspect ratio to that window and injects its live capture into the simulation. Choosing **None** clears the capture and restores the default 16:9 ratio.
-- **Passthrough Underlay** - when a window input is active, enable a live underlay of that window behind the Game of Life output.
-- **Blend Mode** - choose how the underlay mixes with the simulation (Additive default; Normal, Multiply, Screen, Overlay, Lighten, Darken).
-- **Preserve Window Resolution** - renders the scene at the source window's resolution (bilinear sampling) instead of snapping to the grid size to reduce pixelation.
+- **Sources** - stack multiple live window feeds. Use *Add Window Source* to pull in any visible, non-minimized top-level window (checked entries are already in the stack). Each entry exposes *Make Primary* (adopts aspect ratio), *Move Up/Down*, *Remove*, and a per-source blend mode (Normal, Additive, Multiply, Screen, Overlay, Lighten, Darken, Subtractive). The top-most source drives the aspect ratio and the native-resolution target when preserve-res is enabled; clearing all sources restores the default 16:9 ratio.
+- **Passthrough Underlay** - when sources are active, enable a live underlay of the composited stack behind the Game of Life output.
+- **Composite Blend** - choose how the underlay mixes with the simulation (Additive default; Normal, Multiply, Screen, Overlay, Lighten, Darken, Subtractive).
+- **Preserve Window Resolution** - renders the scene at the primary source's resolution (bilinear sampling) instead of snapping to the grid size to reduce pixelation.
 - **Framerate** - lock the render loop to 15 / 30 / 60 fps to tune performance.
 - **Life Modes** - switch between *Naive Grayscale* (single simulation thresholded from luminance) and *RGB Channel Bins* (independent simulations in R/G/B bins, with per-channel capture injection).
 - **Binning Mode** - choose *Fill* (default; channel intensity = fraction of alive cells within the bin) or *Binary* (original bit-packed depth encoding).
@@ -25,8 +25,8 @@ The UI stays invisible until you right-click anywhere on the canvas, revealing t
 
 ## Applying Changes
 
-- When you change columns, depth, or window selection, the simulation pauses, reconfigures the engine, rebuilds the `WriteableBitmap`, then resumes if it was running.
-- Reconfiguring columns automatically recomputes rows to maintain the current aspect ratio (either 16:9 or the selected window's ratio).
+- When you change columns, depth, or the source stack (including changing the primary), the simulation pauses, reconfigures the engine, rebuilds the `WriteableBitmap`, then resumes if it was running.
+- Reconfiguring columns automatically recomputes rows to maintain the current aspect ratio (either 16:9 or the current primary source's ratio).
 
 ## Defaults
 
@@ -36,11 +36,11 @@ The UI stays invisible until you right-click anywhere on the canvas, revealing t
 | Depth    | 24      |
 | Seed RNG | Uniform, 35% alive probability |
 | Tick     | 60?ms interval |
-| Window Input | None |
+| Sources  | None (16:9 aspect) |
 
 ## Engine Guards
 
 - Columns are clamped between 32 and 512.
 - Depth is clamped between 3 and 96.
 - Rows never fall below 9, avoiding degenerate grids when columns are tiny.
-- Window capture gracefully detaches if the source closes or becomes inaccessible.
+- Window captures gracefully detach if a source closes or becomes inaccessible; the next source in the stack becomes primary, and removing the last source restores the default aspect ratio.

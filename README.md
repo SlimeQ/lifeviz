@@ -13,21 +13,17 @@ The new Rider solution (`lifeviz.sln`) includes a "lifeviz: Run App" configurati
 
 ## Live Window Injection
 
-Right-click the scene to pick **Window Input ? <any open window>**. Once selected:
+Right-click the scene and use **Sources** to stack multiple windows, OBS-style:
 
-- The Game of Life grid locks to the window's aspect ratio (and auto-resizes rows).
-- Each simulation tick captures that window, converts it to a boolean mask (grayscale + threshold), and injects it into the z-stack's newest layer.
-- Capture uses DPI-correct window bounds (via DWM) so the full surface is normalized to the grid—even Picture-in-Picture or scaled windows.
-- Optional passthrough: toggle a captured window underlay and pick a blend mode (Additive default; Normal, Multiply, Screen, Overlay, Lighten, Darken) from the context menu.
-- Preserve resolution: optionally keep the capture at native resolution for the underlay (bilinear) and render the scene at that size to reduce pixelation.
-- Blending now runs on the GPU via a WPF pixel shader, keeping passthrough performance stable even at native window resolutions.
+- Add entries via **Sources > Add Window Source** (checked items are already in the stack). The top entry is the primary: it drives the canvas aspect ratio and the native-resolution target when preserve-res is on. Make Primary, Move Up/Down, or Remove/Remove All to resequence quickly; clearing all sources drops back to the 16:9 default.
+- Each source has its own blend mode applied during compositing (Normal, Additive, Multiply, Screen, Overlay, Lighten, Darken, Subtractive).
+- **Composite Blend** still controls how the finished composite mixes with the Game of Life output (Additive default via the pixel shader).
+- **Passthrough Underlay** shows that composite behind the simulation; **Preserve Window Resolution** renders at the primary source's native size before scaling.
+- Capture uses DPI-correct window bounds (via DWM) so the full surface is normalized even for PiP/scaled windows, and the composited buffer feeds the injection path (threshold window + noise + life/binning modes) on every tick.
 - Framerate lock: choose 15 / 30 / 60 fps from the context menu to match capture needs or ease CPU/GPU load.
-- Life modes: select **Naive Grayscale** (single simulation, thresholded luminance) or **RGB Channel Bins** (three independent Game of Life simulations per R/G/B bin with channel-specific injection and propagation).
-- Binning mode: default **Fill** (per-channel intensity = live cells ratio across the bin); **Binary** keeps the original bit-packed depth encoding.
 - Capture threshold window: adjustable min/max sliders (with optional invert) in the context menu; only pixels inside the window set cells alive during injection, applied before each simulation step.
 - Injection noise: adjustable slider (0-1) that randomly skips cell injection per pixel to introduce controlled noise.
-- Window capture uses client-area bounds plus layered rendering (`PrintWindow`) to handle Picture-in-Picture windows more reliably.
-- Choosing **Window Input ? None** releases the aspect ratio back to 16:9 and resumes fully procedural simulation.
+
 
 ## Packaging & Deployment
 

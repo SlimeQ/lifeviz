@@ -37,8 +37,8 @@
                     <MenuItem Header="Custom..." Click="SetDepth_Click" />
                 </MenuItem>
                 <Separator />
-                <MenuItem Header="Window Input"
-                          x:Name="WindowInputMenu" />
+                <MenuItem Header="Sources"
+                          x:Name="SourcesMenu" />
                 <Separator />
                 <MenuItem x:Name="PassthroughMenuItem"
                           Header="Passthrough Underlay"
@@ -48,7 +48,7 @@
                           Header="Preserve Window Resolution"
                           IsCheckable="True"
                           Click="TogglePreserveResolution_Click" />
-                <MenuItem Header="Blend Mode"
+                <MenuItem Header="Composite Blend"
                           x:Name="BlendModeMenu">
                     <MenuItem Header="Additive" IsCheckable="True" Click="BlendModeItem_Click" />
                     <MenuItem Header="Normal" IsCheckable="True" Click="BlendModeItem_Click" />

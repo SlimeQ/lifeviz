@@ -2,13 +2,13 @@
 
 ## Layout
 
-- `MainWindow.xaml` hosts a `Viewbox`-wrapped `Image` control to enforce a constant aspect ratio. Default is 16:9, but selecting a window input swaps the ratio to match the source window automatically.
+- `MainWindow.xaml` hosts a `Viewbox`-wrapped `Image` control to enforce a constant aspect ratio. Default is 16:9, but the primary source in the *Sources* stack overrides the ratio automatically.
 - The backing surface is a `WriteableBitmap` sized to the current simulation grid (`columns x rows`), so each logical cell maps to a single pixel before scaling.
 
 ## Simulation Loop
 
 - `DispatcherTimer` in `MainWindow.xaml.cs` ticks at a user-selectable rate (15 / 30 / 60 fps) via the context menu.
-- Each tick invokes `_engine.Step()` (unless paused), grabs a window capture (if selected), injects it into the stack, then calls `RenderFrame()`.
+- Each tick (unless paused) captures every active source, composites them (per-source blend modes, ordered by the stack), injects the resulting buffer into the simulation, advances `_engine.Step()`, then calls `RenderFrame()`.
 - The engine maintains a depth stack (`List<bool[,]>`) where index 0 is the newest frame.
 
 ## Color Encoding
@@ -19,18 +19,18 @@
 
 ## Window Capture Injection
 
-1. `WindowCaptureService` enumerates all visible, non-minimized windows (excluding LifeViz itself), grabs their DWM extended frame bounds to get physical pixel sizes (avoids DPI virtualization cropping), and captures the chosen handle via BitBlt into a `System.Drawing.Bitmap`.
-2. The bitmap is downscaled to the grid size, converted to grayscale, thresholded (default 0.55), and turned into a `bool[,]` mask using the full window extents so Picture-in-Picture or scaled windows map correctly to the grid.
-3. `_engine.InjectFrame(mask)` inserts the capture as the newest depth layer (z=0), pushing older frames down the stack.
-4. If the window disappears, selection is automatically cleared and the aspect ratio reverts to default.
+1. `WindowCaptureService` enumerates all visible, non-minimized windows (excluding LifeViz itself), grabs their DWM extended frame bounds to get physical pixel sizes (avoids DPI virtualization cropping), and captures each active source handle via BitBlt into a `System.Drawing.Bitmap`.
+2. Each capture is downscaled to the grid size and stored as BGRA; the primary source also keeps its source-resolution buffer for preserve-res rendering.
+3. Sources are composited CPU-side in stack order using their selected blend modes (Normal, Additive, Multiply, Screen, Overlay, Lighten, Darken, Subtractive) into a shared downscaled buffer (and an optional high-res buffer when preserve-res is enabled).
+4. The composited downscaled buffer feeds the injection path: luminance masks for *Naive Grayscale* or per-channel masks for *RGB Channel Bins*. If a source disappears, it is removed automatically; removing the last source restores the default aspect ratio.
 
 ## Passthrough Underlay
 
-- When **Passthrough Underlay** is enabled, the capture step also keeps a BGRA buffer of the downscaled window. That buffer matches the grid dimensions so it aligns 1:1 under the Game of Life pixels.
-- Rendering blends the underlay with the simulation output per-pixel. Supported blend modes: Additive (default), Normal, Multiply, Screen, Overlay, Lighten, Darken.
-- Underlay rendering is skipped when no window is selected or the buffer dimensions disagree with the current grid (e.g., immediately after resizing).
-- **Preserve Window Resolution** renders the composite at the window's native resolution and samples the underlay bilinearly, then scales the Game of Life grid up to that size, reducing underlay pixelation.
-- Blend happens in a WPF pixel shader (GPU) so passthrough stays responsive even when rendering at source resolution.
+- When **Passthrough Underlay** is enabled, the composited buffer is preserved for presentation as well as injection.
+- Rendering blends the composited underlay with the simulation output per-pixel. Supported blend modes: Additive (default), Normal, Multiply, Screen, Overlay, Lighten, Darken, Subtractive.
+- Underlay rendering is skipped when no sources are active or the buffer dimensions disagree with the current surface (e.g., immediately after resizing).
+- **Preserve Window Resolution** renders the composite at the primary source's native resolution and samples the underlay bilinearly, then scales the Game of Life grid up to that size, reducing underlay pixelation.
+- Final blending still happens in a WPF pixel shader (GPU) so passthrough stays responsive even when rendering at source resolution; per-source blends occur CPU-side during the composite build.
 
 ## Life Modes
 
@@ -48,6 +48,6 @@ Because every new frame pushes down the history stack, movement leaves chromatic
 
 ## Performance Notes
 
-- Rows = round(columns / aspectRatio). Window selections replace the default 16:9 ratio with the source window's ratio.
-- Random fill uses 35% seed density to encourage interesting evolution when no window input is selected.
-- All rendering is CPU-side; WPF's scaling handles presentation without smoothing (`NearestNeighbor`). Window capture uses GDI BitBlt, so extremely large sources may require pausing or smaller grids if ticks fall behind.
+- Rows = round(columns / aspectRatio). The primary source replaces the default 16:9 ratio with its current ratio; removing all sources restores 16:9.
+- Random fill uses 35% seed density to encourage interesting evolution when no source is selected.
+- All rendering is CPU-side; WPF's scaling handles presentation without smoothing (`NearestNeighbor`). Window capture uses GDI BitBlt, so extremely large or numerous sources may require smaller grids or lower tick rates if compositing falls behind.
