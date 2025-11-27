@@ -11,12 +11,31 @@
     <GenerateBootstrapper Condition="'$(MSBuildRuntimeType)' == 'Core'">false</GenerateBootstrapper>
   </PropertyGroup>
 
+  <PropertyGroup>
+    <!-- 
+      Specifies the path to the DirectX shader compiler (fxc.exe).
+      This path is used in a custom build step to compile the .fx shader.
+      If the build fails because fxc.exe is not found, please update this path
+      to point to the fxc.exe on your system. It is part of the Windows SDK,
+      often found in a path like 'C:\Program Files (x86)\Windows Kits\10\bin\[SDK_VERSION]\x64\fxc.exe'.
+    -->
+    <FxcExePath>C:\Program Files (x86)\Windows Kits\10\bin\10.0.26100.0\x64\fxc.exe</FxcExePath>
+  </PropertyGroup>
+  
   <ItemGroup>
     <PackageReference Include="System.Drawing.Common" Version="8.0.7" />
     <PackageReference Include="Microsoft.Windows.SDK.NET" Version="10.0.18362.6-preview" />
   </ItemGroup>
+  
   <ItemGroup>
+    <None Include="Assets\Blend.fx" />
     <Resource Include="Assets\Blend.ps" />
   </ItemGroup>
+
+  <Target Name="CompileShader" BeforeTargets="CoreBuild" Inputs="Assets\Blend.fx" Outputs="Assets\Blend.ps">
+    <Message Text="Compiling shader Assets\Blend.fx -> Assets\Blend.ps..." Importance="high" />
+    <Exec Command="&quot;$(FxcExePath)&quot; /T ps_3_0 /E main /nologo /Fo &quot;Assets\Blend.ps&quot; &quot;Assets\Blend.fx&quot;" Condition="Exists('$(FxcExePath)')" />
+    <Error Text="Shader compiler (fxc.exe) not found at '$(FxcExePath)'. Please update the FxcExePath property in lifeviz.csproj." Condition="!Exists('$(FxcExePath)')" />
+  </Target>
 
 </Project>

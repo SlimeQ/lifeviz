@@ -25,11 +25,10 @@ float3 Blend(float3 baseColor, float3 overlayColor)
     }
     else if (mode < 4.5) // Overlay
     {
-        float3 result;
-        result.r = baseColor.r < 0.5 ? (2 * baseColor.r * overlayColor.r) : (1 - 2 * (1 - baseColor.r) * (1 - overlayColor.r));
-        result.g = baseColor.g < 0.5 ? (2 * baseColor.g * overlayColor.g) : (1 - 2 * (1 - baseColor.g) * (1 - overlayColor.g));
-        result.b = baseColor.b < 0.5 ? (2 * baseColor.b * overlayColor.b) : (1 - 2 * (1 - baseColor.b) * (1 - overlayColor.b));
-        return result;
+        float3 branch1 = 2 * baseColor * overlayColor;
+        float3 branch2 = 1 - 2 * (1 - baseColor) * (1 - overlayColor);
+        float3 mask = step(0.5, baseColor);
+        return lerp(branch1, branch2, mask);
     }
     else if (mode < 5.5) // Lighten
     {
