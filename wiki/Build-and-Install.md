@@ -14,6 +14,8 @@ dotnet run
 ```
 
 Rider users can open `lifeviz.sln` and choose the built-in **lifeviz: Run App** configuration.
+For ClickOnce packages inside Rider, use the shared **lifeviz: Publish Installer (MSBuild.exe)** run configuration (in `.run/`); it shells out to `Publish-Installer.ps1` so full MSBuild is used. The auto-generated Rider publish config uses `dotnet msbuild` and will trip `MSB4803`.
+If you still publish via Rider's generated config, the project automatically disables the ClickOnce bootstrapper under `dotnet msbuild` so the build completes (no `setup.exe`); use the MSBuild.exe-backed script/config when you need the bootstrapper.
 
 ## Branded Icon
 
@@ -69,7 +71,7 @@ Downloaders should grab the single `lifeviz_installer.exe` from the release and 
 
 ## Troubleshooting
 
-- `MSB4803` or similar errors usually mean you ran `dotnet publish` instead of full MSBuild; re-run through `Publish-Installer.ps1`/`deploy.ps1`.
+- `MSB4803` or similar errors usually mean you ran `dotnet publish` instead of full MSBuild; re-run through `Publish-Installer.ps1`/`deploy.ps1` (or the **lifeviz: Publish Installer (MSBuild.exe)** run config in Rider).
 - If Rider/VS doesn't see the run configs, ensure the `.run/` folder and `.idea` contents are checked out.
 - Window capture requires desktop composition (Aero); minimized or hidden windows cannot be sampled.
 - ClickOnce "already installed from a different location" error: use `Install-ClickOnce.ps1` to stage to `%LOCALAPPDATA%\lifeviz-clickonce`, which uses a stable deployment URI and clears the cache before installing. If you prefer manual cleanup, uninstall the previous LifeViz entry first.

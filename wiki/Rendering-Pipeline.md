@@ -20,7 +20,7 @@
 ## Window Capture Injection
 
 1. `WindowCaptureService` enumerates all visible, non-minimized windows (excluding LifeViz itself), grabs their DWM extended frame bounds to get physical pixel sizes (avoids DPI virtualization cropping), and captures each active window via BitBlt into a `System.Drawing.Bitmap`. `WebcamCaptureService` uses WinRT `MediaCapture` + `MediaFrameReader` to buffer BGRA frames from selected cameras.
-2. Each capture is downscaled to the grid size and stored as BGRA; the primary source also keeps its source-resolution buffer for preserve-res rendering.
+2. Each capture is downscaled to the grid size and stored as BGRA; the primary source only materializes a source-resolution buffer when preserve-res rendering is enabled, and buffers are reused per window/webcam to avoid per-frame allocations.
 3. Sources are composited CPU-side in stack order using their selected blend modes (Normal, Additive, Multiply, Screen, Overlay, Lighten, Darken, Subtractive) into a shared downscaled buffer (and an optional high-res buffer when preserve-res is enabled).
 4. The composited downscaled buffer feeds the injection path: luminance masks for *Naive Grayscale* or per-channel masks for *RGB Channel Bins*. If a source disappears, it is removed automatically; removing the last source restores the default aspect ratio (and webcam capture is released).
 
@@ -49,5 +49,6 @@ Because every new frame pushes down the history stack, movement leaves chromatic
 ## Performance Notes
 
 - Rows = round(columns / aspectRatio). The primary source replaces the default 16:9 ratio with its current ratio; removing all sources restores 16:9.
+- Capture buffers are pooled (including the raw window/webcam readback), so toggling **Preserve Window Resolution** is the only time a source-resolution copy is kept alive; this removes GC spikes that caused occasional lurches.
 - Random fill uses 35% seed density to encourage interesting evolution when no source is selected.
 - All rendering is CPU-side; WPF's scaling handles presentation without smoothing (`NearestNeighbor`). Window capture uses GDI BitBlt, so extremely large or numerous sources may require smaller grids or lower tick rates if compositing falls behind.

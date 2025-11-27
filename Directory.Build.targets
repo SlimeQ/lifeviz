@@ -1,0 +1,7 @@
+<Project>
+  <!-- Ensure dotnet MSBuild (Core) skips ClickOnce bootstrapper tasks to avoid MSB4803; full MSBuild.exe still generates it. -->
+  <PropertyGroup Condition="'$(MSBuildRuntimeType)' == 'Core'">
+    <PublishBootstrapper>false</PublishBootstrapper>
+    <GenerateBootstrapper>false</GenerateBootstrapper>
+  </PropertyGroup>
+</Project>

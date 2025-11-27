@@ -4,6 +4,7 @@ using System.Diagnostics;
 using System.Globalization;
 using System.IO;
 using System.Linq;
+using System.Runtime.InteropServices;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Interop;
@@ -75,6 +76,8 @@ public partial class MainWindow : Window
     private WindowState _previousWindowState = WindowState.Normal;
     private WindowStyle _previousWindowStyle = WindowStyle.SingleBorderWindow;
     private ResizeMode _previousResizeMode = ResizeMode.CanResize;
+    private bool _previousTopmost;
+    private Rect _previousBounds;
 
     public MainWindow()
     {
@@ -844,7 +847,7 @@ public partial class MainWindow : Window
             {
                 if (source.Type == CaptureSource.SourceType.Window && source.Window != null)
                 {
-                    var windowFrame = _windowCapture.CaptureFrame(source.Window, _engine.Columns, _engine.Rows, thresholdHint);
+                    var windowFrame = _windowCapture.CaptureFrame(source.Window, _engine.Columns, _engine.Rows, thresholdHint, _preserveResolution);
                     if (windowFrame != null)
                     {
                         frame = new SourceFrame(windowFrame.OverlayDownscaled, windowFrame.DownscaledWidth, windowFrame.DownscaledHeight,
@@ -861,7 +864,7 @@ public partial class MainWindow : Window
                 }
                 else if (source.Type == CaptureSource.SourceType.Webcam && !string.IsNullOrWhiteSpace(source.WebcamId))
                 {
-                    var webcamFrame = _webcamCapture.CaptureFrame(source.WebcamId, _engine.Columns, _engine.Rows);
+                    var webcamFrame = _webcamCapture.CaptureFrame(source.WebcamId, _engine.Columns, _engine.Rows, _preserveResolution);
                     if (webcamFrame != null)
                     {
                         frame = new SourceFrame(webcamFrame.OverlayDownscaled, webcamFrame.DownscaledWidth, webcamFrame.DownscaledHeight,
@@ -898,9 +901,19 @@ public partial class MainWindow : Window
                 {
                     source.MissedFrames++;
                     var age = DateTime.UtcNow - source.AddedUtc;
-                    if (source.MissedFrames <= 90 || age < TimeSpan.FromSeconds(3))
+                    if (!source.FirstFrameReceived && !source.RetryInitializationAttempted && source.MissedFrames >= 90)
                     {
-                        if (source.MissedFrames % 30 == 0)
+                        Logger.Warn($"Webcam frames missing; retrying initialization for {source.DisplayName} after {source.MissedFrames} misses.");
+                        _webcamCapture.Reset();
+                        source.RetryInitializationAttempted = true;
+                        source.MissedFrames = 0;
+                        source.AddedUtc = DateTime.UtcNow;
+                        continue;
+                    }
+
+                    if (source.MissedFrames <= 240 || age < TimeSpan.FromSeconds(12))
+                    {
+                        if (source.MissedFrames % 60 == 0)
                         {
                             Logger.Warn($"Waiting for webcam frames from {source.DisplayName}; missed {source.MissedFrames} so far.");
                         }
@@ -1003,10 +1016,19 @@ public partial class MainWindow : Window
         _previousWindowState = WindowState;
         _previousWindowStyle = WindowStyle;
         _previousResizeMode = ResizeMode;
+        _previousTopmost = Topmost;
+        _previousBounds = WindowState == WindowState.Normal ? new Rect(Left, Top, Width, Height) : RestoreBounds;
 
+        WindowState = WindowState.Normal;
         WindowStyle = WindowStyle.None;
         ResizeMode = ResizeMode.NoResize;
-        WindowState = WindowState.Maximized;
+        Topmost = true;
+
+        var monitorBounds = GetCurrentMonitorBounds();
+        Left = monitorBounds.Left;
+        Top = monitorBounds.Top;
+        Width = monitorBounds.Width;
+        Height = monitorBounds.Height;
         _isFullscreen = true;
         if (!applyConfig)
         {
@@ -1022,13 +1044,77 @@ public partial class MainWindow : Window
             return;
         }
 
+        WindowState = WindowState.Normal;
         WindowStyle = _previousWindowStyle;
         ResizeMode = _previousResizeMode;
-        WindowState = _previousWindowState == WindowState.Minimized ? WindowState.Normal : _previousWindowState;
+        Topmost = _previousTopmost;
+        if (!_previousBounds.IsEmpty)
+        {
+            Left = _previousBounds.Left;
+            Top = _previousBounds.Top;
+            Width = _previousBounds.Width;
+            Height = _previousBounds.Height;
+        }
+
+        var targetState = _previousWindowState == WindowState.Minimized ? WindowState.Normal : _previousWindowState;
+        WindowState = targetState;
         _isFullscreen = false;
         SaveConfig();
         UpdateFullscreenMenuItem();
     }
+
+    private Rect GetCurrentMonitorBounds()
+    {
+        var dpi = VisualTreeHelper.GetDpi(this);
+        double scaleX = dpi.DpiScaleX <= 0 ? 1.0 : dpi.DpiScaleX;
+        double scaleY = dpi.DpiScaleY <= 0 ? 1.0 : dpi.DpiScaleY;
+        const int MonitorDefaultToNearest = 2;
+        if (_windowHandle != IntPtr.Zero)
+        {
+            IntPtr monitor = MonitorFromWindow(_windowHandle, MonitorDefaultToNearest);
+            if (monitor != IntPtr.Zero)
+            {
+                var info = new MonitorInfo
+                {
+                    cbSize = Marshal.SizeOf<MonitorInfo>()
+                };
+                if (GetMonitorInfo(monitor, ref info))
+                {
+                    return new Rect(
+                        info.rcMonitor.left / scaleX,
+                        info.rcMonitor.top / scaleY,
+                        (info.rcMonitor.right - info.rcMonitor.left) / scaleX,
+                        (info.rcMonitor.bottom - info.rcMonitor.top) / scaleY);
+                }
+            }
+        }
+
+        return new Rect(0, 0, SystemParameters.PrimaryScreenWidth, SystemParameters.PrimaryScreenHeight);
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct NativeRect
+    {
+        public int left;
+        public int top;
+        public int right;
+        public int bottom;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct MonitorInfo
+    {
+        public int cbSize;
+        public NativeRect rcMonitor;
+        public NativeRect rcWork;
+        public uint dwFlags;
+    }
+
+    [DllImport("user32.dll")]
+    private static extern IntPtr MonitorFromWindow(IntPtr hwnd, int flags);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool GetMonitorInfo(IntPtr monitor, ref MonitorInfo info);
 
     private void UpdateFullscreenMenuItem()
     {
@@ -2277,6 +2363,7 @@ public partial class MainWindow : Window
         public DateTime AddedUtc { get; set; }
         public double Opacity { get; set; } = 1.0;
         public bool Mirror { get; set; }
+        public bool RetryInitializationAttempted { get; set; }
 
         public double AspectRatio
         {

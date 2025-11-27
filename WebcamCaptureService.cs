@@ -1,6 +1,9 @@
 using System;
+using System.Buffers;
 using System.Collections.Generic;
 using System.Linq;
+using System.Runtime.InteropServices;
+using System.Runtime.InteropServices.WindowsRuntime;
 using System.Threading;
 using System.Threading.Tasks;
 using Windows.Devices.Enumeration;
@@ -23,6 +26,8 @@ internal sealed class WebcamCaptureService : IDisposable
     private string? _currentDeviceId;
     private Task<bool>? _initializeTask;
     private readonly SemaphoreSlim _initLock = new(1, 1);
+    private byte[]? _downscaledBuffer;
+    private byte[]? _sourceCopyBuffer;
 
     public IReadOnlyList<CameraInfo> EnumerateCameras()
     {
@@ -39,7 +44,7 @@ internal sealed class WebcamCaptureService : IDisposable
         }
     }
 
-    public WebcamFrame? CaptureFrame(string cameraId, int targetWidth, int targetHeight)
+    public WebcamFrame? CaptureFrame(string cameraId, int targetWidth, int targetHeight, bool includeSource = true)
     {
         if (string.IsNullOrWhiteSpace(cameraId) || targetWidth <= 0 || targetHeight <= 0)
         {
@@ -59,18 +64,37 @@ internal sealed class WebcamCaptureService : IDisposable
             latest = _latestBuffer;
             width = _latestWidth;
             height = _latestHeight;
+            if (latest == null || width <= 0 || height <= 0)
+            {
+                return null;
+            }
+
+            int downscaledLength = targetWidth * targetHeight * 4;
+            if (_downscaledBuffer == null || _downscaledBuffer.Length != downscaledLength)
+            {
+                _downscaledBuffer = new byte[downscaledLength];
+            }
+
+            Downscale(latest, width, height, _downscaledBuffer, targetWidth, targetHeight);
+
+            if (includeSource)
+            {
+                if (_sourceCopyBuffer == null || _sourceCopyBuffer.Length != latest.Length)
+                {
+                    _sourceCopyBuffer = new byte[latest.Length];
+                }
+                System.Buffer.BlockCopy(latest, 0, _sourceCopyBuffer, 0, latest.Length);
+            }
+            else
+            {
+                _sourceCopyBuffer = null;
+            }
         }
 
-        if (latest == null || width <= 0 || height <= 0)
-        {
-            return null;
-        }
-
-        var sourceCopy = new byte[latest.Length];
-        System.Buffer.BlockCopy(latest, 0, sourceCopy, 0, latest.Length);
-        var downscaled = Downscale(sourceCopy, width, height, targetWidth, targetHeight);
-
-        return new WebcamFrame(downscaled, targetWidth, targetHeight, sourceCopy, width, height);
+        return new WebcamFrame(_downscaledBuffer!, targetWidth, targetHeight,
+            includeSource ? _sourceCopyBuffer : null,
+            width,
+            height);
     }
 
     private bool EnsureInitialized(string cameraId)
@@ -170,26 +194,13 @@ internal sealed class WebcamCaptureService : IDisposable
             }
 
             SoftwareBitmap? converted = null;
-            DataReader? reader = null;
             try
             {
                 converted = SoftwareBitmap.Convert(softwareBitmap, BitmapPixelFormat.Bgra8, BitmapAlphaMode.Premultiplied);
-                var buffer = new Windows.Storage.Streams.Buffer((uint)(converted.PixelWidth * converted.PixelHeight * 4));
-                converted.CopyToBuffer(buffer);
-                reader = DataReader.FromBuffer(buffer);
-                var bytes = new byte[buffer.Length];
-                reader.ReadBytes(bytes);
-
-                lock (_frameLock)
-                {
-                    _latestBuffer = bytes;
-                    _latestWidth = converted.PixelWidth;
-                    _latestHeight = converted.PixelHeight;
-                }
+                CopyToLatestBuffer(converted);
             }
             finally
             {
-                reader?.Dispose();
                 converted?.Dispose();
             }
         }
@@ -200,9 +211,36 @@ internal sealed class WebcamCaptureService : IDisposable
         }
     }
 
-    private static byte[] Downscale(byte[] source, int sourceWidth, int sourceHeight, int targetWidth, int targetHeight)
+    private void CopyToLatestBuffer(SoftwareBitmap bitmap)
     {
-        var output = new byte[targetWidth * targetHeight * 4];
+        int required = bitmap.PixelWidth * bitmap.PixelHeight * 4;
+        var scratch = ArrayPool<byte>.Shared.Rent(required);
+        try
+        {
+            var ibuffer = new Windows.Storage.Streams.Buffer((uint)required);
+            bitmap.CopyToBuffer(ibuffer);
+            ibuffer.CopyTo(scratch);
+
+            lock (_frameLock)
+            {
+                if (_latestBuffer == null || _latestBuffer.Length != required)
+                {
+                    _latestBuffer = new byte[required];
+                }
+
+                System.Buffer.BlockCopy(scratch, 0, _latestBuffer, 0, required);
+                _latestWidth = bitmap.PixelWidth;
+                _latestHeight = bitmap.PixelHeight;
+            }
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(scratch);
+        }
+    }
+
+    private static void Downscale(byte[] source, int sourceWidth, int sourceHeight, byte[] destination, int targetWidth, int targetHeight)
+    {
         double scaleX = sourceWidth / (double)targetWidth;
         double scaleY = sourceHeight / (double)targetHeight;
         int destStride = targetWidth * 4;
@@ -220,14 +258,12 @@ internal sealed class WebcamCaptureService : IDisposable
                 int destIndex = destRowOffset + (col * 4);
                 int srcIndex = srcRowOffset + (srcX * 4);
 
-                output[destIndex] = source[srcIndex];
-                output[destIndex + 1] = source[srcIndex + 1];
-                output[destIndex + 2] = source[srcIndex + 2];
-                output[destIndex + 3] = 255;
+                destination[destIndex] = source[srcIndex];
+                destination[destIndex + 1] = source[srcIndex + 1];
+                destination[destIndex + 2] = source[srcIndex + 2];
+                destination[destIndex + 3] = 255;
             }
         }
-
-        return output;
     }
 
     public void Reset()
@@ -258,6 +294,8 @@ internal sealed class WebcamCaptureService : IDisposable
             _latestBuffer = null;
             _latestWidth = 0;
             _latestHeight = 0;
+            _downscaledBuffer = null;
+            _sourceCopyBuffer = null;
         }
 
         Logger.Info("Webcam capture reset.");
@@ -279,7 +317,7 @@ internal sealed class WebcamCaptureService : IDisposable
 
     internal sealed class WebcamFrame
     {
-        public WebcamFrame(byte[] overlayDownscaled, int downscaledWidth, int downscaledHeight, byte[] overlaySource, int sourceWidth, int sourceHeight)
+        public WebcamFrame(byte[] overlayDownscaled, int downscaledWidth, int downscaledHeight, byte[]? overlaySource, int sourceWidth, int sourceHeight)
         {
             OverlayDownscaled = overlayDownscaled;
             DownscaledWidth = downscaledWidth;
@@ -292,7 +330,7 @@ internal sealed class WebcamCaptureService : IDisposable
         public byte[] OverlayDownscaled { get; }
         public int DownscaledWidth { get; }
         public int DownscaledHeight { get; }
-        public byte[] OverlaySource { get; }
+        public byte[]? OverlaySource { get; }
         public int SourceWidth { get; }
         public int SourceHeight { get; }
     }

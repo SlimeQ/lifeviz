@@ -1,4 +1,5 @@
 using System;
+using System.Buffers;
 using System.Collections.Generic;
 using System.Drawing;
 using System.Drawing.Imaging;
@@ -9,7 +10,9 @@ namespace lifeviz;
 
     internal sealed class WindowCaptureService
     {
-        public WindowCaptureFrame? CaptureFrame(WindowHandleInfo info, int targetColumns, int targetRows, double threshold)
+        private readonly Dictionary<IntPtr, FrameCache> _frameCache = new();
+
+        public WindowCaptureFrame? CaptureFrame(WindowHandleInfo info, int targetColumns, int targetRows, double threshold, bool includeSource = true)
         {
             if (targetColumns <= 0 || targetRows <= 0)
             {
@@ -27,7 +30,8 @@ namespace lifeviz;
                 return null;
             }
 
-            return DownscaleToFrame(bitmap, targetColumns, targetRows, threshold);
+            var cache = GetOrCreateCache(info.Handle);
+            return DownscaleToFrame(bitmap, targetColumns, targetRows, threshold, includeSource, cache);
         }
 
         // Fetches the physical window bounds, preferring the DWM extended frame bounds so DPI virtualization
@@ -155,12 +159,14 @@ namespace lifeviz;
 
         if (!NativeMethods.IsWindow(info.Handle))
         {
+            _frameCache.Remove(info.Handle);
             return null;
         }
 
         using var bitmap = CaptureWindowBitmap(info.Handle);
         if (bitmap == null)
         {
+            _frameCache.Remove(info.Handle);
             return null;
         }
 
@@ -264,16 +270,32 @@ namespace lifeviz;
         }
     }
 
-    private static WindowCaptureFrame DownscaleToFrame(Bitmap bitmap, int columns, int rows, double threshold)
+    private WindowCaptureFrame DownscaleToFrame(Bitmap bitmap, int columns, int rows, double threshold, bool includeSource, FrameCache cache)
     {
-        bool[,] mask = new bool[rows, columns];
-        byte[] overlay = new byte[rows * columns * 4];
+        bool[,] mask = cache.Mask is { } existingMask && existingMask.GetLength(0) == rows && existingMask.GetLength(1) == columns
+            ? existingMask
+            : cache.Mask = new bool[rows, columns];
+
+        int downscaledLength = rows * columns * 4;
+        byte[] overlay = cache.OverlayDownscaled?.Length == downscaledLength
+            ? cache.OverlayDownscaled!
+            : cache.OverlayDownscaled = new byte[downscaledLength];
+
+        int sourceLength = bitmap.Width * bitmap.Height * 4;
+        byte[]? overlaySource = includeSource
+            ? cache.OverlaySource?.Length == sourceLength
+                ? cache.OverlaySource
+                : cache.OverlaySource = new byte[sourceLength]
+            : null;
+        if (!includeSource)
+        {
+            cache.OverlaySource = null;
+        }
         double scaleX = bitmap.Width / (double)columns;
         double scaleY = bitmap.Height / (double)rows;
         threshold = Math.Clamp(threshold, 0, 1);
 
         var rect = new Rectangle(0, 0, bitmap.Width, bitmap.Height);
-        byte[] overlaySource;
         var data = bitmap.LockBits(rect, ImageLockMode.ReadOnly, PixelFormat.Format32bppArgb);
         try
         {
@@ -281,53 +303,61 @@ namespace lifeviz;
             bool bottomUp = stride < 0;
             int absoluteStride = Math.Abs(stride);
             int bufferLength = absoluteStride * bitmap.Height;
-            var buffer = new byte[bufferLength];
+            var buffer = ArrayPool<byte>.Shared.Rent(bufferLength);
             Marshal.Copy(data.Scan0, buffer, 0, bufferLength);
-            overlaySource = new byte[bitmap.Width * bitmap.Height * 4];
-
-            if (!bottomUp && absoluteStride == bitmap.Width * 4)
+            try
             {
-                Buffer.BlockCopy(buffer, 0, overlaySource, 0, overlaySource.Length);
-            }
-            else
-            {
-                for (int srcRow = 0; srcRow < bitmap.Height; srcRow++)
+                if (includeSource && overlaySource != null)
                 {
-                    int bufferRow = bottomUp ? (bitmap.Height - 1 - srcRow) : srcRow;
-                    int srcOffset = bufferRow * absoluteStride;
-                    int destOffset = srcRow * bitmap.Width * 4;
-                    Buffer.BlockCopy(buffer, srcOffset, overlaySource, destOffset, bitmap.Width * 4);
-                }
-            }
-
-            for (int row = 0; row < rows; row++)
-            {
-                int srcY = Math.Min(bitmap.Height - 1, (int)Math.Floor(row * scaleY));
-                int bufferRow = bottomUp ? (bitmap.Height - 1 - srcY) : srcY;
-                int rowOffset = bufferRow * absoluteStride;
-                int overlayRowOffset = row * columns * 4;
-
-                for (int col = 0; col < columns; col++)
-                {
-                    int srcX = Math.Min(bitmap.Width - 1, (int)Math.Floor(col * scaleX));
-                    int index = rowOffset + (srcX * 4);
-                    if (index < 0 || index + 2 >= buffer.Length)
+                    if (!bottomUp && absoluteStride == bitmap.Width * 4)
                     {
-                        continue;
+                        Buffer.BlockCopy(buffer, 0, overlaySource, 0, overlaySource.Length);
                     }
-
-                    byte b = buffer[index];
-                    byte g = buffer[index + 1];
-                    byte r = buffer[index + 2];
-                    double luminance = (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255.0;
-                    mask[row, col] = luminance >= threshold;
-
-                    int overlayIndex = overlayRowOffset + (col * 4);
-                    overlay[overlayIndex] = b;
-                    overlay[overlayIndex + 1] = g;
-                    overlay[overlayIndex + 2] = r;
-                    overlay[overlayIndex + 3] = 255;
+                    else
+                    {
+                        for (int srcRow = 0; srcRow < bitmap.Height; srcRow++)
+                        {
+                            int bufferRow = bottomUp ? (bitmap.Height - 1 - srcRow) : srcRow;
+                            int srcOffset = bufferRow * absoluteStride;
+                            int destOffset = srcRow * bitmap.Width * 4;
+                            Buffer.BlockCopy(buffer, srcOffset, overlaySource, destOffset, bitmap.Width * 4);
+                        }
+                    }
                 }
+
+                for (int row = 0; row < rows; row++)
+                {
+                    int srcY = Math.Min(bitmap.Height - 1, (int)Math.Floor(row * scaleY));
+                    int bufferRow = bottomUp ? (bitmap.Height - 1 - srcY) : srcY;
+                    int rowOffset = bufferRow * absoluteStride;
+                    int overlayRowOffset = row * columns * 4;
+
+                    for (int col = 0; col < columns; col++)
+                    {
+                        int srcX = Math.Min(bitmap.Width - 1, (int)Math.Floor(col * scaleX));
+                        int index = rowOffset + (srcX * 4);
+                        if (index < 0 || index + 2 >= bufferLength)
+                        {
+                            continue;
+                        }
+
+                        byte b = buffer[index];
+                        byte g = buffer[index + 1];
+                        byte r = buffer[index + 2];
+                        double luminance = (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255.0;
+                        mask[row, col] = luminance >= threshold;
+
+                        int overlayIndex = overlayRowOffset + (col * 4);
+                        overlay[overlayIndex] = b;
+                        overlay[overlayIndex + 1] = g;
+                        overlay[overlayIndex + 2] = r;
+                        overlay[overlayIndex + 3] = 255;
+                    }
+                }
+            }
+            finally
+            {
+                ArrayPool<byte>.Shared.Return(buffer);
             }
         }
         finally
@@ -335,7 +365,10 @@ namespace lifeviz;
             bitmap.UnlockBits(data);
         }
 
-        return new WindowCaptureFrame(mask, overlay, columns, rows, overlaySource, bitmap.Width, bitmap.Height);
+        return new WindowCaptureFrame(mask, overlay, columns, rows,
+            includeSource ? overlaySource : null,
+            bitmap.Width,
+            bitmap.Height);
     }
 
     private static bool[,] DownscaleToMask(Bitmap bitmap, int columns, int rows, double threshold)
@@ -486,7 +519,7 @@ namespace lifeviz;
     internal sealed class WindowCaptureFrame
     {
         public WindowCaptureFrame(bool[,] mask, byte[] overlayDownscaled, int downscaledWidth, int downscaledHeight,
-            byte[] overlaySource, int sourceWidth, int sourceHeight)
+            byte[]? overlaySource, int sourceWidth, int sourceHeight)
         {
             Mask = mask;
             OverlayDownscaled = overlayDownscaled;
@@ -501,8 +534,26 @@ namespace lifeviz;
         public byte[] OverlayDownscaled { get; }
         public int DownscaledWidth { get; }
         public int DownscaledHeight { get; }
-        public byte[] OverlaySource { get; }
+        public byte[]? OverlaySource { get; }
         public int SourceWidth { get; }
         public int SourceHeight { get; }
+    }
+
+    private sealed class FrameCache
+    {
+        public bool[,]? Mask;
+        public byte[]? OverlayDownscaled;
+        public byte[]? OverlaySource;
+    }
+
+    private FrameCache GetOrCreateCache(IntPtr handle)
+    {
+        if (!_frameCache.TryGetValue(handle, out var cache))
+        {
+            cache = new FrameCache();
+            _frameCache[handle] = cache;
+        }
+
+        return cache;
     }
 }

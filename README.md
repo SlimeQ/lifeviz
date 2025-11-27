@@ -19,9 +19,10 @@ Right-click the scene and use **Sources** to stack multiple windows, OBS-style:
 - Each source has its own blend mode applied during compositing (Normal, Additive, Multiply, Screen, Overlay, Lighten, Darken, Subtractive).
 - **Composite Blend** still controls how the finished composite mixes with the Game of Life output (Additive default via the pixel shader).
 - **Passthrough Underlay** shows that composite behind the simulation; **Preserve Window Resolution** renders at the primary source's native size before scaling.
-- **Fullscreen** toggle lives in the context menu and persists; it switches to a borderless, maximized view.
+- **Fullscreen** toggle lives in the context menu and persists; it now sizes to the active monitor bounds, stays topmost, and covers the taskbar.
 - Capture uses DPI-correct window bounds (via DWM) so the full surface is normalized even for PiP/scaled windows, and the composited buffer feeds the injection path (threshold window + noise + life/binning modes) on every tick.
-- Webcam sources stream via WinRT `MediaCapture`; clearing sources or closing the app releases the camera.
+- Capture buffers are pooled and source-resolution copies are only produced when **Preserve Window Resolution** is enabled, eliminating GC spikes from per-frame allocations.
+- Webcam sources stream via WinRT `MediaCapture`; clearing sources or closing the app releases the camera. Cameras retry initialization once and wait longer for first frames before being removed.
 - Framerate lock: choose 15 / 30 / 60 fps from the context menu to match capture needs or ease CPU/GPU load.
 - Capture threshold window: adjustable min/max sliders (with optional invert) in the context menu; only pixels inside the window set cells alive during injection, applied before each simulation step.
 - Injection noise: adjustable slider (0-1) that randomly skips cell injection per pixel to introduce controlled noise.
@@ -30,7 +31,7 @@ Right-click the scene and use **Sources** to stack multiple windows, OBS-style:
 
 - Settings persist to `%AppData%\lifeviz\config.json` after the app finishes loading (columns/depth, framerate, blend/composite toggles, thresholds, opacity, passthrough, etc.) and restore on next launch.
 - The source stack is restored too: window sources are matched by title, webcams by device id/name, keeping order plus per-layer blend mode, opacity, and mirror settings when the devices are available.
-- Fullscreen preference is remembered and re-applied on launch.
+- Fullscreen preference is remembered and re-applied on launch using the active monitor bounds so the taskbar stays hidden.
 
 
 ## Packaging & Deployment
@@ -49,8 +50,10 @@ The repo now bundles three helper scripts:
 
 - `Publish-Installer.ps1` - resolves `MSBuild.exe`, runs the publish target, and writes manifests + installer assets into `bin/Release/net9.0-windows/publish/`.
 - `deploy.ps1` - builds, publishes with an auto-generated version (so ClickOnce always sees an update), then launches the `lifeviz.application` manifest to trigger an in-place update of the installed app.
-- `Publish-GitHubRelease.ps1` - builds, publishes a ClickOnce payload, bundles it into a single `lifeviz_installer.exe` (self-extracting + auto-install), and creates a GitHub release that uploads that one exe (requires `gh` CLI authenticated to your repo). It asks a quick vibe check (tiny tweak / glow-up / new era) and auto-bumps the version/tag for you—no need to invent numbers.
-- `Install-ClickOnce.ps1` - bundled alongside published payloads; stages the ClickOnce files to `%LOCALAPPDATA%\lifeviz-clickonce`, clears the old ClickOnce cache, and launches the manifest from that stable path so future installs/updates don’t break when the zip is extracted to a new folder.
+- `Publish-GitHubRelease.ps1` - builds, publishes a ClickOnce payload, bundles it into a single `lifeviz_installer.exe` (self-extracting + auto-install), and creates a GitHub release that uploads that one exe (requires `gh` CLI authenticated to your repo). It asks a quick vibe check (tiny tweak / glow-up / new era) and auto-bumps the version/tag for you-no need to invent numbers.
+- `Install-ClickOnce.ps1` - bundled alongside published payloads; stages the ClickOnce files to `%LOCALAPPDATA%\lifeviz-clickonce`, clears the old ClickOnce cache, and launches the manifest from that stable path so future installs/updates don't break when the zip is extracted to a new folder.
+- Rider users: run the **lifeviz: Publish Installer (MSBuild.exe)** configuration (stored in `.run/`), which shells out to `Publish-Installer.ps1` so full MSBuild is used. The auto-generated Rider publish config uses `dotnet msbuild` and will fail with `MSB4803`.
+- If you do publish via `dotnet msbuild` (e.g., Rider's generated publish config), the project automatically disables the ClickOnce bootstrapper so the build succeeds; use the MSBuild.exe-backed scripts to produce the optional `setup.exe` bootstrapper.
 
 Artifacts:
 
