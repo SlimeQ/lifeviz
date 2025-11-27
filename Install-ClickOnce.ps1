@@ -71,5 +71,26 @@ if (-not (Test-Path $stagedManifest)) {
     throw "Staged manifest missing at $stagedManifest"
 }
 
+# Stamp a stable deployment provider URI so installs/updates always point to the same path.
+try {
+    [xml]$xml = Get-Content $stagedManifest
+    $ns = New-Object System.Xml.XmlNamespaceManager($xml.NameTable)
+    $ns.AddNamespace("asmv1","urn:schemas-microsoft-com:asm.v1")
+    $ns.AddNamespace("asmv2","urn:schemas-microsoft-com:asm.v2")
+    $providerNode = $xml.SelectSingleNode("//asmv2:deploymentProvider", $ns)
+    if (-not $providerNode) {
+        $providerNode = $xml.CreateElement("deploymentProvider","urn:schemas-microsoft-com:asm.v2")
+        $deployNode = $xml.SelectSingleNode("//asmv2:deployment",$ns)
+        if ($deployNode) { $deployNode.AppendChild($providerNode) | Out-Null }
+    }
+    if ($providerNode) {
+        $providerUri = (New-Object System.Uri((Resolve-Path $stagedManifest).Path)).AbsoluteUri
+        $null = $providerNode.SetAttribute("codebase",$providerUri)
+        $xml.Save($stagedManifest)
+    }
+} catch {
+    Write-Warning "Failed to stamp stable deployment provider URI: $_"
+}
+
 Write-Host "[install] Launching ClickOnce manifest from $stagedManifest" -ForegroundColor Cyan
 Start-Process -FilePath $stagedManifest

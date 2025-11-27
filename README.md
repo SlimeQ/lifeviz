@@ -49,7 +49,7 @@ The repo now bundles three helper scripts:
 
 - `Publish-Installer.ps1` - resolves `MSBuild.exe`, runs the publish target, and writes manifests + installer assets into `bin/Release/net9.0-windows/publish/`.
 - `deploy.ps1` - builds, publishes with an auto-generated version (so ClickOnce always sees an update), then launches the `lifeviz.application` manifest to trigger an in-place update of the installed app.
-- `Publish-GitHubRelease.ps1` - builds, publishes a tagged ClickOnce payload, zips the publish folder into `artifacts/github-release/`, and creates a GitHub release that uploads that single zip asset (requires `gh` CLI authenticated to your repo).
+- `Publish-GitHubRelease.ps1` - builds, publishes a ClickOnce payload, bundles it into a single `lifeviz_installer.exe` (self-extracting + auto-install), and creates a GitHub release that uploads that one exe (requires `gh` CLI authenticated to your repo). It asks a quick vibe check (tiny tweak / glow-up / new era) and auto-bumps the version/tag for you—no need to invent numbers.
 - `Install-ClickOnce.ps1` - bundled alongside published payloads; stages the ClickOnce files to `%LOCALAPPDATA%\lifeviz-clickonce`, clears the old ClickOnce cache, and launches the manifest from that stable path so future installs/updates don’t break when the zip is extracted to a new folder.
 
 Artifacts:
@@ -62,10 +62,10 @@ To push a Windows release to GitHub:
 
 ```powershell
 gh auth login # one-time
-.\Publish-GitHubRelease.ps1 -Tag v1.2.3 -NotesPath release-notes.md
+.\Publish-GitHubRelease.ps1 -NotesPath release-notes.md
 ```
 
-Use `-Draft` to stage without publishing. The script reuses `Publish-Installer.ps1` to generate assets and keeps the zipped payload under `artifacts/github-release/`. Downloaders should grab the zip, extract it, then run `setup.exe` (or `lifeviz.application`) from inside the extracted folder—grabbing `setup.exe` alone will miss the ClickOnce payload.
+Use `-Draft` to stage without publishing. The script reuses `Publish-Installer.ps1` to generate assets and emits a single `lifeviz_installer.exe` into `artifacts/github-release/`; the GitHub release uploads just that executable.
 
 > **NOTE:** `.NET CLI` alone cannot produce ClickOnce installers (MSB4803). Always use the full MSBuild toolchain, either directly (`msbuild`) or through the scripts above.
 

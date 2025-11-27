@@ -55,22 +55,17 @@ Use `Publish-GitHubRelease.ps1` to package and upload a ClickOnce build as a Git
 
 ```powershell
 gh auth login # one-time
-.\Publish-GitHubRelease.ps1 -Tag v1.2.3 -NotesPath release-notes.md
+.\Publish-GitHubRelease.ps1 -NotesPath release-notes.md
 ```
 
 What it does:
 
-- Builds in Release, then calls `Publish-Installer.ps1` with `ApplicationVersion` derived from the tag and optional `-ApplicationRevision`.
-- Zips `bin/<Configuration>/net9.0-windows/publish/` to `artifacts/github-release/lifeviz-clickonce-<tag>.zip`.
-- Creates a GitHub release for the supplied tag (draftable via `-Draft`) and uploads only the zip as the release asset. If the tag does not yet exist, `gh release create` will create it.
+- Prompts for the release vibe (tiny tweak / glow-up / new era) and auto-bumps the semantic version/tag based on the existing highest `v*` tag. You can still pass `-Tag` to override if needed.
+- Builds in Release, then calls `Publish-Installer.ps1` with `ApplicationVersion` derived from the new tag and optional `-ApplicationRevision`.
+- Bundles the publish payload into a single self-extracting `lifeviz_installer.exe` (stored in `artifacts/github-release/`).
+- Creates a GitHub release for the supplied tag (draftable via `-Draft`) and uploads only that exe as the release asset. If the tag does not yet exist, `gh release create` will create it.
 
-Downloaders should pull that zip, extract it locally, and then run `setup.exe` (or `lifeviz.application`) from inside the extracted folder. Downloading `setup.exe` by itself will not include the ClickOnce payload.
-- To avoid ClickOnce location conflicts on target machines, run `Install-ClickOnce.ps1` from inside the extracted publish folder:
-
-  ```powershell
-  # From the extracted publish directory
-  powershell -ExecutionPolicy Bypass -File .\Install-ClickOnce.ps1
-  ```
+Downloaders should grab the single `lifeviz_installer.exe` from the release and run it; it self-extracts the payload and launches `Install-ClickOnce.ps1` from a stable location (the manifest is rewritten to `%LOCALAPPDATA%\lifeviz-clickonce\lifeviz.application` to avoid "installed from a different location" warnings on future updates).
 
 ## Troubleshooting
 
