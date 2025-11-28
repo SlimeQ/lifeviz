@@ -26,7 +26,6 @@ public partial class MainWindow : Window
     private const double DefaultFps = 60;
 
     private readonly GameOfLifeEngine _engine = new();
-    private readonly DispatcherTimer _timer;
     private readonly WindowCaptureService _windowCapture = new();
     private readonly WebcamCaptureService _webcamCapture = new();
     private readonly BlendEffect _blendEffect = new();
@@ -58,8 +57,8 @@ public partial class MainWindow : Window
     private double _lifeOpacity = 1.0;
     private bool _invertComposite;
     private bool _showFps;
-    private readonly Stopwatch _fpsStopwatch = new();
-    private int _fpsFrames;
+    private readonly Stopwatch _simulationFpsStopwatch = new();
+    private int _simulationFrames;
     private double _displayFps;
     private GameOfLifeEngine.LifeMode _lifeMode = GameOfLifeEngine.LifeMode.NaiveGrayscale;
     private GameOfLifeEngine.BinningMode _binningMode = GameOfLifeEngine.BinningMode.Fill;
@@ -79,17 +78,13 @@ public partial class MainWindow : Window
     private ResizeMode _previousResizeMode = ResizeMode.CanResize;
     private bool _previousTopmost;
     private Rect _previousBounds;
+    private readonly Stopwatch _stepStopwatch = new();
+    private double _timeSinceLastStep;
 
     public MainWindow()
     {
         Logger.Initialize();
         InitializeComponent();
-
-        _timer = new DispatcherTimer
-        {
-            Interval = TimeSpan.FromMilliseconds(1000.0 / DefaultFps)
-        };
-        _timer.Tick += (_, _) => OnTick();
 
         Loaded += (_, _) =>
         {
@@ -120,23 +115,53 @@ public partial class MainWindow : Window
         _engine.SetMode(_lifeMode);
         _engine.SetBinningMode(_binningMode);
         _engine.SetInjectionMode(_injectionMode);
-        _timer.Interval = TimeSpan.FromMilliseconds(1000.0 / _currentFps);
         _engine.Randomize();
         UpdateDisplaySurface(force: true);
         InitializeEffect();
         UpdateFpsOverlay();
-        _timer.Start();
+        CompositionTarget.Rendering += CompositionTarget_Rendering;
+        _stepStopwatch.Start();
     }
 
-    private void OnTick()
+    private void CompositionTarget_Rendering(object sender, EventArgs e)
     {
-        if (!_isPaused)
+        // --- Simulation Step ---
+        double elapsed = _stepStopwatch.Elapsed.TotalSeconds;
+        _stepStopwatch.Restart();
+        _timeSinceLastStep += elapsed;
+
+        double desiredInterval = 1.0 / _currentFps;
+
+        if (_timeSinceLastStep >= desiredInterval)
         {
-            InjectCaptureFrames();
-            _engine.Step();
+            if (!_isPaused)
+            {
+                InjectCaptureFrames();
+                _engine.Step();
+                _simulationFrames++;
+            }
+            _timeSinceLastStep -= desiredInterval;
         }
 
+        // --- Rendering Step ---
         RenderFrame();
+
+        // --- FPS Counter Update ---
+        if (!_simulationFpsStopwatch.IsRunning)
+        {
+            _simulationFpsStopwatch.Start();
+        }
+        else if (_simulationFpsStopwatch.ElapsedMilliseconds >= 500)
+        {
+            double seconds = _simulationFpsStopwatch.Elapsed.TotalSeconds;
+            if (seconds > 0)
+            {
+                _displayFps = _simulationFrames / seconds;
+            }
+            _simulationFrames = 0;
+            _simulationFpsStopwatch.Restart();
+        }
+        UpdateFpsOverlay();
     }
 
     private void RebuildSurface() => UpdateDisplaySurface(force: true);
@@ -195,23 +220,6 @@ public partial class MainWindow : Window
         _bitmap.WritePixels(new Int32Rect(0, 0, width, height), _pixelBuffer, stride, 0);
         UpdateUnderlayBitmap(requiredLength);
         UpdateEffectInput();
-        UpdateFpsOverlay();
-
-        _fpsFrames++;
-        if (!_fpsStopwatch.IsRunning)
-        {
-            _fpsStopwatch.Start();
-        }
-        else if (_fpsStopwatch.ElapsedMilliseconds >= 500)
-        {
-            double seconds = _fpsStopwatch.Elapsed.TotalSeconds;
-            if (seconds > 0)
-            {
-                _displayFps = _fpsFrames / seconds;
-            }
-            _fpsFrames = 0;
-            _fpsStopwatch.Restart();
-        }
     }
 
     private void TogglePause_Click(object sender, RoutedEventArgs e)
@@ -1861,7 +1869,6 @@ public partial class MainWindow : Window
     {
         fps = Math.Clamp(fps, 5, 144);
         _currentFps = fps;
-        _timer.Interval = TimeSpan.FromMilliseconds(1000.0 / _currentFps);
         UpdateFramerateMenuChecks();
         SaveConfig();
     }
