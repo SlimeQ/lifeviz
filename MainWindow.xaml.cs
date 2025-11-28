@@ -1224,6 +1224,10 @@ public partial class MainWindow : Window
         {
             SetFramerate(60);
         }
+        else if (header.StartsWith("144", StringComparison.OrdinalIgnoreCase))
+        {
+            SetFramerate(144);
+        }
     }
 
     private void TogglePreserveResolution_Click(object sender, RoutedEventArgs e)
@@ -1855,7 +1859,7 @@ public partial class MainWindow : Window
 
     private void SetFramerate(double fps)
     {
-        fps = Math.Clamp(fps, 5, 120);
+        fps = Math.Clamp(fps, 5, 144);
         _currentFps = fps;
         _timer.Interval = TimeSpan.FromMilliseconds(1000.0 / _currentFps);
         UpdateFramerateMenuChecks();
@@ -1875,7 +1879,8 @@ public partial class MainWindow : Window
             {
                 bool isChecked = header.StartsWith("15", StringComparison.OrdinalIgnoreCase) && Math.Abs(_currentFps - 15) < 0.1
                                  || header.StartsWith("30", StringComparison.OrdinalIgnoreCase) && Math.Abs(_currentFps - 30) < 0.1
-                                 || header.StartsWith("60", StringComparison.OrdinalIgnoreCase) && Math.Abs(_currentFps - 60) < 0.1;
+                                 || header.StartsWith("60", StringComparison.OrdinalIgnoreCase) && Math.Abs(_currentFps - 60) < 0.1
+                                 || header.StartsWith("144", StringComparison.OrdinalIgnoreCase) && Math.Abs(_currentFps - 144) < 0.1;
                 menuItem.IsCheckable = true;
                 menuItem.IsChecked = isChecked;
             }

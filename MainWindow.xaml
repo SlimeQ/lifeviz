@@ -140,6 +140,7 @@
                     <MenuItem Header="15 fps" IsCheckable="True" Click="FramerateItem_Click" />
                     <MenuItem Header="30 fps" IsCheckable="True" Click="FramerateItem_Click" />
                     <MenuItem Header="60 fps" IsCheckable="True" Click="FramerateItem_Click" />
+                    <MenuItem Header="144 fps" IsCheckable="True" Click="FramerateItem_Click" />
                 </MenuItem>
             </ContextMenu>
         </Grid.ContextMenu>
