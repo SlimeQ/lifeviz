@@ -5,6 +5,7 @@ using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Runtime.InteropServices;
+using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Interop;
@@ -168,7 +169,7 @@ public partial class MainWindow : Window
             return;
         }
 
-        for (int row = 0; row < height; row++)
+        Parallel.For(0, height, row =>
         {
             int sourceRow = _rowMap[row];
             for (int col = 0; col < width; col++)
@@ -184,7 +185,7 @@ public partial class MainWindow : Window
                 _pixelBuffer[index + 2] = r;
                 _pixelBuffer[index + 3] = 255;
             }
-        }
+        });
 
         if (_invertComposite)
         {
@@ -1446,13 +1447,11 @@ public partial class MainWindow : Window
         opacity = Math.Clamp(opacity, 0.0, 1.0);
         int destStride = destWidth * 4;
         int sourceStride = sourceWidth * 4;
-        var destSpan = new Span<byte>(destination);
-        var sourceSpan = new ReadOnlySpan<byte>(source);
 
         double scaleX = sourceWidth / (double)destWidth;
         double scaleY = sourceHeight / (double)destHeight;
 
-        for (int row = 0; row < destHeight; row++)
+        Parallel.For(0, destHeight, row =>
         {
             int srcY = Math.Min(sourceHeight - 1, (int)Math.Floor(row * scaleY));
             int destRowOffset = row * destStride;
@@ -1464,16 +1463,16 @@ public partial class MainWindow : Window
                 int destIndex = destRowOffset + (col * 4);
                 int srcIndex = srcRowOffset + (srcX * 4);
 
-                byte sb = sourceSpan[srcIndex];
-                byte sg = sourceSpan[srcIndex + 1];
-                byte sr = sourceSpan[srcIndex + 2];
+                byte sb = source[srcIndex];
+                byte sg = source[srcIndex + 1];
+                byte sr = source[srcIndex + 2];
 
-                destSpan[destIndex] = ClampToByte((int)(sb * opacity));
-                destSpan[destIndex + 1] = ClampToByte((int)(sg * opacity));
-                destSpan[destIndex + 2] = ClampToByte((int)(sr * opacity));
-                destSpan[destIndex + 3] = 255;
+                destination[destIndex] = ClampToByte((int)(sb * opacity));
+                destination[destIndex + 1] = ClampToByte((int)(sg * opacity));
+                destination[destIndex + 2] = ClampToByte((int)(sr * opacity));
+                destination[destIndex + 3] = 255;
             }
-        }
+        });
     }
 
     private void CompositeIntoBuffer(byte[] destination, int destWidth, int destHeight, byte[] source, int sourceWidth, int sourceHeight, BlendMode mode, double opacity, bool mirror)
@@ -1492,12 +1491,10 @@ public partial class MainWindow : Window
 
         int destStride = destWidth * 4;
         int sourceStride = sourceWidth * 4;
-        var destSpan = new Span<byte>(destination);
-        var sourceSpan = new ReadOnlySpan<byte>(source);
 
         if (destWidth == sourceWidth && destHeight == sourceHeight)
         {
-            for (int row = 0; row < destHeight; row++)
+            Parallel.For(0, destHeight, row =>
             {
                 int destRowOffset = row * destStride;
                 int srcRowOffset = row * sourceStride;
@@ -1506,15 +1503,15 @@ public partial class MainWindow : Window
                     int destIndex = destRowOffset + (col * 4);
                     int sampleX = mirror ? (sourceWidth - 1 - col) : col;
                     int srcIndex = srcRowOffset + (sampleX * 4);
-                    BlendInto(destSpan, sourceSpan, destIndex, srcIndex, mode, opacity);
+                    BlendInto(destination, source, destIndex, srcIndex, mode, opacity);
                 }
-            }
+            });
             return;
         }
 
         double scaleX = sourceWidth / (double)destWidth;
         double scaleY = sourceHeight / (double)destHeight;
-        for (int row = 0; row < destHeight; row++)
+        Parallel.For(0, destHeight, row =>
         {
             int srcY = Math.Min(sourceHeight - 1, (int)Math.Floor(row * scaleY));
             int destRowOffset = row * destStride;
@@ -1525,12 +1522,12 @@ public partial class MainWindow : Window
                 int srcX = mirror ? (sourceWidth - 1 - sampleX) : sampleX;
                 int destIndex = destRowOffset + (col * 4);
                 int srcIndex = srcRowOffset + (srcX * 4);
-                BlendInto(destSpan, sourceSpan, destIndex, srcIndex, mode, opacity);
+                BlendInto(destination, source, destIndex, srcIndex, mode, opacity);
             }
-        }
+        });
     }
 
-    private static void BlendInto(Span<byte> destination, ReadOnlySpan<byte> source, int destIndex, int srcIndex, BlendMode mode, double opacity)
+    private static void BlendInto(byte[] destination, byte[] source, int destIndex, int srcIndex, BlendMode mode, double opacity)
     {
         opacity = Math.Clamp(opacity, 0.0, 1.0);
         byte db = destination[destIndex];
@@ -1607,7 +1604,7 @@ public partial class MainWindow : Window
             _engineColorBuffer = new byte[size];
         }
 
-        for (int row = 0; row < _engine.Rows; row++)
+        Parallel.For(0, _engine.Rows, row =>
         {
             int rowOffset = row * _engine.Columns * 4;
             for (int col = 0; col < _engine.Columns; col++)
@@ -1619,7 +1616,7 @@ public partial class MainWindow : Window
                 _engineColorBuffer[index + 2] = b;
                 _engineColorBuffer[index + 3] = 255;
             }
-        }
+        });
     }
 
     private void InitializeEffect()
@@ -1738,12 +1735,13 @@ public partial class MainWindow : Window
             return;
         }
 
-        for (int i = 0; i < buffer.Length; i += 4)
+        Parallel.For(0, buffer.Length / 4, i =>
         {
-            buffer[i] = (byte)(255 - buffer[i]);         // B
-            buffer[i + 1] = (byte)(255 - buffer[i + 1]); // G
-            buffer[i + 2] = (byte)(255 - buffer[i + 2]); // R
-        }
+            int index = i * 4;
+            buffer[index] = (byte)(255 - buffer[index]);
+            buffer[index + 1] = (byte)(255 - buffer[index + 1]);
+            buffer[index + 2] = (byte)(255 - buffer[index + 2]);
+        });
     }
 
     private void BinningModeItem_Click(object sender, RoutedEventArgs e)
@@ -1984,7 +1982,7 @@ public partial class MainWindow : Window
         }
 
         int stride = cols * 4;
-        for (int row = 0; row < rows; row++)
+        Parallel.For(0, rows, row =>
         {
             int rowOffset = row * stride;
             for (int col = 0; col < cols; col++)
@@ -2013,7 +2011,7 @@ public partial class MainWindow : Window
                 }
                 mask[row, col] = !noiseFail && alive;
             }
-        }
+        });
 
         return mask;
     }
@@ -2038,7 +2036,7 @@ public partial class MainWindow : Window
         }
 
         int stride = cols * 4;
-        for (int row = 0; row < rows; row++)
+        Parallel.For(0, rows, row =>
         {
             int rowOffset = row * stride;
             for (int col = 0; col < cols; col++)
@@ -2078,7 +2076,7 @@ public partial class MainWindow : Window
                 gMask[row, col] = !noiseFail && gAlive;
                 bMask[row, col] = !noiseFail && bAlive;
             }
-        }
+        });
 
         return (rMask, gMask, bMask);
     }

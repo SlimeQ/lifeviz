@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Threading.Tasks;
 
 namespace lifeviz;
 
@@ -364,7 +365,7 @@ namespace lifeviz;
         var current = history[0];
         var next = CreateFrame();
 
-        for (int row = 0; row < Rows; row++)
+        Parallel.For(0, Rows, row =>
         {
             for (int col = 0; col < Columns; col++)
             {
@@ -372,7 +373,7 @@ namespace lifeviz;
                 bool alive = current[row, col];
                 next[row, col] = neighbors == 3 || (alive && neighbors == 2);
             }
-        }
+        });
 
         history.Insert(0, next);
         TrimChannel(history, depth);
