@@ -789,6 +789,10 @@ public partial class MainWindow : Window
             _webcamCapture.Reset(source.WebcamId);
             source.IsInitialized = false;
         }
+        else if (source.Type == CaptureSource.SourceType.Window && source.Window != null)
+        {
+            _windowCapture.RemoveCache(source.Window.Handle);
+        }
 
         if (_sources.Count == 0)
         {
@@ -811,12 +815,20 @@ public partial class MainWindow : Window
     private void ClearSources()
     {
         bool hadSources = _sources.Count > 0;
-        // Reset all webcam captures before clearing sources
-        foreach (var source in _sources.Where(s => s.Type == CaptureSource.SourceType.Webcam && s.WebcamId != null))
+        
+        foreach (var source in _sources)
         {
-            _webcamCapture.Reset(source.WebcamId);
-            source.IsInitialized = false;
+            if (source.Type == CaptureSource.SourceType.Webcam && source.WebcamId != null)
+            {
+                _webcamCapture.Reset(source.WebcamId);
+                source.IsInitialized = false;
+            }
+            else if (source.Type == CaptureSource.SourceType.Window && source.Window != null)
+            {
+                _windowCapture.RemoveCache(source.Window.Handle);
+            }
         }
+        
         _sources.Clear();
         _lastCompositeFrame = null;
         _preserveResolution = false;

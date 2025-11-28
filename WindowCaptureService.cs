@@ -5,6 +5,7 @@ using System.Drawing;
 using System.Drawing.Imaging;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Threading.Tasks;
 
 namespace lifeviz;
 
@@ -24,18 +25,18 @@ namespace lifeviz;
                 return null;
             }
 
-            using var bitmap = CaptureWindowBitmap(info.Handle);
-            if (bitmap == null)
+            var capture = CaptureWindowBytes(info.Handle);
+            if (capture == null)
             {
                 return null;
             }
 
+            var (buffer, width, height) = capture.Value;
+            
             var cache = GetOrCreateCache(info.Handle);
-            return DownscaleToFrame(bitmap, targetColumns, targetRows, threshold, includeSource, cache);
+            return DownscaleToFrame(buffer, width, height, targetColumns, targetRows, threshold, includeSource, cache);
         }
 
-        // Fetches the physical window bounds, preferring the DWM extended frame bounds so DPI virtualization
-        // doesn't truncate captures on per-monitor DPI setups.
         private static bool TryGetWindowBounds(IntPtr handle, out RECT rect)
         {
             int rectSize = Marshal.SizeOf<RECT>();
@@ -43,24 +44,8 @@ namespace lifeviz;
             {
                 return true;
             }
-
-            if (!NativeMethods.GetWindowRect(handle, out rect))
-            {
-                rect = default;
-                return false;
-            }
-
-            uint dpi = NativeMethods.GetDpiForWindow(handle);
-            if (dpi > 0 && dpi != 96)
-            {
-                double scale = dpi / 96d;
-                int width = rect.Right - rect.Left;
-                int height = rect.Bottom - rect.Top;
-                rect.Right = rect.Left + (int)Math.Round(width * scale);
-                rect.Bottom = rect.Top + (int)Math.Round(height * scale);
-            }
-
-            return true;
+            
+            return NativeMethods.GetWindowRect(handle, out rect);
         }
 
         private static bool TryGetClientBounds(IntPtr handle, out RECT clientRect, out int offsetX, out int offsetY)
@@ -149,282 +134,209 @@ namespace lifeviz;
         windows.Sort((a, b) => string.Compare(a.Title, b.Title, StringComparison.OrdinalIgnoreCase));
         return windows;
     }
-
-    public bool[,]? CaptureMask(WindowHandleInfo info, int targetColumns, int targetRows, double threshold)
-    {
-        if (targetColumns <= 0 || targetRows <= 0)
+    
+        private (byte[] buffer, int width, int height)? CaptureWindowBytes(IntPtr handle)
         {
-            return null;
-        }
-
-        if (!NativeMethods.IsWindow(info.Handle))
-        {
-            _frameCache.Remove(info.Handle);
-            return null;
-        }
-
-        using var bitmap = CaptureWindowBitmap(info.Handle);
-        if (bitmap == null)
-        {
-            _frameCache.Remove(info.Handle);
-            return null;
-        }
-
-            return DownscaleToMask(bitmap, targetColumns, targetRows, threshold);
-        }
-
-    private static Bitmap? CaptureWindowBitmap(IntPtr handle)
-    {
-        if (!TryGetWindowBounds(handle, out var rect))
-        {
-            return null;
-        }
-
-        if (!TryGetClientBounds(handle, out var clientRect, out int offsetX, out int offsetY))
-        {
-            clientRect = rect;
-            offsetX = 0;
-            offsetY = 0;
-        }
-
-        int windowWidth = rect.Right - rect.Left;
-        int windowHeight = rect.Bottom - rect.Top;
-        int clientWidth = clientRect.Right - clientRect.Left;
-        int clientHeight = clientRect.Bottom - clientRect.Top;
-        if (windowWidth <= 0 || windowHeight <= 0 || clientWidth <= 0 || clientHeight <= 0)
-        {
-            return null;
-        }
-
-        IntPtr hdcWindow = NativeMethods.GetWindowDC(handle);
-        if (hdcWindow == IntPtr.Zero)
-        {
-            return null;
-        }
-
-        IntPtr hdcMem = NativeMethods.CreateCompatibleDC(hdcWindow);
-        IntPtr hBitmap = NativeMethods.CreateCompatibleBitmap(hdcWindow, windowWidth, windowHeight);
-        if (hBitmap == IntPtr.Zero)
-        {
-            NativeMethods.DeleteDC(hdcMem);
-            NativeMethods.ReleaseDC(handle, hdcWindow);
-            return null;
-        }
-
-        IntPtr hOld = NativeMethods.SelectObject(hdcMem, hBitmap);
-
-        bool captured = false;
-        // Try PrintWindow to render layered/offscreen content (common for PiP).
-        if (NativeMethods.PrintWindow(handle, hdcMem, NativeMethods.PW_RENDERFULLCONTENT))
-        {
-            captured = true;
-        }
-        else
-        {
-            // Fallback to BitBlt of the client area from the window DC.
-            captured = NativeMethods.BitBlt(hdcMem, 0, 0, windowWidth, windowHeight, hdcWindow, 0, 0,
-                NativeMethods.SRCCOPY | NativeMethods.CAPTUREBLT);
-        }
-
-        NativeMethods.SelectObject(hdcMem, hOld);
-        NativeMethods.DeleteDC(hdcMem);
-        NativeMethods.ReleaseDC(handle, hdcWindow);
-
-        if (!captured)
-        {
-            NativeMethods.DeleteObject(hBitmap);
-            return null;
-        }
-
-        Bitmap? bmp = null;
-        try
-        {
-            bmp = Image.FromHbitmap(hBitmap);
-        }
-        finally
-        {
-            NativeMethods.DeleteObject(hBitmap);
-        }
-
-        // Crop to client area to drop title bars/chrome.
-        if (offsetX == 0 && offsetY == 0 && clientWidth == windowWidth && clientHeight == windowHeight)
-        {
-            return bmp;
-        }
-
-        try
-        {
-            var crop = new Rectangle(offsetX, offsetY, Math.Min(clientWidth, bmp.Width - offsetX), Math.Min(clientHeight, bmp.Height - offsetY));
-            if (crop.Width <= 0 || crop.Height <= 0)
+            if (!TryGetWindowBounds(handle, out var rect))
             {
-                return bmp;
+                return null;
             }
 
-            var clientBmp = bmp.Clone(crop, PixelFormat.Format32bppArgb);
-            bmp.Dispose();
-            return clientBmp;
-        }
-        catch
-        {
-            return bmp;
-        }
-    }
+            if (!TryGetClientBounds(handle, out var clientRect, out int offsetX, out int offsetY))
+            {
+                clientRect = rect;
+                offsetX = 0;
+                offsetY = 0;
+            }
 
-    private WindowCaptureFrame DownscaleToFrame(Bitmap bitmap, int columns, int rows, double threshold, bool includeSource, FrameCache cache)
+            int windowWidth = rect.Right - rect.Left;
+            int windowHeight = rect.Bottom - rect.Top;
+            if (windowWidth <= 0 || windowHeight <= 0)
+            {
+                return null;
+            }
+
+            IntPtr hdcWindow = NativeMethods.GetWindowDC(handle);
+            if (hdcWindow == IntPtr.Zero) return null;
+            IntPtr hdcMem = NativeMethods.CreateCompatibleDC(hdcWindow);
+            IntPtr hBitmap = NativeMethods.CreateCompatibleBitmap(hdcWindow, windowWidth, windowHeight);
+
+            if (hBitmap == IntPtr.Zero)
+            {
+                NativeMethods.DeleteDC(hdcMem);
+                NativeMethods.ReleaseDC(handle, hdcWindow);
+                return null;
+            }
+
+            IntPtr hOld = NativeMethods.SelectObject(hdcMem, hBitmap);
+
+            try
+            {
+                bool captured = NativeMethods.PrintWindow(handle, hdcMem, NativeMethods.PW_RENDERFULLCONTENT);
+                if (!captured)
+                {
+                    captured = NativeMethods.BitBlt(hdcMem, 0, 0, windowWidth, windowHeight, hdcWindow, 0, 0, NativeMethods.SRCCOPY | NativeMethods.CAPTUREBLT);
+                }
+
+                if (!captured)
+                {
+                    return null;
+                }
+                
+                var bmi = new NativeMethods.BITMAPINFO
+                {
+                    bmiHeader =
+                    {
+                        biSize = (uint)Marshal.SizeOf<NativeMethods.BITMAPINFOHEADER>(),
+                        biWidth = windowWidth,
+                        biHeight = -windowHeight, // Negative for top-down bitmap
+                        biPlanes = 1,
+                        biBitCount = 32,
+                        biCompression = 0 // BI_RGB
+                    }
+                };
+
+                int bufferSize = windowWidth * windowHeight * 4;
+                var buffer = ArrayPool<byte>.Shared.Rent(bufferSize);
+
+                if (NativeMethods.GetDIBits(hdcMem, hBitmap, 0, (uint)windowHeight, buffer, ref bmi, 0) == 0)
+                {
+                    ArrayPool<byte>.Shared.Return(buffer);
+                    return null;
+                }
+                
+                int clientWidth = clientRect.Right - clientRect.Left;
+                int clientHeight = clientRect.Bottom - clientRect.Top;
+                
+                if (offsetX == 0 && offsetY == 0 && clientWidth == windowWidth && clientHeight == windowHeight)
+                {
+                    // No cropping needed, return the full buffer
+                    return (buffer, windowWidth, windowHeight);
+                }
+
+                int cropWidth = Math.Min(clientWidth, windowWidth - offsetX);
+                int cropHeight = Math.Min(clientHeight, windowHeight - offsetY);
+                if (cropWidth <= 0 || cropHeight <= 0)
+                {
+                    ArrayPool<byte>.Shared.Return(buffer);
+                    return null;
+                }
+
+                var croppedBuffer = new byte[cropWidth * cropHeight * 4];
+                Parallel.For(0, cropHeight, y =>
+                {
+                    int sourceY = y + offsetY;
+                    int sourceIndex = (sourceY * windowWidth + offsetX) * 4;
+                    int destIndex = y * cropWidth * 4;
+                    Buffer.BlockCopy(buffer, sourceIndex, croppedBuffer, destIndex, cropWidth * 4);
+                });
+                
+                ArrayPool<byte>.Shared.Return(buffer);
+                return (croppedBuffer, cropWidth, cropHeight);
+            }
+            finally
+            {
+                NativeMethods.SelectObject(hdcMem, hOld);
+                NativeMethods.DeleteObject(hBitmap);
+                NativeMethods.DeleteDC(hdcMem);
+                NativeMethods.ReleaseDC(handle, hdcWindow);
+            }
+        }
+
+    private WindowCaptureFrame DownscaleToFrame(byte[] sourceBuffer, int sourceWidth, int sourceHeight, int columns, int rows, double threshold, bool includeSource, FrameCache cache)
     {
-        bool[,] mask = cache.Mask is { } existingMask && existingMask.GetLength(0) == rows && existingMask.GetLength(1) == columns
-            ? existingMask
-            : cache.Mask = new bool[rows, columns];
-
         int downscaledLength = rows * columns * 4;
         byte[] overlay = cache.OverlayDownscaled?.Length == downscaledLength
             ? cache.OverlayDownscaled!
             : cache.OverlayDownscaled = new byte[downscaledLength];
 
-        int sourceLength = bitmap.Width * bitmap.Height * 4;
-        byte[]? overlaySource = includeSource
-            ? cache.OverlaySource?.Length == sourceLength
-                ? cache.OverlaySource
-                : cache.OverlaySource = new byte[sourceLength]
-            : null;
-        if (!includeSource)
+        byte[]? overlaySource = null;
+        if (includeSource)
+        {
+            if (cache.OverlaySource == null || cache.OverlaySource.Length != sourceBuffer.Length)
+            {
+                cache.OverlaySource = new byte[sourceBuffer.Length];
+            }
+            overlaySource = cache.OverlaySource;
+            Buffer.BlockCopy(sourceBuffer, 0, overlaySource, 0, sourceBuffer.Length);
+        }
+        else
         {
             cache.OverlaySource = null;
         }
-        double scaleX = bitmap.Width / (double)columns;
-        double scaleY = bitmap.Height / (double)rows;
-        threshold = Math.Clamp(threshold, 0, 1);
-
-        var rect = new Rectangle(0, 0, bitmap.Width, bitmap.Height);
-        var data = bitmap.LockBits(rect, ImageLockMode.ReadOnly, PixelFormat.Format32bppArgb);
-        try
+        
+        double scaleX = sourceWidth / (double)columns;
+        double scaleY = sourceHeight / (double)rows;
+        
+        Parallel.For(0, rows, row =>
         {
-            int stride = data.Stride;
-            bool bottomUp = stride < 0;
-            int absoluteStride = Math.Abs(stride);
-            int bufferLength = absoluteStride * bitmap.Height;
-            var buffer = ArrayPool<byte>.Shared.Rent(bufferLength);
-            Marshal.Copy(data.Scan0, buffer, 0, bufferLength);
-            try
+            int srcY = Math.Min(sourceHeight - 1, (int)Math.Floor(row * scaleY));
+            int sourceRowOffset = srcY * sourceWidth * 4;
+            int overlayRowOffset = row * columns * 4;
+
+            for (int col = 0; col < columns; col++)
             {
-                if (includeSource && overlaySource != null)
-                {
-                    if (!bottomUp && absoluteStride == bitmap.Width * 4)
-                    {
-                        Buffer.BlockCopy(buffer, 0, overlaySource, 0, overlaySource.Length);
-                    }
-                    else
-                    {
-                        for (int srcRow = 0; srcRow < bitmap.Height; srcRow++)
-                        {
-                            int bufferRow = bottomUp ? (bitmap.Height - 1 - srcRow) : srcRow;
-                            int srcOffset = bufferRow * absoluteStride;
-                            int destOffset = srcRow * bitmap.Width * 4;
-                            Buffer.BlockCopy(buffer, srcOffset, overlaySource, destOffset, bitmap.Width * 4);
-                        }
-                    }
-                }
+                int srcX = Math.Min(sourceWidth - 1, (int)Math.Floor(col * scaleX));
+                int index = sourceRowOffset + (srcX * 4);
 
-                for (int row = 0; row < rows; row++)
-                {
-                    int srcY = Math.Min(bitmap.Height - 1, (int)Math.Floor(row * scaleY));
-                    int bufferRow = bottomUp ? (bitmap.Height - 1 - srcY) : srcY;
-                    int rowOffset = bufferRow * absoluteStride;
-                    int overlayRowOffset = row * columns * 4;
-
-                    for (int col = 0; col < columns; col++)
-                    {
-                        int srcX = Math.Min(bitmap.Width - 1, (int)Math.Floor(col * scaleX));
-                        int index = rowOffset + (srcX * 4);
-                        if (index < 0 || index + 2 >= bufferLength)
-                        {
-                            continue;
-                        }
-
-                        byte b = buffer[index];
-                        byte g = buffer[index + 1];
-                        byte r = buffer[index + 2];
-                        double luminance = (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255.0;
-                        mask[row, col] = luminance >= threshold;
-
-                        int overlayIndex = overlayRowOffset + (col * 4);
-                        overlay[overlayIndex] = b;
-                        overlay[overlayIndex + 1] = g;
-                        overlay[overlayIndex + 2] = r;
-                        overlay[overlayIndex + 3] = 255;
-                    }
-                }
+                byte b = sourceBuffer[index];
+                byte g = sourceBuffer[index + 1];
+                byte r = sourceBuffer[index + 2];
+                
+                int overlayIndex = overlayRowOffset + (col * 4);
+                overlay[overlayIndex] = b;
+                overlay[overlayIndex + 1] = g;
+                overlay[overlayIndex + 2] = r;
+                overlay[overlayIndex + 3] = 255;
             }
-            finally
-            {
-                ArrayPool<byte>.Shared.Return(buffer);
-            }
-        }
-        finally
-        {
-            bitmap.UnlockBits(data);
-        }
-
-        return new WindowCaptureFrame(mask, overlay, columns, rows,
+        });
+        
+        // Note: Mask is not calculated here anymore, it's done in the main window
+        return new WindowCaptureFrame(overlay, columns, rows,
             includeSource ? overlaySource : null,
-            bitmap.Width,
-            bitmap.Height);
+            sourceWidth,
+            sourceHeight);
     }
-
-    private static bool[,] DownscaleToMask(Bitmap bitmap, int columns, int rows, double threshold)
-    {
-        bool[,] mask = new bool[rows, columns];
-        double scaleX = bitmap.Width / (double)columns;
-        double scaleY = bitmap.Height / (double)rows;
-        threshold = Math.Clamp(threshold, 0, 1);
-
-        var rect = new Rectangle(0, 0, bitmap.Width, bitmap.Height);
-        var data = bitmap.LockBits(rect, ImageLockMode.ReadOnly, PixelFormat.Format32bppArgb);
-        try
-        {
-            int stride = data.Stride;
-            bool bottomUp = stride < 0;
-            int absoluteStride = Math.Abs(stride);
-            int bufferLength = absoluteStride * bitmap.Height;
-            var buffer = new byte[bufferLength];
-            Marshal.Copy(data.Scan0, buffer, 0, bufferLength);
-
-            for (int row = 0; row < rows; row++)
-            {
-                int srcY = Math.Min(bitmap.Height - 1, (int)Math.Floor(row * scaleY));
-                int bufferRow = bottomUp ? (bitmap.Height - 1 - srcY) : srcY;
-                int rowOffset = bufferRow * absoluteStride;
-                for (int col = 0; col < columns; col++)
-                {
-                    int srcX = Math.Min(bitmap.Width - 1, (int)Math.Floor(col * scaleX));
-                    int index = rowOffset + (srcX * 4);
-                    if (index < 0 || index + 2 >= buffer.Length)
-                    {
-                        continue;
-                    }
-
-                    byte b = buffer[index];
-                    byte g = buffer[index + 1];
-                    byte r = buffer[index + 2];
-                    double luminance = (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255.0;
-                    mask[row, col] = luminance >= threshold;
-                }
-            }
-        }
-        finally
-        {
-            bitmap.UnlockBits(data);
-        }
-
-        return mask;
-    }
-
+    
     private static class NativeMethods
     {
         public const int SRCCOPY = 0x00CC0020;
         public const int CAPTUREBLT = 0x40000000;
         public const int DWMWA_EXTENDED_FRAME_BOUNDS = 9;
         public const int PW_RENDERFULLCONTENT = 0x00000002;
+        public const uint DIB_RGB_COLORS = 0;
+
+        [StructLayout(LayoutKind.Sequential)]
+        public struct BITMAPINFO
+        {
+            public BITMAPINFOHEADER bmiHeader;
+            public RGBQUAD bmiColors;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        public struct BITMAPINFOHEADER
+        {
+            public uint biSize;
+            public int biWidth;
+            public int biHeight;
+            public ushort biPlanes;
+            public ushort biBitCount;
+            public uint biCompression;
+            public uint biSizeImage;
+            public int biXPelsPerMeter;
+            public int biYPelsPerMeter;
+            public uint biClrUsed;
+            public uint biClrImportant;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        public struct RGBQUAD
+        {
+            public byte rgbBlue;
+            public byte rgbGreen;
+            public byte rgbRed;
+            public byte rgbReserved;
+        }
 
         public delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
 
@@ -483,10 +395,7 @@ namespace lifeviz;
 
         [DllImport("dwmapi.dll")]
         public static extern int DwmGetWindowAttribute(IntPtr hwnd, int dwAttribute, out RECT pvAttribute, int cbAttribute);
-
-        [DllImport("user32.dll")]
-        public static extern uint GetDpiForWindow(IntPtr hWnd);
-
+        
         [DllImport("user32.dll")]
         [return: MarshalAs(UnmanagedType.Bool)]
         public static extern bool GetClientRect(IntPtr hWnd, out RECT lpRect);
@@ -498,6 +407,9 @@ namespace lifeviz;
         [DllImport("user32.dll")]
         [return: MarshalAs(UnmanagedType.Bool)]
         public static extern bool PrintWindow(IntPtr hwnd, IntPtr hdcBlt, int nFlags);
+        
+        [DllImport("gdi32.dll")]
+        public static extern int GetDIBits(IntPtr hdc, IntPtr hbm, uint start, uint cLines, [Out] byte[] lpvBits, ref BITMAPINFO lpbmi, uint usage);
     }
 
     [StructLayout(LayoutKind.Sequential)]
@@ -518,10 +430,9 @@ namespace lifeviz;
 
     internal sealed class WindowCaptureFrame
     {
-        public WindowCaptureFrame(bool[,] mask, byte[] overlayDownscaled, int downscaledWidth, int downscaledHeight,
+        public WindowCaptureFrame(byte[] overlayDownscaled, int downscaledWidth, int downscaledHeight,
             byte[]? overlaySource, int sourceWidth, int sourceHeight)
         {
-            Mask = mask;
             OverlayDownscaled = overlayDownscaled;
             DownscaledWidth = downscaledWidth;
             DownscaledHeight = downscaledHeight;
@@ -530,7 +441,6 @@ namespace lifeviz;
             SourceHeight = sourceHeight;
         }
 
-        public bool[,] Mask { get; }
         public byte[] OverlayDownscaled { get; }
         public int DownscaledWidth { get; }
         public int DownscaledHeight { get; }
@@ -541,7 +451,6 @@ namespace lifeviz;
 
     private sealed class FrameCache
     {
-        public bool[,]? Mask;
         public byte[]? OverlayDownscaled;
         public byte[]? OverlaySource;
     }
