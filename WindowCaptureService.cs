@@ -1,8 +1,7 @@
 using System;
 using System.Buffers;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
-using System.Drawing;
-using System.Drawing.Imaging;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading.Tasks;
@@ -11,9 +10,9 @@ namespace lifeviz;
 
     internal sealed class WindowCaptureService
     {
-        private readonly Dictionary<IntPtr, FrameCache> _frameCache = new();
+        private readonly ConcurrentDictionary<IntPtr, FrameCache> _frameCache = new();
 
-        public WindowCaptureFrame? CaptureFrame(WindowHandleInfo info, int targetColumns, int targetRows, double threshold, bool includeSource = true)
+        public WindowCaptureFrame? CaptureFrame(WindowHandleInfo info, int targetColumns, int targetRows, bool includeSource = true)
         {
             if (targetColumns <= 0 || targetRows <= 0)
             {
@@ -22,6 +21,7 @@ namespace lifeviz;
 
             if (!NativeMethods.IsWindow(info.Handle))
             {
+                RemoveCache(info.Handle);
                 return null;
             }
 
@@ -34,7 +34,20 @@ namespace lifeviz;
             var (buffer, width, height) = capture.Value;
             
             var cache = GetOrCreateCache(info.Handle);
-            return DownscaleToFrame(buffer, width, height, targetColumns, targetRows, threshold, includeSource, cache);
+            var frame = DownscaleToFrame(buffer, width, height, targetColumns, targetRows, includeSource, cache);
+            
+            // The buffer from CaptureWindowBytes is from the ArrayPool, so it must be returned.
+            ArrayPool<byte>.Shared.Return(buffer);
+            
+            return frame;
+        }
+        
+        public void RemoveCache(IntPtr handle)
+        {
+            if (_frameCache.TryRemove(handle, out var cache))
+            {
+                cache.Dispose();
+            }
         }
 
         private static bool TryGetWindowBounds(IntPtr handle, out RECT rect)
@@ -139,15 +152,11 @@ namespace lifeviz;
         {
             if (!TryGetWindowBounds(handle, out var rect))
             {
+                RemoveCache(handle);
                 return null;
             }
 
-            if (!TryGetClientBounds(handle, out var clientRect, out int offsetX, out int offsetY))
-            {
-                clientRect = rect;
-                offsetX = 0;
-                offsetY = 0;
-            }
+            var cache = GetOrCreateCache(handle);
 
             int windowWidth = rect.Right - rect.Left;
             int windowHeight = rect.Bottom - rect.Top;
@@ -158,92 +167,105 @@ namespace lifeviz;
 
             IntPtr hdcWindow = NativeMethods.GetWindowDC(handle);
             if (hdcWindow == IntPtr.Zero) return null;
-            IntPtr hdcMem = NativeMethods.CreateCompatibleDC(hdcWindow);
-            IntPtr hBitmap = NativeMethods.CreateCompatibleBitmap(hdcWindow, windowWidth, windowHeight);
-
-            if (hBitmap == IntPtr.Zero)
-            {
-                NativeMethods.DeleteDC(hdcMem);
-                NativeMethods.ReleaseDC(handle, hdcWindow);
-                return null;
-            }
-
-            IntPtr hOld = NativeMethods.SelectObject(hdcMem, hBitmap);
 
             try
             {
-                bool captured = NativeMethods.PrintWindow(handle, hdcMem, NativeMethods.PW_RENDERFULLCONTENT);
-                if (!captured)
+                if (cache.Width != windowWidth || cache.Height != windowHeight || cache.HdcMem == IntPtr.Zero || cache.HBitmap == IntPtr.Zero)
                 {
-                    captured = NativeMethods.BitBlt(hdcMem, 0, 0, windowWidth, windowHeight, hdcWindow, 0, 0, NativeMethods.SRCCOPY | NativeMethods.CAPTUREBLT);
+                    cache.Dispose();
+                    cache.HdcMem = NativeMethods.CreateCompatibleDC(hdcWindow);
+                    cache.HBitmap = NativeMethods.CreateCompatibleBitmap(hdcWindow, windowWidth, windowHeight);
+                    cache.Width = windowWidth;
+                    cache.Height = windowHeight;
                 }
 
-                if (!captured)
+                if (cache.HBitmap == IntPtr.Zero)
                 {
                     return null;
                 }
-                
-                var bmi = new NativeMethods.BITMAPINFO
+
+                IntPtr hOld = NativeMethods.SelectObject(cache.HdcMem, cache.HBitmap);
+
+                try
                 {
-                    bmiHeader =
+                    bool captured = NativeMethods.PrintWindow(handle, cache.HdcMem, NativeMethods.PW_RENDERFULLCONTENT);
+                    if (!captured)
                     {
-                        biSize = (uint)Marshal.SizeOf<NativeMethods.BITMAPINFOHEADER>(),
-                        biWidth = windowWidth,
-                        biHeight = -windowHeight, // Negative for top-down bitmap
-                        biPlanes = 1,
-                        biBitCount = 32,
-                        biCompression = 0 // BI_RGB
+                        captured = NativeMethods.BitBlt(cache.HdcMem, 0, 0, windowWidth, windowHeight, hdcWindow, 0, 0, NativeMethods.SRCCOPY | NativeMethods.CAPTUREBLT);
                     }
-                };
 
-                int bufferSize = windowWidth * windowHeight * 4;
-                var buffer = ArrayPool<byte>.Shared.Rent(bufferSize);
+                    if (!captured)
+                    {
+                        return null;
+                    }
+                
+                    var bmi = new NativeMethods.BITMAPINFO
+                    {
+                        bmiHeader =
+                        {
+                            biSize = (uint)Marshal.SizeOf<NativeMethods.BITMAPINFOHEADER>(),
+                            biWidth = windowWidth,
+                            biHeight = -windowHeight, 
+                            biPlanes = 1,
+                            biBitCount = 32,
+                            biCompression = 0 // BI_RGB
+                        }
+                    };
 
-                if (NativeMethods.GetDIBits(hdcMem, hBitmap, 0, (uint)windowHeight, buffer, ref bmi, 0) == 0)
-                {
+                    int bufferSize = windowWidth * windowHeight * 4;
+                    var buffer = ArrayPool<byte>.Shared.Rent(bufferSize);
+
+                    if (NativeMethods.GetDIBits(cache.HdcMem, cache.HBitmap, 0, (uint)windowHeight, buffer, ref bmi, 0) == 0)
+                    {
+                        ArrayPool<byte>.Shared.Return(buffer);
+                        return null;
+                    }
+
+                    if (!TryGetClientBounds(handle, out var clientRect, out int offsetX, out int offsetY))
+                    {
+                        return (buffer, windowWidth, windowHeight);
+                    }
+                
+                    int clientWidth = clientRect.Right - clientRect.Left;
+                    int clientHeight = clientRect.Bottom - clientRect.Top;
+                
+                    if (offsetX == 0 && offsetY == 0 && clientWidth == windowWidth && clientHeight == windowHeight)
+                    {
+                        return (buffer, windowWidth, windowHeight);
+                    }
+
+                    int cropWidth = Math.Min(clientWidth, windowWidth - offsetX);
+                    int cropHeight = Math.Min(clientHeight, windowHeight - offsetY);
+                    if (cropWidth <= 0 || cropHeight <= 0)
+                    {
+                        ArrayPool<byte>.Shared.Return(buffer);
+                        return null;
+                    }
+
+                    var croppedBuffer = ArrayPool<byte>.Shared.Rent(cropWidth * cropHeight * 4);
+                    Parallel.For(0, cropHeight, y =>
+                    {
+                        int sourceY = y + offsetY;
+                        int sourceIndex = (sourceY * windowWidth + offsetX) * 4;
+                        int destIndex = y * cropWidth * 4;
+                        Buffer.BlockCopy(buffer, sourceIndex, croppedBuffer, destIndex, cropWidth * 4);
+                    });
+                
                     ArrayPool<byte>.Shared.Return(buffer);
-                    return null;
+                    return (croppedBuffer, cropWidth, cropHeight);
                 }
-                
-                int clientWidth = clientRect.Right - clientRect.Left;
-                int clientHeight = clientRect.Bottom - clientRect.Top;
-                
-                if (offsetX == 0 && offsetY == 0 && clientWidth == windowWidth && clientHeight == windowHeight)
+                finally
                 {
-                    // No cropping needed, return the full buffer
-                    return (buffer, windowWidth, windowHeight);
+                    NativeMethods.SelectObject(cache.HdcMem, hOld);
                 }
-
-                int cropWidth = Math.Min(clientWidth, windowWidth - offsetX);
-                int cropHeight = Math.Min(clientHeight, windowHeight - offsetY);
-                if (cropWidth <= 0 || cropHeight <= 0)
-                {
-                    ArrayPool<byte>.Shared.Return(buffer);
-                    return null;
-                }
-
-                var croppedBuffer = new byte[cropWidth * cropHeight * 4];
-                Parallel.For(0, cropHeight, y =>
-                {
-                    int sourceY = y + offsetY;
-                    int sourceIndex = (sourceY * windowWidth + offsetX) * 4;
-                    int destIndex = y * cropWidth * 4;
-                    Buffer.BlockCopy(buffer, sourceIndex, croppedBuffer, destIndex, cropWidth * 4);
-                });
-                
-                ArrayPool<byte>.Shared.Return(buffer);
-                return (croppedBuffer, cropWidth, cropHeight);
             }
             finally
             {
-                NativeMethods.SelectObject(hdcMem, hOld);
-                NativeMethods.DeleteObject(hBitmap);
-                NativeMethods.DeleteDC(hdcMem);
                 NativeMethods.ReleaseDC(handle, hdcWindow);
             }
         }
 
-    private WindowCaptureFrame DownscaleToFrame(byte[] sourceBuffer, int sourceWidth, int sourceHeight, int columns, int rows, double threshold, bool includeSource, FrameCache cache)
+    private WindowCaptureFrame DownscaleToFrame(byte[] sourceBuffer, int sourceWidth, int sourceHeight, int columns, int rows, bool includeSource, FrameCache cache)
     {
         int downscaledLength = rows * columns * 4;
         byte[] overlay = cache.OverlayDownscaled?.Length == downscaledLength
@@ -291,7 +313,6 @@ namespace lifeviz;
             }
         });
         
-        // Note: Mask is not calculated here anymore, it's done in the main window
         return new WindowCaptureFrame(overlay, columns, rows,
             includeSource ? overlaySource : null,
             sourceWidth,
@@ -449,10 +470,28 @@ namespace lifeviz;
         public int SourceHeight { get; }
     }
 
-    private sealed class FrameCache
+    private sealed class FrameCache : IDisposable
     {
         public byte[]? OverlayDownscaled;
         public byte[]? OverlaySource;
+        public IntPtr HdcMem = IntPtr.Zero;
+        public IntPtr HBitmap = IntPtr.Zero;
+        public int Width;
+        public int Height;
+
+        public void Dispose()
+        {
+            if (HBitmap != IntPtr.Zero)
+            {
+                NativeMethods.DeleteObject(HBitmap);
+                HBitmap = IntPtr.Zero;
+            }
+            if (HdcMem != IntPtr.Zero)
+            {
+                NativeMethods.DeleteDC(HdcMem);
+                HdcMem = IntPtr.Zero;
+            }
+        }
     }
 
     private FrameCache GetOrCreateCache(IntPtr handle)

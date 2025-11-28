@@ -886,7 +886,7 @@ public partial class MainWindow : Window
             {
                 if (source.Type == CaptureSource.SourceType.Window && source.Window != null)
                 {
-                    var windowFrame = _windowCapture.CaptureFrame(source.Window, _engine.Columns, _engine.Rows, thresholdHint, _preserveResolution);
+                    var windowFrame = _windowCapture.CaptureFrame(source.Window, _engine.Columns, _engine.Rows, _preserveResolution);
                     if (windowFrame != null)
                     {
                         frame = new SourceFrame(windowFrame.OverlayDownscaled, windowFrame.DownscaledWidth, windowFrame.DownscaledHeight,
