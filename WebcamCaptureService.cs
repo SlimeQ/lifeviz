@@ -1,8 +1,8 @@
 using System;
 using System.Buffers;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Linq;
-using System.Runtime.InteropServices;
 using System.Runtime.InteropServices.WindowsRuntime;
 using System.Threading;
 using System.Threading.Tasks;
@@ -11,23 +11,26 @@ using Windows.Graphics.Imaging;
 using Windows.Media.Capture;
 using Windows.Media.Capture.Frames;
 using Windows.Media.MediaProperties;
-using Windows.Storage.Streams;
 
 namespace lifeviz;
 
 internal sealed class WebcamCaptureService : IDisposable
 {
-    private readonly object _frameLock = new();
-    private MediaCapture? _mediaCapture;
-    private MediaFrameReader? _frameReader;
-    private byte[]? _latestBuffer;
-    private int _latestWidth;
-    private int _latestHeight;
-    private string? _currentDeviceId;
-    private Task<bool>? _initializeTask;
+    private readonly ConcurrentDictionary<string, CaptureData> _captureData = new();
+    private readonly ConcurrentDictionary<string, MediaCapture> _mediaCaptures = new();
+    private readonly ConcurrentDictionary<string, MediaFrameReader> _frameReaders = new();
+    private readonly ConcurrentDictionary<string, Task<bool>> _initializeTasks = new();
     private readonly SemaphoreSlim _initLock = new(1, 1);
-    private byte[]? _downscaledBuffer;
-    private byte[]? _sourceCopyBuffer;
+
+    private class CaptureData
+    {
+        public readonly object FrameLock = new();
+        public byte[]? LatestBuffer;
+        public int LatestWidth;
+        public int LatestHeight;
+        public byte[]? DownscaledBuffer;
+        public byte[]? SourceCopyBuffer;
+    }
 
     public IReadOnlyList<CameraInfo> EnumerateCameras()
     {
@@ -56,50 +59,55 @@ internal sealed class WebcamCaptureService : IDisposable
             return null;
         }
 
+        if (!_captureData.TryGetValue(cameraId, out var data))
+        {
+            return null;
+        }
+
         byte[]? latest;
         int width;
         int height;
-        lock (_frameLock)
+        lock (data.FrameLock)
         {
-            latest = _latestBuffer;
-            width = _latestWidth;
-            height = _latestHeight;
+            latest = data.LatestBuffer;
+            width = data.LatestWidth;
+            height = data.LatestHeight;
             if (latest == null || width <= 0 || height <= 0)
             {
                 return null;
             }
 
             int downscaledLength = targetWidth * targetHeight * 4;
-            if (_downscaledBuffer == null || _downscaledBuffer.Length != downscaledLength)
+            if (data.DownscaledBuffer == null || data.DownscaledBuffer.Length != downscaledLength)
             {
-                _downscaledBuffer = new byte[downscaledLength];
+                data.DownscaledBuffer = new byte[downscaledLength];
             }
 
-            Downscale(latest, width, height, _downscaledBuffer, targetWidth, targetHeight);
+            Downscale(latest, width, height, data.DownscaledBuffer, targetWidth, targetHeight);
 
             if (includeSource)
             {
-                if (_sourceCopyBuffer == null || _sourceCopyBuffer.Length != latest.Length)
+                if (data.SourceCopyBuffer == null || data.SourceCopyBuffer.Length != latest.Length)
                 {
-                    _sourceCopyBuffer = new byte[latest.Length];
+                    data.SourceCopyBuffer = new byte[latest.Length];
                 }
-                System.Buffer.BlockCopy(latest, 0, _sourceCopyBuffer, 0, latest.Length);
+                Buffer.BlockCopy(latest, 0, data.SourceCopyBuffer, 0, latest.Length);
             }
             else
             {
-                _sourceCopyBuffer = null;
+                data.SourceCopyBuffer = null;
             }
-        }
 
-        return new WebcamFrame(_downscaledBuffer!, targetWidth, targetHeight,
-            includeSource ? _sourceCopyBuffer : null,
-            width,
-            height);
+            return new WebcamFrame(data.DownscaledBuffer, targetWidth, targetHeight,
+                includeSource ? data.SourceCopyBuffer : null,
+                width,
+                height);
+        }
     }
 
-    private bool EnsureInitialized(string cameraId)
+    public bool EnsureInitialized(string cameraId)
     {
-        if (_mediaCapture != null && string.Equals(_currentDeviceId, cameraId, StringComparison.OrdinalIgnoreCase))
+        if (_mediaCaptures.ContainsKey(cameraId))
         {
             return true;
         }
@@ -111,7 +119,7 @@ internal sealed class WebcamCaptureService : IDisposable
         catch (Exception ex)
         {
             Logger.Error($"Webcam ensure-init failed: {cameraId}", ex);
-            Reset();
+            Reset(cameraId);
             return false;
         }
     }
@@ -121,20 +129,30 @@ internal sealed class WebcamCaptureService : IDisposable
         await _initLock.WaitAsync().ConfigureAwait(false);
         try
         {
-            if (_mediaCapture != null && string.Equals(_currentDeviceId, cameraId, StringComparison.OrdinalIgnoreCase))
+            if (_mediaCaptures.ContainsKey(cameraId))
             {
                 return true;
             }
 
-            Reset();
-            _initializeTask = Task.Run(() => InitializeInternalAsync(cameraId));
+            // If another initialization for the same device is in progress, await it.
+            if (_initializeTasks.TryGetValue(cameraId, out var existingTask))
+            {
+                return await existingTask.ConfigureAwait(false);
+            }
+
+            var newTask = Task.Run(() => InitializeInternalAsync(cameraId));
+            _initializeTasks[cameraId] = newTask;
+            
+            var result = await newTask.ConfigureAwait(false);
+
+            // Clean up the task from the dictionary once it's complete.
+            _initializeTasks.TryRemove(cameraId, out _);
+            return result;
         }
         finally
         {
             _initLock.Release();
         }
-
-        return _initializeTask != null && await _initializeTask.ConfigureAwait(false);
     }
 
     private async Task<bool> InitializeInternalAsync(string cameraId)
@@ -142,7 +160,7 @@ internal sealed class WebcamCaptureService : IDisposable
         try
         {
             Logger.Info($"Initializing webcam: {cameraId}");
-            _mediaCapture = new MediaCapture();
+            var mediaCapture = new MediaCapture();
             var settings = new MediaCaptureInitializationSettings
             {
                 StreamingCaptureMode = StreamingCaptureMode.Video,
@@ -151,38 +169,41 @@ internal sealed class WebcamCaptureService : IDisposable
                 SharingMode = MediaCaptureSharingMode.SharedReadOnly
             };
 
-            await _mediaCapture.InitializeAsync(settings);
+            await mediaCapture.InitializeAsync(settings);
+            _mediaCaptures[cameraId] = mediaCapture;
 
-            var source = _mediaCapture.FrameSources.Values.FirstOrDefault(s => s.Info.SourceKind == MediaFrameSourceKind.Color);
+            var source = mediaCapture.FrameSources.Values.FirstOrDefault(s => s.Info.SourceKind == MediaFrameSourceKind.Color);
             if (source == null)
             {
                 Logger.Warn($"No color source found for webcam {cameraId}");
-                Reset();
+                Reset(cameraId);
                 return false;
             }
 
-            _frameReader = await _mediaCapture.CreateFrameReaderAsync(source, MediaEncodingSubtypes.Bgra8);
-            _frameReader.FrameArrived += FrameReaderOnFrameArrived;
-            var status = await _frameReader.StartAsync();
+            var frameReader = await mediaCapture.CreateFrameReaderAsync(source, MediaEncodingSubtypes.Bgra8);
+            frameReader.FrameArrived += (sender, args) => FrameReaderOnFrameArrived(sender, args, cameraId);
+            _frameReaders[cameraId] = frameReader;
+
+            var status = await frameReader.StartAsync();
             if (status != MediaFrameReaderStartStatus.Success)
             {
                 Logger.Warn($"MediaFrameReader failed to start for webcam {cameraId}: {status}");
-                Reset();
+                Reset(cameraId);
                 return false;
             }
 
-            _currentDeviceId = cameraId;
+            _captureData.TryAdd(cameraId, new CaptureData());
             return true;
         }
         catch (Exception ex)
         {
             Logger.Error($"Webcam initialization failed: {cameraId}", ex);
-            Reset();
+            Reset(cameraId);
             return false;
         }
     }
 
-    private void FrameReaderOnFrameArrived(MediaFrameReader sender, MediaFrameArrivedEventArgs args)
+    private void FrameReaderOnFrameArrived(MediaFrameReader sender, MediaFrameArrivedEventArgs args, string deviceId)
     {
         try
         {
@@ -192,27 +213,23 @@ internal sealed class WebcamCaptureService : IDisposable
             {
                 return;
             }
-
-            SoftwareBitmap? converted = null;
-            try
-            {
-                converted = SoftwareBitmap.Convert(softwareBitmap, BitmapPixelFormat.Bgra8, BitmapAlphaMode.Premultiplied);
-                CopyToLatestBuffer(converted);
-            }
-            finally
-            {
-                converted?.Dispose();
-            }
+            
+            using var converted = SoftwareBitmap.Convert(softwareBitmap, BitmapPixelFormat.Bgra8, BitmapAlphaMode.Premultiplied);
+            CopyToLatestBuffer(converted, deviceId);
         }
         catch (Exception ex)
         {
-            Logger.Warn($"Webcam frame read failed: {ex.Message}");
-            // Ignore capture errors; the next frame may recover.
+            Logger.Warn($"Webcam frame read failed for {deviceId}: {ex.Message}");
         }
     }
 
-    private void CopyToLatestBuffer(SoftwareBitmap bitmap)
+    private void CopyToLatestBuffer(SoftwareBitmap bitmap, string deviceId)
     {
+        if (!_captureData.TryGetValue(deviceId, out var data))
+        {
+            return;
+        }
+        
         int required = bitmap.PixelWidth * bitmap.PixelHeight * 4;
         var scratch = ArrayPool<byte>.Shared.Rent(required);
         try
@@ -221,16 +238,16 @@ internal sealed class WebcamCaptureService : IDisposable
             bitmap.CopyToBuffer(ibuffer);
             ibuffer.CopyTo(scratch);
 
-            lock (_frameLock)
+            lock (data.FrameLock)
             {
-                if (_latestBuffer == null || _latestBuffer.Length != required)
+                if (data.LatestBuffer == null || data.LatestBuffer.Length != required)
                 {
-                    _latestBuffer = new byte[required];
+                    data.LatestBuffer = new byte[required];
                 }
 
-                System.Buffer.BlockCopy(scratch, 0, _latestBuffer, 0, required);
-                _latestWidth = bitmap.PixelWidth;
-                _latestHeight = bitmap.PixelHeight;
+                Buffer.BlockCopy(scratch, 0, data.LatestBuffer, 0, required);
+                data.LatestWidth = bitmap.PixelWidth;
+                data.LatestHeight = bitmap.PixelHeight;
             }
         }
         finally
@@ -238,7 +255,7 @@ internal sealed class WebcamCaptureService : IDisposable
             ArrayPool<byte>.Shared.Return(scratch);
         }
     }
-
+    
     private static void Downscale(byte[] source, int sourceWidth, int sourceHeight, byte[] destination, int targetWidth, int targetHeight)
     {
         double scaleX = sourceWidth / (double)targetWidth;
@@ -246,7 +263,7 @@ internal sealed class WebcamCaptureService : IDisposable
         int destStride = targetWidth * 4;
         int sourceStride = sourceWidth * 4;
 
-        for (int row = 0; row < targetHeight; row++)
+        Parallel.For(0, targetHeight, row =>
         {
             int srcY = Math.Min(sourceHeight - 1, (int)Math.Floor(row * scaleY));
             int destRowOffset = row * destStride;
@@ -263,42 +280,56 @@ internal sealed class WebcamCaptureService : IDisposable
                 destination[destIndex + 2] = source[srcIndex + 2];
                 destination[destIndex + 3] = 255;
             }
-        }
+        });
     }
 
-    public void Reset()
+    public void Reset(string? cameraId = null)
     {
+        if (string.IsNullOrWhiteSpace(cameraId))
+        {
+            var allIds = _mediaCaptures.Keys.ToList();
+            foreach (var id in allIds)
+            {
+                Reset(id);
+            }
+            return;
+        }
+
         try
         {
-            if (_frameReader != null)
+            if (_frameReaders.TryRemove(cameraId, out var frameReader))
             {
-                _frameReader.FrameArrived -= FrameReaderOnFrameArrived;
-                _frameReader.StopAsync().AsTask().ConfigureAwait(false).GetAwaiter().GetResult();
-                _frameReader.Dispose();
+                // The FrameArrived handler is an anonymous lambda, can't easily unsubscribe.
+                // Assuming Dispose() is enough to stop callbacks.
+                frameReader.StopAsync().AsTask().ConfigureAwait(false).GetAwaiter().GetResult();
+                frameReader.Dispose();
             }
+
+            if (_mediaCaptures.TryRemove(cameraId, out var mediaCapture))
+            {
+                mediaCapture.Dispose();
+            }
+            
+            _initializeTasks.TryRemove(cameraId, out _);
+            
+            if(_captureData.TryRemove(cameraId, out var data))
+            {
+                lock (data.FrameLock)
+                {
+                    data.LatestBuffer = null;
+                    data.DownscaledBuffer = null;
+                    data.SourceCopyBuffer = null;
+                    data.LatestWidth = 0;
+                    data.LatestHeight = 0;
+                }
+            }
+
+            Logger.Info($"Webcam capture reset for device: {cameraId}");
         }
-        catch
+        catch(Exception ex)
         {
-            // Best-effort cleanup.
+            Logger.Error($"Error during reset for device {cameraId}", ex);
         }
-
-        _frameReader = null;
-
-        _mediaCapture?.Dispose();
-        _mediaCapture = null;
-        _currentDeviceId = null;
-        _initializeTask = null;
-
-        lock (_frameLock)
-        {
-            _latestBuffer = null;
-            _latestWidth = 0;
-            _latestHeight = 0;
-            _downscaledBuffer = null;
-            _sourceCopyBuffer = null;
-        }
-
-        Logger.Info("Webcam capture reset.");
     }
 
     public void Dispose() => Reset();

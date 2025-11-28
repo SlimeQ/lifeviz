@@ -123,7 +123,7 @@ public partial class MainWindow : Window
         _stepStopwatch.Start();
     }
 
-    private void CompositionTarget_Rendering(object sender, EventArgs e)
+    private void CompositionTarget_Rendering(object? sender, EventArgs e)
     {
         // --- Simulation Step ---
         double elapsed = _stepStopwatch.Elapsed.TotalSeconds;
@@ -784,15 +784,16 @@ public partial class MainWindow : Window
         _sources.RemoveAt(index);
         Logger.Info($"Removed source: {source.DisplayName} ({source.Type})");
 
+        if (source.Type == CaptureSource.SourceType.Webcam && source.WebcamId != null)
+        {
+            _webcamCapture.Reset(source.WebcamId);
+            source.IsInitialized = false;
+        }
+
         if (_sources.Count == 0)
         {
             ClearSources();
             return;
-        }
-
-        if (_sources.All(s => s.Type != CaptureSource.SourceType.Webcam))
-        {
-            _webcamCapture.Reset();
         }
 
         if (index == 0)
@@ -810,11 +811,17 @@ public partial class MainWindow : Window
     private void ClearSources()
     {
         bool hadSources = _sources.Count > 0;
+        // Reset all webcam captures before clearing sources
+        foreach (var source in _sources.Where(s => s.Type == CaptureSource.SourceType.Webcam && s.WebcamId != null))
+        {
+            _webcamCapture.Reset(source.WebcamId);
+            source.IsInitialized = false;
+        }
         _sources.Clear();
         _lastCompositeFrame = null;
         _preserveResolution = false;
         _passthroughEnabled = false;
-        _webcamCapture.Reset();
+        
         Logger.Info("Cleared all sources; reset webcam capture.");
         if (PassthroughMenuItem != null)
         {
@@ -851,6 +858,17 @@ public partial class MainWindow : Window
 
         foreach (var source in _sources.ToList())
         {
+            if (!source.IsInitialized && source.Type == CaptureSource.SourceType.Webcam && source.WebcamId != null)
+            {
+                var initialized = _webcamCapture.EnsureInitialized(source.WebcamId);
+                source.IsInitialized = initialized;
+                if (!initialized)
+                {
+                    Logger.Warn($"Failed to initialize {source.DisplayName}, it will be skipped.");
+                    continue;
+                }
+            }
+            
             SourceFrame? frame = null;
             try
             {
@@ -906,14 +924,15 @@ public partial class MainWindow : Window
             if (frame == null)
             {
                 bool isWebcam = source.Type == CaptureSource.SourceType.Webcam;
-                if (isWebcam)
+                if (isWebcam && source.WebcamId != null)
                 {
                     source.MissedFrames++;
                     var age = DateTime.UtcNow - source.AddedUtc;
                     if (!source.FirstFrameReceived && !source.RetryInitializationAttempted && source.MissedFrames >= 90)
                     {
                         Logger.Warn($"Webcam frames missing; retrying initialization for {source.DisplayName} after {source.MissedFrames} misses.");
-                        _webcamCapture.Reset();
+                        _webcamCapture.Reset(source.WebcamId);
+                        source.IsInitialized = false;
                         source.RetryInitializationAttempted = true;
                         source.MissedFrames = 0;
                         source.AddedUtc = DateTime.UtcNow;
@@ -922,7 +941,7 @@ public partial class MainWindow : Window
 
                     if (source.MissedFrames <= 240 || age < TimeSpan.FromSeconds(12))
                     {
-                        if (source.MissedFrames % 60 == 0)
+                        if (source.MissedFrames > 0 && source.MissedFrames % 60 == 0)
                         {
                             Logger.Warn($"Waiting for webcam frames from {source.DisplayName}; missed {source.MissedFrames} so far.");
                         }
@@ -948,11 +967,11 @@ public partial class MainWindow : Window
             foreach (var source in removed)
             {
                 _sources.Remove(source);
-            }
-
-            if (_sources.All(s => s.Type != CaptureSource.SourceType.Webcam))
-            {
-                _webcamCapture.Reset();
+                if (source.Type == CaptureSource.SourceType.Webcam && source.WebcamId != null)
+                {
+                    _webcamCapture.Reset(source.WebcamId);
+                    source.IsInitialized = false;
+                }
             }
 
             if (_sources.Count == 0)
@@ -2374,6 +2393,8 @@ public partial class MainWindow : Window
         public double Opacity { get; set; } = 1.0;
         public bool Mirror { get; set; }
         public bool RetryInitializationAttempted { get; set; }
+
+        public bool IsInitialized { get; set; }
 
         public double AspectRatio
         {
