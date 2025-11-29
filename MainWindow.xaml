@@ -151,22 +151,21 @@
             <Border Background="Black"
                     Padding="0"
                     SnapsToDevicePixels="True">
-                <Grid>
-                    <Image x:Name="GameImage"
-                           RenderOptions.BitmapScalingMode="NearestNeighbor"
-                           RenderOptions.EdgeMode="Aliased"
-                           SnapsToDevicePixels="True" />
-                    <TextBlock x:Name="FpsText"
-                               Margin="8"
-                               HorizontalAlignment="Left"
-                               VerticalAlignment="Top"
-                               FontSize="14"
-                               FontWeight="Bold"
-                               Foreground="White"
-                               Visibility="Collapsed"
-                               Text="FPS" />
-                </Grid>
+                <Image x:Name="GameImage"
+                       RenderOptions.BitmapScalingMode="NearestNeighbor"
+                       RenderOptions.EdgeMode="Aliased"
+                       SnapsToDevicePixels="True" />
             </Border>
         </Viewbox>
+
+        <TextBlock x:Name="FpsText"
+                   Margin="8"
+                   HorizontalAlignment="Left"
+                   VerticalAlignment="Top"
+                   FontSize="14"
+                   FontWeight="Bold"
+                   Foreground="White"
+                   Visibility="Collapsed"
+                   Text="FPS" />
     </Grid>
 </Window>
