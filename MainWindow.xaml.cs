@@ -964,6 +964,16 @@ public partial class MainWindow : Window
                     continue;
                 }
 
+                if (source.Type == CaptureSource.SourceType.Window)
+                {
+                    source.MissedFrames++;
+                    var age = DateTime.UtcNow - source.AddedUtc;
+                    if (!source.FirstFrameReceived && age < TimeSpan.FromSeconds(10))
+                    {
+                        continue;
+                    }
+                }
+
                 Logger.Warn($"Source frame missing; removing source {source.DisplayName} ({source.Type})");
                 removed.Add(source);
                 continue;

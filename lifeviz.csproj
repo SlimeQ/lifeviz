@@ -9,6 +9,7 @@
     <ApplicationIcon>Assets\lifeviz.ico</ApplicationIcon>
     <!-- Avoid MSB4803 when building with the .NET SDK (dotnet msbuild); ClickOnce bootstrapper stays enabled under full MSBuild.exe. -->
     <GenerateBootstrapper Condition="'$(MSBuildRuntimeType)' == 'Core'">false</GenerateBootstrapper>
+    <StartupObject>lifeviz.Program</StartupObject>
   </PropertyGroup>
 
   <PropertyGroup>

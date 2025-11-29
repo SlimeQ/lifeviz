@@ -4,98 +4,52 @@ using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Threading;
 using System.Threading.Tasks;
 
 namespace lifeviz;
 
-    internal sealed class WindowCaptureService
+internal sealed class WindowCaptureService : IDisposable
+{
+    private readonly ConcurrentDictionary<IntPtr, WindowCaptureSession> _sessions = new();
+
+    public WindowCaptureFrame? CaptureFrame(WindowHandleInfo info, int targetColumns, int targetRows, bool includeSource = true)
     {
-        private readonly ConcurrentDictionary<IntPtr, FrameCache> _frameCache = new();
-
-        public WindowCaptureFrame? CaptureFrame(WindowHandleInfo info, int targetColumns, int targetRows, bool includeSource = true)
+        if (targetColumns <= 0 || targetRows <= 0)
         {
-            if (targetColumns <= 0 || targetRows <= 0)
-            {
-                return null;
-            }
-
-            if (!NativeMethods.IsWindow(info.Handle))
-            {
-                RemoveCache(info.Handle);
-                return null;
-            }
-
-            var capture = CaptureWindowBytes(info.Handle);
-            if (capture == null)
-            {
-                return null;
-            }
-
-            var (buffer, width, height) = capture.Value;
-            
-            var cache = GetOrCreateCache(info.Handle);
-            var frame = DownscaleToFrame(buffer, width, height, targetColumns, targetRows, includeSource, cache);
-            
-            // The buffer from CaptureWindowBytes is from the ArrayPool, so it must be returned.
-            ArrayPool<byte>.Shared.Return(buffer);
-            
-            return frame;
-        }
-        
-        public void RemoveCache(IntPtr handle)
-        {
-            if (_frameCache.TryRemove(handle, out var cache))
-            {
-                cache.Dispose();
-            }
+            return null;
         }
 
-        private static bool TryGetWindowBounds(IntPtr handle, out RECT rect)
+        if (!NativeMethods.IsWindow(info.Handle))
         {
-            int rectSize = Marshal.SizeOf<RECT>();
-            if (NativeMethods.DwmGetWindowAttribute(handle, NativeMethods.DWMWA_EXTENDED_FRAME_BOUNDS, out rect, rectSize) == 0)
-            {
-                return true;
-            }
-            
-            return NativeMethods.GetWindowRect(handle, out rect);
+            RemoveCache(info.Handle);
+            return null;
         }
 
-        private static bool TryGetClientBounds(IntPtr handle, out RECT clientRect, out int offsetX, out int offsetY)
+        var session = _sessions.GetOrAdd(info.Handle, h => new WindowCaptureSession(h));
+        return session.GetFrame(targetColumns, targetRows, includeSource);
+    }
+    
+    public void RemoveCache(IntPtr handle)
+    {
+        if (_sessions.TryRemove(handle, out var session))
         {
-            clientRect = default;
-            offsetX = 0;
-            offsetY = 0;
-
-            if (!NativeMethods.GetClientRect(handle, out var localClient))
-            {
-                return false;
-            }
-
-            var topLeft = new POINT { X = 0, Y = 0 };
-            if (!NativeMethods.ClientToScreen(handle, ref topLeft))
-            {
-                return false;
-            }
-
-            if (!TryGetWindowBounds(handle, out var windowRect))
-            {
-                return false;
-            }
-
-            clientRect.Left = topLeft.X;
-            clientRect.Top = topLeft.Y;
-            clientRect.Right = topLeft.X + localClient.Right;
-            clientRect.Bottom = topLeft.Y + localClient.Bottom;
-
-            offsetX = clientRect.Left - windowRect.Left;
-            offsetY = clientRect.Top - windowRect.Top;
-            return true;
+            session.Dispose();
         }
+    }
 
-        public IReadOnlyList<WindowHandleInfo> EnumerateWindows(IntPtr excludeHandle)
+    public void Dispose()
+    {
+        foreach (var session in _sessions.Values)
         {
-            var windows = new List<WindowHandleInfo>();
+            session.Dispose();
+        }
+        _sessions.Clear();
+    }
+
+    public IReadOnlyList<WindowHandleInfo> EnumerateWindows(IntPtr excludeHandle)
+    {
+        var windows = new List<WindowHandleInfo>();
 
         NativeMethods.EnumWindows((hWnd, _) =>
         {
@@ -147,56 +101,208 @@ namespace lifeviz;
         windows.Sort((a, b) => string.Compare(a.Title, b.Title, StringComparison.OrdinalIgnoreCase));
         return windows;
     }
-    
-        private (byte[] buffer, int width, int height)? CaptureWindowBytes(IntPtr handle)
-        {
-            if (!TryGetWindowBounds(handle, out var rect))
-            {
-                RemoveCache(handle);
-                return null;
-            }
 
-            var cache = GetOrCreateCache(handle);
+            private static bool TryGetWindowBounds(IntPtr handle, out RECT rect)
+            {
+                // DwmGetWindowAttribute gives the "visual" bounds (no shadow),
+                // but PrintWindow captures the "real" bounds (with shadow).
+                // mixing them causes offset errors and crashes.
+                // We must use GetWindowRect to match PrintWindow's output.
+                return NativeMethods.GetWindowRect(handle, out rect);
+            }    
+    // Helper for internal logic to access client bounds
+    private static bool TryGetClientBounds(IntPtr handle, out RECT clientRect, out int offsetX, out int offsetY)
+    {
+        clientRect = default;
+        offsetX = 0;
+        offsetY = 0;
+
+        if (!NativeMethods.GetClientRect(handle, out var localClient))
+        {
+            return false;
+        }
+
+        var topLeft = new POINT { X = 0, Y = 0 };
+        if (!NativeMethods.ClientToScreen(handle, ref topLeft))
+        {
+            return false;
+        }
+
+        if (!TryGetWindowBounds(handle, out var windowRect))
+        {
+            return false;
+        }
+
+        clientRect.Left = topLeft.X;
+        clientRect.Top = topLeft.Y;
+        clientRect.Right = topLeft.X + localClient.Right;
+        clientRect.Bottom = topLeft.Y + localClient.Bottom;
+
+        offsetX = clientRect.Left - windowRect.Left;
+        offsetY = clientRect.Top - windowRect.Top;
+        return true;
+    }
+
+    private sealed class WindowCaptureSession : IDisposable
+    {
+        private readonly IntPtr _handle;
+        private readonly CancellationTokenSource _cts = new();
+        private readonly Task _captureTask;
+        private readonly object _lock = new();
+        private readonly FrameCache _cache = new();
+        
+        private byte[]? _latestBuffer;
+        private int _latestWidth;
+        private int _latestHeight;
+        
+        private byte[]? _downscaleBuffer;
+        private byte[]? _sourceCopyBuffer;
+
+        public WindowCaptureSession(IntPtr handle)
+        {
+            _handle = handle;
+            _captureTask = Task.Run(CaptureLoop);
+        }
+
+        public void Dispose()
+        {
+            _cts.Cancel();
+            try
+            {
+                _captureTask.Wait(500);
+            }
+            catch
+            {
+                // Ignore shutdown errors
+            }
+            _cts.Dispose();
+            _cache.Dispose();
+        }
+
+        public WindowCaptureFrame? GetFrame(int targetColumns, int targetRows, bool includeSource)
+        {
+            byte[]? bufferToProcess;
+            int width, height;
+
+            lock (_lock)
+            {
+                if (_latestBuffer == null || _latestWidth <= 0 || _latestHeight <= 0)
+                {
+                    return null;
+                }
+
+                // Check if we need to resize or if we can just use the buffer
+                // We need a stable copy or we need to hold the lock while downscaling.
+                // Downscaling inside lock is safer for memory but blocks the capture thread from updating.
+                // Capture thread updates every ~16-30ms. Downscale takes ~1-2ms. 
+                // Blocking capture thread briefly is fine.
+                
+                width = _latestWidth;
+                height = _latestHeight;
+                bufferToProcess = _latestBuffer;
+
+                return DownscaleToFrame(bufferToProcess, width, height, targetColumns, targetRows, includeSource);
+            }
+        }
+
+        private async Task CaptureLoop()
+        {
+            Logger.Info($"Starting CaptureLoop for handle {_handle}");
+            int successCount = 0;
+            while (!_cts.IsCancellationRequested)
+            {
+                try
+                {
+                    if (!NativeMethods.IsWindow(_handle))
+                    {
+                        Logger.Warn($"Window {_handle} is no longer valid. Exiting CaptureLoop.");
+                        break;
+                    }
+
+                    if (CaptureAndSwap())
+                    {
+                        if (successCount == 0)
+                        {
+                            Logger.Info($"First frame captured for {_handle}. Buffer: {_latestWidth}x{_latestHeight}.");
+                            // We can try to get bounds here to log them
+                             if (TryGetWindowBounds(_handle, out var rect) && TryGetClientBounds(_handle, out var clientRect, out int offsetX, out int offsetY))
+                             {
+                                 int w = rect.Right - rect.Left;
+                                 int h = rect.Bottom - rect.Top;
+                                 int cw = clientRect.Right - clientRect.Left;
+                                 int ch = clientRect.Bottom - clientRect.Top;
+                                 Logger.Info($"Debug DPI: Window={w}x{h}, Client={cw}x{ch}, Offset={offsetX},{offsetY}");
+                             }
+                        }
+                        successCount++;
+                    }
+                    else
+                    {
+                         // Optional: log failure if needed, but avoid spam
+                    }
+                    
+                    // Target high FPS capture
+                    await Task.Delay(1, _cts.Token);
+                }
+                catch (OperationCanceledException)
+                {
+                    break;
+                }
+                catch (Exception ex)
+                {
+                    Logger.Error($"Error in CaptureLoop for {_handle}: {ex}", ex);
+                    await Task.Delay(100, _cts.Token); // Backoff on error
+                }
+            }
+            Logger.Info($"Exiting CaptureLoop for {_handle}");
+        }
+
+        private bool CaptureAndSwap()
+        {
+            if (!TryGetWindowBounds(_handle, out var rect))
+            {
+                return false;
+            }
 
             int windowWidth = rect.Right - rect.Left;
             int windowHeight = rect.Bottom - rect.Top;
             if (windowWidth <= 0 || windowHeight <= 0)
             {
-                return null;
+                return false;
             }
 
-            IntPtr hdcWindow = NativeMethods.GetWindowDC(handle);
-            if (hdcWindow == IntPtr.Zero) return null;
+            IntPtr hdcWindow = NativeMethods.GetWindowDC(_handle);
+            if (hdcWindow == IntPtr.Zero) return false;
 
             try
             {
-                if (cache.Width != windowWidth || cache.Height != windowHeight || cache.HdcMem == IntPtr.Zero || cache.HBitmap == IntPtr.Zero)
+                if (_cache.Width != windowWidth || _cache.Height != windowHeight || _cache.HdcMem == IntPtr.Zero || _cache.HBitmap == IntPtr.Zero)
                 {
-                    cache.Dispose();
-                    cache.HdcMem = NativeMethods.CreateCompatibleDC(hdcWindow);
-                    cache.HBitmap = NativeMethods.CreateCompatibleBitmap(hdcWindow, windowWidth, windowHeight);
-                    cache.Width = windowWidth;
-                    cache.Height = windowHeight;
+                    _cache.Dispose();
+                    _cache.HdcMem = NativeMethods.CreateCompatibleDC(hdcWindow);
+                    _cache.HBitmap = NativeMethods.CreateCompatibleBitmap(hdcWindow, windowWidth, windowHeight);
+                    _cache.Width = windowWidth;
+                    _cache.Height = windowHeight;
                 }
 
-                if (cache.HBitmap == IntPtr.Zero)
+                if (_cache.HBitmap == IntPtr.Zero)
                 {
-                    return null;
+                    return false;
                 }
 
-                IntPtr hOld = NativeMethods.SelectObject(cache.HdcMem, cache.HBitmap);
+                IntPtr hOld = NativeMethods.SelectObject(_cache.HdcMem, _cache.HBitmap);
 
                 try
                 {
-                    bool captured = NativeMethods.PrintWindow(handle, cache.HdcMem, NativeMethods.PW_RENDERFULLCONTENT);
+                    bool captured = NativeMethods.PrintWindow(_handle, _cache.HdcMem, NativeMethods.PW_RENDERFULLCONTENT);
                     if (!captured)
                     {
-                        captured = NativeMethods.BitBlt(cache.HdcMem, 0, 0, windowWidth, windowHeight, hdcWindow, 0, 0, NativeMethods.SRCCOPY | NativeMethods.CAPTUREBLT);
+                        captured = NativeMethods.BitBlt(_cache.HdcMem, 0, 0, windowWidth, windowHeight, hdcWindow, 0, 0, NativeMethods.SRCCOPY | NativeMethods.CAPTUREBLT);
                     }
 
                     if (!captured)
                     {
-                        return null;
+                        return false;
                     }
                 
                     var bmi = new NativeMethods.BITMAPINFO
@@ -215,110 +321,162 @@ namespace lifeviz;
                     int bufferSize = windowWidth * windowHeight * 4;
                     var buffer = ArrayPool<byte>.Shared.Rent(bufferSize);
 
-                    if (NativeMethods.GetDIBits(cache.HdcMem, cache.HBitmap, 0, (uint)windowHeight, buffer, ref bmi, 0) == 0)
+                    try
                     {
-                        ArrayPool<byte>.Shared.Return(buffer);
-                        return null;
-                    }
+                        if (NativeMethods.GetDIBits(_cache.HdcMem, _cache.HBitmap, 0, (uint)windowHeight, buffer, ref bmi, 0) == 0)
+                        {
+                            return false;
+                        }
 
-                    if (!TryGetClientBounds(handle, out var clientRect, out int offsetX, out int offsetY))
-                    {
-                        return (buffer, windowWidth, windowHeight);
-                    }
-                
-                    int clientWidth = clientRect.Right - clientRect.Left;
-                    int clientHeight = clientRect.Bottom - clientRect.Top;
-                
-                    if (offsetX == 0 && offsetY == 0 && clientWidth == windowWidth && clientHeight == windowHeight)
-                    {
-                        return (buffer, windowWidth, windowHeight);
-                    }
+                        // Handle cropping logic
+                        byte[] finalBuffer = buffer;
+                        int finalWidth = windowWidth;
+                        int finalHeight = windowHeight;
 
-                    int cropWidth = Math.Min(clientWidth, windowWidth - offsetX);
-                    int cropHeight = Math.Min(clientHeight, windowHeight - offsetY);
-                    if (cropWidth <= 0 || cropHeight <= 0)
-                    {
-                        ArrayPool<byte>.Shared.Return(buffer);
-                        return null;
-                    }
+                        if (TryGetClientBounds(_handle, out var clientRect, out int offsetX, out int offsetY))
+                        {
+                            int clientWidth = clientRect.Right - clientRect.Left;
+                            int clientHeight = clientRect.Bottom - clientRect.Top;
+                            
+                            // Debug logging for DPI issues (only once per second roughly, or just first frame? let's do first frame logic in CaptureLoop)
+                            // But we don't have access to successCount here easily. 
+                            // We can check if dimensions changed significantly or just relies on the Loop logger.
+                            
+                            // Let's just trust the values for now, but if we need to debug:
+                            // Logger.Info($"Bounds: Window={windowWidth}x{windowHeight}, Client={clientWidth}x{clientHeight}, Offset={offsetX},{offsetY}");
+                        
+                            if (!(offsetX == 0 && offsetY == 0 && clientWidth == windowWidth && clientHeight == windowHeight))
+                            {
+                                int cropWidth = Math.Min(clientWidth, windowWidth - offsetX);
+                                int cropHeight = Math.Min(clientHeight, windowHeight - offsetY);
+                                
+                                if (cropWidth > 0 && cropHeight > 0)
+                                {
+                                    var croppedBuffer = ArrayPool<byte>.Shared.Rent(cropWidth * cropHeight * 4);
+                                    Parallel.For(0, cropHeight, y =>
+                                    {
+                                        int sourceY = y + offsetY;
+                                        int sourceIndex = (sourceY * windowWidth + offsetX) * 4;
+                                        int destIndex = y * cropWidth * 4;
+                                        Buffer.BlockCopy(buffer, sourceIndex, croppedBuffer, destIndex, cropWidth * 4);
+                                    });
+                                    
+                                    finalBuffer = croppedBuffer;
+                                    finalWidth = cropWidth;
+                                    finalHeight = cropHeight;
+                                }
+                            }
+                        }
 
-                    var croppedBuffer = ArrayPool<byte>.Shared.Rent(cropWidth * cropHeight * 4);
-                    Parallel.For(0, cropHeight, y =>
+                        // Now swap into _latestBuffer
+                        lock (_lock)
+                        {
+                            int requiredSize = finalWidth * finalHeight * 4;
+                            if (_latestBuffer == null || _latestBuffer.Length != requiredSize)
+                            {
+                                _latestBuffer = new byte[requiredSize];
+                            }
+                            
+                            Buffer.BlockCopy(finalBuffer, 0, _latestBuffer, 0, requiredSize);
+                            _latestWidth = finalWidth;
+                            _latestHeight = finalHeight;
+                        }
+
+                        if (finalBuffer != buffer)
+                        {
+                            ArrayPool<byte>.Shared.Return(finalBuffer);
+                        }
+                        
+                        return true;
+                    }
+                    finally
                     {
-                        int sourceY = y + offsetY;
-                        int sourceIndex = (sourceY * windowWidth + offsetX) * 4;
-                        int destIndex = y * cropWidth * 4;
-                        Buffer.BlockCopy(buffer, sourceIndex, croppedBuffer, destIndex, cropWidth * 4);
-                    });
-                
-                    ArrayPool<byte>.Shared.Return(buffer);
-                    return (croppedBuffer, cropWidth, cropHeight);
+                         ArrayPool<byte>.Shared.Return(buffer);
+                    }
                 }
                 finally
                 {
-                    NativeMethods.SelectObject(cache.HdcMem, hOld);
+                    NativeMethods.SelectObject(_cache.HdcMem, hOld);
                 }
             }
             finally
             {
-                NativeMethods.ReleaseDC(handle, hdcWindow);
+                NativeMethods.ReleaseDC(_handle, hdcWindow);
             }
         }
 
-    private WindowCaptureFrame DownscaleToFrame(byte[] sourceBuffer, int sourceWidth, int sourceHeight, int columns, int rows, bool includeSource, FrameCache cache)
-    {
-        int downscaledLength = rows * columns * 4;
-        byte[] overlay = cache.OverlayDownscaled?.Length == downscaledLength
-            ? cache.OverlayDownscaled!
-            : cache.OverlayDownscaled = new byte[downscaledLength];
-
-        byte[]? overlaySource = null;
-        if (includeSource)
+        private WindowCaptureFrame DownscaleToFrame(byte[] sourceBuffer, int sourceWidth, int sourceHeight, int columns, int rows, bool includeSource)
         {
-            if (cache.OverlaySource == null || cache.OverlaySource.Length != sourceBuffer.Length)
+            int downscaledLength = rows * columns * 4;
+            if (_downscaleBuffer == null || _downscaleBuffer.Length != downscaledLength)
             {
-                cache.OverlaySource = new byte[sourceBuffer.Length];
+                _downscaleBuffer = new byte[downscaledLength];
             }
-            overlaySource = cache.OverlaySource;
-            Buffer.BlockCopy(sourceBuffer, 0, overlaySource, 0, sourceBuffer.Length);
-        }
-        else
-        {
-            cache.OverlaySource = null;
-        }
-        
-        double scaleX = sourceWidth / (double)columns;
-        double scaleY = sourceHeight / (double)rows;
-        
-        Parallel.For(0, rows, row =>
-        {
-            int srcY = Math.Min(sourceHeight - 1, (int)Math.Floor(row * scaleY));
-            int sourceRowOffset = srcY * sourceWidth * 4;
-            int overlayRowOffset = row * columns * 4;
+            byte[] overlay = _downscaleBuffer;
 
-            for (int col = 0; col < columns; col++)
+            byte[]? overlaySource = null;
+            if (includeSource)
             {
-                int srcX = Math.Min(sourceWidth - 1, (int)Math.Floor(col * scaleX));
-                int index = sourceRowOffset + (srcX * 4);
-
-                byte b = sourceBuffer[index];
-                byte g = sourceBuffer[index + 1];
-                byte r = sourceBuffer[index + 2];
-                
-                int overlayIndex = overlayRowOffset + (col * 4);
-                overlay[overlayIndex] = b;
-                overlay[overlayIndex + 1] = g;
-                overlay[overlayIndex + 2] = r;
-                overlay[overlayIndex + 3] = 255;
+                if (_sourceCopyBuffer == null || _sourceCopyBuffer.Length != sourceBuffer.Length)
+                {
+                    _sourceCopyBuffer = new byte[sourceBuffer.Length];
+                }
+                overlaySource = _sourceCopyBuffer;
+                Buffer.BlockCopy(sourceBuffer, 0, overlaySource, 0, sourceBuffer.Length);
             }
-        });
-        
-        return new WindowCaptureFrame(overlay, columns, rows,
-            includeSource ? overlaySource : null,
-            sourceWidth,
-            sourceHeight);
+            else
+            {
+                _sourceCopyBuffer = null;
+            }
+            
+            double scaleX = sourceWidth / (double)columns;
+            double scaleY = sourceHeight / (double)rows;
+            
+            Parallel.For(0, rows, row =>
+            {
+                int srcY = Math.Min(sourceHeight - 1, (int)Math.Floor(row * scaleY));
+                int sourceRowOffset = srcY * sourceWidth * 4;
+                int overlayRowOffset = row * columns * 4;
+
+                for (int col = 0; col < columns; col++)
+                {
+                    int srcX = Math.Min(sourceWidth - 1, (int)Math.Floor(col * scaleX));
+                    int index = sourceRowOffset + (srcX * 4);
+
+                    byte b = sourceBuffer[index];
+                    byte g = sourceBuffer[index + 1];
+                    byte r = sourceBuffer[index + 2];
+                    
+                    int overlayIndex = overlayRowOffset + (col * 4);
+                    overlay[overlayIndex] = b;
+                    overlay[overlayIndex + 1] = g;
+                    overlay[overlayIndex + 2] = r;
+                    overlay[overlayIndex + 3] = 255;
+                }
+            });
+            
+            // We must return copies or handle buffer lifecycle carefully. 
+            // WindowCaptureFrame is used by MainWindow.
+            // The OverlayDownscaled buffer is just passed to MainWindow. 
+            // MainWindow composites it immediately. 
+            // However, next call to GetFrame reuses _downscaleBuffer.
+            // If MainWindow is multithreaded or stores the frame, this is a race.
+            // MainWindow seems to use it in InjectCaptureFrames -> BuildCompositeFrame -> CopyIntoBuffer
+            // which happens sequentially in the render loop. So it should be fine to reuse the buffer 
+            // IF we assume strictly sequential usage in MainWindow.
+            
+            // But to be safe (and standard), let's copy the result to a new buffer or return a new array?
+            // WebcamCaptureService reuses the buffer:
+            // return new WebcamFrame(data.DownscaledBuffer, ...)
+            // So reusing is the established pattern here.
+            
+            return new WindowCaptureFrame(overlay, columns, rows,
+                includeSource ? overlaySource : null,
+                sourceWidth,
+                sourceHeight);
+        }
     }
-    
+
     private static class NativeMethods
     {
         public const int SRCCOPY = 0x00CC0020;
@@ -472,8 +630,6 @@ namespace lifeviz;
 
     private sealed class FrameCache : IDisposable
     {
-        public byte[]? OverlayDownscaled;
-        public byte[]? OverlaySource;
         public IntPtr HdcMem = IntPtr.Zero;
         public IntPtr HBitmap = IntPtr.Zero;
         public int Width;
@@ -492,16 +648,5 @@ namespace lifeviz;
                 HdcMem = IntPtr.Zero;
             }
         }
-    }
-
-    private FrameCache GetOrCreateCache(IntPtr handle)
-    {
-        if (!_frameCache.TryGetValue(handle, out var cache))
-        {
-            cache = new FrameCache();
-            _frameCache[handle] = cache;
-        }
-
-        return cache;
     }
 }
