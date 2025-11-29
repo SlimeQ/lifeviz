@@ -1680,6 +1680,10 @@ public partial class MainWindow : Window
             AlignmentX = AlignmentX.Center,
             AlignmentY = AlignmentY.Center
         };
+        if (_underlayBitmap != null)
+        {
+            _overlayBrush.ImageSource = _underlayBitmap;
+        }
         _blendEffect.Overlay = _overlayBrush;
         _inputBrush = new ImageBrush(_bitmap)
         {
