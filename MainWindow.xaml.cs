@@ -28,11 +28,13 @@ public partial class MainWindow : Window
     private readonly GameOfLifeEngine _engine = new();
     private readonly WindowCaptureService _windowCapture = new();
     private readonly WebcamCaptureService _webcamCapture = new();
+    private readonly AudioBeatDetector _audioBeatDetector = new();
     private readonly BlendEffect _blendEffect = new();
     private int _configuredColumns = DefaultColumns;
     private int _configuredDepth = DefaultDepth;
     private IReadOnlyList<WindowHandleInfo> _cachedWindows = Array.Empty<WindowHandleInfo>();
     private IReadOnlyList<WebcamCaptureService.CameraInfo> _cachedCameras = Array.Empty<WebcamCaptureService.CameraInfo>();
+    private IReadOnlyList<AudioBeatDetector.AudioDeviceInfo> _cachedAudioDevices = Array.Empty<AudioBeatDetector.AudioDeviceInfo>();
     private readonly List<CaptureSource> _sources = new();
     private WriteableBitmap? _bitmap;
     private byte[]? _pixelBuffer;
@@ -79,7 +81,14 @@ public partial class MainWindow : Window
     private bool _previousTopmost;
     private Rect _previousBounds;
     private readonly Stopwatch _stepStopwatch = new();
+    private readonly Stopwatch _lifetimeStopwatch = new();
     private double _timeSinceLastStep;
+    private bool _fpsOscillationEnabled;
+    private bool _audioSyncEnabled;
+    private string? _selectedAudioDeviceId;
+    private double _oscillationBpm = 140;
+    private double _oscillationMinFps = 30;
+    private double _oscillationMaxFps = 60;
 
     public MainWindow()
     {
@@ -104,6 +113,7 @@ public partial class MainWindow : Window
         Closed += (_, _) =>
         {
             _webcamCapture.Reset();
+            _audioBeatDetector.Dispose();
             Logger.Shutdown();
         };
     }
@@ -121,10 +131,37 @@ public partial class MainWindow : Window
         UpdateFpsOverlay();
         CompositionTarget.Rendering += CompositionTarget_Rendering;
         _stepStopwatch.Start();
+        _lifetimeStopwatch.Start();
     }
+
+    private double _oscillationPhase;
+    // We need to track previous time to calculate delta time for phase.
+    private double _lastRenderTime;
 
     private void CompositionTarget_Rendering(object? sender, EventArgs e)
     {
+        double now = _lifetimeStopwatch.Elapsed.TotalSeconds;
+        double dt = now - _lastRenderTime;
+        _lastRenderTime = now;
+
+        // --- FPS Modulation ---
+        if (_fpsOscillationEnabled)
+        {
+            double bpm = _oscillationBpm;
+            if (_audioSyncEnabled)
+            {
+                bpm = _audioBeatDetector.CurrentBpm;
+                // Update UI if menu is open? No, too complex for now.
+            }
+            
+            double frequency = bpm / 60.0;
+            _oscillationPhase += frequency * dt;
+            if (_oscillationPhase > 1.0) _oscillationPhase -= 1.0;
+
+            double factor = (Math.Sin(2 * Math.PI * _oscillationPhase) + 1.0) / 2.0;
+            _currentFps = _oscillationMinFps + (_oscillationMaxFps - _oscillationMinFps) * factor;
+        }
+
         // --- Simulation Step ---
         double elapsed = _stepStopwatch.Elapsed.TotalSeconds;
         _stepStopwatch.Restart();
@@ -385,6 +422,7 @@ public partial class MainWindow : Window
     private void RootContextMenu_OnOpened(object sender, RoutedEventArgs e)
     {
         PopulateSourcesMenu();
+        PopulateAudioMenu();
         if (PassthroughMenuItem != null)
         {
             PassthroughMenuItem.IsChecked = _passthroughEnabled;
@@ -435,6 +473,77 @@ public partial class MainWindow : Window
         {
             InvertThresholdCheckBox.IsChecked = _invertThreshold;
         }
+
+        if (FpsOscillationCheckBox != null)
+        {
+            FpsOscillationCheckBox.IsChecked = _fpsOscillationEnabled;
+        }
+        if (AudioSyncCheckBox != null)
+        {
+            AudioSyncCheckBox.IsChecked = _audioSyncEnabled;
+            AudioSyncCheckBox.IsEnabled = _fpsOscillationEnabled;
+        }
+        if (BpmSlider != null && BpmValueText != null)
+        {
+            BpmSlider.Value = _oscillationBpm;
+            BpmValueText.Text = $"{_oscillationBpm:F0}";
+            BpmSlider.IsEnabled = !_audioSyncEnabled;
+        }
+        if (MinFpsSlider != null && MinFpsValueText != null)
+        {
+            MinFpsSlider.Value = _oscillationMinFps;
+            MinFpsValueText.Text = $"{_oscillationMinFps:F0}";
+        }
+        if (MaxFpsSlider != null && MaxFpsValueText != null)
+        {
+            MaxFpsSlider.Value = _oscillationMaxFps;
+            MaxFpsValueText.Text = $"{_oscillationMaxFps:F0}";
+        }
+    }
+
+    private async void PopulateAudioMenu()
+    {
+        if (AudioSourceMenu == null) return;
+        AudioSourceMenu.Items.Clear();
+
+        try
+        {
+            _cachedAudioDevices = await _audioBeatDetector.EnumerateAudioDevices();
+        }
+        catch
+        {
+            // Fallback
+        }
+
+        if (_cachedAudioDevices.Count == 0)
+        {
+            AudioSourceMenu.Items.Add(new MenuItem { Header = "No audio devices found", IsEnabled = false });
+            return;
+        }
+
+        foreach (var device in _cachedAudioDevices)
+        {
+            var item = new MenuItem
+            {
+                Header = device.Name,
+                Tag = device,
+                IsCheckable = true,
+                IsChecked = _selectedAudioDeviceId == device.Id
+            };
+            item.Click += AudioDeviceMenuItem_Click;
+            AudioSourceMenu.Items.Add(item);
+        }
+    }
+
+    private async void AudioDeviceMenuItem_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is not MenuItem { Tag: AudioBeatDetector.AudioDeviceInfo device }) return;
+
+        if (_selectedAudioDeviceId == device.Id) return;
+
+        _selectedAudioDeviceId = device.Id;
+        await _audioBeatDetector.InitializeAsync(device.Id);
+        SaveConfig();
     }
 
     private void PopulateSourcesMenu()
@@ -2138,6 +2247,49 @@ public partial class MainWindow : Window
         return (rMask, gMask, bMask);
     }
 
+    private void FpsOscillation_OnChecked(object sender, RoutedEventArgs e)
+    {
+        _fpsOscillationEnabled = FpsOscillationCheckBox?.IsChecked == true;
+        if (AudioSyncCheckBox != null)
+        {
+            AudioSyncCheckBox.IsEnabled = _fpsOscillationEnabled;
+        }
+        SaveConfig();
+    }
+
+    private void AudioSync_OnChecked(object sender, RoutedEventArgs e)
+    {
+        _audioSyncEnabled = AudioSyncCheckBox?.IsChecked == true;
+        if (BpmSlider != null)
+        {
+            BpmSlider.IsEnabled = !_audioSyncEnabled;
+        }
+        SaveConfig();
+    }
+
+    private void BpmSlider_OnValueChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
+    {
+        _oscillationBpm = e.NewValue;
+        if (BpmValueText != null)
+        {
+            BpmValueText.Text = $"{_oscillationBpm:F0}";
+        }
+        SaveConfig();
+    }
+
+    private void OscillationRange_OnValueChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
+    {
+        if (MinFpsSlider == null || MaxFpsSlider == null) return;
+
+        _oscillationMinFps = MinFpsSlider.Value;
+        _oscillationMaxFps = MaxFpsSlider.Value;
+        
+        if (MinFpsValueText != null) MinFpsValueText.Text = $"{_oscillationMinFps:F0}";
+        if (MaxFpsValueText != null) MaxFpsValueText.Text = $"{_oscillationMaxFps:F0}";
+
+        SaveConfig();
+    }
+
     private void LoadConfig()
     {
         try
@@ -2178,6 +2330,18 @@ public partial class MainWindow : Window
             _configuredColumns = Math.Clamp(config.Columns, 32, 512);
             _configuredDepth = Math.Clamp(config.Depth, 3, 96);
             _passthroughEnabled = config.Passthrough;
+            _fpsOscillationEnabled = config.OscillationEnabled;
+            _oscillationBpm = Math.Clamp(config.OscillationBpm, 40, 240);
+            _oscillationMinFps = Math.Clamp(config.OscillationMinFps, 1, 144);
+            _oscillationMaxFps = Math.Clamp(config.OscillationMaxFps, 1, 144);
+            _audioSyncEnabled = config.AudioSyncEnabled;
+            _selectedAudioDeviceId = config.AudioDeviceId;
+
+            if (!string.IsNullOrWhiteSpace(_selectedAudioDeviceId))
+            {
+                 _ = _audioBeatDetector.InitializeAsync(_selectedAudioDeviceId);
+            }
+
             if (Enum.TryParse<BlendMode>(config.BlendMode, out var blendMode))
             {
                 _blendMode = blendMode;
@@ -2223,6 +2387,12 @@ public partial class MainWindow : Window
                 Columns = _configuredColumns,
                 Depth = _configuredDepth,
                 Passthrough = _passthroughEnabled,
+                OscillationEnabled = _fpsOscillationEnabled,
+                OscillationBpm = _oscillationBpm,
+                OscillationMinFps = _oscillationMinFps,
+                OscillationMaxFps = _oscillationMaxFps,
+                AudioSyncEnabled = _audioSyncEnabled,
+                AudioDeviceId = _selectedAudioDeviceId,
                 BlendMode = _blendMode.ToString(),
                 Fullscreen = _isFullscreen,
                 Sources = BuildSourceConfigs()
@@ -2355,6 +2525,12 @@ public partial class MainWindow : Window
         public int Columns { get; set; } = DefaultColumns;
         public int Depth { get; set; } = DefaultDepth;
         public bool Passthrough { get; set; }
+        public bool OscillationEnabled { get; set; }
+        public double OscillationBpm { get; set; } = 140;
+        public double OscillationMinFps { get; set; } = 30;
+        public double OscillationMaxFps { get; set; } = 60;
+        public bool AudioSyncEnabled { get; set; }
+        public string? AudioDeviceId { get; set; }
         public string BlendMode { get; set; } = MainWindow.BlendMode.Additive.ToString();
         public bool Fullscreen { get; set; }
         public List<SourceConfig> Sources { get; set; } = new();

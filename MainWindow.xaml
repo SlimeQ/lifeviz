@@ -39,6 +39,8 @@
                 <Separator />
                 <MenuItem Header="Sources"
                           x:Name="SourcesMenu" />
+                <MenuItem Header="Audio Source"
+                          x:Name="AudioSourceMenu" />
                 <Separator />
                 <MenuItem x:Name="PassthroughMenuItem"
                           Header="Passthrough Underlay"
@@ -141,6 +143,59 @@
                     <MenuItem Header="30 fps" IsCheckable="True" Click="FramerateItem_Click" />
                     <MenuItem Header="60 fps" IsCheckable="True" Click="FramerateItem_Click" />
                     <MenuItem Header="144 fps" IsCheckable="True" Click="FramerateItem_Click" />
+                </MenuItem>
+                <MenuItem Header="FPS Modulation" StaysOpenOnClick="True">
+                    <StackPanel Margin="4" Width="220">
+                        <CheckBox x:Name="FpsOscillationCheckBox"
+                                  Content="Enable Oscillation"
+                                  Margin="0,0,0,4"
+                                  Checked="FpsOscillation_OnChecked"
+                                  Unchecked="FpsOscillation_OnChecked"/>
+                        <CheckBox x:Name="AudioSyncCheckBox"
+                                  Content="Sync to Audio BPM"
+                                  Margin="0,0,0,8"
+                                  Checked="AudioSync_OnChecked"
+                                  Unchecked="AudioSync_OnChecked"/>
+                        
+                        <DockPanel Margin="0,0,0,4">
+                            <TextBlock Text="BPM:" DockPanel.Dock="Left"/>
+                            <TextBlock x:Name="BpmValueText" Text="140" DockPanel.Dock="Right" FontWeight="Bold"/>
+                            <Slider x:Name="BpmSlider"
+                                    Minimum="40"
+                                    Maximum="240"
+                                    Value="140"
+                                    SmallChange="1"
+                                    LargeChange="10"
+                                    Margin="8,0"
+                                    ValueChanged="BpmSlider_OnValueChanged"/>
+                        </DockPanel>
+                        
+                        <DockPanel Margin="0,0,0,4">
+                            <TextBlock Text="Min FPS:" DockPanel.Dock="Left"/>
+                            <TextBlock x:Name="MinFpsValueText" Text="30" DockPanel.Dock="Right" FontWeight="Bold"/>
+                            <Slider x:Name="MinFpsSlider"
+                                    Minimum="1"
+                                    Maximum="144"
+                                    Value="30"
+                                    SmallChange="1"
+                                    LargeChange="5"
+                                    Margin="8,0"
+                                    ValueChanged="OscillationRange_OnValueChanged"/>
+                        </DockPanel>
+
+                        <DockPanel>
+                            <TextBlock Text="Max FPS:" DockPanel.Dock="Left"/>
+                            <TextBlock x:Name="MaxFpsValueText" Text="60" DockPanel.Dock="Right" FontWeight="Bold"/>
+                            <Slider x:Name="MaxFpsSlider"
+                                    Minimum="1"
+                                    Maximum="144"
+                                    Value="60"
+                                    SmallChange="1"
+                                    LargeChange="5"
+                                    Margin="8,0"
+                                    ValueChanged="OscillationRange_OnValueChanged"/>
+                        </DockPanel>
+                    </StackPanel>
                 </MenuItem>
             </ContextMenu>
         </Grid.ContextMenu>
