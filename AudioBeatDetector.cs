@@ -34,7 +34,8 @@ internal sealed class AudioBeatDetector : IDisposable
     private readonly List<long> _beatTimestamps = new();
     private const int BeatHistorySize = 10;
     private double _detectedBpm = 120;
-    private DateTime _lastBeatTime = DateTime.MinValue;
+    
+    public DateTime LastBeatTime { get; private set; } = DateTime.MinValue;
 
     public double CurrentBpm => _detectedBpm;
     public bool IsBeat { get; private set; }
@@ -173,15 +174,15 @@ internal sealed class AudioBeatDetector : IDisposable
         // Simple Beat Detection: Instant energy > C * Average Energy
         // And wait some time (debounce)
         
-        if (rms > _localEnergyAverage * C && (DateTime.UtcNow - _lastBeatTime).TotalSeconds > 0.25) // Max 240 BPM
+        if (rms > _localEnergyAverage * C && (DateTime.UtcNow - LastBeatTime).TotalSeconds > 0.25) // Max 240 BPM
         {
             IsBeat = true;
             var now = DateTime.UtcNow;
             
             // Calculate BPM
-            if (_lastBeatTime != DateTime.MinValue)
+            if (LastBeatTime != DateTime.MinValue)
             {
-                long ticks = now.Ticks - _lastBeatTime.Ticks;
+                long ticks = now.Ticks - LastBeatTime.Ticks;
                 _beatTimestamps.Add(ticks);
                 if (_beatTimestamps.Count > BeatHistorySize)
                 {
@@ -201,7 +202,7 @@ internal sealed class AudioBeatDetector : IDisposable
                 }
             }
             
-            _lastBeatTime = now;
+            LastBeatTime = now;
         }
         else
         {

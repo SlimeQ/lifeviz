@@ -151,15 +151,47 @@ public partial class MainWindow : Window
             if (_audioSyncEnabled)
             {
                 bpm = _audioBeatDetector.CurrentBpm;
-                // Update UI if menu is open? No, too complex for now.
             }
+
+            // Clamp BPM to reasonable range to avoid crazy frequencies
+            bpm = Math.Clamp(bpm, 10, 300);
             
             double frequency = bpm / 60.0;
-            _oscillationPhase += frequency * dt;
-            if (_oscillationPhase > 1.0) _oscillationPhase -= 1.0;
+            
+            if (_audioSyncEnabled)
+            {
+                 // Sync phase to beat: Peak at beat.
+                 // Sin wave peaks at 0.25 (PI/2).
+                 // So we want Phase = 0.25 when TimeSinceBeat = 0.
+                 double timeSinceBeat = (DateTime.UtcNow - _audioBeatDetector.LastBeatTime).TotalSeconds;
+                 
+                 // Handle potentially large numbers or negative drift
+                 if (timeSinceBeat < 0) timeSinceBeat = 0;
+
+                 _oscillationPhase = (timeSinceBeat * frequency + 0.25) % 1.0;
+            }
+            else
+            {
+                // Clamp dt to avoid huge jumps if simulation lags
+                double safeDt = Math.Min(dt, 0.1); 
+            
+                _oscillationPhase += frequency * safeDt;
+                _oscillationPhase %= 1.0; // Safe wrapping
+                if (_oscillationPhase < 0) _oscillationPhase += 1.0;
+            }
 
             double factor = (Math.Sin(2 * Math.PI * _oscillationPhase) + 1.0) / 2.0;
-            _currentFps = _oscillationMinFps + (_oscillationMaxFps - _oscillationMinFps) * factor;
+            double targetFps = _oscillationMinFps + (_oscillationMaxFps - _oscillationMinFps) * factor;
+            
+            _currentFps = Math.Clamp(targetFps, 1, 144);
+        }
+        else
+        {
+             // Ensure we stay at config FPS if disabled (redundant safety)
+             if (Math.Abs(_currentFps - _currentFpsFromConfig) > 0.1)
+             {
+                 _currentFps = _currentFpsFromConfig;
+             }
         }
 
         // --- Simulation Step ---
@@ -2019,10 +2051,16 @@ public partial class MainWindow : Window
         }
     }
 
+    private double _currentFpsFromConfig = DefaultFps;
+
     private void SetFramerate(double fps)
     {
         fps = Math.Clamp(fps, 5, 144);
-        _currentFps = fps;
+        _currentFpsFromConfig = fps;
+        if (!_fpsOscillationEnabled)
+        {
+            _currentFps = fps;
+        }
         UpdateFramerateMenuChecks();
         SaveConfig();
     }
@@ -2038,10 +2076,10 @@ public partial class MainWindow : Window
         {
             if (item is MenuItem menuItem && menuItem.Header is string header)
             {
-                bool isChecked = header.StartsWith("15", StringComparison.OrdinalIgnoreCase) && Math.Abs(_currentFps - 15) < 0.1
-                                 || header.StartsWith("30", StringComparison.OrdinalIgnoreCase) && Math.Abs(_currentFps - 30) < 0.1
-                                 || header.StartsWith("60", StringComparison.OrdinalIgnoreCase) && Math.Abs(_currentFps - 60) < 0.1
-                                 || header.StartsWith("144", StringComparison.OrdinalIgnoreCase) && Math.Abs(_currentFps - 144) < 0.1;
+                bool isChecked = header.StartsWith("15", StringComparison.OrdinalIgnoreCase) && Math.Abs(_currentFpsFromConfig - 15) < 0.1
+                                 || header.StartsWith("30", StringComparison.OrdinalIgnoreCase) && Math.Abs(_currentFpsFromConfig - 30) < 0.1
+                                 || header.StartsWith("60", StringComparison.OrdinalIgnoreCase) && Math.Abs(_currentFpsFromConfig - 60) < 0.1
+                                 || header.StartsWith("144", StringComparison.OrdinalIgnoreCase) && Math.Abs(_currentFpsFromConfig - 144) < 0.1;
                 menuItem.IsCheckable = true;
                 menuItem.IsChecked = isChecked;
             }
@@ -2249,7 +2287,15 @@ public partial class MainWindow : Window
 
     private void FpsOscillation_OnChecked(object sender, RoutedEventArgs e)
     {
+        bool wasEnabled = _fpsOscillationEnabled;
         _fpsOscillationEnabled = FpsOscillationCheckBox?.IsChecked == true;
+        
+        if (wasEnabled && !_fpsOscillationEnabled)
+        {
+            // Reset to fixed framerate
+            SetFramerate(_currentFpsFromConfig); 
+        }
+
         if (AudioSyncCheckBox != null)
         {
             AudioSyncCheckBox.IsEnabled = _fpsOscillationEnabled;
@@ -2309,7 +2355,8 @@ public partial class MainWindow : Window
             _captureThresholdMin = Math.Clamp(config.CaptureThresholdMin, 0, 1);
             _captureThresholdMax = Math.Clamp(config.CaptureThresholdMax, 0, 1);
             _invertThreshold = config.InvertThreshold;
-            _currentFps = Math.Clamp(config.Framerate, 5, 120);
+            _currentFpsFromConfig = Math.Clamp(config.Framerate, 5, 144);
+            _currentFps = _currentFpsFromConfig;
             _lifeOpacity = Math.Clamp(config.LifeOpacity, 0, 1);
             if (Enum.TryParse<GameOfLifeEngine.LifeMode>(config.LifeMode, out var lifeMode))
             {
@@ -2375,7 +2422,7 @@ public partial class MainWindow : Window
                 CaptureThresholdMin = _captureThresholdMin,
                 CaptureThresholdMax = _captureThresholdMax,
                 InvertThreshold = _invertThreshold,
-                Framerate = _currentFps,
+                Framerate = _currentFpsFromConfig,
                 LifeMode = _lifeMode.ToString(),
                 BinningMode = _binningMode.ToString(),
                 InjectionMode = _injectionMode.ToString(),
