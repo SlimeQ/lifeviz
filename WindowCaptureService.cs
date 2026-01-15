@@ -13,7 +13,7 @@ internal sealed class WindowCaptureService : IDisposable
 {
     private readonly ConcurrentDictionary<IntPtr, WindowCaptureSession> _sessions = new();
 
-    public WindowCaptureFrame? CaptureFrame(WindowHandleInfo info, int targetColumns, int targetRows, bool includeSource = true)
+    public WindowCaptureFrame? CaptureFrame(WindowHandleInfo info, int targetColumns, int targetRows, FitMode fitMode, bool includeSource = true)
     {
         if (targetColumns <= 0 || targetRows <= 0)
         {
@@ -27,7 +27,7 @@ internal sealed class WindowCaptureService : IDisposable
         }
 
         var session = _sessions.GetOrAdd(info.Handle, h => new WindowCaptureSession(h));
-        return session.GetFrame(targetColumns, targetRows, includeSource);
+        return session.GetFrame(targetColumns, targetRows, fitMode, includeSource);
     }
     
     public void RemoveCache(IntPtr handle)
@@ -179,7 +179,7 @@ internal sealed class WindowCaptureService : IDisposable
             _cache.Dispose();
         }
 
-        public WindowCaptureFrame? GetFrame(int targetColumns, int targetRows, bool includeSource)
+        public WindowCaptureFrame? GetFrame(int targetColumns, int targetRows, FitMode fitMode, bool includeSource)
         {
             byte[]? bufferToProcess;
             int width, height;
@@ -201,7 +201,7 @@ internal sealed class WindowCaptureService : IDisposable
                 height = _latestHeight;
                 bufferToProcess = _latestBuffer;
 
-                return DownscaleToFrame(bufferToProcess, width, height, targetColumns, targetRows, includeSource);
+                return DownscaleToFrame(bufferToProcess, width, height, targetColumns, targetRows, fitMode, includeSource);
             }
         }
 
@@ -405,7 +405,7 @@ internal sealed class WindowCaptureService : IDisposable
             }
         }
 
-        private WindowCaptureFrame DownscaleToFrame(byte[] sourceBuffer, int sourceWidth, int sourceHeight, int columns, int rows, bool includeSource)
+        private WindowCaptureFrame DownscaleToFrame(byte[] sourceBuffer, int sourceWidth, int sourceHeight, int columns, int rows, FitMode fitMode, bool includeSource)
         {
             int downscaledLength = rows * columns * 4;
             if (_downscaleBuffer == null || _downscaleBuffer.Length != downscaledLength)
@@ -429,23 +429,26 @@ internal sealed class WindowCaptureService : IDisposable
                 _sourceCopyBuffer = null;
             }
             
-            double scaleX = sourceWidth / (double)columns;
-            double scaleY = sourceHeight / (double)rows;
+            var mapping = ImageFit.GetMapping(fitMode, sourceWidth, sourceHeight, columns, rows);
             
             Parallel.For(0, rows, row =>
             {
-                int srcY = Math.Min(sourceHeight - 1, (int)Math.Floor(row * scaleY));
-                int sourceRowOffset = srcY * sourceWidth * 4;
+                int sourceRowOffset = 0;
                 int overlayRowOffset = row * columns * 4;
 
                 for (int col = 0; col < columns; col++)
                 {
-                    int srcX = Math.Min(sourceWidth - 1, (int)Math.Floor(col * scaleX));
-                    int index = sourceRowOffset + (srcX * 4);
-
-                    byte b = sourceBuffer[index];
-                    byte g = sourceBuffer[index + 1];
-                    byte r = sourceBuffer[index + 2];
+                    byte b = 0;
+                    byte g = 0;
+                    byte r = 0;
+                    if (ImageFit.TryMapPixel(mapping, col, row, out int srcX, out int srcY))
+                    {
+                        sourceRowOffset = srcY * sourceWidth * 4;
+                        int index = sourceRowOffset + (srcX * 4);
+                        b = sourceBuffer[index];
+                        g = sourceBuffer[index + 1];
+                        r = sourceBuffer[index + 2];
+                    }
                     
                     int overlayIndex = overlayRowOffset + (col * 4);
                     overlay[overlayIndex] = b;

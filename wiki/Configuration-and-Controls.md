@@ -8,7 +8,8 @@ The UI stays invisible until you right-click anywhere on the canvas, revealing t
 - **Randomize** - re-seeds every frame in the depth stack to a fresh random state.
 - **Columns** - quick presets (64-256) plus a *Custom...* dialog to pick any value between 32 and 512.
 - **Depth** - quick presets (12-48) plus a *Custom...* dialog for 3-96 layers.
-- **Sources** - stack multiple live feeds. Use *Add Window Source* to pull in any visible, non-minimized top-level window, or *Add Webcam Source* to attach a camera (checked entries are already in the stack). Each entry exposes *Make Primary* (adopts aspect ratio), *Move Up/Down*, *Remove*, and a per-source blend mode (Normal, Additive, Multiply, Screen, Overlay, Lighten, Darken, Subtractive). The top-most source drives the aspect ratio and the native-resolution target when preserve-res is enabled; clearing all sources restores the default 16:9 ratio. Webcam capture retries initialization once and waits longer for first frames before a source is removed; capture releases automatically when you close the app or clear sources.
+- **Lock Aspect Ratio (16:9)** - freezes the simulation grid at a 16:9 ratio; disable to let the primary source drive the aspect ratio.
+- **Sources** - stack multiple live feeds. Use *Add Window Source* to pull in any visible, non-minimized top-level window, *Add Webcam Source* to attach a camera, or *Add File Source* to load a static image (PNG/JPG/BMP/WEBP), GIF, or video (animated files loop). Each entry exposes *Make Primary* (adopts aspect ratio), *Move Up/Down*, *Remove*, a per-source blend mode (Normal, Additive, Multiply, Screen, Overlay, Lighten, Darken, Subtractive), and a per-source fit mode (Fit default, plus Fill/Stretch/Center/Tile/Span). The top-most source drives the aspect ratio and the native-resolution target when preserve-res is enabled; clearing all sources restores the default 16:9 ratio. Webcam capture retries initialization once and waits longer for first frames before a source is removed; capture releases automatically when you close the app or clear sources.
 - **Passthrough Underlay** - when sources are active, enable a live underlay of the composited stack behind the Game of Life output.
 - **Composite Blend** - choose how the underlay mixes with the simulation (Additive default; Normal, Multiply, Screen, Overlay, Lighten, Darken, Subtractive).
 - **Preserve Window Resolution** - renders the scene at the primary source's resolution (bilinear sampling) instead of snapping to the grid size to reduce pixelation.
@@ -32,7 +33,8 @@ The UI stays invisible until you right-click anywhere on the canvas, revealing t
 ## Persistence
 
 - Columns, depth, thresholds, modes, opacity, framerate, blend/passthrough toggles, and preserve-res settings persist to `%AppData%\lifeviz\config.json` after the app finishes loading, so startup control events no longer overwrite prior configs.
-- The source stack (windows + webcams) is restored on launch when devices are present, including ordering plus per-source blend mode, opacity, and mirror; windows are matched by title and webcams by device id/name.
+- The source stack (windows + webcams + files) is restored on launch when inputs are present, including ordering plus per-source blend mode, fit mode, opacity, and mirror; windows are matched by title, webcams by device id/name, and files by path.
+- Aspect ratio lock state persists between runs (lock ratio defaults to 16:9).
 - Fullscreen preference is persisted and applied after startup using the active monitor bounds so the taskbar stays hidden.
 
 ## Defaults

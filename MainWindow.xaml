@@ -36,6 +36,10 @@
                     <Separator />
                     <MenuItem Header="Custom..." Click="SetDepth_Click" />
                 </MenuItem>
+                <MenuItem x:Name="AspectRatioLockMenuItem"
+                          Header="Lock Aspect Ratio (16:9)"
+                          IsCheckable="True"
+                          Click="ToggleAspectRatioLock_Click" />
                 <Separator />
                 <MenuItem Header="Sources"
                           x:Name="SourcesMenu" />

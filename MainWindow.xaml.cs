@@ -6,6 +6,7 @@ using System.IO;
 using System.Linq;
 using System.Runtime.InteropServices;
 using System.Threading.Tasks;
+using Microsoft.Win32;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Interop;
@@ -28,6 +29,7 @@ public partial class MainWindow : Window
     private readonly GameOfLifeEngine _engine = new();
     private readonly WindowCaptureService _windowCapture = new();
     private readonly WebcamCaptureService _webcamCapture = new();
+    private readonly FileCaptureService _fileCapture = new();
     private readonly AudioBeatDetector _audioBeatDetector = new();
     private readonly BlendEffect _blendEffect = new();
     private int _configuredColumns = DefaultColumns;
@@ -52,6 +54,8 @@ public partial class MainWindow : Window
     private int[] _colMap = Array.Empty<int>();
     private bool _isPaused;
     private double _currentAspectRatio = DefaultAspectRatio;
+    private bool _aspectRatioLocked;
+    private double _lockedAspectRatio = DefaultAspectRatio;
     private IntPtr _windowHandle;
     private bool _passthroughEnabled;
     private bool _preserveResolution;
@@ -113,6 +117,7 @@ public partial class MainWindow : Window
         Closed += (_, _) =>
         {
             _webcamCapture.Reset();
+            _fileCapture.Dispose();
             _audioBeatDetector.Dispose();
             Logger.Shutdown();
         };
@@ -120,7 +125,9 @@ public partial class MainWindow : Window
 
     private void InitializeVisualizer()
     {
-        _currentAspectRatio = DefaultAspectRatio;
+        _currentAspectRatio = _aspectRatioLocked
+            ? _lockedAspectRatio
+            : (_sources.Count > 0 ? _sources[0].AspectRatio : DefaultAspectRatio);
         _engine.Configure(_configuredColumns, _configuredDepth, _currentAspectRatio);
         _engine.SetMode(_lifeMode);
         _engine.SetBinningMode(_binningMode);
@@ -342,6 +349,10 @@ public partial class MainWindow : Window
         int nextColumns = columns ?? _engine.Columns;
         int nextDepth = depth ?? _engine.Depth;
         double nextAspect = aspectOverride ?? _currentAspectRatio;
+        if (_aspectRatioLocked)
+        {
+            nextAspect = _lockedAspectRatio;
+        }
         _currentAspectRatio = nextAspect;
 
         bool wasPaused = _isPaused;
@@ -483,6 +494,10 @@ public partial class MainWindow : Window
         {
             InvertCompositeMenuItem.IsChecked = _invertComposite;
         }
+        if (AspectRatioLockMenuItem != null)
+        {
+            AspectRatioLockMenuItem.IsChecked = _aspectRatioLocked;
+        }
         if (ShowFpsMenuItem != null)
         {
             ShowFpsMenuItem.IsChecked = _showFps;
@@ -587,6 +602,9 @@ public partial class MainWindow : Window
 
         SourcesMenu.Items.Clear();
 
+        var addFileItem = new MenuItem { Header = "Add File Source..." };
+        addFileItem.Click += AddFileSourceMenuItem_Click;
+
         var addWindowMenu = new MenuItem { Header = "Add Window Source" };
         _cachedWindows = _windowCapture.EnumerateWindows(_windowHandle);
         Logger.Info($"Enumerated windows: count={_cachedWindows.Count}");
@@ -643,6 +661,7 @@ public partial class MainWindow : Window
             }
         }
 
+        SourcesMenu.Items.Add(addFileItem);
         SourcesMenu.Items.Add(addWindowMenu);
         SourcesMenu.Items.Add(addWebcamMenu);
         SourcesMenu.Items.Add(new Separator());
@@ -660,9 +679,12 @@ public partial class MainWindow : Window
         for (int i = 0; i < _sources.Count; i++)
         {
             var source = _sources[i];
-            string label = source.Type == CaptureSource.SourceType.Webcam
-                ? $"{i + 1}. Camera: {source.DisplayName}"
-                : $"{i + 1}. {source.DisplayName}";
+            string label = source.Type switch
+            {
+                CaptureSource.SourceType.Webcam => $"{i + 1}. Camera: {source.DisplayName}",
+                CaptureSource.SourceType.File => $"{i + 1}. File: {source.DisplayName}",
+                _ => $"{i + 1}. {source.DisplayName}"
+            };
             var sourceItem = new MenuItem { Header = label, Tag = source };
 
             var blendMenu = new MenuItem { Header = "Blend Mode" };
@@ -677,6 +699,20 @@ public partial class MainWindow : Window
                 };
                 blendItem.Click += SourceBlendModeItem_Click;
                 blendMenu.Items.Add(blendItem);
+            }
+
+            var fitMenu = new MenuItem { Header = "Fit Mode" };
+            foreach (var fit in Enum.GetValues(typeof(FitMode)).Cast<FitMode>())
+            {
+                var fitItem = new MenuItem
+                {
+                    Header = fit.ToString(),
+                    IsCheckable = true,
+                    IsChecked = source.FitMode == fit,
+                    Tag = source
+                };
+                fitItem.Click += SourceFitModeItem_Click;
+                fitMenu.Items.Add(fitItem);
             }
 
             var primaryItem = new MenuItem
@@ -753,6 +789,7 @@ public partial class MainWindow : Window
             removeItem.Click += (_, _) => RemoveSource(source);
 
             sourceItem.Items.Add(blendMenu);
+            sourceItem.Items.Add(fitMenu);
             sourceItem.Items.Add(primaryItem);
             sourceItem.Items.Add(moveUpItem);
             sourceItem.Items.Add(moveDownItem);
@@ -796,6 +833,22 @@ public partial class MainWindow : Window
         AddOrPromoteWebcamSource(camera);
     }
 
+    private void AddFileSourceMenuItem_Click(object sender, RoutedEventArgs e)
+    {
+        var dialog = new OpenFileDialog
+        {
+            Title = "Select Image, GIF, or Video",
+            Filter = "Media Files|*.png;*.jpg;*.jpeg;*.bmp;*.gif;*.webp;*.mp4;*.mov;*.wmv;*.avi;*.mkv;*.webm;*.mpg;*.mpeg|Image Files|*.png;*.jpg;*.jpeg;*.bmp;*.gif;*.webp|Video Files|*.mp4;*.mov;*.wmv;*.avi;*.mkv;*.webm;*.mpg;*.mpeg|All Files|*.*",
+            Multiselect = false,
+            CheckFileExists = true
+        };
+
+        if (dialog.ShowDialog(this) == true)
+        {
+            AddOrPromoteFileSource(dialog.FileName);
+        }
+    }
+
     private void SourceBlendModeItem_Click(object sender, RoutedEventArgs e)
     {
         if (sender is not MenuItem { Header: string header, Tag: CaptureSource source })
@@ -806,6 +859,22 @@ public partial class MainWindow : Window
         if (Enum.TryParse<BlendMode>(header, ignoreCase: true, out var mode))
         {
             source.BlendMode = mode;
+            PopulateSourcesMenu();
+            RenderFrame();
+            SaveConfig();
+        }
+    }
+
+    private void SourceFitModeItem_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is not MenuItem { Header: string header, Tag: CaptureSource source })
+        {
+            return;
+        }
+
+        if (Enum.TryParse<FitMode>(header, ignoreCase: true, out var fitMode))
+        {
+            source.FitMode = fitMode;
             PopulateSourcesMenu();
             RenderFrame();
             SaveConfig();
@@ -874,6 +943,45 @@ public partial class MainWindow : Window
         _webcamErrorShown = false;
     }
 
+    private void AddOrPromoteFileSource(string path)
+    {
+        if (!_fileCapture.TryGetOrAdd(path, out var info, out var error))
+        {
+            string message = error ?? "Unsupported file format.";
+            MessageBox.Show(this, $"Failed to load file source:\n{message}", "File Source Error", MessageBoxButton.OK, MessageBoxImage.Warning);
+            Logger.Warn($"Failed to add file source: {path}. {message}");
+            return;
+        }
+
+        var existing = _sources.FirstOrDefault(s => s.Type == CaptureSource.SourceType.File && s.FilePath != null &&
+            string.Equals(s.FilePath, info.Path, StringComparison.OrdinalIgnoreCase));
+        if (existing != null)
+        {
+            Logger.Info($"File source already active: {info.Path}");
+        }
+        else
+        {
+            bool hadSources = _sources.Count > 0;
+            _sources.Add(CaptureSource.CreateFile(info.Path, info.DisplayName, info.Width, info.Height));
+            Logger.Info($"Inserted new file source (appended): {info.Path}");
+
+            if (!hadSources)
+            {
+                _currentAspectRatio = _sources[0].AspectRatio;
+                ApplyDimensions(null, null, _currentAspectRatio, persist: false);
+            }
+        }
+
+        if (_sources.Count == 1)
+        {
+            _currentAspectRatio = _sources[0].AspectRatio;
+            ApplyDimensions(null, null, _currentAspectRatio, persist: false);
+        }
+
+        RenderFrame();
+        SaveConfig();
+    }
+
     private void MakePrimarySource(CaptureSource source)
     {
         if (!_sources.Contains(source))
@@ -934,6 +1042,10 @@ public partial class MainWindow : Window
         {
             _windowCapture.RemoveCache(source.Window.Handle);
         }
+        else if (source.Type == CaptureSource.SourceType.File && source.FilePath != null)
+        {
+            _fileCapture.Remove(source.FilePath);
+        }
 
         if (_sources.Count == 0)
         {
@@ -969,6 +1081,8 @@ public partial class MainWindow : Window
                 _windowCapture.RemoveCache(source.Window.Handle);
             }
         }
+
+        _fileCapture.Clear();
         
         _sources.Clear();
         _lastCompositeFrame = null;
@@ -1027,7 +1141,7 @@ public partial class MainWindow : Window
             {
                 if (source.Type == CaptureSource.SourceType.Window && source.Window != null)
                 {
-                    var windowFrame = _windowCapture.CaptureFrame(source.Window, _engine.Columns, _engine.Rows, _preserveResolution);
+                    var windowFrame = _windowCapture.CaptureFrame(source.Window, _engine.Columns, _engine.Rows, source.FitMode, _preserveResolution);
                     if (windowFrame != null)
                     {
                         frame = new SourceFrame(windowFrame.OverlayDownscaled, windowFrame.DownscaledWidth, windowFrame.DownscaledHeight,
@@ -1044,7 +1158,7 @@ public partial class MainWindow : Window
                 }
                 else if (source.Type == CaptureSource.SourceType.Webcam && !string.IsNullOrWhiteSpace(source.WebcamId))
                 {
-                    var webcamFrame = _webcamCapture.CaptureFrame(source.WebcamId, _engine.Columns, _engine.Rows, _preserveResolution);
+                    var webcamFrame = _webcamCapture.CaptureFrame(source.WebcamId, _engine.Columns, _engine.Rows, source.FitMode, _preserveResolution);
                     if (webcamFrame != null)
                     {
                         frame = new SourceFrame(webcamFrame.OverlayDownscaled, webcamFrame.DownscaledWidth, webcamFrame.DownscaledHeight,
@@ -1055,6 +1169,24 @@ public partial class MainWindow : Window
                         {
                             source.FirstFrameReceived = true;
                             Logger.Info($"Webcam frame acquired for {source.DisplayName}: {webcamFrame.SourceWidth}x{webcamFrame.SourceHeight}");
+                        }
+                    }
+                }
+                else if (source.Type == CaptureSource.SourceType.File && !string.IsNullOrWhiteSpace(source.FilePath))
+                {
+                    var fileFrame = _fileCapture.CaptureFrame(source.FilePath, _engine.Columns, _engine.Rows, source.FitMode, _preserveResolution);
+                    if (fileFrame.HasValue)
+                    {
+                        var value = fileFrame.Value;
+                        frame = new SourceFrame(value.OverlayDownscaled, value.DownscaledWidth, value.DownscaledHeight,
+                            value.OverlaySource, value.SourceWidth, value.SourceHeight);
+                        source.UpdateFileDimensions(value.SourceWidth, value.SourceHeight);
+                        source.HasError = false;
+                        source.MissedFrames = 0;
+                        if (!source.FirstFrameReceived)
+                        {
+                            source.FirstFrameReceived = true;
+                            Logger.Info($"File frame acquired for {source.DisplayName}: {value.SourceWidth}x{value.SourceHeight}");
                         }
                     }
                 }
@@ -1115,6 +1247,20 @@ public partial class MainWindow : Window
                     }
                 }
 
+                if (source.Type == CaptureSource.SourceType.File)
+                {
+                    source.MissedFrames++;
+                    var age = DateTime.UtcNow - source.AddedUtc;
+                    if (!source.FirstFrameReceived && age < TimeSpan.FromSeconds(5))
+                    {
+                        continue;
+                    }
+                    if (source.MissedFrames <= 180 && age < TimeSpan.FromSeconds(10))
+                    {
+                        continue;
+                    }
+                }
+
                 Logger.Warn($"Source frame missing; removing source {source.DisplayName} ({source.Type})");
                 removed.Add(source);
                 continue;
@@ -1134,6 +1280,10 @@ public partial class MainWindow : Window
                 {
                     _webcamCapture.Reset(source.WebcamId);
                     source.IsInitialized = false;
+                }
+                else if (source.Type == CaptureSource.SourceType.File && source.FilePath != null)
+                {
+                    _fileCapture.Remove(source.FilePath);
                 }
             }
 
@@ -1182,6 +1332,30 @@ public partial class MainWindow : Window
             PassthroughMenuItem.IsChecked = _passthroughEnabled;
         }
         RenderFrame();
+        SaveConfig();
+    }
+
+    private void ToggleAspectRatioLock_Click(object sender, RoutedEventArgs e)
+    {
+        _aspectRatioLocked = !_aspectRatioLocked;
+        if (_aspectRatioLocked)
+        {
+            if (_lockedAspectRatio <= 0)
+            {
+                _lockedAspectRatio = DefaultAspectRatio;
+            }
+            ApplyDimensions(null, null, _lockedAspectRatio);
+        }
+        else
+        {
+            double target = _sources.Count > 0 ? _sources[0].AspectRatio : DefaultAspectRatio;
+            ApplyDimensions(null, null, target);
+        }
+
+        if (AspectRatioLockMenuItem != null)
+        {
+            AspectRatioLockMenuItem.IsChecked = _aspectRatioLocked;
+        }
         SaveConfig();
     }
 
@@ -1596,14 +1770,14 @@ public partial class MainWindow : Window
             if (!primedDownscaled)
             {
                 CopyIntoBuffer(_compositeDownscaledBuffer, downscaledWidth, downscaledHeight,
-                    frame.Downscaled, frame.DownscaledWidth, frame.DownscaledHeight, source.Opacity, source.Mirror && source.Type == CaptureSource.SourceType.Webcam);
+                    frame.Downscaled, frame.DownscaledWidth, frame.DownscaledHeight, source.Opacity, source.Mirror && source.Type == CaptureSource.SourceType.Webcam, source.FitMode);
                 primedDownscaled = true;
                 wroteDownscaled = true;
             }
             else
             {
                 CompositeIntoBuffer(_compositeDownscaledBuffer, downscaledWidth, downscaledHeight,
-                    frame.Downscaled, frame.DownscaledWidth, frame.DownscaledHeight, source.BlendMode, source.Opacity, source.Mirror && source.Type == CaptureSource.SourceType.Webcam);
+                    frame.Downscaled, frame.DownscaledWidth, frame.DownscaledHeight, source.BlendMode, source.Opacity, source.Mirror && source.Type == CaptureSource.SourceType.Webcam, source.FitMode);
                 wroteDownscaled = true;
             }
 
@@ -1615,13 +1789,13 @@ public partial class MainWindow : Window
 
                 if (!primedHighRes)
                 {
-                    CopyIntoBuffer(highResBuffer, targetWidth, targetHeight, sourceBuffer, sourceWidth, sourceHeight, source.Opacity, source.Mirror && source.Type == CaptureSource.SourceType.Webcam);
+                    CopyIntoBuffer(highResBuffer, targetWidth, targetHeight, sourceBuffer, sourceWidth, sourceHeight, source.Opacity, source.Mirror && source.Type == CaptureSource.SourceType.Webcam, source.FitMode);
                     primedHighRes = true;
                     wroteHighRes = true;
                 }
                 else
                 {
-                    CompositeIntoBuffer(highResBuffer, targetWidth, targetHeight, sourceBuffer, sourceWidth, sourceHeight, source.BlendMode, source.Opacity, source.Mirror && source.Type == CaptureSource.SourceType.Webcam);
+                    CompositeIntoBuffer(highResBuffer, targetWidth, targetHeight, sourceBuffer, sourceWidth, sourceHeight, source.BlendMode, source.Opacity, source.Mirror && source.Type == CaptureSource.SourceType.Webcam, source.FitMode);
                     wroteHighRes = true;
                 }
             }
@@ -1636,30 +1810,33 @@ public partial class MainWindow : Window
             wroteHighRes ? highResBuffer : null, targetWidth, targetHeight);
     }
 
-    private void CopyIntoBuffer(byte[] destination, int destWidth, int destHeight, byte[] source, int sourceWidth, int sourceHeight, double opacity, bool mirror)
+    private void CopyIntoBuffer(byte[] destination, int destWidth, int destHeight, byte[] source, int sourceWidth, int sourceHeight, double opacity, bool mirror, FitMode fitMode)
     {
         opacity = Math.Clamp(opacity, 0.0, 1.0);
         int destStride = destWidth * 4;
         int sourceStride = sourceWidth * 4;
-
-        double scaleX = sourceWidth / (double)destWidth;
-        double scaleY = sourceHeight / (double)destHeight;
+        var mapping = ImageFit.GetMapping(fitMode, sourceWidth, sourceHeight, destWidth, destHeight);
 
         Parallel.For(0, destHeight, row =>
         {
-            int srcY = Math.Min(sourceHeight - 1, (int)Math.Floor(row * scaleY));
             int destRowOffset = row * destStride;
-            int srcRowOffset = srcY * sourceStride;
             for (int col = 0; col < destWidth; col++)
             {
-                int sampleX = Math.Min(sourceWidth - 1, (int)Math.Floor(col * scaleX));
-                int srcX = mirror ? (sourceWidth - 1 - sampleX) : sampleX;
                 int destIndex = destRowOffset + (col * 4);
-                int srcIndex = srcRowOffset + (srcX * 4);
-
-                byte sb = source[srcIndex];
-                byte sg = source[srcIndex + 1];
-                byte sr = source[srcIndex + 2];
+                byte sb = 0;
+                byte sg = 0;
+                byte sr = 0;
+                if (ImageFit.TryMapPixel(mapping, col, row, out int srcX, out int srcY))
+                {
+                    if (mirror)
+                    {
+                        srcX = sourceWidth - 1 - srcX;
+                    }
+                    int srcIndex = (srcY * sourceStride) + (srcX * 4);
+                    sb = source[srcIndex];
+                    sg = source[srcIndex + 1];
+                    sr = source[srcIndex + 2];
+                }
 
                 destination[destIndex] = ClampToByte((int)(sb * opacity));
                 destination[destIndex + 1] = ClampToByte((int)(sg * opacity));
@@ -1669,7 +1846,7 @@ public partial class MainWindow : Window
         });
     }
 
-    private void CompositeIntoBuffer(byte[] destination, int destWidth, int destHeight, byte[] source, int sourceWidth, int sourceHeight, BlendMode mode, double opacity, bool mirror)
+    private void CompositeIntoBuffer(byte[] destination, int destWidth, int destHeight, byte[] source, int sourceWidth, int sourceHeight, BlendMode mode, double opacity, bool mirror, FitMode fitMode)
     {
         if (destination == null || source == null || destWidth <= 0 || destHeight <= 0 || sourceWidth <= 0 || sourceHeight <= 0)
         {
@@ -1697,40 +1874,47 @@ public partial class MainWindow : Window
                     int destIndex = destRowOffset + (col * 4);
                     int sampleX = mirror ? (sourceWidth - 1 - col) : col;
                     int srcIndex = srcRowOffset + (sampleX * 4);
-                    BlendInto(destination, source, destIndex, srcIndex, mode, opacity);
+                    byte sb = source[srcIndex];
+                    byte sg = source[srcIndex + 1];
+                    byte sr = source[srcIndex + 2];
+                    BlendInto(destination, destIndex, sb, sg, sr, mode, opacity);
                 }
             });
             return;
         }
 
-        double scaleX = sourceWidth / (double)destWidth;
-        double scaleY = sourceHeight / (double)destHeight;
+        var mapping = ImageFit.GetMapping(fitMode, sourceWidth, sourceHeight, destWidth, destHeight);
         Parallel.For(0, destHeight, row =>
         {
-            int srcY = Math.Min(sourceHeight - 1, (int)Math.Floor(row * scaleY));
             int destRowOffset = row * destStride;
-            int srcRowOffset = srcY * sourceStride;
             for (int col = 0; col < destWidth; col++)
             {
-                int sampleX = Math.Min(sourceWidth - 1, (int)Math.Floor(col * scaleX));
-                int srcX = mirror ? (sourceWidth - 1 - sampleX) : sampleX;
                 int destIndex = destRowOffset + (col * 4);
-                int srcIndex = srcRowOffset + (srcX * 4);
-                BlendInto(destination, source, destIndex, srcIndex, mode, opacity);
+                byte sb = 0;
+                byte sg = 0;
+                byte sr = 0;
+                if (ImageFit.TryMapPixel(mapping, col, row, out int srcX, out int srcY))
+                {
+                    if (mirror)
+                    {
+                        srcX = sourceWidth - 1 - srcX;
+                    }
+                    int srcIndex = (srcY * sourceStride) + (srcX * 4);
+                    sb = source[srcIndex];
+                    sg = source[srcIndex + 1];
+                    sr = source[srcIndex + 2];
+                }
+                BlendInto(destination, destIndex, sb, sg, sr, mode, opacity);
             }
         });
     }
 
-    private static void BlendInto(byte[] destination, byte[] source, int destIndex, int srcIndex, BlendMode mode, double opacity)
+    private static void BlendInto(byte[] destination, int destIndex, byte sb, byte sg, byte sr, BlendMode mode, double opacity)
     {
         opacity = Math.Clamp(opacity, 0.0, 1.0);
         byte db = destination[destIndex];
         byte dg = destination[destIndex + 1];
         byte dr = destination[destIndex + 2];
-
-        byte sb = source[srcIndex];
-        byte sg = source[srcIndex + 1];
-        byte sr = source[srcIndex + 2];
 
         int b;
         int g;
@@ -2383,6 +2567,8 @@ public partial class MainWindow : Window
             _oscillationMaxFps = Math.Clamp(config.OscillationMaxFps, 1, 144);
             _audioSyncEnabled = config.AudioSyncEnabled;
             _selectedAudioDeviceId = config.AudioDeviceId;
+            _aspectRatioLocked = config.AspectRatioLocked;
+            _lockedAspectRatio = config.LockedAspectRatio > 0 ? config.LockedAspectRatio : DefaultAspectRatio;
 
             if (!string.IsNullOrWhiteSpace(_selectedAudioDeviceId))
             {
@@ -2442,6 +2628,8 @@ public partial class MainWindow : Window
                 AudioDeviceId = _selectedAudioDeviceId,
                 BlendMode = _blendMode.ToString(),
                 Fullscreen = _isFullscreen,
+                AspectRatioLocked = _aspectRatioLocked,
+                LockedAspectRatio = _lockedAspectRatio,
                 Sources = BuildSourceConfigs()
             };
 
@@ -2470,8 +2658,10 @@ public partial class MainWindow : Window
                 Type = source.Type.ToString(),
                 WindowTitle = source.Window?.Title,
                 WebcamId = source.WebcamId,
+                FilePath = source.FilePath,
                 DisplayName = source.DisplayName,
                 BlendMode = source.BlendMode.ToString(),
+                FitMode = source.FitMode.ToString(),
                 Opacity = source.Opacity,
                 Mirror = source.Mirror
             });
@@ -2523,6 +2713,18 @@ public partial class MainWindow : Window
                         restored = CaptureSource.CreateWebcam(camera.Id, camera.Name);
                     }
                     break;
+
+                case CaptureSource.SourceType.File:
+                    if (string.IsNullOrWhiteSpace(config.FilePath))
+                    {
+                        break;
+                    }
+
+                    if (_fileCapture.TryGetOrAdd(config.FilePath, out var info, out _))
+                    {
+                        restored = CaptureSource.CreateFile(info.Path, info.DisplayName, info.Width, info.Height);
+                    }
+                    break;
             }
 
             if (restored == null)
@@ -2546,6 +2748,11 @@ public partial class MainWindow : Window
         if (Enum.TryParse<BlendMode>(config.BlendMode, true, out var blend))
         {
             source.BlendMode = blend;
+        }
+
+        if (Enum.TryParse<FitMode>(config.FitMode, true, out var fitMode))
+        {
+            source.FitMode = fitMode;
         }
 
         source.Opacity = Math.Clamp(config.Opacity, 0, 1);
@@ -2580,6 +2787,8 @@ public partial class MainWindow : Window
         public string? AudioDeviceId { get; set; }
         public string BlendMode { get; set; } = MainWindow.BlendMode.Additive.ToString();
         public bool Fullscreen { get; set; }
+        public bool AspectRatioLocked { get; set; }
+        public double LockedAspectRatio { get; set; } = DefaultAspectRatio;
         public List<SourceConfig> Sources { get; set; } = new();
 
         public sealed class SourceConfig
@@ -2587,8 +2796,10 @@ public partial class MainWindow : Window
             public string Type { get; set; } = CaptureSource.SourceType.Window.ToString();
             public string? WindowTitle { get; set; }
             public string? WebcamId { get; set; }
+            public string? FilePath { get; set; }
             public string? DisplayName { get; set; }
             public string BlendMode { get; set; } = MainWindow.BlendMode.Normal.ToString();
+            public string FitMode { get; set; } = lifeviz.FitMode.Fit.ToString();
             public double Opacity { get; set; } = 1.0;
             public bool Mirror { get; set; }
         }
@@ -2612,28 +2823,41 @@ public partial class MainWindow : Window
         public enum SourceType
         {
             Window,
-            Webcam
+            Webcam,
+            File
         }
 
-        private CaptureSource(SourceType type, WindowHandleInfo? window, string? webcamId, string displayName)
+        private CaptureSource(SourceType type, WindowHandleInfo? window, string? webcamId, string? filePath, string displayName, int? fileWidth, int? fileHeight)
         {
             Type = type;
             Window = window;
             WebcamId = webcamId;
+            FilePath = filePath;
             DisplayName = displayName;
+            FileWidth = fileWidth;
+            FileHeight = fileHeight;
         }
 
         public static CaptureSource CreateWindow(WindowHandleInfo window) =>
-            new(SourceType.Window, window, null, window.Title) { AddedUtc = DateTime.UtcNow };
+            new(SourceType.Window, window, null, null, window.Title, null, null) { AddedUtc = DateTime.UtcNow };
 
         public static CaptureSource CreateWebcam(string webcamId, string name) =>
-            new(SourceType.Webcam, null, webcamId, name) { AddedUtc = DateTime.UtcNow };
+            new(SourceType.Webcam, null, webcamId, null, name, null, null) { AddedUtc = DateTime.UtcNow };
+
+        public static CaptureSource CreateFile(string filePath, string displayName, int width, int height)
+        {
+            int? fileWidth = width > 0 ? width : null;
+            int? fileHeight = height > 0 ? height : null;
+            return new(SourceType.File, null, null, filePath, displayName, fileWidth, fileHeight) { AddedUtc = DateTime.UtcNow };
+        }
 
         public SourceType Type { get; }
         public WindowHandleInfo? Window { get; set; }
         public string? WebcamId { get; }
+        public string? FilePath { get; }
         public string DisplayName { get; }
         public BlendMode BlendMode { get; set; } = BlendMode.Normal;
+        public FitMode FitMode { get; set; } = FitMode.Fit;
         public SourceFrame? LastFrame { get; set; }
         public bool HasError { get; set; }
         public int MissedFrames { get; set; }
@@ -2644,6 +2868,8 @@ public partial class MainWindow : Window
         public bool RetryInitializationAttempted { get; set; }
 
         public bool IsInitialized { get; set; }
+        public int? FileWidth { get; private set; }
+        public int? FileHeight { get; private set; }
 
         public double AspectRatio
         {
@@ -2659,12 +2885,37 @@ public partial class MainWindow : Window
                     return Window.AspectRatio;
                 }
 
+                if (Type == SourceType.File && FileWidth.HasValue && FileHeight.HasValue && FileHeight > 0)
+                {
+                    return Math.Max(0.05, FileWidth.Value / (double)FileHeight.Value);
+                }
+
                 return DefaultAspectRatio;
             }
         }
 
-        public int? FallbackWidth => Type == SourceType.Window ? Window?.Width : LastFrame?.SourceWidth;
-        public int? FallbackHeight => Type == SourceType.Window ? Window?.Height : LastFrame?.SourceHeight;
+        public int? FallbackWidth => Type switch
+        {
+            SourceType.Window => Window?.Width,
+            SourceType.File => FileWidth,
+            _ => LastFrame?.SourceWidth
+        };
+
+        public int? FallbackHeight => Type switch
+        {
+            SourceType.Window => Window?.Height,
+            SourceType.File => FileHeight,
+            _ => LastFrame?.SourceHeight
+        };
+
+        public void UpdateFileDimensions(int width, int height)
+        {
+            if (width > 0 && height > 0)
+            {
+                FileWidth = width;
+                FileHeight = height;
+            }
+        }
     }
 
     private sealed class SourceFrame

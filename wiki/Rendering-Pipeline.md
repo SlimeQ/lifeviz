@@ -17,10 +17,10 @@
 - For each slice, the engine walks the relevant frames and treats alive cells as set bits, forming a binary number. That integer is normalized against the maximum for that bit-length to derive a 0-255 channel value.
 - The renderer writes BGRA bytes into `_pixelBuffer`, then blits the buffer via `WriteableBitmap.WritePixels`.
 
-## Window Capture Injection
+## Source Capture Injection
 
-1. `WindowCaptureService` enumerates all visible, non-minimized windows (excluding LifeViz itself), grabs their DWM extended frame bounds to get physical pixel sizes (avoids DPI virtualization cropping), and captures each active window via BitBlt into a `System.Drawing.Bitmap`. `WebcamCaptureService` uses the modern WinRT `MediaCapture` API, which provides a high-performance path to stream frames directly into reusable memory buffers, avoiding the GC pressure associated with frequent allocations during capture.
-2. Each capture is downscaled to the grid size and stored as BGRA; the primary source only materializes a source-resolution buffer when preserve-res rendering is enabled, and buffers are reused per window/webcam to avoid per-frame allocations.
+1. `WindowCaptureService` enumerates all visible, non-minimized windows (excluding LifeViz itself), grabs their DWM extended frame bounds to get physical pixel sizes (avoids DPI virtualization cropping), and captures each active window via BitBlt into a `System.Drawing.Bitmap`. `WebcamCaptureService` uses the modern WinRT `MediaCapture` API, which provides a high-performance path to stream frames directly into reusable memory buffers, avoiding the GC pressure associated with frequent allocations during capture. `FileCaptureService` loads static images (including WEBP) and GIFs via WPF bitmap decoders and uses `MediaPlayer` for videos; animated files loop, and frames are converted to BGRA buffers for compositing.
+2. Each capture is downscaled to the grid size and stored as BGRA using the per-source fit mode (Fit default, plus Fill/Stretch/Center/Tile/Span); the primary source only materializes a source-resolution buffer when preserve-res rendering is enabled, and buffers are reused per window/webcam to avoid per-frame allocations.
 3. Sources are composited CPU-side in stack order using their selected blend modes (Normal, Additive, Multiply, Screen, Overlay, Lighten, Darken, Subtractive) into a shared downscaled buffer (and an optional high-res buffer when preserve-res is enabled).
 4. The composited downscaled buffer feeds the injection path: luminance masks for *Naive Grayscale* or per-channel masks for *RGB Channel Bins*. If a source disappears, it is removed automatically; removing the last source restores the default aspect ratio (and webcam capture is released).
 

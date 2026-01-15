@@ -47,7 +47,7 @@ internal sealed class WebcamCaptureService : IDisposable
         }
     }
 
-    public WebcamFrame? CaptureFrame(string cameraId, int targetWidth, int targetHeight, bool includeSource = true)
+    public WebcamFrame? CaptureFrame(string cameraId, int targetWidth, int targetHeight, FitMode fitMode, bool includeSource = true)
     {
         if (string.IsNullOrWhiteSpace(cameraId) || targetWidth <= 0 || targetHeight <= 0)
         {
@@ -83,7 +83,7 @@ internal sealed class WebcamCaptureService : IDisposable
                 data.DownscaledBuffer = new byte[downscaledLength];
             }
 
-            Downscale(latest, width, height, data.DownscaledBuffer, targetWidth, targetHeight);
+            Downscale(latest, width, height, data.DownscaledBuffer, targetWidth, targetHeight, fitMode);
 
             if (includeSource)
             {
@@ -256,28 +256,32 @@ internal sealed class WebcamCaptureService : IDisposable
         }
     }
     
-    private static void Downscale(byte[] source, int sourceWidth, int sourceHeight, byte[] destination, int targetWidth, int targetHeight)
+    private static void Downscale(byte[] source, int sourceWidth, int sourceHeight, byte[] destination, int targetWidth, int targetHeight, FitMode fitMode)
     {
-        double scaleX = sourceWidth / (double)targetWidth;
-        double scaleY = sourceHeight / (double)targetHeight;
+        var mapping = ImageFit.GetMapping(fitMode, sourceWidth, sourceHeight, targetWidth, targetHeight);
         int destStride = targetWidth * 4;
         int sourceStride = sourceWidth * 4;
 
         Parallel.For(0, targetHeight, row =>
         {
-            int srcY = Math.Min(sourceHeight - 1, (int)Math.Floor(row * scaleY));
             int destRowOffset = row * destStride;
-            int srcRowOffset = srcY * sourceStride;
 
             for (int col = 0; col < targetWidth; col++)
             {
-                int srcX = Math.Min(sourceWidth - 1, (int)Math.Floor(col * scaleX));
                 int destIndex = destRowOffset + (col * 4);
-                int srcIndex = srcRowOffset + (srcX * 4);
-
-                destination[destIndex] = source[srcIndex];
-                destination[destIndex + 1] = source[srcIndex + 1];
-                destination[destIndex + 2] = source[srcIndex + 2];
+                if (ImageFit.TryMapPixel(mapping, col, row, out int srcX, out int srcY))
+                {
+                    int srcIndex = (srcY * sourceStride) + (srcX * 4);
+                    destination[destIndex] = source[srcIndex];
+                    destination[destIndex + 1] = source[srcIndex + 1];
+                    destination[destIndex + 2] = source[srcIndex + 2];
+                }
+                else
+                {
+                    destination[destIndex] = 0;
+                    destination[destIndex + 1] = 0;
+                    destination[destIndex + 2] = 0;
+                }
                 destination[destIndex + 3] = 255;
             }
         });
