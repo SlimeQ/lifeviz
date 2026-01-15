@@ -2,13 +2,13 @@
 
 ## Layout
 
-- `MainWindow.xaml` hosts a `Viewbox`-wrapped `Image` control to enforce a constant aspect ratio. Default is 16:9, but the primary source in the *Sources* stack overrides the ratio automatically.
+- `MainWindow.xaml` hosts a `Viewbox`-wrapped `Image` control to enforce a constant aspect ratio. Default is 16:9, but the primary source in the *Sources* stack overrides the ratio automatically (if the primary is a layer group, its first child supplies the ratio).
 - The backing surface is a `WriteableBitmap` sized to the current simulation grid (`columns x rows`), so each logical cell maps to a single pixel before scaling.
 
 ## Simulation Loop
 
 - `DispatcherTimer` in `MainWindow.xaml.cs` ticks at a user-selectable rate (15 / 30 / 60 fps) via the context menu.
-- Each tick (unless paused) captures every active source, composites them (per-source blend modes, ordered by the stack), injects the resulting buffer into the simulation, advances `_engine.Step()`, then calls `RenderFrame()`.
+- Each tick (unless paused) captures every active source, composites them (per-source blend modes, ordered by the stack, including layer groups), injects the resulting buffer into the simulation, advances `_engine.Step()`, then calls `RenderFrame()`.
 - The engine maintains a depth stack (`List<bool[,]>`) where index 0 is the newest frame.
 
 ## Color Encoding
@@ -21,7 +21,7 @@
 
 1. `WindowCaptureService` enumerates all visible, non-minimized windows (excluding LifeViz itself), grabs their DWM extended frame bounds to get physical pixel sizes (avoids DPI virtualization cropping), and captures each active window via BitBlt into a `System.Drawing.Bitmap`. `WebcamCaptureService` uses the modern WinRT `MediaCapture` API, which provides a high-performance path to stream frames directly into reusable memory buffers, avoiding the GC pressure associated with frequent allocations during capture. `FileCaptureService` loads static images (including WEBP) and GIFs via WPF bitmap decoders and uses `MediaPlayer` for videos; animated files loop, and frames are converted to BGRA buffers for compositing.
 2. Each capture is downscaled to the grid size and stored as BGRA using the per-source fit mode (Fit default, plus Fill/Stretch/Center/Tile/Span); the primary source only materializes a source-resolution buffer when preserve-res rendering is enabled, and buffers are reused per window/webcam to avoid per-frame allocations.
-3. Sources are composited CPU-side in stack order using their selected blend modes (Normal, Additive, Multiply, Screen, Overlay, Lighten, Darken, Subtractive) into a shared downscaled buffer (and an optional high-res buffer when preserve-res is enabled).
+3. Sources are composited CPU-side in stack order using their selected blend modes (Normal, Additive, Multiply, Screen, Overlay, Lighten, Darken, Subtractive) into a shared downscaled buffer (and an optional high-res buffer when preserve-res is enabled). Layer groups are composited recursively: each group blends its children into a private composite buffer sized to the group's primary aspect (fit within the engine grid), then that group composite is treated as a single layer in its parent stack.
 4. The composited downscaled buffer feeds the injection path: luminance masks for *Naive Grayscale* or per-channel masks for *RGB Channel Bins*. If a source disappears, it is removed automatically; removing the last source restores the default aspect ratio (and webcam capture is released).
 
 ## Passthrough Underlay

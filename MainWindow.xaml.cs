@@ -602,68 +602,15 @@ public partial class MainWindow : Window
 
         SourcesMenu.Items.Clear();
 
-        var addFileItem = new MenuItem { Header = "Add File Source..." };
-        addFileItem.Click += AddFileSourceMenuItem_Click;
-
-        var addWindowMenu = new MenuItem { Header = "Add Window Source" };
         _cachedWindows = _windowCapture.EnumerateWindows(_windowHandle);
         Logger.Info($"Enumerated windows: count={_cachedWindows.Count}");
-        if (_cachedWindows.Count == 0)
-        {
-            addWindowMenu.Items.Add(new MenuItem
-            {
-                Header = "No windows detected",
-                IsEnabled = false
-            });
-        }
-        else
-        {
-            foreach (var window in _cachedWindows)
-            {
-                bool alreadyAdded = _sources.Any(s => s.Type == CaptureSource.SourceType.Window && s.Window != null && s.Window.Handle == window.Handle);
-                var item = new MenuItem
-                {
-                    Header = window.Title,
-                    Tag = window,
-                    IsCheckable = true,
-                    IsChecked = alreadyAdded
-                };
-                item.Click += AddWindowSourceMenuItem_Click;
-                addWindowMenu.Items.Add(item);
-            }
-        }
-
-        var addWebcamMenu = new MenuItem { Header = "Add Webcam Source" };
         _cachedCameras = _webcamCapture.EnumerateCameras();
         Logger.Info($"Enumerated webcams: count={_cachedCameras.Count}");
-        if (_cachedCameras.Count == 0)
-        {
-            addWebcamMenu.Items.Add(new MenuItem
-            {
-                Header = "No webcams detected",
-                IsEnabled = false
-            });
-        }
-        else
-        {
-            foreach (var camera in _cachedCameras)
-            {
-                bool alreadyAdded = _sources.Any(s => s.Type == CaptureSource.SourceType.Webcam && string.Equals(s.WebcamId, camera.Id, StringComparison.OrdinalIgnoreCase));
-                var item = new MenuItem
-                {
-                    Header = camera.Name,
-                    Tag = camera,
-                    IsCheckable = true,
-                    IsChecked = alreadyAdded
-                };
-                item.Click += AddWebcamSourceMenuItem_Click;
-                addWebcamMenu.Items.Add(item);
-            }
-        }
 
-        SourcesMenu.Items.Add(addFileItem);
-        SourcesMenu.Items.Add(addWindowMenu);
-        SourcesMenu.Items.Add(addWebcamMenu);
+        SourcesMenu.Items.Add(BuildAddLayerGroupMenuItem(null));
+        SourcesMenu.Items.Add(BuildAddWindowMenuItem(null));
+        SourcesMenu.Items.Add(BuildAddWebcamMenuItem(null));
+        SourcesMenu.Items.Add(BuildAddFileMenuItem(null));
         SourcesMenu.Items.Add(new Separator());
 
         if (_sources.Count == 0)
@@ -678,127 +625,7 @@ public partial class MainWindow : Window
 
         for (int i = 0; i < _sources.Count; i++)
         {
-            var source = _sources[i];
-            string label = source.Type switch
-            {
-                CaptureSource.SourceType.Webcam => $"{i + 1}. Camera: {source.DisplayName}",
-                CaptureSource.SourceType.File => $"{i + 1}. File: {source.DisplayName}",
-                _ => $"{i + 1}. {source.DisplayName}"
-            };
-            var sourceItem = new MenuItem { Header = label, Tag = source };
-
-            var blendMenu = new MenuItem { Header = "Blend Mode" };
-            foreach (var mode in Enum.GetValues(typeof(BlendMode)).Cast<BlendMode>())
-            {
-                var blendItem = new MenuItem
-                {
-                    Header = mode.ToString(),
-                    IsCheckable = true,
-                    IsChecked = source.BlendMode == mode,
-                    Tag = source
-                };
-                blendItem.Click += SourceBlendModeItem_Click;
-                blendMenu.Items.Add(blendItem);
-            }
-
-            var fitMenu = new MenuItem { Header = "Fit Mode" };
-            foreach (var fit in Enum.GetValues(typeof(FitMode)).Cast<FitMode>())
-            {
-                var fitItem = new MenuItem
-                {
-                    Header = fit.ToString(),
-                    IsCheckable = true,
-                    IsChecked = source.FitMode == fit,
-                    Tag = source
-                };
-                fitItem.Click += SourceFitModeItem_Click;
-                fitMenu.Items.Add(fitItem);
-            }
-
-            var primaryItem = new MenuItem
-            {
-                Header = "Make Primary (adopt aspect)",
-                IsEnabled = i != 0
-            };
-            primaryItem.Click += (_, _) => MakePrimarySource(source);
-
-            var moveUpItem = new MenuItem
-            {
-                Header = "Move Up",
-                IsEnabled = i > 0
-            };
-            moveUpItem.Click += (_, _) => MoveSource(source, -1);
-
-            var moveDownItem = new MenuItem
-            {
-                Header = "Move Down",
-                IsEnabled = i < _sources.Count - 1
-            };
-            moveDownItem.Click += (_, _) => MoveSource(source, 1);
-
-            var mirrorItem = new MenuItem
-            {
-                Header = "Mirror Webcam",
-                IsCheckable = true,
-                IsChecked = source.Mirror,
-                IsEnabled = source.Type == CaptureSource.SourceType.Webcam
-            };
-            mirrorItem.Click += (_, _) =>
-            {
-                source.Mirror = !source.Mirror;
-                Logger.Info($"Mirror toggled for {source.DisplayName}: {source.Mirror}");
-                RenderFrame();
-                SaveConfig();
-            };
-
-            var opacityItem = new MenuItem
-            {
-                Header = "Opacity",
-                StaysOpenOnClick = true
-            };
-            var opacityValueItem = new MenuItem
-            {
-                Header = $"{source.Opacity:P0}",
-                IsEnabled = false
-            };
-            var opacitySlider = new Slider
-            {
-                Minimum = 0,
-                Maximum = 1,
-                Value = Math.Clamp(source.Opacity, 0, 1),
-                Width = 140,
-                SmallChange = 0.05,
-                LargeChange = 0.1,
-                Margin = new Thickness(12, 4, 12, 8)
-            };
-            opacitySlider.ValueChanged += (_, args) =>
-            {
-                source.Opacity = Math.Clamp(args.NewValue, 0, 1);
-                Logger.Info($"Source opacity changed: {source.DisplayName} ({source.Type}) = {source.Opacity:F2}");
-                opacityValueItem.Header = $"{source.Opacity:P0}";
-                RenderFrame();
-                SaveConfig();
-            };
-            opacityItem.Items.Add(opacityValueItem);
-            opacityItem.Items.Add(opacitySlider);
-
-            var removeItem = new MenuItem
-            {
-                Header = "Remove"
-            };
-            removeItem.Click += (_, _) => RemoveSource(source);
-
-            sourceItem.Items.Add(blendMenu);
-            sourceItem.Items.Add(fitMenu);
-            sourceItem.Items.Add(primaryItem);
-            sourceItem.Items.Add(moveUpItem);
-            sourceItem.Items.Add(moveDownItem);
-            sourceItem.Items.Add(mirrorItem);
-            sourceItem.Items.Add(opacityItem);
-            sourceItem.Items.Add(new Separator());
-            sourceItem.Items.Add(removeItem);
-
-            SourcesMenu.Items.Add(sourceItem);
+            SourcesMenu.Items.Add(BuildSourceMenuItem(_sources[i], _sources, i, isTopLevel: true));
         }
 
         SourcesMenu.Items.Add(new Separator());
@@ -811,30 +638,284 @@ public partial class MainWindow : Window
         SourcesMenu.Items.Add(clearItem);
     }
 
+    private sealed class WindowAddTarget
+    {
+        public WindowAddTarget(WindowHandleInfo info, CaptureSource? parentGroup)
+        {
+            Info = info;
+            ParentGroup = parentGroup;
+        }
+
+        public WindowHandleInfo Info { get; }
+        public CaptureSource? ParentGroup { get; }
+    }
+
+    private sealed class WebcamAddTarget
+    {
+        public WebcamAddTarget(WebcamCaptureService.CameraInfo camera, CaptureSource? parentGroup)
+        {
+            Camera = camera;
+            ParentGroup = parentGroup;
+        }
+
+        public WebcamCaptureService.CameraInfo Camera { get; }
+        public CaptureSource? ParentGroup { get; }
+    }
+
+    private MenuItem BuildAddLayerGroupMenuItem(CaptureSource? parentGroup)
+    {
+        var addGroupItem = new MenuItem { Header = "Add Layer Group", Tag = parentGroup };
+        addGroupItem.Click += AddLayerGroupMenuItem_Click;
+        return addGroupItem;
+    }
+
+    private MenuItem BuildAddFileMenuItem(CaptureSource? parentGroup)
+    {
+        var addFileItem = new MenuItem { Header = "Add File Source...", Tag = parentGroup };
+        addFileItem.Click += AddFileSourceMenuItem_Click;
+        return addFileItem;
+    }
+
+    private MenuItem BuildAddWindowMenuItem(CaptureSource? parentGroup)
+    {
+        var addWindowMenu = new MenuItem { Header = "Add Window Source" };
+        if (_cachedWindows.Count == 0)
+        {
+            addWindowMenu.Items.Add(new MenuItem
+            {
+                Header = "No windows detected",
+                IsEnabled = false
+            });
+            return addWindowMenu;
+        }
+
+        foreach (var window in _cachedWindows)
+        {
+            bool alreadyAdded = ContainsWindowSource(window.Handle);
+            var item = new MenuItem
+            {
+                Header = window.Title,
+                Tag = new WindowAddTarget(window, parentGroup),
+                IsCheckable = true,
+                IsChecked = alreadyAdded
+            };
+            item.Click += AddWindowSourceMenuItem_Click;
+            addWindowMenu.Items.Add(item);
+        }
+
+        return addWindowMenu;
+    }
+
+    private MenuItem BuildAddWebcamMenuItem(CaptureSource? parentGroup)
+    {
+        var addWebcamMenu = new MenuItem { Header = "Add Webcam Source" };
+        if (_cachedCameras.Count == 0)
+        {
+            addWebcamMenu.Items.Add(new MenuItem
+            {
+                Header = "No webcams detected",
+                IsEnabled = false
+            });
+            return addWebcamMenu;
+        }
+
+        foreach (var camera in _cachedCameras)
+        {
+            bool alreadyAdded = ContainsWebcamSource(camera.Id);
+            var item = new MenuItem
+            {
+                Header = camera.Name,
+                Tag = new WebcamAddTarget(camera, parentGroup),
+                IsCheckable = true,
+                IsChecked = alreadyAdded
+            };
+            item.Click += AddWebcamSourceMenuItem_Click;
+            addWebcamMenu.Items.Add(item);
+        }
+
+        return addWebcamMenu;
+    }
+
+    private MenuItem BuildSourceMenuItem(CaptureSource source, List<CaptureSource> siblings, int index, bool isTopLevel)
+    {
+        string label = BuildSourceLabel(source, index, isTopLevel);
+        var sourceItem = new MenuItem { Header = label, Tag = source };
+
+        if (source.Type == CaptureSource.SourceType.Group)
+        {
+            for (int i = 0; i < source.Children.Count; i++)
+            {
+                sourceItem.Items.Add(BuildSourceMenuItem(source.Children[i], source.Children, i, isTopLevel: false));
+            }
+
+            if (source.Children.Count > 0)
+            {
+                sourceItem.Items.Add(new Separator());
+            }
+
+            sourceItem.Items.Add(BuildAddLayerGroupMenuItem(source));
+            sourceItem.Items.Add(BuildAddWindowMenuItem(source));
+            sourceItem.Items.Add(BuildAddWebcamMenuItem(source));
+            sourceItem.Items.Add(BuildAddFileMenuItem(source));
+            sourceItem.Items.Add(new Separator());
+        }
+
+        var blendMenu = new MenuItem { Header = "Blend Mode" };
+        foreach (var mode in Enum.GetValues(typeof(BlendMode)).Cast<BlendMode>())
+        {
+            var blendItem = new MenuItem
+            {
+                Header = mode.ToString(),
+                IsCheckable = true,
+                IsChecked = source.BlendMode == mode,
+                Tag = source
+            };
+            blendItem.Click += SourceBlendModeItem_Click;
+            blendMenu.Items.Add(blendItem);
+        }
+
+        var fitMenu = new MenuItem { Header = "Fit Mode" };
+        foreach (var fit in Enum.GetValues(typeof(FitMode)).Cast<FitMode>())
+        {
+            var fitItem = new MenuItem
+            {
+                Header = fit.ToString(),
+                IsCheckable = true,
+                IsChecked = source.FitMode == fit,
+                Tag = source
+            };
+            fitItem.Click += SourceFitModeItem_Click;
+            fitMenu.Items.Add(fitItem);
+        }
+
+        var primaryItem = new MenuItem
+        {
+            Header = "Make Primary (adopt aspect)",
+            IsEnabled = index != 0
+        };
+        primaryItem.Click += (_, _) => MakePrimarySource(source);
+
+        var moveUpItem = new MenuItem
+        {
+            Header = "Move Up",
+            IsEnabled = index > 0
+        };
+        moveUpItem.Click += (_, _) => MoveSource(source, -1);
+
+        var moveDownItem = new MenuItem
+        {
+            Header = "Move Down",
+            IsEnabled = index < siblings.Count - 1
+        };
+        moveDownItem.Click += (_, _) => MoveSource(source, 1);
+
+        var mirrorItem = new MenuItem
+        {
+            Header = "Mirror Webcam",
+            IsCheckable = true,
+            IsChecked = source.Mirror,
+            IsEnabled = source.Type == CaptureSource.SourceType.Webcam
+        };
+        mirrorItem.Click += (_, _) =>
+        {
+            source.Mirror = !source.Mirror;
+            Logger.Info($"Mirror toggled for {source.DisplayName}: {source.Mirror}");
+            RenderFrame();
+            SaveConfig();
+        };
+
+        var opacityItem = new MenuItem
+        {
+            Header = "Opacity",
+            StaysOpenOnClick = true
+        };
+        var opacityValueItem = new MenuItem
+        {
+            Header = $"{source.Opacity:P0}",
+            IsEnabled = false
+        };
+        var opacitySlider = new Slider
+        {
+            Minimum = 0,
+            Maximum = 1,
+            Value = Math.Clamp(source.Opacity, 0, 1),
+            Width = 140,
+            SmallChange = 0.05,
+            LargeChange = 0.1,
+            Margin = new Thickness(12, 4, 12, 8)
+        };
+        opacitySlider.ValueChanged += (_, args) =>
+        {
+            source.Opacity = Math.Clamp(args.NewValue, 0, 1);
+            Logger.Info($"Source opacity changed: {source.DisplayName} ({source.Type}) = {source.Opacity:F2}");
+            opacityValueItem.Header = $"{source.Opacity:P0}";
+            RenderFrame();
+            SaveConfig();
+        };
+        opacityItem.Items.Add(opacityValueItem);
+        opacityItem.Items.Add(opacitySlider);
+
+        var removeItem = new MenuItem
+        {
+            Header = "Remove"
+        };
+        removeItem.Click += (_, _) => RemoveSource(source);
+
+        sourceItem.Items.Add(blendMenu);
+        sourceItem.Items.Add(fitMenu);
+        sourceItem.Items.Add(primaryItem);
+        sourceItem.Items.Add(moveUpItem);
+        sourceItem.Items.Add(moveDownItem);
+        sourceItem.Items.Add(mirrorItem);
+        sourceItem.Items.Add(opacityItem);
+        sourceItem.Items.Add(new Separator());
+        sourceItem.Items.Add(removeItem);
+
+        return sourceItem;
+    }
+
+    private static string BuildSourceLabel(CaptureSource source, int index, bool isTopLevel)
+    {
+        string prefix = isTopLevel ? $"{index + 1}. " : string.Empty;
+        return source.Type switch
+        {
+            CaptureSource.SourceType.Webcam => $"{prefix}Camera: {source.DisplayName}",
+            CaptureSource.SourceType.File => $"{prefix}File: {source.DisplayName}",
+            CaptureSource.SourceType.Group => $"{prefix}Group: {source.DisplayName}",
+            _ => $"{prefix}{source.DisplayName}"
+        };
+    }
+
     private void AddWindowSourceMenuItem_Click(object sender, RoutedEventArgs e)
     {
-        if (sender is not MenuItem { Tag: WindowHandleInfo info })
+        if (sender is not MenuItem { Tag: WindowAddTarget target })
         {
             return;
         }
 
-        Logger.Info($"Adding window source: {info.Title}");
-        AddOrPromoteWindowSource(info);
+        Logger.Info($"Adding window source: {target.Info.Title}");
+        AddOrPromoteWindowSource(target.Info, target.ParentGroup?.Children ?? _sources);
     }
 
     private void AddWebcamSourceMenuItem_Click(object sender, RoutedEventArgs e)
     {
-        if (sender is not MenuItem { Tag: WebcamCaptureService.CameraInfo camera })
+        if (sender is not MenuItem { Tag: WebcamAddTarget target })
         {
             return;
         }
 
-        Logger.Info($"Adding webcam source: {camera.Name}");
-        AddOrPromoteWebcamSource(camera);
+        Logger.Info($"Adding webcam source: {target.Camera.Name}");
+        AddOrPromoteWebcamSource(target.Camera, target.ParentGroup?.Children ?? _sources);
     }
 
     private void AddFileSourceMenuItem_Click(object sender, RoutedEventArgs e)
     {
+        CaptureSource? parentGroup = null;
+        if (sender is MenuItem { Tag: CaptureSource group })
+        {
+            parentGroup = group;
+        }
+
         var dialog = new OpenFileDialog
         {
             Title = "Select Image, GIF, or Video",
@@ -845,7 +926,7 @@ public partial class MainWindow : Window
 
         if (dialog.ShowDialog(this) == true)
         {
-            AddOrPromoteFileSource(dialog.FileName);
+            AddOrPromoteFileSource(dialog.FileName, parentGroup?.Children ?? _sources);
         }
     }
 
@@ -881,9 +962,20 @@ public partial class MainWindow : Window
         }
     }
 
-    private void AddOrPromoteWindowSource(WindowHandleInfo info)
+    private void AddLayerGroupMenuItem_Click(object sender, RoutedEventArgs e)
     {
-        var existing = _sources.FirstOrDefault(s => s.Type == CaptureSource.SourceType.Window && s.Window != null && s.Window.Handle == info.Handle);
+        CaptureSource? parentGroup = null;
+        if (sender is MenuItem { Tag: CaptureSource group })
+        {
+            parentGroup = group;
+        }
+
+        AddLayerGroup(parentGroup?.Children ?? _sources);
+    }
+
+    private void AddOrPromoteWindowSource(WindowHandleInfo info, List<CaptureSource> targetList)
+    {
+        var existing = FindSource(s => s.Type == CaptureSource.SourceType.Window && s.Window != null && s.Window.Handle == info.Handle);
         if (existing != null)
         {
             existing.Window = info;
@@ -891,59 +983,35 @@ public partial class MainWindow : Window
         }
         else
         {
-            bool hadSources = _sources.Count > 0;
-            _sources.Add(CaptureSource.CreateWindow(info));
+            targetList.Add(CaptureSource.CreateWindow(info));
             Logger.Info($"Inserted new window source (appended): {info.Title}");
-
-            if (!hadSources)
-            {
-                _currentAspectRatio = info.AspectRatio;
-                ApplyDimensions(null, null, _currentAspectRatio, persist: false);
-            }
         }
 
-        if (_sources.Count == 1)
-        {
-            _currentAspectRatio = info.AspectRatio;
-            ApplyDimensions(null, null, _currentAspectRatio, persist: false);
-        }
-
+        UpdatePrimaryAspectIfNeeded();
         RenderFrame();
         SaveConfig();
     }
 
-    private void AddOrPromoteWebcamSource(WebcamCaptureService.CameraInfo camera)
+    private void AddOrPromoteWebcamSource(WebcamCaptureService.CameraInfo camera, List<CaptureSource> targetList)
     {
-        var existing = _sources.FirstOrDefault(s => s.Type == CaptureSource.SourceType.Webcam && string.Equals(s.WebcamId, camera.Id, StringComparison.OrdinalIgnoreCase));
+        var existing = FindSource(s => s.Type == CaptureSource.SourceType.Webcam && string.Equals(s.WebcamId, camera.Id, StringComparison.OrdinalIgnoreCase));
         if (existing != null)
         {
             Logger.Info($"Updated existing webcam source: {camera.Name}");
         }
         else
         {
-            bool hadSources = _sources.Count > 0;
-            _sources.Add(CaptureSource.CreateWebcam(camera.Id, camera.Name));
+            targetList.Add(CaptureSource.CreateWebcam(camera.Id, camera.Name));
             Logger.Info($"Inserted new webcam source (appended): {camera.Name}");
-
-            if (!hadSources && _sources.Count > 0)
-            {
-                _currentAspectRatio = _sources[0].AspectRatio;
-                ApplyDimensions(null, null, _currentAspectRatio, persist: false);
-            }
         }
 
-        if (_sources.Count == 1)
-        {
-            _currentAspectRatio = _sources[0].AspectRatio;
-            ApplyDimensions(null, null, _currentAspectRatio, persist: false);
-        }
-
+        UpdatePrimaryAspectIfNeeded();
         RenderFrame();
         SaveConfig();
         _webcamErrorShown = false;
     }
 
-    private void AddOrPromoteFileSource(string path)
+    private void AddOrPromoteFileSource(string path, List<CaptureSource> targetList)
     {
         if (!_fileCapture.TryGetOrAdd(path, out var info, out var error))
         {
@@ -953,7 +1021,7 @@ public partial class MainWindow : Window
             return;
         }
 
-        var existing = _sources.FirstOrDefault(s => s.Type == CaptureSource.SourceType.File && s.FilePath != null &&
+        var existing = FindSource(s => s.Type == CaptureSource.SourceType.File && s.FilePath != null &&
             string.Equals(s.FilePath, info.Path, StringComparison.OrdinalIgnoreCase));
         if (existing != null)
         {
@@ -961,77 +1029,83 @@ public partial class MainWindow : Window
         }
         else
         {
-            bool hadSources = _sources.Count > 0;
-            _sources.Add(CaptureSource.CreateFile(info.Path, info.DisplayName, info.Width, info.Height));
+            targetList.Add(CaptureSource.CreateFile(info.Path, info.DisplayName, info.Width, info.Height));
             Logger.Info($"Inserted new file source (appended): {info.Path}");
-
-            if (!hadSources)
-            {
-                _currentAspectRatio = _sources[0].AspectRatio;
-                ApplyDimensions(null, null, _currentAspectRatio, persist: false);
-            }
         }
 
-        if (_sources.Count == 1)
-        {
-            _currentAspectRatio = _sources[0].AspectRatio;
-            ApplyDimensions(null, null, _currentAspectRatio, persist: false);
-        }
-
+        UpdatePrimaryAspectIfNeeded();
         RenderFrame();
         SaveConfig();
     }
 
-    private void MakePrimarySource(CaptureSource source)
+    private void AddLayerGroup(List<CaptureSource> targetList)
     {
-        if (!_sources.Contains(source))
-        {
-            return;
-        }
-
-        _sources.Remove(source);
-        _sources.Insert(0, source);
-        _currentAspectRatio = source.AspectRatio;
-        Logger.Info($"Primary source set: {source.DisplayName} ({source.Type})");
-        ApplyDimensions(null, null, _currentAspectRatio);
+        targetList.Add(CaptureSource.CreateGroup());
+        Logger.Info("Inserted new layer group.");
+        UpdatePrimaryAspectIfNeeded();
+        RenderFrame();
         SaveConfig();
     }
 
-    private void MoveSource(CaptureSource source, int delta)
+    private IEnumerable<CaptureSource> EnumerateSources(IEnumerable<CaptureSource> sources)
     {
-        int index = _sources.IndexOf(source);
-        if (index < 0)
+        foreach (var source in sources)
         {
-            return;
+            yield return source;
+            if (source.Type == CaptureSource.SourceType.Group)
+            {
+                foreach (var child in EnumerateSources(source.Children))
+                {
+                    yield return child;
+                }
+            }
         }
-
-        int next = Math.Clamp(index + delta, 0, _sources.Count - 1);
-        if (next == index)
-        {
-            return;
-        }
-
-        _sources.RemoveAt(index);
-        _sources.Insert(next, source);
-
-        if (next == 0)
-        {
-            _currentAspectRatio = source.AspectRatio;
-            ApplyDimensions(null, null, _currentAspectRatio);
-        }
-        SaveConfig();
     }
 
-    private void RemoveSource(CaptureSource source)
+    private CaptureSource? FindSource(Func<CaptureSource, bool> predicate) =>
+        EnumerateSources(_sources).FirstOrDefault(predicate);
+
+    private bool ContainsWindowSource(IntPtr handle) =>
+        FindSource(s => s.Type == CaptureSource.SourceType.Window && s.Window != null && s.Window.Handle == handle) != null;
+
+    private bool ContainsWebcamSource(string webcamId) =>
+        FindSource(s => s.Type == CaptureSource.SourceType.Webcam && string.Equals(s.WebcamId, webcamId, StringComparison.OrdinalIgnoreCase)) != null;
+
+    private static List<CaptureSource>? FindParentList(List<CaptureSource> sources, CaptureSource target)
     {
-        int index = _sources.IndexOf(source);
-        if (index < 0)
+        if (sources.Contains(target))
         {
-            return;
+            return sources;
         }
 
-        _sources.RemoveAt(index);
-        Logger.Info($"Removed source: {source.DisplayName} ({source.Type})");
+        foreach (var source in sources)
+        {
+            if (source.Type == CaptureSource.SourceType.Group)
+            {
+                var parent = FindParentList(source.Children, target);
+                if (parent != null)
+                {
+                    return parent;
+                }
+            }
+        }
+
+        return null;
+    }
+
+    private void CleanupSource(CaptureSource source)
+    {
+        if (source.Type == CaptureSource.SourceType.Group)
+        {
+            foreach (var child in source.Children.ToList())
+            {
+                CleanupSource(child);
+            }
+            source.Children.Clear();
+            source.CompositeDownscaledBuffer = null;
+            source.CompositeHighResBuffer = null;
+            return;
+        }
 
         if (source.Type == CaptureSource.SourceType.Webcam && source.WebcamId != null)
         {
@@ -1046,6 +1120,79 @@ public partial class MainWindow : Window
         {
             _fileCapture.Remove(source.FilePath);
         }
+    }
+
+    private bool UpdatePrimaryAspectIfNeeded()
+    {
+        if (_aspectRatioLocked)
+        {
+            return false;
+        }
+
+        double target = _sources.Count > 0 ? _sources[0].AspectRatio : DefaultAspectRatio;
+        if (Math.Abs(target - _currentAspectRatio) > 0.0001)
+        {
+            ApplyDimensions(null, null, target, persist: false);
+            return true;
+        }
+
+        return false;
+    }
+
+    private void MakePrimarySource(CaptureSource source)
+    {
+        var parentList = FindParentList(_sources, source);
+        if (parentList == null || parentList.Count == 0 || parentList[0] == source)
+        {
+            return;
+        }
+
+        parentList.Remove(source);
+        parentList.Insert(0, source);
+        Logger.Info($"Primary source set: {source.DisplayName} ({source.Type})");
+        UpdatePrimaryAspectIfNeeded();
+        RenderFrame();
+        SaveConfig();
+    }
+
+    private void MoveSource(CaptureSource source, int delta)
+    {
+        var parentList = FindParentList(_sources, source);
+        if (parentList == null)
+        {
+            return;
+        }
+
+        int index = parentList.IndexOf(source);
+        if (index < 0)
+        {
+            return;
+        }
+
+        int next = Math.Clamp(index + delta, 0, parentList.Count - 1);
+        if (next == index)
+        {
+            return;
+        }
+
+        parentList.RemoveAt(index);
+        parentList.Insert(next, source);
+
+        UpdatePrimaryAspectIfNeeded();
+        SaveConfig();
+    }
+
+    private void RemoveSource(CaptureSource source)
+    {
+        var parentList = FindParentList(_sources, source);
+        if (parentList == null)
+        {
+            return;
+        }
+
+        parentList.Remove(source);
+        Logger.Info($"Removed source: {source.DisplayName} ({source.Type})");
+        CleanupSource(source);
 
         if (_sources.Count == 0)
         {
@@ -1053,33 +1200,18 @@ public partial class MainWindow : Window
             return;
         }
 
-        if (index == 0)
-        {
-            _currentAspectRatio = _sources[0].AspectRatio;
-            ApplyDimensions(null, null, _currentAspectRatio);
-        }
-        else
-        {
-            RenderFrame();
-        }
+        UpdatePrimaryAspectIfNeeded();
+        RenderFrame();
         SaveConfig();
     }
 
     private void ClearSources()
     {
         bool hadSources = _sources.Count > 0;
-        
-        foreach (var source in _sources)
+
+        foreach (var source in _sources.ToList())
         {
-            if (source.Type == CaptureSource.SourceType.Webcam && source.WebcamId != null)
-            {
-                _webcamCapture.Reset(source.WebcamId);
-                source.IsInitialized = false;
-            }
-            else if (source.Type == CaptureSource.SourceType.Window && source.Window != null)
-            {
-                _windowCapture.RemoveCache(source.Window.Handle);
-            }
+            CleanupSource(source);
         }
 
         _fileCapture.Clear();
@@ -1099,7 +1231,12 @@ public partial class MainWindow : Window
             PreserveResolutionMenuItem.IsChecked = false;
         }
         UpdateDisplaySurface(force: true);
-        if (Math.Abs(_currentAspectRatio - DefaultAspectRatio) > 0.0001)
+        if (_aspectRatioLocked)
+        {
+            _currentAspectRatio = _lockedAspectRatio;
+            ApplyDimensions(null, null, _currentAspectRatio);
+        }
+        else if (Math.Abs(_currentAspectRatio - DefaultAspectRatio) > 0.0001)
         {
             _currentAspectRatio = DefaultAspectRatio;
             ApplyDimensions(null, null, _currentAspectRatio);
@@ -1119,12 +1256,82 @@ public partial class MainWindow : Window
             return;
         }
 
-        double thresholdHint = Math.Min(_captureThresholdMin, _captureThresholdMax);
-        var removed = new List<CaptureSource>();
-        var primaryBeforeRemoval = _sources.Count > 0 ? _sources[0] : null;
-
-        foreach (var source in _sources.ToList())
+        bool removedAny = CaptureSourceList(_sources);
+        if (_sources.Count == 0)
         {
+            ClearSources();
+            return;
+        }
+
+        if (removedAny && UpdatePrimaryAspectIfNeeded())
+        {
+            _lastCompositeFrame = null;
+            return;
+        }
+
+        var composite = BuildCompositeFrame(_sources, ref _compositeDownscaledBuffer, ref _compositeHighResBuffer, useEngineDimensions: true);
+        if (composite == null)
+        {
+            _lastCompositeFrame = null;
+            return;
+        }
+
+        _lastCompositeFrame = composite;
+        UpdateDisplaySurface();
+
+        if (_lifeMode == GameOfLifeEngine.LifeMode.NaiveGrayscale)
+        {
+            var grayMask = BuildLuminanceMask(composite.Downscaled, composite.DownscaledWidth, composite.DownscaledHeight, _captureThresholdMin, _captureThresholdMax, _invertThreshold, _injectionMode, _injectionNoise, _engine.Depth, _pulseStep);
+            _engine.InjectFrame(grayMask);
+        }
+        else
+        {
+            var (rMask, gMask, bMask) = BuildChannelMasks(composite.Downscaled, composite.DownscaledWidth, composite.DownscaledHeight, _captureThresholdMin, _captureThresholdMax, _invertThreshold, _injectionMode, _injectionNoise, _engine.RDepth, _engine.GDepth, _engine.BDepth, _pulseStep);
+            _engine.InjectRgbFrame(rMask, gMask, bMask);
+        }
+
+        _pulseStep++;
+    }
+
+    private bool CaptureSourceList(List<CaptureSource> sources)
+    {
+        bool removedAny = false;
+        var removed = new List<CaptureSource>();
+
+        foreach (var source in sources.ToList())
+        {
+            if (source.Type == CaptureSource.SourceType.Group)
+            {
+                if (source.Children.Count > 0)
+                {
+                    removedAny |= CaptureSourceList(source.Children);
+                }
+
+                var groupDownscaled = source.CompositeDownscaledBuffer;
+                var groupHighRes = source.CompositeHighResBuffer;
+                var groupComposite = BuildCompositeFrame(source.Children, ref groupDownscaled, ref groupHighRes, useEngineDimensions: false);
+                source.CompositeDownscaledBuffer = groupDownscaled;
+                source.CompositeHighResBuffer = groupHighRes;
+                if (groupComposite != null)
+                {
+                    source.LastFrame = new SourceFrame(groupComposite.Downscaled, groupComposite.DownscaledWidth, groupComposite.DownscaledHeight,
+                        groupComposite.HighRes, groupComposite.HighResWidth, groupComposite.HighResHeight);
+                    source.HasError = false;
+                    source.MissedFrames = 0;
+                    if (!source.FirstFrameReceived)
+                    {
+                        source.FirstFrameReceived = true;
+                        Logger.Info($"Layer group composite ready: {source.DisplayName}");
+                    }
+                }
+                else
+                {
+                    source.LastFrame = null;
+                }
+
+                continue;
+            }
+
             if (!source.IsInitialized && source.Type == CaptureSource.SourceType.Webcam && source.WebcamId != null)
             {
                 var initialized = _webcamCapture.EnsureInitialized(source.WebcamId);
@@ -1135,7 +1342,7 @@ public partial class MainWindow : Window
                     continue;
                 }
             }
-            
+
             SourceFrame? frame = null;
             try
             {
@@ -1272,56 +1479,15 @@ public partial class MainWindow : Window
 
         if (removed.Count > 0)
         {
-            bool primaryRemoved = primaryBeforeRemoval != null && removed.Contains(primaryBeforeRemoval);
             foreach (var source in removed)
             {
-                _sources.Remove(source);
-                if (source.Type == CaptureSource.SourceType.Webcam && source.WebcamId != null)
-                {
-                    _webcamCapture.Reset(source.WebcamId);
-                    source.IsInitialized = false;
-                }
-                else if (source.Type == CaptureSource.SourceType.File && source.FilePath != null)
-                {
-                    _fileCapture.Remove(source.FilePath);
-                }
+                sources.Remove(source);
+                CleanupSource(source);
             }
-
-            if (_sources.Count == 0)
-            {
-                ClearSources();
-                return;
-            }
-
-            if (primaryRemoved)
-            {
-                _currentAspectRatio = _sources[0].AspectRatio;
-                ApplyDimensions(null, null, _currentAspectRatio);
-                Logger.Info($"Primary source removed; new primary is {_sources[0].DisplayName} ({_sources[0].Type})");
-            }
+            removedAny = true;
         }
 
-        var composite = BuildCompositeFrame();
-        if (composite == null)
-        {
-            return;
-        }
-
-        _lastCompositeFrame = composite;
-        UpdateDisplaySurface();
-
-        if (_lifeMode == GameOfLifeEngine.LifeMode.NaiveGrayscale)
-        {
-            var grayMask = BuildLuminanceMask(composite.Downscaled, composite.DownscaledWidth, composite.DownscaledHeight, _captureThresholdMin, _captureThresholdMax, _invertThreshold, _injectionMode, _injectionNoise, _engine.Depth, _pulseStep);
-            _engine.InjectFrame(grayMask);
-        }
-        else
-        {
-            var (rMask, gMask, bMask) = BuildChannelMasks(composite.Downscaled, composite.DownscaledWidth, composite.DownscaledHeight, _captureThresholdMin, _captureThresholdMax, _invertThreshold, _injectionMode, _injectionNoise, _engine.RDepth, _engine.GDepth, _engine.BDepth, _pulseStep);
-            _engine.InjectRgbFrame(rMask, gMask, bMask);
-        }
-
-        _pulseStep++;
+        return removedAny;
     }
 
     private void TogglePassthrough_Click(object sender, RoutedEventArgs e)
@@ -1709,27 +1875,104 @@ public partial class MainWindow : Window
         _colMap = _displayWidth == _colMap.Length ? _colMap : new int[_displayWidth];
     }
 
-    private CompositeFrame? BuildCompositeFrame()
+    private static bool TryGetPrimaryDimensions(List<CaptureSource> sources, out int width, out int height)
     {
-        int downscaledWidth = _engine.Columns;
-        int downscaledHeight = _engine.Rows;
-        int downscaledLength = downscaledWidth * downscaledHeight * 4;
+        width = 0;
+        height = 0;
 
-        if (_compositeDownscaledBuffer == null || _compositeDownscaledBuffer.Length != downscaledLength)
+        if (sources.Count == 0)
         {
-            _compositeDownscaledBuffer = new byte[downscaledLength];
+            return false;
         }
 
-        int targetWidth = _preserveResolution && _sources.Count > 0
-            ? (_sources[0].LastFrame?.SourceWidth > 0
-                ? _sources[0].LastFrame!.SourceWidth
-                : _sources[0].FallbackWidth ?? downscaledWidth)
-            : downscaledWidth;
-        int targetHeight = _preserveResolution && _sources.Count > 0
-            ? (_sources[0].LastFrame?.SourceHeight > 0
-                ? _sources[0].LastFrame!.SourceHeight
-                : _sources[0].FallbackHeight ?? downscaledHeight)
-            : downscaledHeight;
+        var primary = sources[0];
+        if (primary.LastFrame != null && primary.LastFrame.SourceWidth > 0 && primary.LastFrame.SourceHeight > 0)
+        {
+            width = primary.LastFrame.SourceWidth;
+            height = primary.LastFrame.SourceHeight;
+            return true;
+        }
+
+        if (primary.FallbackWidth.HasValue && primary.FallbackHeight.HasValue && primary.FallbackWidth > 0 && primary.FallbackHeight > 0)
+        {
+            width = primary.FallbackWidth.Value;
+            height = primary.FallbackHeight.Value;
+            return true;
+        }
+
+        return false;
+    }
+
+    private bool TryGetDownscaledDimensions(List<CaptureSource> sources, bool useEngineDimensions, out int width, out int height)
+    {
+        width = 0;
+        height = 0;
+
+        if (useEngineDimensions || sources.Count == 0)
+        {
+            width = _engine.Columns;
+            height = _engine.Rows;
+            return width > 0 && height > 0;
+        }
+
+        int maxWidth = _engine.Columns;
+        int maxHeight = _engine.Rows;
+        if (maxWidth <= 0 || maxHeight <= 0)
+        {
+            return false;
+        }
+
+        double aspect = sources[0].AspectRatio;
+        if (aspect <= 0 || double.IsNaN(aspect) || double.IsInfinity(aspect))
+        {
+            width = maxWidth;
+            height = maxHeight;
+            return true;
+        }
+
+        double fitWidth = maxHeight * aspect;
+        double fitHeight = maxWidth / aspect;
+        if (fitWidth <= maxWidth)
+        {
+            width = (int)Math.Round(fitWidth);
+            height = maxHeight;
+        }
+        else
+        {
+            width = maxWidth;
+            height = (int)Math.Round(fitHeight);
+        }
+
+        width = Math.Clamp(width, 1, maxWidth);
+        height = Math.Clamp(height, 1, maxHeight);
+        return true;
+    }
+
+    private CompositeFrame? BuildCompositeFrame(List<CaptureSource> sources, ref byte[]? downscaledBuffer, ref byte[]? highResBuffer, bool useEngineDimensions)
+    {
+        if (sources.Count == 0)
+        {
+            return null;
+        }
+
+        if (!TryGetDownscaledDimensions(sources, useEngineDimensions, out int downscaledWidth, out int downscaledHeight))
+        {
+            return null;
+        }
+        int downscaledLength = downscaledWidth * downscaledHeight * 4;
+
+        if (downscaledBuffer == null || downscaledBuffer.Length != downscaledLength)
+        {
+            downscaledBuffer = new byte[downscaledLength];
+        }
+
+        int targetWidth = downscaledWidth;
+        int targetHeight = downscaledHeight;
+        if (_preserveResolution && TryGetPrimaryDimensions(sources, out int primaryWidth, out int primaryHeight))
+        {
+            targetWidth = primaryWidth;
+            targetHeight = primaryHeight;
+        }
 
         if (targetWidth <= 0 || targetHeight <= 0)
         {
@@ -1737,16 +1980,16 @@ public partial class MainWindow : Window
             targetHeight = downscaledHeight;
         }
 
-        byte[]? highResBuffer = null;
+        byte[]? highRes = null;
         if (_preserveResolution)
         {
             int highResLength = targetWidth * targetHeight * 4;
-            if (_compositeHighResBuffer == null || _compositeHighResBuffer.Length != highResLength)
+            if (highResBuffer == null || highResBuffer.Length != highResLength)
             {
-                _compositeHighResBuffer = new byte[highResLength];
+                highResBuffer = new byte[highResLength];
             }
 
-            highResBuffer = _compositeHighResBuffer;
+            highRes = highResBuffer;
         }
 
         bool wroteDownscaled = false;
@@ -1754,7 +1997,7 @@ public partial class MainWindow : Window
         bool primedDownscaled = false;
         bool primedHighRes = false;
 
-        foreach (var source in _sources)
+        foreach (var source in sources)
         {
             var frame = source.LastFrame;
             if (frame == null)
@@ -1769,19 +2012,19 @@ public partial class MainWindow : Window
 
             if (!primedDownscaled)
             {
-                CopyIntoBuffer(_compositeDownscaledBuffer, downscaledWidth, downscaledHeight,
+                CopyIntoBuffer(downscaledBuffer, downscaledWidth, downscaledHeight,
                     frame.Downscaled, frame.DownscaledWidth, frame.DownscaledHeight, source.Opacity, source.Mirror && source.Type == CaptureSource.SourceType.Webcam, source.FitMode);
                 primedDownscaled = true;
                 wroteDownscaled = true;
             }
             else
             {
-                CompositeIntoBuffer(_compositeDownscaledBuffer, downscaledWidth, downscaledHeight,
+                CompositeIntoBuffer(downscaledBuffer, downscaledWidth, downscaledHeight,
                     frame.Downscaled, frame.DownscaledWidth, frame.DownscaledHeight, source.BlendMode, source.Opacity, source.Mirror && source.Type == CaptureSource.SourceType.Webcam, source.FitMode);
                 wroteDownscaled = true;
             }
 
-            if (highResBuffer != null && frame.Source != null)
+            if (highRes != null && frame.Source != null)
             {
                 var sourceBuffer = frame.Source;
                 int sourceWidth = frame.SourceWidth;
@@ -1789,13 +2032,13 @@ public partial class MainWindow : Window
 
                 if (!primedHighRes)
                 {
-                    CopyIntoBuffer(highResBuffer, targetWidth, targetHeight, sourceBuffer, sourceWidth, sourceHeight, source.Opacity, source.Mirror && source.Type == CaptureSource.SourceType.Webcam, source.FitMode);
+                    CopyIntoBuffer(highRes, targetWidth, targetHeight, sourceBuffer, sourceWidth, sourceHeight, source.Opacity, source.Mirror && source.Type == CaptureSource.SourceType.Webcam, source.FitMode);
                     primedHighRes = true;
                     wroteHighRes = true;
                 }
                 else
                 {
-                    CompositeIntoBuffer(highResBuffer, targetWidth, targetHeight, sourceBuffer, sourceWidth, sourceHeight, source.BlendMode, source.Opacity, source.Mirror && source.Type == CaptureSource.SourceType.Webcam, source.FitMode);
+                    CompositeIntoBuffer(highRes, targetWidth, targetHeight, sourceBuffer, sourceWidth, sourceHeight, source.BlendMode, source.Opacity, source.Mirror && source.Type == CaptureSource.SourceType.Webcam, source.FitMode);
                     wroteHighRes = true;
                 }
             }
@@ -1806,8 +2049,8 @@ public partial class MainWindow : Window
             return null;
         }
 
-        return new CompositeFrame(_compositeDownscaledBuffer, downscaledWidth, downscaledHeight,
-            wroteHighRes ? highResBuffer : null, targetWidth, targetHeight);
+        return new CompositeFrame(downscaledBuffer, downscaledWidth, downscaledHeight,
+            wroteHighRes ? highRes : null, targetWidth, targetHeight);
     }
 
     private void CopyIntoBuffer(byte[] destination, int destWidth, int destHeight, byte[] source, int sourceWidth, int sourceHeight, double opacity, bool mirror, FitMode fitMode)
@@ -2648,12 +2891,14 @@ public partial class MainWindow : Window
         }
     }
 
-    private List<AppConfig.SourceConfig> BuildSourceConfigs()
+    private List<AppConfig.SourceConfig> BuildSourceConfigs() => BuildSourceConfigs(_sources);
+
+    private List<AppConfig.SourceConfig> BuildSourceConfigs(List<CaptureSource> sources)
     {
-        var configs = new List<AppConfig.SourceConfig>(_sources.Count);
-        foreach (var source in _sources)
+        var configs = new List<AppConfig.SourceConfig>(sources.Count);
+        foreach (var source in sources)
         {
-            configs.Add(new AppConfig.SourceConfig
+            var config = new AppConfig.SourceConfig
             {
                 Type = source.Type.ToString(),
                 WindowTitle = source.Window?.Title,
@@ -2664,7 +2909,14 @@ public partial class MainWindow : Window
                 FitMode = source.FitMode.ToString(),
                 Opacity = source.Opacity,
                 Mirror = source.Mirror
-            });
+            };
+
+            if (source.Type == CaptureSource.SourceType.Group && source.Children.Count > 0)
+            {
+                config.Children = BuildSourceConfigs(source.Children);
+            }
+
+            configs.Add(config);
         }
 
         return configs;
@@ -2679,7 +2931,18 @@ public partial class MainWindow : Window
 
         var windows = _windowCapture.EnumerateWindows(_windowHandle);
         var webcams = _webcamCapture.EnumerateCameras();
+        RestoreSourceList(configs, _sources, windows, webcams);
 
+        if (_sources.Count > 0)
+        {
+            _currentAspectRatio = _aspectRatioLocked ? _lockedAspectRatio : _sources[0].AspectRatio;
+            ApplyDimensions(null, null, _currentAspectRatio, persist: false);
+        }
+    }
+
+    private void RestoreSourceList(IReadOnlyList<AppConfig.SourceConfig> configs, List<CaptureSource> targetList,
+        IReadOnlyList<WindowHandleInfo> windows, IReadOnlyList<WebcamCaptureService.CameraInfo> webcams)
+    {
         foreach (var config in configs)
         {
             if (!Enum.TryParse<CaptureSource.SourceType>(config.Type, true, out var type))
@@ -2690,6 +2953,10 @@ public partial class MainWindow : Window
             CaptureSource? restored = null;
             switch (type)
             {
+                case CaptureSource.SourceType.Group:
+                    restored = CaptureSource.CreateGroup(string.IsNullOrWhiteSpace(config.DisplayName) ? null : config.DisplayName);
+                    break;
+
                 case CaptureSource.SourceType.Window:
                     if (string.IsNullOrWhiteSpace(config.WindowTitle))
                     {
@@ -2733,13 +3000,12 @@ public partial class MainWindow : Window
             }
 
             ApplySourceSettings(restored, config);
-            _sources.Add(restored);
-        }
+            targetList.Add(restored);
 
-        if (_sources.Count > 0)
-        {
-            _currentAspectRatio = _sources[0].AspectRatio;
-            ApplyDimensions(null, null, _currentAspectRatio, persist: false);
+            if (type == CaptureSource.SourceType.Group && config.Children.Count > 0)
+            {
+                RestoreSourceList(config.Children, restored.Children, windows, webcams);
+            }
         }
     }
 
@@ -2802,6 +3068,7 @@ public partial class MainWindow : Window
             public string FitMode { get; set; } = lifeviz.FitMode.Fit.ToString();
             public double Opacity { get; set; } = 1.0;
             public bool Mirror { get; set; }
+            public List<SourceConfig> Children { get; set; } = new();
         }
     }
 
@@ -2824,7 +3091,8 @@ public partial class MainWindow : Window
         {
             Window,
             Webcam,
-            File
+            File,
+            Group
         }
 
         private CaptureSource(SourceType type, WindowHandleInfo? window, string? webcamId, string? filePath, string displayName, int? fileWidth, int? fileHeight)
@@ -2851,11 +3119,15 @@ public partial class MainWindow : Window
             return new(SourceType.File, null, null, filePath, displayName, fileWidth, fileHeight) { AddedUtc = DateTime.UtcNow };
         }
 
+        public static CaptureSource CreateGroup(string? displayName = null) =>
+            new(SourceType.Group, null, null, null, displayName ?? "Layer Group", null, null) { AddedUtc = DateTime.UtcNow };
+
         public SourceType Type { get; }
         public WindowHandleInfo? Window { get; set; }
         public string? WebcamId { get; }
         public string? FilePath { get; }
         public string DisplayName { get; }
+        public List<CaptureSource> Children { get; } = new();
         public BlendMode BlendMode { get; set; } = BlendMode.Normal;
         public FitMode FitMode { get; set; } = FitMode.Fit;
         public SourceFrame? LastFrame { get; set; }
@@ -2870,11 +3142,22 @@ public partial class MainWindow : Window
         public bool IsInitialized { get; set; }
         public int? FileWidth { get; private set; }
         public int? FileHeight { get; private set; }
+        public byte[]? CompositeDownscaledBuffer { get; set; }
+        public byte[]? CompositeHighResBuffer { get; set; }
 
         public double AspectRatio
         {
             get
             {
+                if (Type == SourceType.Group)
+                {
+                    if (Children.Count > 0)
+                    {
+                        return Children[0].AspectRatio;
+                    }
+                    return DefaultAspectRatio;
+                }
+
                 if (LastFrame != null && LastFrame.SourceHeight > 0)
                 {
                     return Math.Max(0.05, LastFrame.SourceWidth / (double)LastFrame.SourceHeight);
@@ -2898,6 +3181,7 @@ public partial class MainWindow : Window
         {
             SourceType.Window => Window?.Width,
             SourceType.File => FileWidth,
+            SourceType.Group => Children.Count > 0 ? Children[0].FallbackWidth : null,
             _ => LastFrame?.SourceWidth
         };
 
@@ -2905,6 +3189,7 @@ public partial class MainWindow : Window
         {
             SourceType.Window => Window?.Height,
             SourceType.File => FileHeight,
+            SourceType.Group => Children.Count > 0 ? Children[0].FallbackHeight : null,
             _ => LastFrame?.SourceHeight
         };
 

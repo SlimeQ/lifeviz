@@ -15,7 +15,7 @@ The new Rider solution (`lifeviz.sln`) includes a "lifeviz: Run App" configurati
 
 Right-click the scene and use **Sources** to stack multiple windows, OBS-style:
 
-- Add entries via **Sources > Add Window Source**, **Add Webcam Source**, or **Add File Source** (checked items are already in the stack). File sources accept static images (PNG/JPG/BMP/WEBP), GIFs, and videos; animated files loop. The top entry is the primary: it drives the canvas aspect ratio and the native-resolution target when preserve-res is on (unless the aspect ratio lock is enabled). Make Primary, Move Up/Down, or Remove/Remove All to resequence quickly; clearing all sources drops back to the 16:9 default.
+- Add entries via **Sources > Add Window Source**, **Add Webcam Source**, **Add File Source**, or **Add Layer Group** (checked items are already in the stack). File sources accept static images (PNG/JPG/BMP/WEBP), GIFs, and videos; animated files loop. Layer groups have their own submenu stack; they composite their children internally and blend as a single layer, using the first child to determine the group's aspect ratio. The top entry is the primary: it drives the canvas aspect ratio and the native-resolution target when preserve-res is on (unless the aspect ratio lock is enabled). Make Primary, Move Up/Down, or Remove/Remove All to resequence quickly; clearing all sources drops back to the 16:9 default.
 - Each source exposes a wallpaper-style fit mode (Fit default, plus Fill/Stretch/Center/Tile/Span) that controls how the layer scales into the frame.
 - Each source has its own blend mode applied during compositing (Normal, Additive, Multiply, Screen, Overlay, Lighten, Darken, Subtractive).
 - **Composite Blend** still controls how the finished composite mixes with the Game of Life output (Additive default via the pixel shader).
@@ -31,7 +31,7 @@ Right-click the scene and use **Sources** to stack multiple windows, OBS-style:
 ## Configuration
 
 - Settings persist to `%AppData%\lifeviz\config.json` after the app finishes loading (columns/depth, framerate, blend/composite toggles, thresholds, opacity, passthrough, etc.) and restore on next launch.
-- The source stack is restored too: window sources are matched by title, webcams by device id/name, file sources by path, keeping order plus per-layer blend mode, fit mode, opacity, and mirror settings when the inputs are available.
+- The source stack is restored too: window sources are matched by title, webcams by device id/name, file sources by path, keeping order (including nested layer groups) plus per-layer blend mode, fit mode, opacity, and mirror settings when the inputs are available.
 - Aspect ratio lock state persists (default lock ratio is 16:9).
 - Fullscreen preference is remembered and re-applied on launch using the active monitor bounds so the taskbar stays hidden.
 
