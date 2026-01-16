@@ -4,8 +4,11 @@ using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Threading.Tasks;
+using System.Windows;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
+using System.Security.Cryptography;
+using System.Text;
 
 namespace lifeviz;
 
@@ -108,6 +111,29 @@ internal sealed class FileCaptureService : IDisposable
         return session?.CaptureFrame(targetWidth, targetHeight, fitMode, includeSource);
     }
 
+    public FileCaptureState GetState(string path)
+    {
+        if (string.IsNullOrWhiteSpace(path))
+        {
+            return FileCaptureState.Error;
+        }
+
+        if (!TryNormalizePath(path, out var fullPath))
+        {
+            return FileCaptureState.Error;
+        }
+
+        lock (_lock)
+        {
+            if (_sessions.TryGetValue(fullPath, out var session))
+            {
+                return session.State;
+            }
+        }
+
+        return FileCaptureState.Error;
+    }
+
     public void Remove(string path)
     {
         if (string.IsNullOrWhiteSpace(path))
@@ -199,6 +225,7 @@ internal sealed class FileCaptureService : IDisposable
         public int Width { get; protected set; }
         public int Height { get; protected set; }
         public abstract FileSourceKind Kind { get; }
+        public virtual FileCaptureState State => FileCaptureState.Ready;
 
         public FileSourceInfo GetInfo() => new(Path, DisplayName, Width, Height, Kind);
 
@@ -367,11 +394,22 @@ internal sealed class FileCaptureService : IDisposable
         private byte[]? _downscaledBuffer;
         private bool _isReady;
         private bool _hasError;
+        private bool _errorShown;
+        private int _blankFrameStreak;
+        private readonly object _transcodeLock = new();
+        private bool _transcodeAttempted;
+        private bool _transcodeInProgress;
+        private bool _usingTranscoded;
+        private string? _transcodedPath;
+        private string _playbackPath;
+        private readonly Stopwatch _openClock = Stopwatch.StartNew();
 
         // Throttling and Caching
         private readonly Stopwatch _renderClock = Stopwatch.StartNew();
         private double _lastRenderTimeMs;
         private const double MinFrameIntervalMs = 33.0; // Cap at ~30 FPS
+        private const double MediaOpenTimeoutSeconds = 2.5;
+        private const int BlankFrameThreshold = 5;
         private bool _frameUpdated;
         private int _lastTargetWidth;
         private int _lastTargetHeight;
@@ -383,6 +421,7 @@ internal sealed class FileCaptureService : IDisposable
         public VideoSession(string path)
             : base(path, System.IO.Path.GetFileName(path), 0, 0)
         {
+            _playbackPath = path;
             _player = new MediaPlayer
             {
                 Volume = 0,
@@ -391,16 +430,41 @@ internal sealed class FileCaptureService : IDisposable
             _player.MediaOpened += PlayerOnMediaOpened;
             _player.MediaEnded += PlayerOnMediaEnded;
             _player.MediaFailed += PlayerOnMediaFailed;
-            _player.Open(new Uri(path, UriKind.Absolute));
-            _player.Play();
+            OpenPlayback(_playbackPath);
         }
 
         public override FileSourceKind Kind => FileSourceKind.Video;
+        public override FileCaptureState State
+        {
+            get
+            {
+                if (_hasError)
+                {
+                    return FileCaptureState.Error;
+                }
+                if (_transcodeInProgress || !_isReady)
+                {
+                    return FileCaptureState.Pending;
+                }
+                return FileCaptureState.Ready;
+            }
+        }
 
         public override FileCaptureFrame? CaptureFrame(int targetWidth, int targetHeight, FitMode fitMode, bool includeSource)
         {
-            if (_hasError || !_isReady || targetWidth <= 0 || targetHeight <= 0 || _renderWidth <= 0 || _renderHeight <= 0)
+            if (_hasError || targetWidth <= 0 || targetHeight <= 0)
             {
+                return null;
+            }
+
+            if (_transcodeInProgress)
+            {
+                return null;
+            }
+
+            if (!_isReady || _renderWidth <= 0 || _renderHeight <= 0)
+            {
+                TryStartTranscodeForMissingDimensions();
                 return null;
             }
 
@@ -485,6 +549,10 @@ internal sealed class FileCaptureService : IDisposable
                 _renderWidth = 0;
                 _renderHeight = 0;
                 _isReady = false;
+                if (!BeginTranscodeIfNeeded($"Video opened without valid dimensions: {Path}. Attempting auto-transcode."))
+                {
+                    ReportVideoError($"Video opened without valid dimensions: {Path}. This file may use an unsupported codec (try H.264/AVC).");
+                }
             }
         }
 
@@ -496,8 +564,12 @@ internal sealed class FileCaptureService : IDisposable
 
         private void PlayerOnMediaFailed(object? sender, ExceptionEventArgs e)
         {
-            _hasError = true;
-            Logger.Warn($"Video failed to play: {Path} ({e.ErrorException.Message})");
+            if (BeginTranscodeIfNeeded($"Video failed to play: {Path} ({e.ErrorException.Message})"))
+            {
+                return;
+            }
+
+            ReportVideoError($"Video failed to play: {Path} ({e.ErrorException.Message})");
         }
 
         private bool RenderLatestFrame()
@@ -537,7 +609,210 @@ internal sealed class FileCaptureService : IDisposable
             }
 
             _renderTarget.CopyPixels(_latestBuffer, _renderWidth * 4, 0);
+            if (IsBufferBlank(_latestBuffer))
+            {
+                _blankFrameStreak++;
+                if (_blankFrameStreak >= BlankFrameThreshold)
+                {
+                    if (!BeginTranscodeIfNeeded($"Video frames are blank for {Path}. Attempting auto-transcode."))
+                    {
+                        ReportVideoError($"Video frames are blank for {Path}. This file may use an unsupported codec (try H.264/AVC).");
+                    }
+                }
+                return false;
+            }
+            else
+            {
+                _blankFrameStreak = 0;
+            }
             _frameUpdated = true;
+            return true;
+        }
+
+        private void ReportVideoError(string message)
+        {
+            if (_hasError)
+            {
+                return;
+            }
+
+            _hasError = true;
+            Logger.Warn(message);
+            if (_errorShown)
+            {
+                return;
+            }
+
+            _errorShown = true;
+            if (System.Windows.Application.Current?.Dispatcher != null)
+            {
+                System.Windows.Application.Current.Dispatcher.BeginInvoke(() =>
+                {
+                    MessageBox.Show(message, "Video Source Error", MessageBoxButton.OK, MessageBoxImage.Warning);
+                });
+            }
+        }
+
+        private bool BeginTranscodeIfNeeded(string reason)
+        {
+            lock (_transcodeLock)
+            {
+                if (_transcodeInProgress)
+                {
+                    return true;
+                }
+                if (_usingTranscoded)
+                {
+                    return true;
+                }
+                if (_transcodeAttempted && _transcodedPath == null)
+                {
+                    return false;
+                }
+                _transcodeAttempted = true;
+                _transcodeInProgress = true;
+            }
+
+            string cachePath;
+            try
+            {
+                cachePath = GetTranscodeCachePath(Path);
+                if (File.Exists(cachePath) && new FileInfo(cachePath).Length > 0)
+                {
+                    _transcodedPath = cachePath;
+                    _transcodeInProgress = false;
+                    SwitchToTranscoded(cachePath);
+                    return true;
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.Warn($"Failed to prepare transcode cache for {Path}: {ex.Message}");
+                _transcodeInProgress = false;
+                return false;
+            }
+
+            _ = Task.Run(() =>
+            {
+                try
+                {
+                    Directory.CreateDirectory(System.IO.Path.GetDirectoryName(cachePath)!);
+                    var startInfo = new ProcessStartInfo
+                    {
+                        FileName = "ffmpeg",
+                        Arguments = $"-hide_banner -loglevel error -y -i \"{Path}\" -c:v libx264 -pix_fmt yuv420p -preset veryfast -crf 18 -an \"{cachePath}\"",
+                        CreateNoWindow = true,
+                        UseShellExecute = false,
+                        RedirectStandardError = true,
+                        RedirectStandardOutput = true
+                    };
+
+                    using var process = Process.Start(startInfo);
+                    if (process == null)
+                    {
+                        throw new InvalidOperationException("Failed to start ffmpeg process.");
+                    }
+                    string errorOutput = process.StandardError.ReadToEnd();
+                    process.WaitForExit();
+                    if (process.ExitCode != 0 || !File.Exists(cachePath))
+                    {
+                        throw new InvalidOperationException(string.IsNullOrWhiteSpace(errorOutput)
+                            ? $"ffmpeg exited with code {process.ExitCode}."
+                            : errorOutput.Trim());
+                    }
+
+                    _transcodedPath = cachePath;
+                    _transcodeInProgress = false;
+                    if (Application.Current?.Dispatcher != null)
+                    {
+                        Application.Current.Dispatcher.BeginInvoke(() => SwitchToTranscoded(cachePath));
+                    }
+                    Logger.Info($"Auto-transcoded video for {Path} -> {cachePath}");
+                }
+                catch (Exception ex)
+                {
+                    _transcodeInProgress = false;
+                    ReportVideoError($"Auto-transcode failed for {Path}. Install ffmpeg or transcode manually.\n{ex.Message}");
+                }
+            });
+
+            Logger.Info($"Auto-transcode queued for {Path}. Reason: {reason}");
+            return true;
+        }
+
+        private void SwitchToTranscoded(string path)
+        {
+            if (string.IsNullOrWhiteSpace(path))
+            {
+                return;
+            }
+
+            _playbackPath = path;
+            _usingTranscoded = true;
+            _blankFrameStreak = 0;
+            OpenPlayback(_playbackPath);
+        }
+
+        private void OpenPlayback(string path)
+        {
+            _isReady = false;
+            _renderWidth = 0;
+            _renderHeight = 0;
+            _openClock.Restart();
+            _player.Open(new Uri(path, UriKind.Absolute));
+            _player.Play();
+        }
+
+        private void TryStartTranscodeForMissingDimensions()
+        {
+            if (_hasError || _transcodeInProgress || _usingTranscoded)
+            {
+                return;
+            }
+
+            if (_openClock.Elapsed.TotalSeconds < MediaOpenTimeoutSeconds)
+            {
+                return;
+            }
+
+            if (_player.NaturalVideoWidth > 0 && _player.NaturalVideoHeight > 0)
+            {
+                return;
+            }
+
+            BeginTranscodeIfNeeded($"Video did not report dimensions for {Path} after {MediaOpenTimeoutSeconds:0.0}s.");
+        }
+
+        private static string GetTranscodeCachePath(string originalPath)
+        {
+            var info = new FileInfo(originalPath);
+            string key = $"{originalPath}|{info.Length}|{info.LastWriteTimeUtc.Ticks}";
+            using var sha = SHA256.Create();
+            byte[] hash = sha.ComputeHash(Encoding.UTF8.GetBytes(key));
+            string hex = Convert.ToHexString(hash).Substring(0, 16).ToLowerInvariant();
+
+            string root = System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "lifeviz", "video-cache");
+            return System.IO.Path.Combine(root, $"{hex}.mp4");
+        }
+
+        private static bool IsBufferBlank(byte[] buffer)
+        {
+            if (buffer == null || buffer.Length < 4)
+            {
+                return true;
+            }
+
+            int length = buffer.Length;
+            int step = Math.Max(4, length / 256);
+            int lastStart = length - 4;
+            for (int i = 0; i <= lastStart; i += step)
+            {
+                if (buffer[i] != 0 || buffer[i + 1] != 0 || buffer[i + 2] != 0)
+                {
+                    return false;
+                }
+            }
+
             return true;
         }
     }
@@ -580,12 +855,19 @@ internal sealed class FileCaptureService : IDisposable
         public int SourceHeight { get; }
     }
 
-    internal enum FileSourceKind
-    {
-        Image,
-        Gif,
-        Video
-    }
+internal enum FileSourceKind
+{
+    Image,
+    Gif,
+    Video
+}
+
+internal enum FileCaptureState
+{
+    Ready,
+    Pending,
+    Error
+}
 
     private readonly struct FrameData
     {

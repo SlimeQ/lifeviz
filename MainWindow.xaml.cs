@@ -2559,6 +2559,12 @@ public partial class MainWindow : Window
 
                 if (source.Type == CaptureSource.SourceType.File)
                 {
+                    if (!string.IsNullOrWhiteSpace(source.FilePath) &&
+                        _fileCapture.GetState(source.FilePath) == FileCaptureService.FileCaptureState.Pending)
+                    {
+                        continue;
+                    }
+
                     source.MissedFrames++;
                     var age = DateTime.UtcNow - source.AddedUtc;
                     if (!source.FirstFrameReceived && age < TimeSpan.FromSeconds(5))

@@ -5,6 +5,7 @@
 - .NET SDK 9 (for local dev & running)
 - Visual Studio Build Tools 2022 or Visual Studio with MSBuild & ClickOnce components (for publishing)
 - GitHub CLI (`gh`) authenticated to your repo account (required only for pushing GitHub releases)
+- `ffmpeg` on PATH (required for auto-transcoding unsupported video file sources)
 
 ## Local Development
 

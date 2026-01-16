@@ -25,6 +25,7 @@ Right-click the scene and use **Sources** to stack multiple windows, OBS-style:
 - Each source exposes a wallpaper-style fit mode (Fit default, plus Fill/Stretch/Center/Tile/Span) that controls how the layer scales into the frame.
 - Each source has its own blend mode applied during compositing (Normal, Additive, Multiply, Screen, Overlay, Lighten, Darken, Subtractive).
 - Each source can stack animations (Zoom In, Translate, Rotate, Fade, DVD Bounce) synced to the global animation BPM, with forward or reverse loops plus expanded speed steps (1/8x–8x) and per-animation cycle lengths for long fades; DVD Bounce exposes a size control.
+- Video file sources depend on system codecs; if frames render blank, LifeViz will auto-transcode to H.264 using `ffmpeg` (cached under `%LOCALAPPDATA%\\lifeviz\\video-cache`). While transcoding, the layer is temporarily skipped (so it won't blank out the stack). Install `ffmpeg` on your PATH or transcode manually if needed.
 - **Composite Blend** still controls how the finished composite mixes with the Game of Life output (Additive default via the pixel shader).
 - **Passthrough Underlay** shows that composite behind the simulation; **Preserve Window Resolution** renders at the primary source's native size before scaling.
 - **Fullscreen** toggle lives in the context menu and persists; it now sizes to the active monitor bounds, stays topmost, and covers the taskbar.
