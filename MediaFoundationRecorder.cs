@@ -34,8 +34,8 @@ internal sealed class RecordingSession : IDisposable
 
     public static int EstimateBitrate(int width, int height, int fps)
     {
-        long raw = (long)width * height * fps;
-        long bitrate = Math.Clamp(raw, 2_000_000, 160_000_000);
+        long raw = (long)width * height * fps * 4;
+        long bitrate = Math.Clamp(raw, 8_000_000, 320_000_000);
         return (int)bitrate;
     }
 
@@ -160,19 +160,42 @@ internal sealed class Mp4Recorder : IDisposable
         IMFMediaType? inputType = null;
         try
         {
-            IntPtr writerPtr;
-            int hr = MfInterop.MFCreateSinkWriterFromURL(path, IntPtr.Zero, IntPtr.Zero, out writerPtr);
-            MfInterop.Check(hr);
-            if (writerPtr == IntPtr.Zero)
+            IMFAttributes? writerAttributes = null;
+            IntPtr writerAttributesPtr = IntPtr.Zero;
+            IntPtr writerPtr = IntPtr.Zero;
+            try
             {
-                throw new InvalidOperationException("Failed to create sink writer (null COM pointer).");
-            }
+                MfInterop.Check(MfInterop.MFCreateAttributes(out writerAttributes, 1));
+                MfInterop.Check(writerAttributes.SetUINT32(MfInterop.MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS, 0));
 
-            _writer = Marshal.GetObjectForIUnknown(writerPtr) as IMFSinkWriter;
-            Marshal.Release(writerPtr);
-            if (_writer == null)
+                writerAttributesPtr = Marshal.GetIUnknownForObject(writerAttributes);
+                int hr = MfInterop.MFCreateSinkWriterFromURL(path, IntPtr.Zero, writerAttributesPtr, out writerPtr);
+                MfInterop.Check(hr);
+                if (writerPtr == IntPtr.Zero)
+                {
+                    throw new InvalidOperationException("Failed to create sink writer (null COM pointer).");
+                }
+
+                _writer = Marshal.GetObjectForIUnknown(writerPtr) as IMFSinkWriter;
+                if (_writer == null)
+                {
+                    throw new InvalidOperationException("Media Foundation sink writer is unavailable. If you are on a Windows N edition, install the Media Feature Pack.");
+                }
+            }
+            finally
             {
-                throw new InvalidOperationException("Media Foundation sink writer is unavailable. If you are on a Windows N edition, install the Media Feature Pack.");
+                if (writerPtr != IntPtr.Zero)
+                {
+                    Marshal.Release(writerPtr);
+                }
+                if (writerAttributesPtr != IntPtr.Zero)
+                {
+                    Marshal.Release(writerAttributesPtr);
+                }
+                if (writerAttributes != null)
+                {
+                    Marshal.ReleaseComObject(writerAttributes);
+                }
             }
 
             MfInterop.Check(MfInterop.MFCreateMediaType(out outputType));
@@ -295,6 +318,7 @@ internal static class MfInterop
     public static readonly Guid MF_MT_FIXED_SIZE_SAMPLES = new("b8ebefaf-b718-4e04-b0a9-116775e3321b");
     public static readonly Guid MF_MT_ALL_SAMPLES_INDEPENDENT = new("c9173739-5e56-461c-b713-46f0e25e595c");
     public static readonly Guid MF_MT_SAMPLE_SIZE = new("dad3ab78-1990-408b-bce2-1e2ebc0a76e5");
+    public static readonly Guid MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS = new("a634a91c-822b-41d1-9db1-41a7f2ed9921");
     public static readonly Guid MFMediaType_Video = new("73646976-0000-0010-8000-00aa00389b71");
     public static readonly Guid MFVideoFormat_H264 = new("34363248-0000-0010-8000-00aa00389b71");
     public static readonly Guid MFVideoFormat_RGB32 = new("00000016-0000-0010-8000-00aa00389b71");
@@ -333,6 +357,9 @@ internal static class MfInterop
 
     [DllImport("mfplat.dll", ExactSpelling = true)]
     public static extern int MFCreateMemoryBuffer(uint cbMaxLength, out IMFMediaBuffer buffer);
+
+    [DllImport("mfplat.dll", ExactSpelling = true)]
+    public static extern int MFCreateAttributes(out IMFAttributes attributes, uint initialSize);
 
     [DllImport("mfreadwrite.dll", ExactSpelling = true, CharSet = CharSet.Unicode)]
     public static extern int MFCreateSinkWriterFromURL(string outputUrl, IntPtr byteStream, IntPtr attributes, out IntPtr sinkWriter);

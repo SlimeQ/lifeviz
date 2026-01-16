@@ -50,6 +50,9 @@ public partial class MainWindow : Window
     private TimeSpan _nextRecordingFrameTime;
     private int _recordingWidth;
     private int _recordingHeight;
+    private int _recordingSourceWidth;
+    private int _recordingSourceHeight;
+    private int _recordingScale = 1;
     private string? _recordingPath;
     private ImageSource? _recordingOverlayIcon;
     private IReadOnlyList<WindowHandleInfo> _cachedWindows = Array.Empty<WindowHandleInfo>();
@@ -333,7 +336,7 @@ public partial class MainWindow : Window
             return;
         }
 
-        if (_displayWidth != _recordingWidth || _displayHeight != _recordingHeight)
+        if (_displayWidth != _recordingSourceWidth || _displayHeight != _recordingSourceHeight)
         {
             StopRecording(showMessage: true, reason: "Recording stopped because the output resolution changed.");
             return;
@@ -358,14 +361,15 @@ public partial class MainWindow : Window
             _nextRecordingFrameTime += _recordingFrameInterval;
         }
 
-        int frameSize = _displayWidth * _displayHeight * 4;
-        if (frameSize > requiredLength)
+        int sourceSize = _recordingSourceWidth * _recordingSourceHeight * 4;
+        int frameSize = _recordingWidth * _recordingHeight * 4;
+        if (sourceSize > requiredLength || frameSize <= 0)
         {
             return;
         }
 
         var buffer = ArrayPool<byte>.Shared.Rent(frameSize);
-        if (!BuildRecordingFrame(buffer, frameSize))
+        if (!BuildRecordingFrame(buffer, frameSize, sourceSize))
         {
             ArrayPool<byte>.Shared.Return(buffer);
             return;
@@ -377,42 +381,60 @@ public partial class MainWindow : Window
         }
     }
 
-    private bool BuildRecordingFrame(byte[] destination, int frameSize)
+    private bool BuildRecordingFrame(byte[] destination, int frameSize, int sourceSize)
     {
-        if (_pixelBuffer == null || _pixelBuffer.Length < frameSize || destination.Length < frameSize)
+        if (_pixelBuffer == null || _pixelBuffer.Length < sourceSize || destination.Length < frameSize)
         {
             return false;
         }
 
-        double lifeOpacity = Math.Clamp(_lifeOpacity, 0, 1);
-        for (int i = 0; i < frameSize; i += 4)
+        byte[] targetBuffer = destination;
+        byte[]? sourceBuffer = null;
+        if (_recordingScale > 1)
         {
-            destination[i] = ClampToByte((int)(_pixelBuffer[i] * lifeOpacity));
-            destination[i + 1] = ClampToByte((int)(_pixelBuffer[i + 1] * lifeOpacity));
-            destination[i + 2] = ClampToByte((int)(_pixelBuffer[i + 2] * lifeOpacity));
-            destination[i + 3] = 255;
+            sourceBuffer = ArrayPool<byte>.Shared.Rent(sourceSize);
+            targetBuffer = sourceBuffer;
+        }
+
+        double lifeOpacity = Math.Clamp(_lifeOpacity, 0, 1);
+        for (int i = 0; i < sourceSize; i += 4)
+        {
+            targetBuffer[i] = ClampToByte((int)(_pixelBuffer[i] * lifeOpacity));
+            targetBuffer[i + 1] = ClampToByte((int)(_pixelBuffer[i + 1] * lifeOpacity));
+            targetBuffer[i + 2] = ClampToByte((int)(_pixelBuffer[i + 2] * lifeOpacity));
+            targetBuffer[i + 3] = 255;
         }
 
         var composite = _lastCompositeFrame;
         if (!_passthroughEnabled || composite == null)
         {
+            if (_recordingScale > 1)
+            {
+                ScaleRecordingFrame(targetBuffer, destination);
+                ArrayPool<byte>.Shared.Return(sourceBuffer!);
+            }
             return true;
         }
 
         byte[]? overlay = null;
         if (_preserveResolution && composite.HighRes is { Length: > 0 } highRes &&
-            composite.HighResWidth == _displayWidth && composite.HighResHeight == _displayHeight)
+            composite.HighResWidth == _recordingSourceWidth && composite.HighResHeight == _recordingSourceHeight)
         {
             overlay = highRes;
         }
-        else if (composite.Downscaled.Length >= frameSize &&
-                 composite.DownscaledWidth == _displayWidth && composite.DownscaledHeight == _displayHeight)
+        else if (composite.Downscaled.Length >= sourceSize &&
+                 composite.DownscaledWidth == _recordingSourceWidth && composite.DownscaledHeight == _recordingSourceHeight)
         {
             overlay = composite.Downscaled;
         }
 
-        if (overlay == null || overlay.Length < frameSize)
+        if (overlay == null || overlay.Length < sourceSize)
         {
+            if (_recordingScale > 1)
+            {
+                ScaleRecordingFrame(targetBuffer, destination);
+                ArrayPool<byte>.Shared.Return(sourceBuffer!);
+            }
             return true;
         }
 
@@ -423,20 +445,90 @@ public partial class MainWindow : Window
             Buffer.BlockCopy(overlay, 0, scratch, 0, frameSize);
             InvertBuffer(scratch);
             overlayBuffer = scratch;
-            for (int i = 0; i < frameSize; i += 4)
+            for (int i = 0; i < sourceSize; i += 4)
             {
-                BlendInto(destination, i, overlayBuffer[i], overlayBuffer[i + 1], overlayBuffer[i + 2], _blendMode, 1.0);
+                BlendInto(targetBuffer, i, overlayBuffer[i], overlayBuffer[i + 1], overlayBuffer[i + 2], _blendMode, 1.0);
             }
             ArrayPool<byte>.Shared.Return(scratch);
+            if (_recordingScale > 1)
+            {
+                ScaleRecordingFrame(targetBuffer, destination);
+                ArrayPool<byte>.Shared.Return(sourceBuffer!);
+            }
             return true;
         }
 
-        for (int i = 0; i < frameSize; i += 4)
+        for (int i = 0; i < sourceSize; i += 4)
         {
-            BlendInto(destination, i, overlayBuffer[i], overlayBuffer[i + 1], overlayBuffer[i + 2], _blendMode, 1.0);
+            BlendInto(targetBuffer, i, overlayBuffer[i], overlayBuffer[i + 1], overlayBuffer[i + 2], _blendMode, 1.0);
         }
 
+        if (_recordingScale > 1)
+        {
+            ScaleRecordingFrame(targetBuffer, destination);
+            ArrayPool<byte>.Shared.Return(sourceBuffer!);
+        }
         return true;
+    }
+
+    private void ScaleRecordingFrame(byte[] source, byte[] destination)
+    {
+        if (_recordingScale <= 1)
+        {
+            Buffer.BlockCopy(source, 0, destination, 0, source.Length);
+            return;
+        }
+
+        int srcWidth = _recordingSourceWidth;
+        int srcHeight = _recordingSourceHeight;
+        int scale = _recordingScale;
+        int destWidth = _recordingWidth;
+
+        for (int y = 0; y < srcHeight; y++)
+        {
+            int srcRowOffset = y * srcWidth * 4;
+            int destRowBase = y * scale * destWidth * 4;
+            for (int x = 0; x < srcWidth; x++)
+            {
+                int srcIndex = srcRowOffset + (x * 4);
+                byte b = source[srcIndex];
+                byte g = source[srcIndex + 1];
+                byte r = source[srcIndex + 2];
+                byte a = source[srcIndex + 3];
+                int destPixelBase = destRowBase + (x * scale * 4);
+                for (int dy = 0; dy < scale; dy++)
+                {
+                    int destRowOffset = destPixelBase + (dy * destWidth * 4);
+                    for (int dx = 0; dx < scale; dx++)
+                    {
+                        int destIndex = destRowOffset + (dx * 4);
+                        destination[destIndex] = b;
+                        destination[destIndex + 1] = g;
+                        destination[destIndex + 2] = r;
+                        destination[destIndex + 3] = a;
+                    }
+                }
+            }
+        }
+    }
+
+    private static int GetRecordingTargetHeight(int baseHeight)
+    {
+        if (baseHeight <= 0)
+        {
+            return baseHeight;
+        }
+
+        int[] targets = { 720, 1080, 1440, 2160 };
+        foreach (int target in targets)
+        {
+            if (target >= baseHeight && target % baseHeight == 0)
+            {
+                return target;
+            }
+        }
+
+        return baseHeight;
     }
 
     private void TogglePause_Click(object sender, RoutedEventArgs e)
@@ -478,8 +570,16 @@ public partial class MainWindow : Window
 
         int width = _displayWidth;
         int height = _displayHeight;
+        int targetHeight = GetRecordingTargetHeight(height);
+        int scale = Math.Max(1, targetHeight / height);
+        int targetWidth = width * scale;
+        int targetOutputHeight = height * scale;
+        if (targetOutputHeight != targetHeight)
+        {
+            targetHeight = targetOutputHeight;
+        }
         int fps = Math.Clamp((int)Math.Round(_currentFpsFromConfig), 1, 144);
-        int bitrate = RecordingSession.EstimateBitrate(width, height, fps);
+        int bitrate = RecordingSession.EstimateBitrate(targetWidth, targetHeight, fps);
 
         string folder = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyVideos), "LifeViz");
         Directory.CreateDirectory(folder);
@@ -487,7 +587,7 @@ public partial class MainWindow : Window
 
         try
         {
-            _recordingSession = new RecordingSession(filePath, width, height, fps, bitrate);
+            _recordingSession = new RecordingSession(filePath, targetWidth, targetHeight, fps, bitrate);
         }
         catch (Exception ex)
         {
@@ -497,8 +597,11 @@ public partial class MainWindow : Window
             return;
         }
 
-        _recordingWidth = width;
-        _recordingHeight = height;
+        _recordingSourceWidth = width;
+        _recordingSourceHeight = height;
+        _recordingScale = scale;
+        _recordingWidth = targetWidth;
+        _recordingHeight = targetHeight;
         _recordingPath = filePath;
         _recordingFrameInterval = TimeSpan.FromSeconds(1.0 / fps);
         _nextRecordingFrameTime = TimeSpan.Zero;
@@ -547,6 +650,9 @@ public partial class MainWindow : Window
         _recordingPath = null;
         _recordingWidth = 0;
         _recordingHeight = 0;
+        _recordingSourceWidth = 0;
+        _recordingSourceHeight = 0;
+        _recordingScale = 1;
         _recordingFrameInterval = TimeSpan.Zero;
         _nextRecordingFrameTime = TimeSpan.Zero;
     }
