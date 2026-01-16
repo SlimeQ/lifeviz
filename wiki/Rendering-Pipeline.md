@@ -34,7 +34,7 @@
 
 ## Layer Animations
 
-- Each source (including layer groups) can stack animations: Zoom In, Translate, and Rotate.
+- Each source (including layer groups) can stack animations: Zoom In, Translate, Rotate, Fade, and DVD Bounce (with an adjustable scale). Every animation includes a cycle length in beats, so long fades can stay locked to BPM.
 - Animations are evaluated during compositing by transforming the destination sampling coordinates before the fit-mode mapping, so the animation affects both injection and rendering.
 - All animations share a global BPM (default 140) with per-animation half/normal/double time and forward or reverse (ping-pong) loops.
 

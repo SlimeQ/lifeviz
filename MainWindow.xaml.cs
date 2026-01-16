@@ -34,6 +34,9 @@ public partial class MainWindow : Window
     private const double AnimationZoomScale = 0.2;
     private const double AnimationTranslateFactor = 0.1;
     private const double AnimationRotateDegrees = 12;
+    private const double AnimationDvdScale = 0.2;
+    private const double AnimationDvdCycleBeats = 4.0;
+    private const double AnimationDvdAspectFactor = 1.3;
 
     private readonly GameOfLifeEngine _engine = new();
     private readonly WindowCaptureService _windowCapture = new();
@@ -1415,6 +1418,22 @@ public partial class MainWindow : Window
         }
         animationsMenu.Items.Add(addRotateMenu);
 
+        var addDvdItem = new MenuItem
+        {
+            Header = "Add DVD Bounce",
+            Tag = new AnimationAddTarget(source, AnimationType.DvdBounce)
+        };
+        addDvdItem.Click += AddAnimationMenuItem_Click;
+        animationsMenu.Items.Add(addDvdItem);
+
+        var addFadeItem = new MenuItem
+        {
+            Header = "Add Fade",
+            Tag = new AnimationAddTarget(source, AnimationType.Fade)
+        };
+        addFadeItem.Click += AddAnimationMenuItem_Click;
+        animationsMenu.Items.Add(addFadeItem);
+
         if (source.Animations.Count == 0)
         {
             return animationsMenu;
@@ -1450,12 +1469,7 @@ public partial class MainWindow : Window
             {
                 var speedItem = new MenuItem
                 {
-                    Header = speed switch
-                    {
-                        AnimationSpeed.Half => "Half Time",
-                        AnimationSpeed.Double => "Double Time",
-                        _ => "Normal"
-                    },
+                    Header = DescribeSpeed(speed),
                     IsCheckable = true,
                     IsChecked = animation.Speed == speed,
                     Tag = new AnimationSpeedTarget(source, animation, speed)
@@ -1466,6 +1480,38 @@ public partial class MainWindow : Window
 
             animationItem.Items.Add(loopMenu);
             animationItem.Items.Add(speedMenu);
+
+            var cycleItem = new MenuItem
+            {
+                Header = "Cycle Length",
+                StaysOpenOnClick = true
+            };
+            double cycleMax = animation.Type == AnimationType.DvdBounce ? 128 : 4096;
+            double cycleLargeChange = animation.Type == AnimationType.DvdBounce ? 8 : 32;
+            var cycleValueItem = new MenuItem
+            {
+                Header = DescribeCycleBeats(animation.BeatsPerCycle),
+                IsEnabled = false
+            };
+            var cycleSlider = new Slider
+            {
+                Minimum = 1,
+                Maximum = cycleMax,
+                Value = Math.Clamp(animation.BeatsPerCycle, 1, cycleMax),
+                Width = 140,
+                SmallChange = 1,
+                LargeChange = cycleLargeChange,
+                Margin = new Thickness(12, 4, 12, 8)
+            };
+            cycleSlider.ValueChanged += (_, args) =>
+            {
+                animation.BeatsPerCycle = Math.Clamp(args.NewValue, 1, cycleMax);
+                cycleValueItem.Header = DescribeCycleBeats(animation.BeatsPerCycle);
+                SaveConfig();
+            };
+            cycleItem.Items.Add(cycleValueItem);
+            cycleItem.Items.Add(cycleSlider);
+            animationItem.Items.Add(cycleItem);
 
             if (animation.Type == AnimationType.Translate)
             {
@@ -1500,6 +1546,39 @@ public partial class MainWindow : Window
                     directionMenu.Items.Add(directionItem);
                 }
                 animationItem.Items.Add(directionMenu);
+            }
+            else if (animation.Type == AnimationType.DvdBounce)
+            {
+                var sizeItem = new MenuItem
+                {
+                    Header = "Size",
+                    StaysOpenOnClick = true
+                };
+                var sizeValueItem = new MenuItem
+                {
+                    Header = DescribeScale(animation.DvdScale),
+                    IsEnabled = false
+                };
+                var sizeSlider = new Slider
+                {
+                    Minimum = 0.05,
+                    Maximum = 0.5,
+                    Value = Math.Clamp(animation.DvdScale, 0.05, 0.5),
+                    Width = 140,
+                    SmallChange = 0.01,
+                    LargeChange = 0.05,
+                    Margin = new Thickness(12, 4, 12, 8)
+                };
+                sizeSlider.ValueChanged += (_, args) =>
+                {
+                    animation.DvdScale = Math.Clamp(args.NewValue, 0.05, 0.5);
+                    sizeValueItem.Header = DescribeScale(animation.DvdScale);
+                    RebuildSourcesMenu();
+                    SaveConfig();
+                };
+                sizeItem.Items.Add(sizeValueItem);
+                sizeItem.Items.Add(sizeSlider);
+                animationItem.Items.Add(sizeItem);
             }
 
             var removeItem = new MenuItem
@@ -1825,6 +1904,8 @@ public partial class MainWindow : Window
             AnimationType.ZoomIn => $"{prefix}Zoom In ({DescribeLoop(animation.Loop)}, {DescribeSpeed(animation.Speed)})",
             AnimationType.Translate => $"{prefix}Translate {animation.TranslateDirection} ({DescribeLoop(animation.Loop)}, {DescribeSpeed(animation.Speed)})",
             AnimationType.Rotate => $"{prefix}Rotate {animation.RotationDirection} ({DescribeLoop(animation.Loop)}, {DescribeSpeed(animation.Speed)})",
+            AnimationType.DvdBounce => $"{prefix}DVD Bounce ({DescribeLoop(animation.Loop)}, {DescribeSpeed(animation.Speed)}, {DescribeScale(animation.DvdScale)})",
+            AnimationType.Fade => $"{prefix}Fade ({DescribeLoop(animation.Loop)}, {DescribeSpeed(animation.Speed)})",
             _ => $"{prefix}Animation"
         };
     }
@@ -1833,9 +1914,38 @@ public partial class MainWindow : Window
 
     private static string DescribeSpeed(AnimationSpeed speed) => speed switch
     {
-        AnimationSpeed.Half => "Half",
-        AnimationSpeed.Double => "Double",
-        _ => "Normal"
+        AnimationSpeed.Eighth => "1/8x",
+        AnimationSpeed.Quarter => "1/4x",
+        AnimationSpeed.Half => "1/2x",
+        AnimationSpeed.Double => "2x",
+        AnimationSpeed.Quadruple => "4x",
+        AnimationSpeed.Octuple => "8x",
+        _ => "1x"
+    };
+
+    private static string DescribeScale(double value) => $"{Math.Clamp(value, 0.01, 1):P0}";
+
+    private string DescribeCycleBeats(double beats)
+    {
+        double clamped = Math.Clamp(beats, 1, 4096);
+        double bpm = _animationBpm > 0 ? _animationBpm : DefaultAnimationBpm;
+        double seconds = clamped * 60.0 / Math.Max(1.0, bpm);
+        var duration = TimeSpan.FromSeconds(seconds);
+        string formatted = duration.TotalHours >= 1
+            ? duration.ToString(@"h\:mm\:ss")
+            : duration.ToString(@"m\:ss");
+        return $"{clamped:0} beats (~{formatted})";
+    }
+
+    private static double GetSpeedMultiplier(AnimationSpeed speed) => speed switch
+    {
+        AnimationSpeed.Eighth => 0.125,
+        AnimationSpeed.Quarter => 0.25,
+        AnimationSpeed.Half => 0.5,
+        AnimationSpeed.Double => 2.0,
+        AnimationSpeed.Quadruple => 4.0,
+        AnimationSpeed.Octuple => 8.0,
+        _ => 1.0
     };
 
     private void AddAnimationMenuItem_Click(object sender, RoutedEventArgs e)
@@ -1848,7 +1958,7 @@ public partial class MainWindow : Window
         var animation = new LayerAnimation
         {
             Type = target.Type,
-            Loop = AnimationLoop.Forward,
+            Loop = target.Type == AnimationType.DvdBounce ? AnimationLoop.PingPong : AnimationLoop.Forward,
             Speed = AnimationSpeed.Normal
         };
 
@@ -2826,7 +2936,9 @@ public partial class MainWindow : Window
     {
         ZoomIn,
         Translate,
-        Rotate
+        Rotate,
+        DvdBounce,
+        Fade
     }
 
     private enum AnimationLoop
@@ -2837,9 +2949,13 @@ public partial class MainWindow : Window
 
     private enum AnimationSpeed
     {
+        Eighth,
+        Quarter,
         Half,
         Normal,
-        Double
+        Double,
+        Quadruple,
+        Octuple
     }
 
     private enum TranslateDirection
@@ -2863,6 +2979,8 @@ public partial class MainWindow : Window
         public AnimationSpeed Speed { get; set; } = AnimationSpeed.Normal;
         public TranslateDirection TranslateDirection { get; set; } = TranslateDirection.Right;
         public RotationDirection RotationDirection { get; set; } = RotationDirection.Clockwise;
+        public double DvdScale { get; set; } = AnimationDvdScale;
+        public double BeatsPerCycle { get; set; } = 1.0;
     }
 
     private void UpdateDisplaySurface(bool force = false)
@@ -3199,10 +3317,12 @@ public partial class MainWindow : Window
             }
 
             var downscaledTransform = BuildAnimationTransform(source, downscaledWidth, downscaledHeight, animationTime);
+            double animationOpacity = BuildAnimationOpacity(source, animationTime);
+            double effectiveOpacity = Math.Clamp(source.Opacity * animationOpacity, 0.0, 1.0);
             if (!primedDownscaled)
             {
                 CopyIntoBuffer(downscaledBuffer, downscaledWidth, downscaledHeight,
-                    frame.Downscaled, frame.DownscaledWidth, frame.DownscaledHeight, source.Opacity,
+                    frame.Downscaled, frame.DownscaledWidth, frame.DownscaledHeight, effectiveOpacity,
                     source.Mirror && source.Type == CaptureSource.SourceType.Webcam, source.FitMode, downscaledTransform);
                 primedDownscaled = true;
                 wroteDownscaled = true;
@@ -3210,7 +3330,7 @@ public partial class MainWindow : Window
             else
             {
                 CompositeIntoBuffer(downscaledBuffer, downscaledWidth, downscaledHeight,
-                    frame.Downscaled, frame.DownscaledWidth, frame.DownscaledHeight, source.BlendMode, source.Opacity,
+                    frame.Downscaled, frame.DownscaledWidth, frame.DownscaledHeight, source.BlendMode, effectiveOpacity,
                     source.Mirror && source.Type == CaptureSource.SourceType.Webcam, source.FitMode, downscaledTransform);
                 wroteDownscaled = true;
             }
@@ -3224,7 +3344,7 @@ public partial class MainWindow : Window
 
                 if (!primedHighRes)
                 {
-                    CopyIntoBuffer(highRes, targetWidth, targetHeight, sourceBuffer, sourceWidth, sourceHeight, source.Opacity,
+                    CopyIntoBuffer(highRes, targetWidth, targetHeight, sourceBuffer, sourceWidth, sourceHeight, effectiveOpacity,
                         source.Mirror && source.Type == CaptureSource.SourceType.Webcam, source.FitMode, highResTransform);
                     primedHighRes = true;
                     wroteHighRes = true;
@@ -3232,7 +3352,7 @@ public partial class MainWindow : Window
                 else
                 {
                     CompositeIntoBuffer(highRes, targetWidth, targetHeight, sourceBuffer, sourceWidth, sourceHeight,
-                        source.BlendMode, source.Opacity, source.Mirror && source.Type == CaptureSource.SourceType.Webcam, source.FitMode, highResTransform);
+                        source.BlendMode, effectiveOpacity, source.Mirror && source.Type == CaptureSource.SourceType.Webcam, source.FitMode, highResTransform);
                     wroteHighRes = true;
                 }
             }
@@ -3267,23 +3387,16 @@ public partial class MainWindow : Window
         Transform2D combined = Transform2D.Identity;
         foreach (var animation in source.Animations)
         {
-            double speedScale = animation.Speed switch
-            {
-                AnimationSpeed.Half => 2.0,
-                AnimationSpeed.Double => 0.5,
-                _ => 1.0
-            };
-
-            double cycle = beatDuration * speedScale;
+            double tempoMultiplier = GetSpeedMultiplier(animation.Speed);
+            double beatsPerCycle = Math.Clamp(animation.BeatsPerCycle, 1, 4096);
+            double cycle = beatDuration * beatsPerCycle / Math.Max(tempoMultiplier, 0.000001);
             if (cycle <= 0.000001)
             {
                 continue;
             }
 
             double phase = (timeSeconds % cycle) / cycle;
-            double progress = animation.Loop == AnimationLoop.PingPong
-                ? (phase <= 0.5 ? phase * 2.0 : (1.0 - phase) * 2.0)
-                : phase;
+            double progress = GetLoopProgress(phase, animation.Loop);
 
             Transform2D animTransform = Transform2D.Identity;
             switch (animation.Type)
@@ -3327,6 +3440,36 @@ public partial class MainWindow : Window
                     animTransform = CreateRotation(angle, centerX, centerY);
                     break;
                 }
+                case AnimationType.DvdBounce:
+                {
+                    double baseCycle = beatDuration * AnimationDvdCycleBeats * beatsPerCycle / Math.Max(tempoMultiplier, 0.000001);
+                    if (baseCycle <= 0.000001)
+                    {
+                        break;
+                    }
+
+                    double cycleX = baseCycle;
+                    double cycleY = baseCycle * AnimationDvdAspectFactor;
+                    double phaseX = (timeSeconds % cycleX) / cycleX;
+                    double phaseY = (timeSeconds % cycleY) / cycleY;
+                    double progressX = GetLoopProgress(phaseX, animation.Loop);
+                    double progressY = GetLoopProgress(phaseY, animation.Loop);
+
+                    double scale = Math.Clamp(animation.DvdScale, 0.01, 1.0);
+                    double maxX = Math.Max(0, destWidth - (destWidth * scale));
+                    double maxY = Math.Max(0, destHeight - (destHeight * scale));
+                    double posX = maxX * progressX;
+                    double posY = maxY * progressY;
+
+                    var scaleTransform = CreateScaleAtOrigin(scale);
+                    var translateTransform = CreateTranslation(posX, posY);
+                    animTransform = Transform2D.Multiply(translateTransform, scaleTransform);
+                    break;
+                }
+                case AnimationType.Fade:
+                {
+                    break;
+                }
             }
 
             combined = Transform2D.Multiply(animTransform, combined);
@@ -3340,7 +3483,57 @@ public partial class MainWindow : Window
         return inverse;
     }
 
+    private double BuildAnimationOpacity(CaptureSource source, double timeSeconds)
+    {
+        if (source.Animations.Count == 0)
+        {
+            return 1.0;
+        }
+
+        double bpm = _animationBpm > 0 ? _animationBpm : DefaultAnimationBpm;
+        double beatDuration = 60.0 / Math.Max(1.0, bpm);
+        if (beatDuration <= 0)
+        {
+            return 1.0;
+        }
+
+        double opacity = 1.0;
+        foreach (var animation in source.Animations)
+        {
+            if (animation.Type != AnimationType.Fade)
+            {
+                continue;
+            }
+
+            double tempoMultiplier = GetSpeedMultiplier(animation.Speed);
+            double beatsPerCycle = Math.Clamp(animation.BeatsPerCycle, 1, 4096);
+            double cycle = beatDuration * beatsPerCycle / Math.Max(tempoMultiplier, 0.000001);
+            if (cycle <= 0.000001)
+            {
+                continue;
+            }
+
+            double phase = (timeSeconds % cycle) / cycle;
+            double progress = GetLoopProgress(phase, animation.Loop);
+            opacity *= Math.Clamp(progress, 0.0, 1.0);
+        }
+
+        return Math.Clamp(opacity, 0.0, 1.0);
+    }
+
+    private static double GetLoopProgress(double phase, AnimationLoop loop)
+    {
+        phase -= Math.Floor(phase);
+        if (loop == AnimationLoop.PingPong)
+        {
+            return phase <= 0.5 ? phase * 2.0 : (1.0 - phase) * 2.0;
+        }
+        return phase;
+    }
+
     private static Transform2D CreateTranslation(double dx, double dy) => new(1, 0, 0, 1, dx, dy);
+
+    private static Transform2D CreateScaleAtOrigin(double scale) => new(scale, 0, 0, scale, 0, 0);
 
     private static Transform2D CreateScale(double scale, double centerX, double centerY)
     {
@@ -4299,7 +4492,9 @@ public partial class MainWindow : Window
                 Loop = animation.Loop.ToString(),
                 Speed = animation.Speed.ToString(),
                 TranslateDirection = animation.TranslateDirection.ToString(),
-                RotationDirection = animation.RotationDirection.ToString()
+                RotationDirection = animation.RotationDirection.ToString(),
+                DvdScale = animation.DvdScale,
+                BeatsPerCycle = animation.BeatsPerCycle
             });
         }
         return configs;
@@ -4442,6 +4637,14 @@ public partial class MainWindow : Window
                 {
                     animation.RotationDirection = rotate;
                 }
+                if (animationConfig.DvdScale > 0)
+                {
+                    animation.DvdScale = Math.Clamp(animationConfig.DvdScale, 0.01, 1.0);
+                }
+                if (animationConfig.BeatsPerCycle > 0)
+                {
+                    animation.BeatsPerCycle = Math.Clamp(animationConfig.BeatsPerCycle, 1, 4096);
+                }
                 source.Animations.Add(animation);
             }
         }
@@ -4505,6 +4708,8 @@ public partial class MainWindow : Window
             public string Speed { get; set; } = AnimationSpeed.Normal.ToString();
             public string TranslateDirection { get; set; } = global::lifeviz.MainWindow.TranslateDirection.Right.ToString();
             public string RotationDirection { get; set; } = global::lifeviz.MainWindow.RotationDirection.Clockwise.ToString();
+            public double DvdScale { get; set; } = AnimationDvdScale;
+            public double BeatsPerCycle { get; set; } = 1.0;
         }
     }
 
