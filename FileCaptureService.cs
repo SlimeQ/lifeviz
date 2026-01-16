@@ -77,6 +77,62 @@ internal sealed class FileCaptureService : IDisposable
         }
     }
 
+    public bool TryCreateVideoSequence(IReadOnlyList<string> paths, out VideoSequenceSession? session, out string? error)
+    {
+        session = null;
+        error = null;
+
+        if (paths == null || paths.Count == 0)
+        {
+            error = "No video files selected.";
+            return false;
+        }
+
+        var normalized = new List<string>(paths.Count);
+        foreach (var path in paths)
+        {
+            if (string.IsNullOrWhiteSpace(path))
+            {
+                continue;
+            }
+
+            if (!TryNormalizePath(path, out var fullPath))
+            {
+                error = "Invalid file path.";
+                return false;
+            }
+
+            if (!File.Exists(fullPath))
+            {
+                error = $"File not found: {fullPath}";
+                return false;
+            }
+
+            string extension = Path.GetExtension(fullPath);
+            if (!VideoExtensions.Contains(extension))
+            {
+                error = $"Video sequences only support video files. ({Path.GetFileName(fullPath)})";
+                return false;
+            }
+
+            bool duplicate = normalized.Any(existing =>
+                string.Equals(existing, fullPath, StringComparison.OrdinalIgnoreCase));
+            if (!duplicate)
+            {
+                normalized.Add(fullPath);
+            }
+        }
+
+        if (normalized.Count == 0)
+        {
+            error = "No valid video files selected.";
+            return false;
+        }
+
+        session = new VideoSequenceSession(normalized);
+        return true;
+    }
+
     public FileCaptureFrame? CaptureFrame(string path, int targetWidth, int targetHeight, FitMode fitMode, bool includeSource = true)
     {
         if (string.IsNullOrWhiteSpace(path) || targetWidth <= 0 || targetHeight <= 0)
@@ -181,7 +237,7 @@ internal sealed class FileCaptureService : IDisposable
         string extension = Path.GetExtension(path);
         if (VideoExtensions.Contains(extension))
         {
-            return new VideoSession(path);
+            return new VideoSession(path, loopPlayback: true);
         }
 
         bool isGif = string.Equals(extension, ".gif", StringComparison.OrdinalIgnoreCase);
@@ -388,6 +444,7 @@ internal sealed class FileCaptureService : IDisposable
     private sealed class VideoSession : FileSession
     {
         private readonly MediaPlayer _player;
+        private readonly bool _loopPlayback;
         private readonly DrawingVisual _visual = new();
         private RenderTargetBitmap? _renderTarget;
         private byte[]? _latestBuffer;
@@ -395,6 +452,7 @@ internal sealed class FileCaptureService : IDisposable
         private bool _isReady;
         private bool _hasError;
         private bool _errorShown;
+        private bool _ended;
         private int _blankFrameStreak;
         private readonly object _transcodeLock = new();
         private bool _transcodeAttempted;
@@ -418,10 +476,11 @@ internal sealed class FileCaptureService : IDisposable
         private int _renderWidth;
         private int _renderHeight;
 
-        public VideoSession(string path)
+        public VideoSession(string path, bool loopPlayback)
             : base(path, System.IO.Path.GetFileName(path), 0, 0)
         {
             _playbackPath = path;
+            _loopPlayback = loopPlayback;
             _player = new MediaPlayer
             {
                 Volume = 0,
@@ -558,8 +617,17 @@ internal sealed class FileCaptureService : IDisposable
 
         private void PlayerOnMediaEnded(object? sender, EventArgs e)
         {
-            _player.Position = TimeSpan.Zero;
-            _player.Play();
+            if (_loopPlayback)
+            {
+                _player.Position = TimeSpan.Zero;
+                _player.Play();
+                _ended = false;
+            }
+            else
+            {
+                _ended = true;
+                _player.Pause();
+            }
         }
 
         private void PlayerOnMediaFailed(object? sender, ExceptionEventArgs e)
@@ -758,6 +826,7 @@ internal sealed class FileCaptureService : IDisposable
             _isReady = false;
             _renderWidth = 0;
             _renderHeight = 0;
+            _ended = false;
             _openClock.Restart();
             _player.Open(new Uri(path, UriKind.Absolute));
             _player.Play();
@@ -781,6 +850,17 @@ internal sealed class FileCaptureService : IDisposable
             }
 
             BeginTranscodeIfNeeded($"Video did not report dimensions for {Path} after {MediaOpenTimeoutSeconds:0.0}s.");
+        }
+
+        public bool ConsumeEnded()
+        {
+            if (!_ended)
+            {
+                return false;
+            }
+
+            _ended = false;
+            return true;
         }
 
         private static string GetTranscodeCachePath(string originalPath)
@@ -814,6 +894,121 @@ internal sealed class FileCaptureService : IDisposable
             }
 
             return true;
+        }
+    }
+
+    internal sealed class VideoSequenceSession : IDisposable
+    {
+        private readonly List<string> _paths;
+        private readonly string _displayName;
+        private int _index;
+        private VideoSession? _current;
+        private int _errorStreak;
+        private bool _hasError;
+
+        public VideoSequenceSession(IReadOnlyList<string> paths)
+        {
+            _paths = new List<string>(paths);
+            _displayName = BuildDisplayName(_paths);
+            _index = 0;
+            _current = new VideoSession(_paths[_index], loopPlayback: false);
+        }
+
+        public IReadOnlyList<string> Paths => _paths;
+        public string DisplayName => _displayName;
+
+        public FileCaptureState State
+        {
+            get
+            {
+                if (_hasError)
+                {
+                    return FileCaptureState.Error;
+                }
+
+                if (_current == null)
+                {
+                    return FileCaptureState.Error;
+                }
+
+                return _current.State;
+            }
+        }
+
+        public FileCaptureFrame? CaptureFrame(int targetWidth, int targetHeight, FitMode fitMode, bool includeSource)
+        {
+            if (_hasError || _current == null)
+            {
+                return null;
+            }
+
+            var frame = _current.CaptureFrame(targetWidth, targetHeight, fitMode, includeSource);
+
+            if (_current.ConsumeEnded())
+            {
+                Advance(isError: false);
+                return null;
+            }
+
+            if (_current.State == FileCaptureState.Error)
+            {
+                if (!Advance(isError: true))
+                {
+                    Logger.Warn($"All videos in sequence failed: {_displayName}");
+                    _hasError = true;
+                    return null;
+                }
+            }
+            else if (frame.HasValue)
+            {
+                _errorStreak = 0;
+            }
+
+            return frame;
+        }
+
+        public void Dispose()
+        {
+            _current?.Dispose();
+            _current = null;
+        }
+
+        private bool Advance(bool isError)
+        {
+            _current?.Dispose();
+            _index = (_index + 1) % _paths.Count;
+            _current = new VideoSession(_paths[_index], loopPlayback: false);
+
+            if (isError)
+            {
+                _errorStreak++;
+                if (_errorStreak >= _paths.Count)
+                {
+                    return false;
+                }
+            }
+            else
+            {
+                _errorStreak = 0;
+            }
+
+            return true;
+        }
+
+        private static string BuildDisplayName(IReadOnlyList<string> paths)
+        {
+            if (paths == null || paths.Count == 0)
+            {
+                return "Video Sequence";
+            }
+
+            string baseName = Path.GetFileName(paths[0]);
+            if (paths.Count == 1)
+            {
+                return baseName;
+            }
+
+            return $"{baseName} (+{paths.Count - 1})";
         }
     }
 

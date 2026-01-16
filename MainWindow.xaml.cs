@@ -1231,6 +1231,7 @@ public partial class MainWindow : Window
         SourcesMenu.Items.Add(BuildAddWindowMenuItem(null));
         SourcesMenu.Items.Add(BuildAddWebcamMenuItem(null));
         SourcesMenu.Items.Add(BuildAddFileMenuItem(null));
+        SourcesMenu.Items.Add(BuildAddVideoSequenceMenuItem(null));
         SourcesMenu.Items.Add(new Separator());
 
         if (_sources.Count == 0)
@@ -1378,6 +1379,13 @@ public partial class MainWindow : Window
         var addFileItem = new MenuItem { Header = "Add File Source...", Tag = parentGroup };
         addFileItem.Click += AddFileSourceMenuItem_Click;
         return addFileItem;
+    }
+
+    private MenuItem BuildAddVideoSequenceMenuItem(CaptureSource? parentGroup)
+    {
+        var addSequenceItem = new MenuItem { Header = "Add Video Sequence...", Tag = parentGroup };
+        addSequenceItem.Click += AddVideoSequenceMenuItem_Click;
+        return addSequenceItem;
     }
 
     private MenuItem BuildAnimationsMenu(CaptureSource source)
@@ -1677,6 +1685,7 @@ public partial class MainWindow : Window
             sourceItem.Items.Add(BuildAddWindowMenuItem(source));
             sourceItem.Items.Add(BuildAddWebcamMenuItem(source));
             sourceItem.Items.Add(BuildAddFileMenuItem(source));
+            sourceItem.Items.Add(BuildAddVideoSequenceMenuItem(source));
             sourceItem.Items.Add(new Separator());
         }
 
@@ -1815,6 +1824,7 @@ public partial class MainWindow : Window
         {
             CaptureSource.SourceType.Webcam => $"{prefix}Camera: {source.DisplayName}",
             CaptureSource.SourceType.File => $"{prefix}File: {source.DisplayName}",
+            CaptureSource.SourceType.VideoSequence => $"{prefix}Video Sequence: {source.DisplayName}",
             CaptureSource.SourceType.Group => $"{prefix}Group: {source.DisplayName}",
             _ => $"{prefix}{source.DisplayName}"
         };
@@ -1861,6 +1871,28 @@ public partial class MainWindow : Window
         if (dialog.ShowDialog(this) == true)
         {
             AddOrPromoteFileSource(dialog.FileName, parentGroup?.Children ?? _sources);
+        }
+    }
+
+    private void AddVideoSequenceMenuItem_Click(object sender, RoutedEventArgs e)
+    {
+        CaptureSource? parentGroup = null;
+        if (sender is MenuItem { Tag: CaptureSource group })
+        {
+            parentGroup = group;
+        }
+
+        var dialog = new OpenFileDialog
+        {
+            Title = "Select Video Sequence",
+            Filter = "Video Files|*.mp4;*.mov;*.wmv;*.avi;*.mkv;*.webm;*.mpg;*.mpeg|All Files|*.*",
+            Multiselect = true,
+            CheckFileExists = true
+        };
+
+        if (dialog.ShowDialog(this) == true)
+        {
+            AddVideoSequenceSource(dialog.FileNames, parentGroup?.Children ?? _sources);
         }
     }
 
@@ -2116,6 +2148,34 @@ public partial class MainWindow : Window
         SaveConfig();
     }
 
+    private void AddVideoSequenceSource(IReadOnlyList<string> paths, List<CaptureSource> targetList)
+    {
+        if (!_fileCapture.TryCreateVideoSequence(paths, out var sequence, out var error))
+        {
+            string message = error ?? "Unsupported video sequence.";
+            MessageBox.Show(this, $"Failed to load video sequence:\n{message}", "Video Sequence Error", MessageBoxButton.OK, MessageBoxImage.Warning);
+            Logger.Warn($"Failed to add video sequence. {message}");
+            return;
+        }
+
+        var existing = FindSource(s => s.Type == CaptureSource.SourceType.VideoSequence &&
+            s.HasSameVideoSequence(sequence!.Paths));
+        if (existing != null)
+        {
+            sequence!.Dispose();
+            Logger.Info("Video sequence already active.");
+        }
+        else
+        {
+            targetList.Add(CaptureSource.CreateVideoSequence(sequence!));
+            Logger.Info($"Inserted new video sequence (appended): {sequence!.DisplayName}");
+        }
+
+        UpdatePrimaryAspectIfNeeded();
+        RenderFrame();
+        SaveConfig();
+    }
+
     private void AddLayerGroup(List<CaptureSource> targetList)
     {
         targetList.Add(CaptureSource.CreateGroup());
@@ -2217,6 +2277,10 @@ public partial class MainWindow : Window
         else if (source.Type == CaptureSource.SourceType.Window && source.Window != null)
         {
             _windowCapture.RemoveCache(source.Window.Handle);
+        }
+        else if (source.Type == CaptureSource.SourceType.VideoSequence)
+        {
+            source.DisposeVideoSequence();
         }
         else if (source.Type == CaptureSource.SourceType.File && source.FilePath != null)
         {
@@ -2482,6 +2546,24 @@ public partial class MainWindow : Window
                         }
                     }
                 }
+                else if (source.Type == CaptureSource.SourceType.VideoSequence && source.VideoSequence != null)
+                {
+                    var sequenceFrame = source.VideoSequence.CaptureFrame(_engine.Columns, _engine.Rows, source.FitMode, _preserveResolution);
+                    if (sequenceFrame.HasValue)
+                    {
+                        var value = sequenceFrame.Value;
+                        frame = new SourceFrame(value.OverlayDownscaled, value.DownscaledWidth, value.DownscaledHeight,
+                            value.OverlaySource, value.SourceWidth, value.SourceHeight);
+                        source.UpdateFileDimensions(value.SourceWidth, value.SourceHeight);
+                        source.HasError = false;
+                        source.MissedFrames = 0;
+                        if (!source.FirstFrameReceived)
+                        {
+                            source.FirstFrameReceived = true;
+                            Logger.Info($"Video sequence frame acquired for {source.DisplayName}: {value.SourceWidth}x{value.SourceHeight}");
+                        }
+                    }
+                }
                 else if (source.Type == CaptureSource.SourceType.File && !string.IsNullOrWhiteSpace(source.FilePath))
                 {
                     var fileFrame = _fileCapture.CaptureFrame(source.FilePath, _engine.Columns, _engine.Rows, source.FitMode, _preserveResolution);
@@ -2552,6 +2634,25 @@ public partial class MainWindow : Window
                     source.MissedFrames++;
                     var age = DateTime.UtcNow - source.AddedUtc;
                     if (!source.FirstFrameReceived && age < TimeSpan.FromSeconds(10))
+                    {
+                        continue;
+                    }
+                }
+
+                if (source.Type == CaptureSource.SourceType.VideoSequence)
+                {
+                    if (source.VideoSequence?.State == FileCaptureService.FileCaptureState.Pending)
+                    {
+                        continue;
+                    }
+
+                    source.MissedFrames++;
+                    var age = DateTime.UtcNow - source.AddedUtc;
+                    if (!source.FirstFrameReceived && age < TimeSpan.FromSeconds(5))
+                    {
+                        continue;
+                    }
+                    if (source.MissedFrames <= 180 && age < TimeSpan.FromSeconds(10))
                     {
                         continue;
                     }
@@ -4476,6 +4577,11 @@ public partial class MainWindow : Window
                 Animations = BuildAnimationConfigs(source.Animations)
             };
 
+            if (source.Type == CaptureSource.SourceType.VideoSequence && source.FilePaths.Count > 0)
+            {
+                config.FilePaths = new List<string>(source.FilePaths);
+            }
+
             if (source.Type == CaptureSource.SourceType.Group && source.Children.Count > 0)
             {
                 config.Children = BuildSourceConfigs(source.Children);
@@ -4583,6 +4689,21 @@ public partial class MainWindow : Window
                     if (_fileCapture.TryGetOrAdd(config.FilePath, out var info, out _))
                     {
                         restored = CaptureSource.CreateFile(info.Path, info.DisplayName, info.Width, info.Height);
+                    }
+                    break;
+
+                case CaptureSource.SourceType.VideoSequence:
+                    var sequencePaths = config.FilePaths != null && config.FilePaths.Count > 0
+                        ? config.FilePaths
+                        : (!string.IsNullOrWhiteSpace(config.FilePath) ? new List<string> { config.FilePath } : null);
+                    if (sequencePaths == null || sequencePaths.Count == 0)
+                    {
+                        break;
+                    }
+
+                    if (_fileCapture.TryCreateVideoSequence(sequencePaths, out var sequence, out _))
+                    {
+                        restored = CaptureSource.CreateVideoSequence(sequence!);
                     }
                     break;
             }
@@ -4698,6 +4819,7 @@ public partial class MainWindow : Window
             public string? WindowTitle { get; set; }
             public string? WebcamId { get; set; }
             public string? FilePath { get; set; }
+            public List<string> FilePaths { get; set; } = new();
             public string? DisplayName { get; set; }
             public string BlendMode { get; set; } = MainWindow.BlendMode.Normal.ToString();
             public string FitMode { get; set; } = lifeviz.FitMode.Fit.ToString();
@@ -4739,6 +4861,7 @@ public partial class MainWindow : Window
             Window,
             Webcam,
             File,
+            VideoSequence,
             Group
         }
 
@@ -4766,6 +4889,16 @@ public partial class MainWindow : Window
             return new(SourceType.File, null, null, filePath, displayName, fileWidth, fileHeight) { AddedUtc = DateTime.UtcNow };
         }
 
+        public static CaptureSource CreateVideoSequence(FileCaptureService.VideoSequenceSession session)
+        {
+            var source = new CaptureSource(SourceType.VideoSequence, null, null, null, session.DisplayName, null, null)
+            {
+                AddedUtc = DateTime.UtcNow
+            };
+            source.SetVideoSequence(session);
+            return source;
+        }
+
         public static CaptureSource CreateGroup(string? displayName = null) =>
             new(SourceType.Group, null, null, null, displayName ?? "Layer Group", null, null) { AddedUtc = DateTime.UtcNow };
 
@@ -4773,6 +4906,8 @@ public partial class MainWindow : Window
         public WindowHandleInfo? Window { get; set; }
         public string? WebcamId { get; }
         public string? FilePath { get; }
+        public List<string> FilePaths { get; } = new();
+        public FileCaptureService.VideoSequenceSession? VideoSequence { get; private set; }
         public string DisplayName { get; private set; }
         public List<CaptureSource> Children { get; } = new();
         public List<LayerAnimation> Animations { get; } = new();
@@ -4796,6 +4931,38 @@ public partial class MainWindow : Window
         public void SetDisplayName(string displayName)
         {
             DisplayName = string.IsNullOrWhiteSpace(displayName) ? "Layer Group" : displayName.Trim();
+        }
+
+        public void SetVideoSequence(FileCaptureService.VideoSequenceSession session)
+        {
+            VideoSequence = session;
+            FilePaths.Clear();
+            FilePaths.AddRange(session.Paths);
+        }
+
+        public void DisposeVideoSequence()
+        {
+            VideoSequence?.Dispose();
+            VideoSequence = null;
+            FilePaths.Clear();
+        }
+
+        public bool HasSameVideoSequence(IReadOnlyList<string> paths)
+        {
+            if (Type != SourceType.VideoSequence || paths.Count != FilePaths.Count)
+            {
+                return false;
+            }
+
+            for (int i = 0; i < paths.Count; i++)
+            {
+                if (!string.Equals(paths[i], FilePaths[i], StringComparison.OrdinalIgnoreCase))
+                {
+                    return false;
+                }
+            }
+
+            return true;
         }
 
         public double AspectRatio
@@ -4826,6 +4993,11 @@ public partial class MainWindow : Window
                     return Math.Max(0.05, FileWidth.Value / (double)FileHeight.Value);
                 }
 
+                if (Type == SourceType.VideoSequence && FileWidth.HasValue && FileHeight.HasValue && FileHeight > 0)
+                {
+                    return Math.Max(0.05, FileWidth.Value / (double)FileHeight.Value);
+                }
+
                 return DefaultAspectRatio;
             }
         }
@@ -4834,6 +5006,7 @@ public partial class MainWindow : Window
         {
             SourceType.Window => Window?.Width,
             SourceType.File => FileWidth,
+            SourceType.VideoSequence => FileWidth,
             SourceType.Group => Children.Count > 0 ? Children[0].FallbackWidth : null,
             _ => LastFrame?.SourceWidth
         };
@@ -4842,6 +5015,7 @@ public partial class MainWindow : Window
         {
             SourceType.Window => Window?.Height,
             SourceType.File => FileHeight,
+            SourceType.VideoSequence => FileHeight,
             SourceType.Group => Children.Count > 0 ? Children[0].FallbackHeight : null,
             _ => LastFrame?.SourceHeight
         };
