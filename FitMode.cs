@@ -149,6 +149,59 @@ internal static class ImageFit
         }
     }
 
+    public static bool TryMapPixel(FitMapping mapping, double col, double row, out int srcX, out int srcY)
+    {
+        srcX = 0;
+        srcY = 0;
+
+        switch (mapping.Mode)
+        {
+            case FitMode.Fit:
+            {
+                double xIn = col - mapping.OffsetX;
+                double yIn = row - mapping.OffsetY;
+                if (xIn < 0 || yIn < 0 || xIn >= mapping.ScaledWidth || yIn >= mapping.ScaledHeight)
+                {
+                    return false;
+                }
+
+                srcX = ClampToInt((int)Math.Floor(xIn / mapping.ScaleX), 0, mapping.SourceWidth - 1);
+                srcY = ClampToInt((int)Math.Floor(yIn / mapping.ScaleY), 0, mapping.SourceHeight - 1);
+                return true;
+            }
+            case FitMode.Fill:
+            {
+                double xIn = col + mapping.OffsetX;
+                double yIn = row + mapping.OffsetY;
+                srcX = ClampToInt((int)Math.Floor(xIn / mapping.ScaleX), 0, mapping.SourceWidth - 1);
+                srcY = ClampToInt((int)Math.Floor(yIn / mapping.ScaleY), 0, mapping.SourceHeight - 1);
+                return true;
+            }
+            case FitMode.Center:
+            {
+                double xIn = col - mapping.OffsetX;
+                double yIn = row - mapping.OffsetY;
+                if (xIn < 0 || yIn < 0 || xIn >= mapping.SourceWidth || yIn >= mapping.SourceHeight)
+                {
+                    return false;
+                }
+
+                srcX = ClampToInt((int)Math.Floor(xIn), 0, mapping.SourceWidth - 1);
+                srcY = ClampToInt((int)Math.Floor(yIn), 0, mapping.SourceHeight - 1);
+                return true;
+            }
+            case FitMode.Tile:
+                srcX = PositiveMod((int)Math.Floor(col), mapping.SourceWidth);
+                srcY = PositiveMod((int)Math.Floor(row), mapping.SourceHeight);
+                return true;
+            case FitMode.Stretch:
+            default:
+                srcX = ClampToInt((int)Math.Floor(col * mapping.ScaleX), 0, mapping.SourceWidth - 1);
+                srcY = ClampToInt((int)Math.Floor(row * mapping.ScaleY), 0, mapping.SourceHeight - 1);
+                return true;
+        }
+    }
+
     private static int PositiveMod(int value, int modulo) => modulo <= 0 ? 0 : (value % modulo + modulo) % modulo;
 
     private static double NormalizeScale(double value)

@@ -32,6 +32,12 @@
 - **Preserve Window Resolution** renders the composite at the primary source's native resolution and samples the underlay bilinearly, then scales the Game of Life grid up to that size, reducing underlay pixelation.
 - Final blending still happens in a WPF pixel shader (GPU) so passthrough stays responsive even when rendering at source resolution; per-source blends occur CPU-side during the composite build.
 
+## Layer Animations
+
+- Each source (including layer groups) can stack animations: Zoom In, Translate, and Rotate.
+- Animations are evaluated during compositing by transforming the destination sampling coordinates before the fit-mode mapping, so the animation affects both injection and rendering.
+- All animations share a global BPM (default 140) with per-animation half/normal/double time and forward or reverse (ping-pong) loops.
+
 ## Recording
 
 - **Start Recording** captures the final output buffer, then applies a pixel-perfect integer upscale to the nearest HD height (720/1080/1440/2160 when divisible). **Recording Quality** chooses between lossless uncompressed RGB (AVI) or H.264 tiers (High/Balanced/Compact). H.264 uses quality-based VBR with bitrate caps to preserve sharp pixel edges without runaway file sizes.

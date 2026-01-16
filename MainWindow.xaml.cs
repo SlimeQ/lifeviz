@@ -30,6 +30,10 @@ public partial class MainWindow : Window
     private const int DefaultDepth = 24;
     private const double DefaultAspectRatio = 16d / 9d;
     private const double DefaultFps = 60;
+    private const double DefaultAnimationBpm = 140;
+    private const double AnimationZoomScale = 0.2;
+    private const double AnimationTranslateFactor = 0.1;
+    private const double AnimationRotateDegrees = 12;
 
     private readonly GameOfLifeEngine _engine = new();
     private readonly WindowCaptureService _windowCapture = new();
@@ -94,6 +98,7 @@ public partial class MainWindow : Window
     private GameOfLifeEngine.BinningMode _binningMode = GameOfLifeEngine.BinningMode.Fill;
     private GameOfLifeEngine.InjectionMode _injectionMode = GameOfLifeEngine.InjectionMode.Threshold;
     private double _currentFps = DefaultFps;
+    private double _animationBpm = DefaultAnimationBpm;
     private double _captureThresholdMin = 0.35;
     private double _captureThresholdMax = 0.75;
     private bool _invertThreshold;
@@ -1109,6 +1114,11 @@ public partial class MainWindow : Window
         {
             InvertThresholdCheckBox.IsChecked = _invertThreshold;
         }
+        if (AnimationBpmSlider != null && AnimationBpmValueText != null)
+        {
+            AnimationBpmSlider.Value = _animationBpm;
+            AnimationBpmValueText.Text = $"{_animationBpm:F0}";
+        }
 
         if (FpsOscillationCheckBox != null)
         {
@@ -1269,6 +1279,90 @@ public partial class MainWindow : Window
         public CaptureSource? ParentGroup { get; }
     }
 
+    private sealed class AnimationAddTarget
+    {
+        public AnimationAddTarget(CaptureSource source, AnimationType type, TranslateDirection? translateDirection = null, RotationDirection? rotationDirection = null)
+        {
+            Source = source;
+            Type = type;
+            TranslateDirection = translateDirection;
+            RotationDirection = rotationDirection;
+        }
+
+        public CaptureSource Source { get; }
+        public AnimationType Type { get; }
+        public TranslateDirection? TranslateDirection { get; }
+        public RotationDirection? RotationDirection { get; }
+    }
+
+    private sealed class AnimationTarget
+    {
+        public AnimationTarget(CaptureSource source, LayerAnimation animation)
+        {
+            Source = source;
+            Animation = animation;
+        }
+
+        public CaptureSource Source { get; }
+        public LayerAnimation Animation { get; }
+    }
+
+    private sealed class AnimationLoopTarget
+    {
+        public AnimationLoopTarget(CaptureSource source, LayerAnimation animation, AnimationLoop loop)
+        {
+            Source = source;
+            Animation = animation;
+            Loop = loop;
+        }
+
+        public CaptureSource Source { get; }
+        public LayerAnimation Animation { get; }
+        public AnimationLoop Loop { get; }
+    }
+
+    private sealed class AnimationSpeedTarget
+    {
+        public AnimationSpeedTarget(CaptureSource source, LayerAnimation animation, AnimationSpeed speed)
+        {
+            Source = source;
+            Animation = animation;
+            Speed = speed;
+        }
+
+        public CaptureSource Source { get; }
+        public LayerAnimation Animation { get; }
+        public AnimationSpeed Speed { get; }
+    }
+
+    private sealed class AnimationTranslateTarget
+    {
+        public AnimationTranslateTarget(CaptureSource source, LayerAnimation animation, TranslateDirection direction)
+        {
+            Source = source;
+            Animation = animation;
+            Direction = direction;
+        }
+
+        public CaptureSource Source { get; }
+        public LayerAnimation Animation { get; }
+        public TranslateDirection Direction { get; }
+    }
+
+    private sealed class AnimationRotateTarget
+    {
+        public AnimationRotateTarget(CaptureSource source, LayerAnimation animation, RotationDirection direction)
+        {
+            Source = source;
+            Animation = animation;
+            Direction = direction;
+        }
+
+        public CaptureSource Source { get; }
+        public LayerAnimation Animation { get; }
+        public RotationDirection Direction { get; }
+    }
+
     private MenuItem BuildAddLayerGroupMenuItem(CaptureSource? parentGroup)
     {
         var addGroupItem = new MenuItem { Header = "Add Layer Group", Tag = parentGroup };
@@ -1281,6 +1375,146 @@ public partial class MainWindow : Window
         var addFileItem = new MenuItem { Header = "Add File Source...", Tag = parentGroup };
         addFileItem.Click += AddFileSourceMenuItem_Click;
         return addFileItem;
+    }
+
+    private MenuItem BuildAnimationsMenu(CaptureSource source)
+    {
+        var animationsMenu = new MenuItem { Header = "Animations" };
+
+        var addZoomItem = new MenuItem
+        {
+            Header = "Add Zoom In",
+            Tag = new AnimationAddTarget(source, AnimationType.ZoomIn)
+        };
+        addZoomItem.Click += AddAnimationMenuItem_Click;
+        animationsMenu.Items.Add(addZoomItem);
+
+        var addTranslateMenu = new MenuItem { Header = "Add Translate" };
+        foreach (var direction in Enum.GetValues(typeof(TranslateDirection)).Cast<TranslateDirection>())
+        {
+            var addTranslateItem = new MenuItem
+            {
+                Header = direction.ToString(),
+                Tag = new AnimationAddTarget(source, AnimationType.Translate, translateDirection: direction)
+            };
+            addTranslateItem.Click += AddAnimationMenuItem_Click;
+            addTranslateMenu.Items.Add(addTranslateItem);
+        }
+        animationsMenu.Items.Add(addTranslateMenu);
+
+        var addRotateMenu = new MenuItem { Header = "Add Rotate" };
+        foreach (var direction in Enum.GetValues(typeof(RotationDirection)).Cast<RotationDirection>())
+        {
+            var addRotateItem = new MenuItem
+            {
+                Header = direction.ToString(),
+                Tag = new AnimationAddTarget(source, AnimationType.Rotate, rotationDirection: direction)
+            };
+            addRotateItem.Click += AddAnimationMenuItem_Click;
+            addRotateMenu.Items.Add(addRotateItem);
+        }
+        animationsMenu.Items.Add(addRotateMenu);
+
+        if (source.Animations.Count == 0)
+        {
+            return animationsMenu;
+        }
+
+        animationsMenu.Items.Add(new Separator());
+
+        for (int i = 0; i < source.Animations.Count; i++)
+        {
+            var animation = source.Animations[i];
+            var animationItem = new MenuItem
+            {
+                Header = BuildAnimationLabel(animation, i),
+                Tag = new AnimationTarget(source, animation)
+            };
+
+            var loopMenu = new MenuItem { Header = "Loop" };
+            foreach (var loop in Enum.GetValues(typeof(AnimationLoop)).Cast<AnimationLoop>())
+            {
+                var loopItem = new MenuItem
+                {
+                    Header = loop == AnimationLoop.PingPong ? "Reverse" : loop.ToString(),
+                    IsCheckable = true,
+                    IsChecked = animation.Loop == loop,
+                    Tag = new AnimationLoopTarget(source, animation, loop)
+                };
+                loopItem.Click += AnimationLoopItem_Click;
+                loopMenu.Items.Add(loopItem);
+            }
+
+            var speedMenu = new MenuItem { Header = "Speed" };
+            foreach (var speed in Enum.GetValues(typeof(AnimationSpeed)).Cast<AnimationSpeed>())
+            {
+                var speedItem = new MenuItem
+                {
+                    Header = speed switch
+                    {
+                        AnimationSpeed.Half => "Half Time",
+                        AnimationSpeed.Double => "Double Time",
+                        _ => "Normal"
+                    },
+                    IsCheckable = true,
+                    IsChecked = animation.Speed == speed,
+                    Tag = new AnimationSpeedTarget(source, animation, speed)
+                };
+                speedItem.Click += AnimationSpeedItem_Click;
+                speedMenu.Items.Add(speedItem);
+            }
+
+            animationItem.Items.Add(loopMenu);
+            animationItem.Items.Add(speedMenu);
+
+            if (animation.Type == AnimationType.Translate)
+            {
+                var directionMenu = new MenuItem { Header = "Direction" };
+                foreach (var direction in Enum.GetValues(typeof(TranslateDirection)).Cast<TranslateDirection>())
+                {
+                    var directionItem = new MenuItem
+                    {
+                        Header = direction.ToString(),
+                        IsCheckable = true,
+                        IsChecked = animation.TranslateDirection == direction,
+                        Tag = new AnimationTranslateTarget(source, animation, direction)
+                    };
+                    directionItem.Click += AnimationTranslateDirectionItem_Click;
+                    directionMenu.Items.Add(directionItem);
+                }
+                animationItem.Items.Add(directionMenu);
+            }
+            else if (animation.Type == AnimationType.Rotate)
+            {
+                var directionMenu = new MenuItem { Header = "Direction" };
+                foreach (var direction in Enum.GetValues(typeof(RotationDirection)).Cast<RotationDirection>())
+                {
+                    var directionItem = new MenuItem
+                    {
+                        Header = direction.ToString(),
+                        IsCheckable = true,
+                        IsChecked = animation.RotationDirection == direction,
+                        Tag = new AnimationRotateTarget(source, animation, direction)
+                    };
+                    directionItem.Click += AnimationRotateDirectionItem_Click;
+                    directionMenu.Items.Add(directionItem);
+                }
+                animationItem.Items.Add(directionMenu);
+            }
+
+            var removeItem = new MenuItem
+            {
+                Header = "Remove",
+                Tag = new AnimationTarget(source, animation)
+            };
+            removeItem.Click += RemoveAnimationMenuItem_Click;
+            animationItem.Items.Add(new Separator());
+            animationItem.Items.Add(removeItem);
+
+            animationsMenu.Items.Add(animationItem);
+        }
+
+        return animationsMenu;
     }
 
     private MenuItem BuildAddWindowMenuItem(CaptureSource? parentGroup)
@@ -1395,6 +1629,8 @@ public partial class MainWindow : Window
             fitMenu.Items.Add(fitItem);
         }
 
+        var animationsMenu = BuildAnimationsMenu(source);
+
         MenuItem? renameItem = null;
         if (source.Type == CaptureSource.SourceType.Group)
         {
@@ -1477,6 +1713,7 @@ public partial class MainWindow : Window
 
         sourceItem.Items.Add(blendMenu);
         sourceItem.Items.Add(fitMenu);
+        sourceItem.Items.Add(animationsMenu);
         if (renameItem != null)
         {
             sourceItem.Items.Add(renameItem);
@@ -1576,6 +1813,119 @@ public partial class MainWindow : Window
             source.FitMode = fitMode;
             RebuildSourcesMenu();
             RenderFrame();
+            SaveConfig();
+        }
+    }
+
+    private static string BuildAnimationLabel(LayerAnimation animation, int index)
+    {
+        string prefix = $"{index + 1}. ";
+        return animation.Type switch
+        {
+            AnimationType.ZoomIn => $"{prefix}Zoom In ({DescribeLoop(animation.Loop)}, {DescribeSpeed(animation.Speed)})",
+            AnimationType.Translate => $"{prefix}Translate {animation.TranslateDirection} ({DescribeLoop(animation.Loop)}, {DescribeSpeed(animation.Speed)})",
+            AnimationType.Rotate => $"{prefix}Rotate {animation.RotationDirection} ({DescribeLoop(animation.Loop)}, {DescribeSpeed(animation.Speed)})",
+            _ => $"{prefix}Animation"
+        };
+    }
+
+    private static string DescribeLoop(AnimationLoop loop) => loop == AnimationLoop.PingPong ? "Reverse" : "Forward";
+
+    private static string DescribeSpeed(AnimationSpeed speed) => speed switch
+    {
+        AnimationSpeed.Half => "Half",
+        AnimationSpeed.Double => "Double",
+        _ => "Normal"
+    };
+
+    private void AddAnimationMenuItem_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is not MenuItem { Tag: AnimationAddTarget target })
+        {
+            return;
+        }
+
+        var animation = new LayerAnimation
+        {
+            Type = target.Type,
+            Loop = AnimationLoop.Forward,
+            Speed = AnimationSpeed.Normal
+        };
+
+        if (target.TranslateDirection.HasValue)
+        {
+            animation.TranslateDirection = target.TranslateDirection.Value;
+        }
+        if (target.RotationDirection.HasValue)
+        {
+            animation.RotationDirection = target.RotationDirection.Value;
+        }
+
+        target.Source.Animations.Add(animation);
+        Logger.Info($"Animation added: {animation.Type} ({target.Source.DisplayName})");
+        RebuildSourcesMenu();
+        SaveConfig();
+    }
+
+    private void AnimationLoopItem_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is not MenuItem { Tag: AnimationLoopTarget target })
+        {
+            return;
+        }
+
+        target.Animation.Loop = target.Loop;
+        RebuildSourcesMenu();
+        SaveConfig();
+    }
+
+    private void AnimationSpeedItem_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is not MenuItem { Tag: AnimationSpeedTarget target })
+        {
+            return;
+        }
+
+        target.Animation.Speed = target.Speed;
+        RebuildSourcesMenu();
+        SaveConfig();
+    }
+
+    private void AnimationTranslateDirectionItem_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is not MenuItem { Tag: AnimationTranslateTarget target })
+        {
+            return;
+        }
+
+        target.Animation.TranslateDirection = target.Direction;
+        RebuildSourcesMenu();
+        SaveConfig();
+    }
+
+    private void AnimationRotateDirectionItem_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is not MenuItem { Tag: AnimationRotateTarget target })
+        {
+            return;
+        }
+
+        target.Animation.RotationDirection = target.Direction;
+        RebuildSourcesMenu();
+        SaveConfig();
+    }
+
+    private void RemoveAnimationMenuItem_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is not MenuItem { Tag: AnimationTarget target })
+        {
+            return;
+        }
+
+        if (target.Source.Animations.Remove(target.Animation))
+        {
+            Logger.Info($"Animation removed: {target.Source.DisplayName}");
+            RebuildSourcesMenu();
             SaveConfig();
         }
     }
@@ -1898,7 +2248,8 @@ public partial class MainWindow : Window
             return;
         }
 
-        bool removedAny = CaptureSourceList(_sources);
+        double animationTime = _lifetimeStopwatch.Elapsed.TotalSeconds;
+        bool removedAny = CaptureSourceList(_sources, animationTime);
         if (_sources.Count == 0)
         {
             ClearSources();
@@ -1911,7 +2262,7 @@ public partial class MainWindow : Window
             return;
         }
 
-        var composite = BuildCompositeFrame(_sources, ref _compositeDownscaledBuffer, ref _compositeHighResBuffer, useEngineDimensions: true);
+        var composite = BuildCompositeFrame(_sources, ref _compositeDownscaledBuffer, ref _compositeHighResBuffer, useEngineDimensions: true, animationTime);
         if (composite == null)
         {
             _lastCompositeFrame = null;
@@ -1935,7 +2286,7 @@ public partial class MainWindow : Window
         _pulseStep++;
     }
 
-    private bool CaptureSourceList(List<CaptureSource> sources)
+    private bool CaptureSourceList(List<CaptureSource> sources, double animationTime)
     {
         bool removedAny = false;
         var removed = new List<CaptureSource>();
@@ -1946,12 +2297,12 @@ public partial class MainWindow : Window
             {
                 if (source.Children.Count > 0)
                 {
-                    removedAny |= CaptureSourceList(source.Children);
+                    removedAny |= CaptureSourceList(source.Children, animationTime);
                 }
 
                 var groupDownscaled = source.CompositeDownscaledBuffer;
                 var groupHighRes = source.CompositeHighResBuffer;
-                var groupComposite = BuildCompositeFrame(source.Children, ref groupDownscaled, ref groupHighRes, useEngineDimensions: false);
+                var groupComposite = BuildCompositeFrame(source.Children, ref groupDownscaled, ref groupHighRes, useEngineDimensions: false, animationTime);
                 source.CompositeDownscaledBuffer = groupDownscaled;
                 source.CompositeHighResBuffer = groupHighRes;
                 if (groupComposite != null)
@@ -2311,6 +2662,16 @@ public partial class MainWindow : Window
         SaveConfig();
     }
 
+    private void AnimationBpmSlider_OnValueChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
+    {
+        _animationBpm = Math.Clamp(e.NewValue, 10, 300);
+        if (AnimationBpmValueText != null)
+        {
+            AnimationBpmValueText.Text = $"{_animationBpm:F0}";
+        }
+        SaveConfig();
+    }
+
     private void InvertThresholdCheckBox_OnChecked(object sender, RoutedEventArgs e)
     {
         _invertThreshold = InvertThresholdCheckBox?.IsChecked == true;
@@ -2459,6 +2820,49 @@ public partial class MainWindow : Window
         Lighten,
         Darken,
         Subtractive
+    }
+
+    private enum AnimationType
+    {
+        ZoomIn,
+        Translate,
+        Rotate
+    }
+
+    private enum AnimationLoop
+    {
+        Forward,
+        PingPong
+    }
+
+    private enum AnimationSpeed
+    {
+        Half,
+        Normal,
+        Double
+    }
+
+    private enum TranslateDirection
+    {
+        Up,
+        Down,
+        Left,
+        Right
+    }
+
+    private enum RotationDirection
+    {
+        Clockwise,
+        CounterClockwise
+    }
+
+    private sealed class LayerAnimation
+    {
+        public AnimationType Type { get; set; } = AnimationType.ZoomIn;
+        public AnimationLoop Loop { get; set; } = AnimationLoop.Forward;
+        public AnimationSpeed Speed { get; set; } = AnimationSpeed.Normal;
+        public TranslateDirection TranslateDirection { get; set; } = TranslateDirection.Right;
+        public RotationDirection RotationDirection { get; set; } = RotationDirection.Clockwise;
     }
 
     private void UpdateDisplaySurface(bool force = false)
@@ -2665,7 +3069,74 @@ public partial class MainWindow : Window
         return true;
     }
 
-    private CompositeFrame? BuildCompositeFrame(List<CaptureSource> sources, ref byte[]? downscaledBuffer, ref byte[]? highResBuffer, bool useEngineDimensions)
+    private readonly struct Transform2D
+    {
+        public Transform2D(double m11, double m12, double m21, double m22, double offsetX, double offsetY)
+        {
+            M11 = m11;
+            M12 = m12;
+            M21 = m21;
+            M22 = m22;
+            OffsetX = offsetX;
+            OffsetY = offsetY;
+        }
+
+        public double M11 { get; }
+        public double M12 { get; }
+        public double M21 { get; }
+        public double M22 { get; }
+        public double OffsetX { get; }
+        public double OffsetY { get; }
+
+        public bool IsIdentity =>
+            Math.Abs(M11 - 1) < 0.000001 &&
+            Math.Abs(M22 - 1) < 0.000001 &&
+            Math.Abs(M12) < 0.000001 &&
+            Math.Abs(M21) < 0.000001 &&
+            Math.Abs(OffsetX) < 0.000001 &&
+            Math.Abs(OffsetY) < 0.000001;
+
+        public static Transform2D Identity => new(1, 0, 0, 1, 0, 0);
+
+        public static Transform2D Multiply(Transform2D a, Transform2D b)
+        {
+            return new Transform2D(
+                (a.M11 * b.M11) + (a.M12 * b.M21),
+                (a.M11 * b.M12) + (a.M12 * b.M22),
+                (a.M21 * b.M11) + (a.M22 * b.M21),
+                (a.M21 * b.M12) + (a.M22 * b.M22),
+                (a.M11 * b.OffsetX) + (a.M12 * b.OffsetY) + a.OffsetX,
+                (a.M21 * b.OffsetX) + (a.M22 * b.OffsetY) + a.OffsetY);
+        }
+
+        public bool TryInvert(out Transform2D inverse)
+        {
+            double det = (M11 * M22) - (M12 * M21);
+            if (Math.Abs(det) < 0.0000001)
+            {
+                inverse = Identity;
+                return false;
+            }
+
+            double invDet = 1.0 / det;
+            double invM11 = M22 * invDet;
+            double invM12 = -M12 * invDet;
+            double invM21 = -M21 * invDet;
+            double invM22 = M11 * invDet;
+            double invOffsetX = -((invM11 * OffsetX) + (invM12 * OffsetY));
+            double invOffsetY = -((invM21 * OffsetX) + (invM22 * OffsetY));
+            inverse = new Transform2D(invM11, invM12, invM21, invM22, invOffsetX, invOffsetY);
+            return true;
+        }
+
+        public void TransformPoint(double x, double y, out double tx, out double ty)
+        {
+            tx = (M11 * x) + (M12 * y) + OffsetX;
+            ty = (M21 * x) + (M22 * y) + OffsetY;
+        }
+    }
+
+    private CompositeFrame? BuildCompositeFrame(List<CaptureSource> sources, ref byte[]? downscaledBuffer, ref byte[]? highResBuffer, bool useEngineDimensions, double animationTime)
     {
         if (sources.Count == 0)
         {
@@ -2727,17 +3198,20 @@ public partial class MainWindow : Window
                 source.Window = source.Window.WithDimensions(frame.SourceWidth, frame.SourceHeight);
             }
 
+            var downscaledTransform = BuildAnimationTransform(source, downscaledWidth, downscaledHeight, animationTime);
             if (!primedDownscaled)
             {
                 CopyIntoBuffer(downscaledBuffer, downscaledWidth, downscaledHeight,
-                    frame.Downscaled, frame.DownscaledWidth, frame.DownscaledHeight, source.Opacity, source.Mirror && source.Type == CaptureSource.SourceType.Webcam, source.FitMode);
+                    frame.Downscaled, frame.DownscaledWidth, frame.DownscaledHeight, source.Opacity,
+                    source.Mirror && source.Type == CaptureSource.SourceType.Webcam, source.FitMode, downscaledTransform);
                 primedDownscaled = true;
                 wroteDownscaled = true;
             }
             else
             {
                 CompositeIntoBuffer(downscaledBuffer, downscaledWidth, downscaledHeight,
-                    frame.Downscaled, frame.DownscaledWidth, frame.DownscaledHeight, source.BlendMode, source.Opacity, source.Mirror && source.Type == CaptureSource.SourceType.Webcam, source.FitMode);
+                    frame.Downscaled, frame.DownscaledWidth, frame.DownscaledHeight, source.BlendMode, source.Opacity,
+                    source.Mirror && source.Type == CaptureSource.SourceType.Webcam, source.FitMode, downscaledTransform);
                 wroteDownscaled = true;
             }
 
@@ -2746,16 +3220,19 @@ public partial class MainWindow : Window
                 var sourceBuffer = frame.Source;
                 int sourceWidth = frame.SourceWidth;
                 int sourceHeight = frame.SourceHeight;
+                var highResTransform = BuildAnimationTransform(source, targetWidth, targetHeight, animationTime);
 
                 if (!primedHighRes)
                 {
-                    CopyIntoBuffer(highRes, targetWidth, targetHeight, sourceBuffer, sourceWidth, sourceHeight, source.Opacity, source.Mirror && source.Type == CaptureSource.SourceType.Webcam, source.FitMode);
+                    CopyIntoBuffer(highRes, targetWidth, targetHeight, sourceBuffer, sourceWidth, sourceHeight, source.Opacity,
+                        source.Mirror && source.Type == CaptureSource.SourceType.Webcam, source.FitMode, highResTransform);
                     primedHighRes = true;
                     wroteHighRes = true;
                 }
                 else
                 {
-                    CompositeIntoBuffer(highRes, targetWidth, targetHeight, sourceBuffer, sourceWidth, sourceHeight, source.BlendMode, source.Opacity, source.Mirror && source.Type == CaptureSource.SourceType.Webcam, source.FitMode);
+                    CompositeIntoBuffer(highRes, targetWidth, targetHeight, sourceBuffer, sourceWidth, sourceHeight,
+                        source.BlendMode, source.Opacity, source.Mirror && source.Type == CaptureSource.SourceType.Webcam, source.FitMode, highResTransform);
                     wroteHighRes = true;
                 }
             }
@@ -2770,12 +3247,125 @@ public partial class MainWindow : Window
             wroteHighRes ? highRes : null, targetWidth, targetHeight);
     }
 
-    private void CopyIntoBuffer(byte[] destination, int destWidth, int destHeight, byte[] source, int sourceWidth, int sourceHeight, double opacity, bool mirror, FitMode fitMode)
+    private Transform2D BuildAnimationTransform(CaptureSource source, int destWidth, int destHeight, double timeSeconds)
+    {
+        if (source.Animations.Count == 0 || destWidth <= 0 || destHeight <= 0)
+        {
+            return Transform2D.Identity;
+        }
+
+        double bpm = _animationBpm > 0 ? _animationBpm : DefaultAnimationBpm;
+        double beatDuration = 60.0 / Math.Max(1.0, bpm);
+        if (beatDuration <= 0)
+        {
+            return Transform2D.Identity;
+        }
+
+        double centerX = (destWidth - 1) / 2.0;
+        double centerY = (destHeight - 1) / 2.0;
+
+        Transform2D combined = Transform2D.Identity;
+        foreach (var animation in source.Animations)
+        {
+            double speedScale = animation.Speed switch
+            {
+                AnimationSpeed.Half => 2.0,
+                AnimationSpeed.Double => 0.5,
+                _ => 1.0
+            };
+
+            double cycle = beatDuration * speedScale;
+            if (cycle <= 0.000001)
+            {
+                continue;
+            }
+
+            double phase = (timeSeconds % cycle) / cycle;
+            double progress = animation.Loop == AnimationLoop.PingPong
+                ? (phase <= 0.5 ? phase * 2.0 : (1.0 - phase) * 2.0)
+                : phase;
+
+            Transform2D animTransform = Transform2D.Identity;
+            switch (animation.Type)
+            {
+                case AnimationType.ZoomIn:
+                {
+                    double scale = 1.0 + (AnimationZoomScale * progress);
+                    animTransform = CreateScale(scale, centerX, centerY);
+                    break;
+                }
+                case AnimationType.Translate:
+                {
+                    double distance = Math.Min(destWidth, destHeight) * AnimationTranslateFactor * progress;
+                    double dx = 0;
+                    double dy = 0;
+                    switch (animation.TranslateDirection)
+                    {
+                        case TranslateDirection.Up:
+                            dy = -distance;
+                            break;
+                        case TranslateDirection.Down:
+                            dy = distance;
+                            break;
+                        case TranslateDirection.Left:
+                            dx = -distance;
+                            break;
+                        case TranslateDirection.Right:
+                            dx = distance;
+                            break;
+                    }
+                    animTransform = CreateTranslation(dx, dy);
+                    break;
+                }
+                case AnimationType.Rotate:
+                {
+                    double angle = DegreesToRadians(AnimationRotateDegrees * progress);
+                    if (animation.RotationDirection == RotationDirection.CounterClockwise)
+                    {
+                        angle = -angle;
+                    }
+                    animTransform = CreateRotation(angle, centerX, centerY);
+                    break;
+                }
+            }
+
+            combined = Transform2D.Multiply(animTransform, combined);
+        }
+
+        if (!combined.TryInvert(out var inverse))
+        {
+            return Transform2D.Identity;
+        }
+
+        return inverse;
+    }
+
+    private static Transform2D CreateTranslation(double dx, double dy) => new(1, 0, 0, 1, dx, dy);
+
+    private static Transform2D CreateScale(double scale, double centerX, double centerY)
+    {
+        return new Transform2D(scale, 0, 0, scale, (1 - scale) * centerX, (1 - scale) * centerY);
+    }
+
+    private static Transform2D CreateRotation(double radians, double centerX, double centerY)
+    {
+        double cos = Math.Cos(radians);
+        double sin = Math.Sin(radians);
+        double offsetX = (centerX * (1 - cos)) + (sin * centerY);
+        double offsetY = (centerY * (1 - cos)) - (sin * centerX);
+        return new Transform2D(cos, -sin, sin, cos, offsetX, offsetY);
+    }
+
+    private static double DegreesToRadians(double degrees) => degrees * (Math.PI / 180.0);
+
+    private void CopyIntoBuffer(byte[] destination, int destWidth, int destHeight, byte[] source, int sourceWidth, int sourceHeight,
+        double opacity, bool mirror, FitMode fitMode, Transform2D transform)
     {
         opacity = Math.Clamp(opacity, 0.0, 1.0);
         int destStride = destWidth * 4;
         int sourceStride = sourceWidth * 4;
         var mapping = ImageFit.GetMapping(fitMode, sourceWidth, sourceHeight, destWidth, destHeight);
+        bool useTransform = !transform.IsIdentity;
 
         Parallel.For(0, destHeight, row =>
         {
@@ -2786,7 +3376,20 @@ public partial class MainWindow : Window
                 byte sb = 0;
                 byte sg = 0;
                 byte sr = 0;
-                if (ImageFit.TryMapPixel(mapping, col, row, out int srcX, out int srcY))
+                bool mapped;
+                int srcX;
+                int srcY;
+                if (useTransform)
+                {
+                    transform.TransformPoint(col, row, out double tx, out double ty);
+                    mapped = ImageFit.TryMapPixel(mapping, tx, ty, out srcX, out srcY);
+                }
+                else
+                {
+                    mapped = ImageFit.TryMapPixel(mapping, col, row, out srcX, out srcY);
+                }
+
+                if (mapped)
                 {
                     if (mirror)
                     {
@@ -2806,7 +3409,8 @@ public partial class MainWindow : Window
         });
     }
 
-    private void CompositeIntoBuffer(byte[] destination, int destWidth, int destHeight, byte[] source, int sourceWidth, int sourceHeight, BlendMode mode, double opacity, bool mirror, FitMode fitMode)
+    private void CompositeIntoBuffer(byte[] destination, int destWidth, int destHeight, byte[] source, int sourceWidth, int sourceHeight,
+        BlendMode mode, double opacity, bool mirror, FitMode fitMode, Transform2D transform)
     {
         if (destination == null || source == null || destWidth <= 0 || destHeight <= 0 || sourceWidth <= 0 || sourceHeight <= 0)
         {
@@ -2823,7 +3427,7 @@ public partial class MainWindow : Window
         int destStride = destWidth * 4;
         int sourceStride = sourceWidth * 4;
 
-        if (destWidth == sourceWidth && destHeight == sourceHeight)
+        if (destWidth == sourceWidth && destHeight == sourceHeight && transform.IsIdentity)
         {
             Parallel.For(0, destHeight, row =>
             {
@@ -2844,6 +3448,7 @@ public partial class MainWindow : Window
         }
 
         var mapping = ImageFit.GetMapping(fitMode, sourceWidth, sourceHeight, destWidth, destHeight);
+        bool useTransform = !transform.IsIdentity;
         Parallel.For(0, destHeight, row =>
         {
             int destRowOffset = row * destStride;
@@ -2853,7 +3458,20 @@ public partial class MainWindow : Window
                 byte sb = 0;
                 byte sg = 0;
                 byte sr = 0;
-                if (ImageFit.TryMapPixel(mapping, col, row, out int srcX, out int srcY))
+                bool mapped;
+                int srcX;
+                int srcY;
+                if (useTransform)
+                {
+                    transform.TransformPoint(col, row, out double tx, out double ty);
+                    mapped = ImageFit.TryMapPixel(mapping, tx, ty, out srcX, out srcY);
+                }
+                else
+                {
+                    mapped = ImageFit.TryMapPixel(mapping, col, row, out srcX, out srcY);
+                }
+
+                if (mapped)
                 {
                     if (mirror)
                     {
@@ -3518,6 +4136,10 @@ public partial class MainWindow : Window
             }
             _invertComposite = config.InvertComposite;
             _showFps = config.ShowFps;
+            if (config.AnimationBpm > 0)
+            {
+                _animationBpm = Math.Clamp(config.AnimationBpm, 10, 300);
+            }
             if (!string.IsNullOrWhiteSpace(config.RecordingQuality) &&
                 Enum.TryParse<RecordingQuality>(config.RecordingQuality, true, out var recordingQuality))
             {
@@ -3601,6 +4223,7 @@ public partial class MainWindow : Window
                 LifeOpacity = _lifeOpacity,
                 InvertComposite = _invertComposite,
                 ShowFps = _showFps,
+                AnimationBpm = _animationBpm,
                 RecordingQuality = _recordingQuality.ToString(),
                 Height = _configuredRows,
                 Depth = _configuredDepth,
@@ -3650,7 +4273,8 @@ public partial class MainWindow : Window
                 BlendMode = source.BlendMode.ToString(),
                 FitMode = source.FitMode.ToString(),
                 Opacity = source.Opacity,
-                Mirror = source.Mirror
+                Mirror = source.Mirror,
+                Animations = BuildAnimationConfigs(source.Animations)
             };
 
             if (source.Type == CaptureSource.SourceType.Group && source.Children.Count > 0)
@@ -3661,6 +4285,23 @@ public partial class MainWindow : Window
             configs.Add(config);
         }
 
+        return configs;
+    }
+
+    private static List<AppConfig.AnimationConfig> BuildAnimationConfigs(List<LayerAnimation> animations)
+    {
+        var configs = new List<AppConfig.AnimationConfig>(animations.Count);
+        foreach (var animation in animations)
+        {
+            configs.Add(new AppConfig.AnimationConfig
+            {
+                Type = animation.Type.ToString(),
+                Loop = animation.Loop.ToString(),
+                Speed = animation.Speed.ToString(),
+                TranslateDirection = animation.TranslateDirection.ToString(),
+                RotationDirection = animation.RotationDirection.ToString()
+            });
+        }
         return configs;
     }
 
@@ -3774,6 +4415,36 @@ public partial class MainWindow : Window
 
         source.Opacity = Math.Clamp(config.Opacity, 0, 1);
         source.Mirror = config.Mirror;
+
+        source.Animations.Clear();
+        if (config.Animations != null && config.Animations.Count > 0)
+        {
+            foreach (var animationConfig in config.Animations)
+            {
+                var animation = new LayerAnimation();
+                if (Enum.TryParse<AnimationType>(animationConfig.Type, true, out var type))
+                {
+                    animation.Type = type;
+                }
+                if (Enum.TryParse<AnimationLoop>(animationConfig.Loop, true, out var loop))
+                {
+                    animation.Loop = loop;
+                }
+                if (Enum.TryParse<AnimationSpeed>(animationConfig.Speed, true, out var speed))
+                {
+                    animation.Speed = speed;
+                }
+                if (Enum.TryParse<TranslateDirection>(animationConfig.TranslateDirection, true, out var translate))
+                {
+                    animation.TranslateDirection = translate;
+                }
+                if (Enum.TryParse<RotationDirection>(animationConfig.RotationDirection, true, out var rotate))
+                {
+                    animation.RotationDirection = rotate;
+                }
+                source.Animations.Add(animation);
+            }
+        }
     }
 
     private string ConfigPath =>
@@ -3793,6 +4464,7 @@ public partial class MainWindow : Window
         public double LifeOpacity { get; set; } = 1.0;
         public bool InvertComposite { get; set; }
         public bool ShowFps { get; set; }
+        public double AnimationBpm { get; set; } = DefaultAnimationBpm;
         public string RecordingQuality { get; set; } = global::lifeviz.RecordingQuality.High.ToString();
         public int Height { get; set; } = DefaultRows;
         [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
@@ -3822,7 +4494,17 @@ public partial class MainWindow : Window
             public string FitMode { get; set; } = lifeviz.FitMode.Fit.ToString();
             public double Opacity { get; set; } = 1.0;
             public bool Mirror { get; set; }
+            public List<AnimationConfig> Animations { get; set; } = new();
             public List<SourceConfig> Children { get; set; } = new();
+        }
+
+        public sealed class AnimationConfig
+        {
+            public string Type { get; set; } = AnimationType.ZoomIn.ToString();
+            public string Loop { get; set; } = AnimationLoop.Forward.ToString();
+            public string Speed { get; set; } = AnimationSpeed.Normal.ToString();
+            public string TranslateDirection { get; set; } = global::lifeviz.MainWindow.TranslateDirection.Right.ToString();
+            public string RotationDirection { get; set; } = global::lifeviz.MainWindow.RotationDirection.Clockwise.ToString();
         }
     }
 
@@ -3882,6 +4564,7 @@ public partial class MainWindow : Window
         public string? FilePath { get; }
         public string DisplayName { get; private set; }
         public List<CaptureSource> Children { get; } = new();
+        public List<LayerAnimation> Animations { get; } = new();
         public BlendMode BlendMode { get; set; } = BlendMode.Normal;
         public FitMode FitMode { get; set; } = FitMode.Fit;
         public SourceFrame? LastFrame { get; set; }
