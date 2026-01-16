@@ -28,6 +28,25 @@
                 <MenuItem x:Name="RecordMenuItem"
                           Header="Start Recording"
                           Click="RecordMenuItem_Click" />
+                <MenuItem Header="Recording Quality"
+                          x:Name="RecordingQualityMenu">
+                    <MenuItem Header="Lossless (AVI)"
+                              Tag="Lossless"
+                              IsCheckable="True"
+                              Click="RecordingQualityItem_Click" />
+                    <MenuItem Header="High (H.264)"
+                              Tag="High"
+                              IsCheckable="True"
+                              Click="RecordingQualityItem_Click" />
+                    <MenuItem Header="Balanced (H.264)"
+                              Tag="Balanced"
+                              IsCheckable="True"
+                              Click="RecordingQualityItem_Click" />
+                    <MenuItem Header="Compact (H.264)"
+                              Tag="Compact"
+                              IsCheckable="True"
+                              Click="RecordingQualityItem_Click" />
+                </MenuItem>
                 <Separator />
                 <MenuItem Header="Height">
                     <MenuItem Header="144" Click="PresetHeight_Click" />

@@ -17,6 +17,20 @@ Rider users can open `lifeviz.sln` and choose the built-in **lifeviz: Run App** 
 For ClickOnce packages inside Rider, use the shared **lifeviz: Publish Installer (MSBuild.exe)** run configuration (in `.run/`); it shells out to `Publish-Installer.ps1` so full MSBuild is used. The auto-generated Rider publish config uses `dotnet msbuild` and will trip `MSB4803`.
 If you still publish via Rider's generated config, the project automatically disables the ClickOnce bootstrapper under `dotnet msbuild` so the build completes (no `setup.exe`); use the MSBuild.exe-backed script/config when you need the bootstrapper.
 
+## Local Smoke Test Install
+
+`install.ps1` publishes a framework-dependent build to `artifacts\local-install` and launches it:
+
+```powershell
+.\install.ps1
+```
+
+Optional parameters:
+
+```powershell
+.\install.ps1 -Configuration Release -Runtime win-x64 -NoRun
+```
+
 ## Branded Icon
 
 The custom neon "LV" mark lives in `Assets/lifeviz.ico` and is referenced via `<ApplicationIcon>` inside `lifeviz.csproj`, so binaries and installers both pick it up.

@@ -11,6 +11,12 @@ dotnet run
 
 The new Rider solution (`lifeviz.sln`) includes a "lifeviz: Run App" configuration so IDE runs mirror `dotnet run`.
 
+For a quick local install-style smoke test (publish to `artifacts\local-install` and launch the app):
+
+```powershell
+.\install.ps1
+```
+
 ## Live Window Injection
 
 Right-click the scene and use **Sources** to stack multiple windows, OBS-style:
@@ -27,7 +33,7 @@ Right-click the scene and use **Sources** to stack multiple windows, OBS-style:
 - Framerate lock: choose 15 / 30 / 60 fps from the context menu to match capture needs or ease CPU/GPU load.
 - Capture threshold window: adjustable min/max sliders (with optional invert) in the context menu; only pixels inside the window set cells alive during injection, applied before each simulation step.
 - Injection noise: adjustable slider (0-1) that randomly skips cell injection per pixel to introduce controlled noise.
-- Built-in recording: **Start Recording** writes an MP4 to `%UserProfile%\\Videos\\LifeViz` using a pixel-perfect integer upscale to the nearest HD height (720/1080/1440/2160 when divisible) with a tuned bitrate for crisp pixel lines and manageable file sizes. A taskbar overlay appears while active.
+- Built-in recording: **Start Recording** writes to `%UserProfile%\\Videos\\LifeViz` using a pixel-perfect integer upscale to the nearest HD height (720/1080/1440/2160 when divisible). Use **Recording Quality** to pick Lossless (AVI, huge files) or H.264 tiers (High/Balanced/Compact); encoding favors quality-based VBR with bitrate caps so pixel lines stay crisp, and a taskbar overlay appears while active.
 
 ## Configuration
 

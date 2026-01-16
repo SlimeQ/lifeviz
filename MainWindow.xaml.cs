@@ -55,6 +55,7 @@ public partial class MainWindow : Window
     private int _recordingDisplayWidth;
     private int _recordingDisplayHeight;
     private int _recordingScale = 1;
+    private RecordingQuality _recordingQuality = RecordingQuality.High;
     private string? _recordingPath;
     private ImageSource? _recordingOverlayIcon;
     private IReadOnlyList<WindowHandleInfo> _cachedWindows = Array.Empty<WindowHandleInfo>();
@@ -636,15 +637,16 @@ public partial class MainWindow : Window
             targetHeight = targetOutputHeight;
         }
         int fps = Math.Clamp((int)Math.Round(_currentFpsFromConfig), 1, 144);
-        int bitrate = RecordingSession.EstimateBitrate(targetWidth, targetHeight, fps);
+        var settings = RecordingSettings.FromQuality(_recordingQuality, targetWidth, targetHeight, fps);
 
         string folder = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyVideos), "LifeViz");
         Directory.CreateDirectory(folder);
-        string filePath = Path.Combine(folder, $"lifeviz_{DateTime.Now:yyyyMMdd_HHmmss}.mp4");
+        string extension = settings.FileExtension.StartsWith(".") ? settings.FileExtension : $".{settings.FileExtension}";
+        string filePath = Path.Combine(folder, $"lifeviz_{DateTime.Now:yyyyMMdd_HHmmss}{extension}");
 
         try
         {
-            _recordingSession = new RecordingSession(filePath, targetWidth, targetHeight, fps, bitrate);
+            _recordingSession = new RecordingSession(filePath, targetWidth, targetHeight, fps, settings);
         }
         catch (Exception ex)
         {
@@ -667,7 +669,7 @@ public partial class MainWindow : Window
         _recordingStopwatch = Stopwatch.StartNew();
         _isRecording = true;
         UpdateRecordingUi();
-        Logger.Info($"Recording started: {filePath} ({width}x{height} @ {fps} fps)");
+        Logger.Info($"Recording started: {filePath} ({width}x{height} @ {fps} fps, {settings.Quality})");
     }
 
     private void StopRecording(bool showMessage, string? reason = null)
@@ -728,6 +730,39 @@ public partial class MainWindow : Window
         if (TaskbarInfo != null)
         {
             TaskbarInfo.Overlay = _isRecording ? GetRecordingOverlayIcon() : null;
+        }
+    }
+
+    private void UpdateRecordingQualityMenuChecks()
+    {
+        if (RecordingQualityMenu == null)
+        {
+            return;
+        }
+
+        foreach (var item in RecordingQualityMenu.Items)
+        {
+            if (item is MenuItem menuItem && menuItem.Tag is string tag &&
+                Enum.TryParse<RecordingQuality>(tag, out var quality))
+            {
+                menuItem.IsCheckable = true;
+                menuItem.IsChecked = quality == _recordingQuality;
+            }
+        }
+    }
+
+    private void RecordingQualityItem_Click(object sender, RoutedEventArgs e)
+    {
+        if (_isRecording)
+        {
+            return;
+        }
+
+        if (sender is MenuItem { Tag: string tag } && Enum.TryParse<RecordingQuality>(tag, out var quality))
+        {
+            _recordingQuality = quality;
+            UpdateRecordingQualityMenuChecks();
+            SaveConfig();
         }
     }
 
@@ -959,6 +994,11 @@ public partial class MainWindow : Window
             ShowFpsMenuItem.IsChecked = _showFps;
         }
         UpdateRecordingUi();
+        if (RecordingQualityMenu != null)
+        {
+            RecordingQualityMenu.IsEnabled = !_isRecording;
+            UpdateRecordingQualityMenuChecks();
+        }
 
         UpdateFramerateMenuChecks();
         UpdateLifeModeMenuChecks();
@@ -3333,6 +3373,11 @@ public partial class MainWindow : Window
             }
             _invertComposite = config.InvertComposite;
             _showFps = config.ShowFps;
+            if (!string.IsNullOrWhiteSpace(config.RecordingQuality) &&
+                Enum.TryParse<RecordingQuality>(config.RecordingQuality, true, out var recordingQuality))
+            {
+                _recordingQuality = recordingQuality;
+            }
             if (config.Height > 0)
             {
                 _configuredRows = Math.Clamp(config.Height, MinRows, MaxRows);
@@ -3411,6 +3456,7 @@ public partial class MainWindow : Window
                 LifeOpacity = _lifeOpacity,
                 InvertComposite = _invertComposite,
                 ShowFps = _showFps,
+                RecordingQuality = _recordingQuality.ToString(),
                 Height = _configuredRows,
                 Depth = _configuredDepth,
                 Passthrough = _passthroughEnabled,
@@ -3602,6 +3648,7 @@ public partial class MainWindow : Window
         public double LifeOpacity { get; set; } = 1.0;
         public bool InvertComposite { get; set; }
         public bool ShowFps { get; set; }
+        public string RecordingQuality { get; set; } = global::lifeviz.RecordingQuality.High.ToString();
         public int Height { get; set; } = DefaultRows;
         [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
         public int Columns { get; set; }

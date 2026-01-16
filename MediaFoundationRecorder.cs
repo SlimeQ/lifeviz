@@ -6,6 +6,81 @@ using System.Threading.Tasks;
 
 namespace lifeviz;
 
+internal enum RecordingQuality
+{
+    Lossless,
+    High,
+    Balanced,
+    Compact
+}
+
+internal readonly struct RecordingSettings
+{
+    public RecordingSettings(RecordingQuality quality, Guid outputSubtype, string fileExtension, int bitrate, int? encoderQuality, int? encoderQualityVsSpeed)
+    {
+        Quality = quality;
+        OutputSubtype = outputSubtype;
+        FileExtension = fileExtension;
+        Bitrate = bitrate;
+        EncoderQuality = encoderQuality;
+        EncoderQualityVsSpeed = encoderQualityVsSpeed;
+    }
+
+    public RecordingQuality Quality { get; }
+    public Guid OutputSubtype { get; }
+    public string FileExtension { get; }
+    public int Bitrate { get; }
+    public int? EncoderQuality { get; }
+    public int? EncoderQualityVsSpeed { get; }
+
+    public bool UseQualityRateControl => OutputSubtype == MfInterop.MFVideoFormat_H264 && EncoderQuality.HasValue;
+
+    public static RecordingSettings FromQuality(RecordingQuality quality, int width, int height, int fps)
+    {
+        if (quality == RecordingQuality.Lossless)
+        {
+            return new RecordingSettings(quality, MfInterop.MFVideoFormat_RGB32, "avi", 0, null, null);
+        }
+
+        int bitrate = EstimateBitrate(width, height, fps, quality);
+        (int encoderQuality, int encoderQualityVsSpeed) = quality switch
+        {
+            RecordingQuality.High => (90, 30),
+            RecordingQuality.Balanced => (80, 50),
+            RecordingQuality.Compact => (65, 70),
+            _ => (80, 50)
+        };
+
+        return new RecordingSettings(quality, MfInterop.MFVideoFormat_H264, "mp4", bitrate, encoderQuality, encoderQualityVsSpeed);
+    }
+
+    private static int EstimateBitrate(int width, int height, int fps, RecordingQuality quality)
+    {
+        if (width <= 0 || height <= 0 || fps <= 0)
+        {
+            return 2_000_000;
+        }
+
+        double bitsPerPixelPerSecond = quality switch
+        {
+            RecordingQuality.High => 0.20,
+            RecordingQuality.Compact => 0.07,
+            _ => 0.12
+        };
+
+        (long min, long max) = quality switch
+        {
+            RecordingQuality.High => (6_000_000, 60_000_000),
+            RecordingQuality.Compact => (1_500_000, 18_000_000),
+            _ => (3_000_000, 35_000_000)
+        };
+
+        long raw = (long)Math.Round(width * height * fps * bitsPerPixelPerSecond);
+        long bitrate = Math.Clamp(raw, min, max);
+        return (int)bitrate;
+    }
+}
+
 internal sealed class RecordingSession : IDisposable
 {
     private readonly int _frameSize;
@@ -15,29 +90,21 @@ internal sealed class RecordingSession : IDisposable
     private readonly int _width;
     private readonly int _height;
     private readonly int _fps;
-    private readonly int _bitrate;
+    private readonly RecordingSettings _settings;
     private readonly object _errorLock = new();
     private string? _errorMessage;
     private bool _completed;
 
-    public RecordingSession(string path, int width, int height, int fps, int bitrate)
+    public RecordingSession(string path, int width, int height, int fps, RecordingSettings settings)
     {
         _frameSize = width * height * 4;
         _path = path;
         _width = width;
         _height = height;
         _fps = fps;
-        _bitrate = bitrate;
+        _settings = settings;
         _frames = new BlockingCollection<byte[]>(boundedCapacity: 4);
         _writerTask = Task.Run(ProcessFrames);
-    }
-
-    public static int EstimateBitrate(int width, int height, int fps)
-    {
-        double bitsPerPixelPerSecond = 0.08;
-        long raw = (long)Math.Round(width * height * fps * bitsPerPixelPerSecond);
-        long bitrate = Math.Clamp(raw, 2_000_000, 40_000_000);
-        return (int)bitrate;
     }
 
     public bool TryEnqueue(byte[] buffer)
@@ -65,10 +132,10 @@ internal sealed class RecordingSession : IDisposable
 
     private void ProcessFrames()
     {
-        Mp4Recorder? recorder = null;
+        MediaFoundationRecorder? recorder = null;
         try
         {
-            recorder = new Mp4Recorder(_path, _width, _height, _fps, _bitrate);
+            recorder = new MediaFoundationRecorder(_path, _width, _height, _fps, _settings);
             foreach (var buffer in _frames.GetConsumingEnumerable())
             {
                 recorder.WriteFrame(buffer, _frameSize);
@@ -134,7 +201,7 @@ internal sealed class RecordingSession : IDisposable
     }
 }
 
-internal sealed class Mp4Recorder : IDisposable
+internal sealed class MediaFoundationRecorder : IDisposable
 {
     private const int MfVersion = 0x00020070;
     private const int MfStartupFull = 0;
@@ -148,7 +215,7 @@ internal sealed class Mp4Recorder : IDisposable
     private int _streamIndex;
     private bool _finalized;
 
-    public Mp4Recorder(string path, int width, int height, int fps, int bitrate)
+    public MediaFoundationRecorder(string path, int width, int height, int fps, RecordingSettings settings)
     {
         _width = width;
         _height = height;
@@ -201,8 +268,11 @@ internal sealed class Mp4Recorder : IDisposable
 
             MfInterop.Check(MfInterop.MFCreateMediaType(out outputType));
             MfInterop.Check(outputType.SetGUID(MfInterop.MF_MT_MAJOR_TYPE, MfInterop.MFMediaType_Video));
-            MfInterop.Check(outputType.SetGUID(MfInterop.MF_MT_SUBTYPE, MfInterop.MFVideoFormat_H264));
-            MfInterop.Check(outputType.SetUINT32(MfInterop.MF_MT_AVG_BITRATE, (uint)bitrate));
+            MfInterop.Check(outputType.SetGUID(MfInterop.MF_MT_SUBTYPE, settings.OutputSubtype));
+            if (settings.OutputSubtype == MfInterop.MFVideoFormat_H264 && settings.Bitrate > 0)
+            {
+                MfInterop.Check(outputType.SetUINT32(MfInterop.MF_MT_AVG_BITRATE, (uint)settings.Bitrate));
+            }
             MfInterop.Check(outputType.SetUINT32(MfInterop.MF_MT_INTERLACE_MODE, MfVideoInterlaceProgressive));
             MfInterop.SetAttributeSize(outputType, MfInterop.MF_MT_FRAME_SIZE, (uint)width, (uint)height);
             MfInterop.SetAttributeRatio(outputType, MfInterop.MF_MT_FRAME_RATE, (uint)fps, 1);
@@ -223,6 +293,7 @@ internal sealed class Mp4Recorder : IDisposable
             MfInterop.SetAttributeRatio(inputType, MfInterop.MF_MT_PIXEL_ASPECT_RATIO, 1, 1);
 
             MfInterop.Check(_writer.SetInputMediaType(_streamIndex, inputType, IntPtr.Zero));
+            ConfigureEncoderQuality(settings);
             MfInterop.Check(_writer.BeginWriting());
         }
         finally
@@ -304,6 +375,72 @@ internal sealed class Mp4Recorder : IDisposable
 
         MfInterop.MFShutdown();
     }
+
+    private void ConfigureEncoderQuality(RecordingSettings settings)
+    {
+        if (_writer == null || !settings.UseQualityRateControl)
+        {
+            return;
+        }
+
+        Guid service = Guid.Empty;
+        Guid iid = typeof(ICodecAPI).GUID;
+        IntPtr codecPtr = IntPtr.Zero;
+        try
+        {
+            int hr = _writer.GetServiceForStream(_streamIndex, ref service, ref iid, out codecPtr);
+            if (hr < 0 || codecPtr == IntPtr.Zero)
+            {
+                return;
+            }
+
+            var codecApi = Marshal.GetObjectForIUnknown(codecPtr) as ICodecAPI;
+            if (codecApi == null)
+            {
+                return;
+            }
+
+            try
+            {
+                object rateControl = (uint)MfInterop.AVEncCommonRateControlMode_Quality;
+                Guid rateControlGuid = MfInterop.CODECAPI_AVEncCommonRateControlMode;
+                codecApi.SetValue(ref rateControlGuid, ref rateControl);
+
+                if (settings.EncoderQuality.HasValue)
+                {
+                    object quality = (uint)Math.Clamp(settings.EncoderQuality.Value, 1, 100);
+                    Guid qualityGuid = MfInterop.CODECAPI_AVEncCommonQuality;
+                    codecApi.SetValue(ref qualityGuid, ref quality);
+                }
+
+                if (settings.EncoderQualityVsSpeed.HasValue)
+                {
+                    object qualityVsSpeed = (uint)Math.Clamp(settings.EncoderQualityVsSpeed.Value, 1, 100);
+                    Guid qualityVsSpeedGuid = MfInterop.CODECAPI_AVEncCommonQualityVsSpeed;
+                    codecApi.SetValue(ref qualityVsSpeedGuid, ref qualityVsSpeed);
+                }
+
+                if (settings.Bitrate > 0)
+                {
+                    object meanBitrate = (uint)settings.Bitrate;
+                    Guid meanBitrateGuid = MfInterop.CODECAPI_AVEncCommonMeanBitRate;
+                    codecApi.SetValue(ref meanBitrateGuid, ref meanBitrate);
+
+                    object maxBitrate = (uint)Math.Max(1, settings.Bitrate + (settings.Bitrate / 2));
+                    Guid maxBitrateGuid = MfInterop.CODECAPI_AVEncCommonMaxBitRate;
+                    codecApi.SetValue(ref maxBitrateGuid, ref maxBitrate);
+                }
+            }
+            finally
+            {
+                Marshal.ReleaseComObject(codecApi);
+            }
+        }
+        catch
+        {
+            // Ignore encoder configuration failures to keep recording available.
+        }
+    }
 }
 
 internal static class MfInterop
@@ -320,6 +457,12 @@ internal static class MfInterop
     public static readonly Guid MF_MT_ALL_SAMPLES_INDEPENDENT = new("c9173739-5e56-461c-b713-46f0e25e595c");
     public static readonly Guid MF_MT_SAMPLE_SIZE = new("dad3ab78-1990-408b-bce2-1e2ebc0a76e5");
     public static readonly Guid MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS = new("a634a91c-822b-41d1-9db1-41a7f2ed9921");
+    public static readonly Guid CODECAPI_AVEncCommonRateControlMode = new("1c0608e9-370c-4710-8a58-cb6181c42423");
+    public static readonly Guid CODECAPI_AVEncCommonQuality = new("fcbf57a3-7ea5-4b0c-9644-69b40c39c391");
+    public static readonly Guid CODECAPI_AVEncCommonQualityVsSpeed = new("98332df8-03cd-476b-89fa-3f9e442dec9f");
+    public static readonly Guid CODECAPI_AVEncCommonMeanBitRate = new("f7222374-2144-4815-b550-a37f8e12ee52");
+    public static readonly Guid CODECAPI_AVEncCommonMaxBitRate = new("9651eae4-39b9-4ebf-85ef-d7f444ec7465");
+    public const uint AVEncCommonRateControlMode_Quality = 3;
     public static readonly Guid MFMediaType_Video = new("73646976-0000-0010-8000-00aa00389b71");
     public static readonly Guid MFVideoFormat_H264 = new("34363248-0000-0010-8000-00aa00389b71");
     public static readonly Guid MFVideoFormat_RGB32 = new("00000016-0000-0010-8000-00aa00389b71");
@@ -479,4 +622,18 @@ internal interface IMFSinkWriter
     [PreserveSig] int Finalize_();
     [PreserveSig] int GetServiceForStream(int streamIndex, ref Guid service, ref Guid riid, out IntPtr result);
     [PreserveSig] int GetStatistics(int streamIndex, out IntPtr stats);
+}
+
+[ComImport, Guid("901db4c7-31ce-41a2-85dc-8fa0bf41b8da"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+internal interface ICodecAPI
+{
+    [PreserveSig] int IsSupported(ref Guid api);
+    [PreserveSig] int IsModifiable(ref Guid api);
+    [PreserveSig] int GetParameterRange(ref Guid api, [MarshalAs(UnmanagedType.Struct)] out object valueMin, [MarshalAs(UnmanagedType.Struct)] out object valueMax, [MarshalAs(UnmanagedType.Struct)] out object steppingDelta);
+    [PreserveSig] int GetParameterValues(ref Guid api, [MarshalAs(UnmanagedType.Struct)] out object values, [MarshalAs(UnmanagedType.Struct)] out object descriptions);
+    [PreserveSig] int GetDefaultValue(ref Guid api, [MarshalAs(UnmanagedType.Struct)] out object value);
+    [PreserveSig] int GetValue(ref Guid api, [MarshalAs(UnmanagedType.Struct)] out object value);
+    [PreserveSig] int SetValue(ref Guid api, [MarshalAs(UnmanagedType.Struct)] ref object value);
+    [PreserveSig] int RegisterForEvent(ref Guid api, IntPtr userData);
+    [PreserveSig] int UnregisterForEvent(ref Guid api);
 }
