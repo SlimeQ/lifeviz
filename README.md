@@ -27,6 +27,7 @@ Right-click the scene and use **Sources** to stack multiple windows, OBS-style:
 - Framerate lock: choose 15 / 30 / 60 fps from the context menu to match capture needs or ease CPU/GPU load.
 - Capture threshold window: adjustable min/max sliders (with optional invert) in the context menu; only pixels inside the window set cells alive during injection, applied before each simulation step.
 - Injection noise: adjustable slider (0-1) that randomly skips cell injection per pixel to introduce controlled noise.
+- Built-in recording: **Start Recording** writes an MP4 to `%UserProfile%\\Videos\\LifeViz` at the current output resolution (pixel-art friendly, no smoothing) and shows a taskbar overlay while active.
 
 ## Configuration
 

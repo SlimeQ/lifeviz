@@ -32,6 +32,11 @@
 - **Preserve Window Resolution** renders the composite at the primary source's native resolution and samples the underlay bilinearly, then scales the Game of Life grid up to that size, reducing underlay pixelation.
 - Final blending still happens in a WPF pixel shader (GPU) so passthrough stays responsive even when rendering at source resolution; per-source blends occur CPU-side during the composite build.
 
+## Recording
+
+- **Start Recording** captures the final output buffer at the current output resolution (rows x columns) and encodes it to H.264 MP4 without scaling, keeping nearest-neighbor pixel art crisp.
+- Recording uses the same composite buffers as the renderer (including passthrough blend mode and invert composite), then writes frames at the configured framerate.
+
 ## Life Modes
 
 - **Naive Grayscale** (default): one simulation drives all channels, derived from a thresholded luminance mask of the capture.

@@ -6,6 +6,7 @@ The UI stays invisible until you right-click anywhere on the canvas, revealing t
 
 - **Pause Simulation / Resume Simulation** - toggles the dispatcher tick loop.
 - **Randomize** - re-seeds every frame in the depth stack to a fresh random state.
+- **Start Recording / Stop Recording** - toggles MP4 capture of the current output resolution (pixel-art friendly, no smoothing). Recordings are saved to `%UserProfile%\\Videos\\LifeViz` and the taskbar icon shows a red overlay while active.
 - **Height** - quick presets for common screen heights (144p, 240p, 480p, 720p, 1080p, 1440p/2K, 2160p/4K) plus a *Custom...* dialog to pick any value between 72 and 2160. Height maps to the simulation's row count; width is derived from the current aspect ratio.
 - **Depth** - quick presets (12-48) plus a *Custom...* dialog for 3-96 layers.
 - **Lock Aspect Ratio (16:9)** - freezes the simulation grid at a 16:9 ratio; disable to let the primary source drive the aspect ratio.

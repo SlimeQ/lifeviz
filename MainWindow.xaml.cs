@@ -5,6 +5,7 @@ using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Runtime.InteropServices;
+using System.Buffers;
 using System.Threading.Tasks;
 using Microsoft.Win32;
 using System.Windows;
@@ -16,6 +17,7 @@ using System.Windows.Media.Imaging;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Windows.Threading;
+using System.Windows.Shell;
 using Windows.Devices.Enumeration;
 
 namespace lifeviz;
@@ -41,6 +43,15 @@ public partial class MainWindow : Window
     private bool _suppressWindowResize;
     private Size _lastWindowSize;
     private Size _lastClientSize;
+    private bool _isRecording;
+    private RecordingSession? _recordingSession;
+    private Stopwatch? _recordingStopwatch;
+    private TimeSpan _recordingFrameInterval;
+    private TimeSpan _nextRecordingFrameTime;
+    private int _recordingWidth;
+    private int _recordingHeight;
+    private string? _recordingPath;
+    private ImageSource? _recordingOverlayIcon;
     private IReadOnlyList<WindowHandleInfo> _cachedWindows = Array.Empty<WindowHandleInfo>();
     private IReadOnlyList<WebcamCaptureService.CameraInfo> _cachedCameras = Array.Empty<WebcamCaptureService.CameraInfo>();
     private IReadOnlyList<AudioBeatDetector.AudioDeviceInfo> _cachedAudioDevices = Array.Empty<AudioBeatDetector.AudioDeviceInfo>();
@@ -125,6 +136,7 @@ public partial class MainWindow : Window
         };
         Closed += (_, _) =>
         {
+            StopRecording(showMessage: false);
             _webcamCapture.Reset();
             _fileCapture.Dispose();
             _audioBeatDetector.Dispose();
@@ -306,6 +318,125 @@ public partial class MainWindow : Window
         _bitmap.WritePixels(new Int32Rect(0, 0, width, height), _pixelBuffer, stride, 0);
         UpdateUnderlayBitmap(requiredLength);
         UpdateEffectInput();
+        TryRecordFrame(requiredLength);
+    }
+
+    private void TryRecordFrame(int requiredLength)
+    {
+        if (!_isRecording || _recordingSession == null || _recordingStopwatch == null)
+        {
+            return;
+        }
+
+        if (_displayWidth <= 0 || _displayHeight <= 0)
+        {
+            return;
+        }
+
+        if (_displayWidth != _recordingWidth || _displayHeight != _recordingHeight)
+        {
+            StopRecording(showMessage: true, reason: "Recording stopped because the output resolution changed.");
+            return;
+        }
+
+        if (_recordingSession.TryGetError(out var errorMessage))
+        {
+            StopRecording(showMessage: false);
+            ShowRecordingError(errorMessage ?? "Unknown encoder failure.");
+            return;
+        }
+
+        var elapsed = _recordingStopwatch.Elapsed;
+        if (elapsed < _nextRecordingFrameTime)
+        {
+            return;
+        }
+
+        _nextRecordingFrameTime += _recordingFrameInterval;
+        while (elapsed >= _nextRecordingFrameTime)
+        {
+            _nextRecordingFrameTime += _recordingFrameInterval;
+        }
+
+        int frameSize = _displayWidth * _displayHeight * 4;
+        if (frameSize > requiredLength)
+        {
+            return;
+        }
+
+        var buffer = ArrayPool<byte>.Shared.Rent(frameSize);
+        if (!BuildRecordingFrame(buffer, frameSize))
+        {
+            ArrayPool<byte>.Shared.Return(buffer);
+            return;
+        }
+
+        if (!_recordingSession.TryEnqueue(buffer))
+        {
+            Logger.Warn("Recording frame dropped (encoder backlog).");
+        }
+    }
+
+    private bool BuildRecordingFrame(byte[] destination, int frameSize)
+    {
+        if (_pixelBuffer == null || _pixelBuffer.Length < frameSize || destination.Length < frameSize)
+        {
+            return false;
+        }
+
+        double lifeOpacity = Math.Clamp(_lifeOpacity, 0, 1);
+        for (int i = 0; i < frameSize; i += 4)
+        {
+            destination[i] = ClampToByte((int)(_pixelBuffer[i] * lifeOpacity));
+            destination[i + 1] = ClampToByte((int)(_pixelBuffer[i + 1] * lifeOpacity));
+            destination[i + 2] = ClampToByte((int)(_pixelBuffer[i + 2] * lifeOpacity));
+            destination[i + 3] = 255;
+        }
+
+        var composite = _lastCompositeFrame;
+        if (!_passthroughEnabled || composite == null)
+        {
+            return true;
+        }
+
+        byte[]? overlay = null;
+        if (_preserveResolution && composite.HighRes is { Length: > 0 } highRes &&
+            composite.HighResWidth == _displayWidth && composite.HighResHeight == _displayHeight)
+        {
+            overlay = highRes;
+        }
+        else if (composite.Downscaled.Length >= frameSize &&
+                 composite.DownscaledWidth == _displayWidth && composite.DownscaledHeight == _displayHeight)
+        {
+            overlay = composite.Downscaled;
+        }
+
+        if (overlay == null || overlay.Length < frameSize)
+        {
+            return true;
+        }
+
+        byte[] overlayBuffer = overlay;
+        if (_invertComposite)
+        {
+            var scratch = ArrayPool<byte>.Shared.Rent(frameSize);
+            Buffer.BlockCopy(overlay, 0, scratch, 0, frameSize);
+            InvertBuffer(scratch);
+            overlayBuffer = scratch;
+            for (int i = 0; i < frameSize; i += 4)
+            {
+                BlendInto(destination, i, overlayBuffer[i], overlayBuffer[i + 1], overlayBuffer[i + 2], _blendMode, 1.0);
+            }
+            ArrayPool<byte>.Shared.Return(scratch);
+            return true;
+        }
+
+        for (int i = 0; i < frameSize; i += 4)
+        {
+            BlendInto(destination, i, overlayBuffer[i], overlayBuffer[i + 1], overlayBuffer[i + 2], _blendMode, 1.0);
+        }
+
+        return true;
     }
 
     private void TogglePause_Click(object sender, RoutedEventArgs e)
@@ -318,6 +449,152 @@ public partial class MainWindow : Window
     {
         _engine.Randomize();
         RenderFrame();
+    }
+
+    private void RecordMenuItem_Click(object sender, RoutedEventArgs e)
+    {
+        if (_isRecording)
+        {
+            StopRecording(showMessage: false);
+        }
+        else
+        {
+            StartRecording();
+        }
+    }
+
+    private void StartRecording()
+    {
+        if (_isRecording)
+        {
+            return;
+        }
+
+        if (_displayWidth <= 0 || _displayHeight <= 0)
+        {
+            MessageBox.Show(this, "Recording is unavailable until the renderer is initialized.", "Recording", MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
+
+        int width = _displayWidth;
+        int height = _displayHeight;
+        int fps = Math.Clamp((int)Math.Round(_currentFpsFromConfig), 1, 144);
+        int bitrate = RecordingSession.EstimateBitrate(width, height, fps);
+
+        string folder = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyVideos), "LifeViz");
+        Directory.CreateDirectory(folder);
+        string filePath = Path.Combine(folder, $"lifeviz_{DateTime.Now:yyyyMMdd_HHmmss}.mp4");
+
+        try
+        {
+            _recordingSession = new RecordingSession(filePath, width, height, fps, bitrate);
+        }
+        catch (Exception ex)
+        {
+            Logger.Error("Failed to start recording.", ex);
+            _recordingSession = null;
+            ShowRecordingError(ex.Message);
+            return;
+        }
+
+        _recordingWidth = width;
+        _recordingHeight = height;
+        _recordingPath = filePath;
+        _recordingFrameInterval = TimeSpan.FromSeconds(1.0 / fps);
+        _nextRecordingFrameTime = TimeSpan.Zero;
+        _recordingStopwatch = Stopwatch.StartNew();
+        _isRecording = true;
+        UpdateRecordingUi();
+        Logger.Info($"Recording started: {filePath} ({width}x{height} @ {fps} fps)");
+    }
+
+    private void StopRecording(bool showMessage, string? reason = null)
+    {
+        if (!_isRecording)
+        {
+            return;
+        }
+
+        _isRecording = false;
+        _recordingStopwatch?.Stop();
+        _recordingStopwatch = null;
+
+        try
+        {
+            _recordingSession?.Dispose();
+        }
+        catch (Exception ex)
+        {
+            Logger.Error("Recording finalize failed.", ex);
+        }
+        finally
+        {
+            _recordingSession = null;
+        }
+
+        UpdateRecordingUi();
+
+        if (showMessage && !string.IsNullOrWhiteSpace(reason))
+        {
+            MessageBox.Show(this, reason, "Recording", MessageBoxButton.OK, MessageBoxImage.Information);
+        }
+
+        if (!string.IsNullOrWhiteSpace(_recordingPath))
+        {
+            Logger.Info($"Recording saved: {_recordingPath}");
+        }
+
+        _recordingPath = null;
+        _recordingWidth = 0;
+        _recordingHeight = 0;
+        _recordingFrameInterval = TimeSpan.Zero;
+        _nextRecordingFrameTime = TimeSpan.Zero;
+    }
+
+    private void UpdateRecordingUi()
+    {
+        if (RecordMenuItem != null)
+        {
+            RecordMenuItem.Header = _isRecording ? "Stop Recording" : "Start Recording";
+        }
+
+        if (TaskbarInfo != null)
+        {
+            TaskbarInfo.Overlay = _isRecording ? GetRecordingOverlayIcon() : null;
+        }
+    }
+
+    private void ShowRecordingError(string message)
+    {
+        string fullMessage = $"Recording failed:\n{message}";
+        try
+        {
+            Clipboard.SetText(fullMessage);
+        }
+        catch
+        {
+            // Ignore clipboard errors.
+        }
+
+        MessageBox.Show(this, $"{fullMessage}\n\n(The message has been copied to your clipboard.)",
+            "Recording Error", MessageBoxButton.OK, MessageBoxImage.Error);
+    }
+
+    private ImageSource GetRecordingOverlayIcon()
+    {
+        if (_recordingOverlayIcon != null)
+        {
+            return _recordingOverlayIcon;
+        }
+
+        var group = new DrawingGroup();
+        var pen = new Pen(Brushes.White, 1);
+        var circle = new GeometryDrawing(Brushes.Red, pen, new EllipseGeometry(new Point(8, 8), 6, 6));
+        group.Children.Add(circle);
+        group.Freeze();
+        _recordingOverlayIcon = new DrawingImage(group);
+        _recordingOverlayIcon.Freeze();
+        return _recordingOverlayIcon;
     }
 
     private void PresetHeight_Click(object sender, RoutedEventArgs e)
@@ -514,6 +791,7 @@ public partial class MainWindow : Window
         {
             ShowFpsMenuItem.IsChecked = _showFps;
         }
+        UpdateRecordingUi();
 
         UpdateFramerateMenuChecks();
         UpdateLifeModeMenuChecks();
