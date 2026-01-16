@@ -48,7 +48,7 @@ Because every new frame pushes down the history stack, movement leaves chromatic
 
 ## Performance Notes
 
-- Rows = round(columns / aspectRatio). The primary source replaces the default 16:9 ratio with its current ratio; removing all sources restores 16:9.
+- Columns = round(rows * aspectRatio). The primary source replaces the default 16:9 ratio with its current ratio; removing all sources restores 16:9, and the selected height (rows) stays fixed while the width adapts.
 - Capture buffers are pooled (including the raw window/webcam readback), so toggling **Preserve Window Resolution** is the only time a source-resolution copy is kept alive; this removes GC spikes that caused occasional lurches.
 - Random fill uses 35% seed density to encourage interesting evolution when no source is selected.
 - All rendering is CPU-side; WPF's scaling handles presentation without smoothing (`NearestNeighbor`). Window capture uses GDI BitBlt, so extremely large or numerous sources may require smaller grids or lower tick rates if compositing falls behind.

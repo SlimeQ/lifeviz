@@ -14,6 +14,7 @@ using System.Windows.Media;
 using System.Windows.Media.Effects;
 using System.Windows.Media.Imaging;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using System.Windows.Threading;
 using Windows.Devices.Enumeration;
 
@@ -21,7 +22,9 @@ namespace lifeviz;
 
 public partial class MainWindow : Window
 {
-    private const int DefaultColumns = 128;
+    private const int DefaultRows = 144;
+    private const int MinRows = 72;
+    private const int MaxRows = 2160;
     private const int DefaultDepth = 24;
     private const double DefaultAspectRatio = 16d / 9d;
     private const double DefaultFps = 60;
@@ -32,8 +35,12 @@ public partial class MainWindow : Window
     private readonly FileCaptureService _fileCapture = new();
     private readonly AudioBeatDetector _audioBeatDetector = new();
     private readonly BlendEffect _blendEffect = new();
-    private int _configuredColumns = DefaultColumns;
+    private int _configuredRows = DefaultRows;
     private int _configuredDepth = DefaultDepth;
+    private int? _pendingLegacyColumns;
+    private bool _suppressWindowResize;
+    private Size _lastWindowSize;
+    private Size _lastClientSize;
     private IReadOnlyList<WindowHandleInfo> _cachedWindows = Array.Empty<WindowHandleInfo>();
     private IReadOnlyList<WebcamCaptureService.CameraInfo> _cachedCameras = Array.Empty<WebcamCaptureService.CameraInfo>();
     private IReadOnlyList<AudioBeatDetector.AudioDeviceInfo> _cachedAudioDevices = Array.Empty<AudioBeatDetector.AudioDeviceInfo>();
@@ -107,6 +114,8 @@ public partial class MainWindow : Window
             {
                 EnterFullscreen(applyConfig: true);
             }
+            _lastWindowSize = new Size(ActualWidth, ActualHeight);
+            _lastClientSize = new Size(Root.ActualWidth, Root.ActualHeight);
             Logger.Info("Main window loaded and visualizer initialized.");
         };
         SourceInitialized += (_, _) =>
@@ -128,7 +137,8 @@ public partial class MainWindow : Window
         _currentAspectRatio = _aspectRatioLocked
             ? _lockedAspectRatio
             : (_sources.Count > 0 ? _sources[0].AspectRatio : DefaultAspectRatio);
-        _engine.Configure(_configuredColumns, _configuredDepth, _currentAspectRatio);
+        _engine.Configure(_configuredRows, _configuredDepth, _currentAspectRatio);
+        SnapWindowToAspect(preserveHeight: true);
         _engine.SetMode(_lifeMode);
         _engine.SetBinningMode(_binningMode);
         _engine.SetInjectionMode(_injectionMode);
@@ -310,7 +320,7 @@ public partial class MainWindow : Window
         RenderFrame();
     }
 
-    private void PresetColumns_Click(object sender, RoutedEventArgs e)
+    private void PresetHeight_Click(object sender, RoutedEventArgs e)
     {
         if (sender is MenuItem { Header: string header } && int.TryParse(header, out int value))
         {
@@ -326,9 +336,9 @@ public partial class MainWindow : Window
         }
     }
 
-    private void SetColumns_Click(object sender, RoutedEventArgs e)
+    private void SetHeight_Click(object sender, RoutedEventArgs e)
     {
-        int? requested = PromptForInteger("Columns", _engine.Columns, 32, 512);
+        int? requested = PromptForInteger("Height", _engine.Rows, MinRows, MaxRows);
         if (requested.HasValue)
         {
             ApplyDimensions(requested.Value, null);
@@ -344,9 +354,9 @@ public partial class MainWindow : Window
         }
     }
 
-    private void ApplyDimensions(int? columns, int? depth, double? aspectOverride = null, bool persist = true)
+    private void ApplyDimensions(int? rows, int? depth, double? aspectOverride = null, bool persist = true)
     {
-        int nextColumns = columns ?? _engine.Columns;
+        int nextRows = rows ?? _configuredRows;
         int nextDepth = depth ?? _engine.Depth;
         double nextAspect = aspectOverride ?? _currentAspectRatio;
         if (_aspectRatioLocked)
@@ -358,9 +368,11 @@ public partial class MainWindow : Window
         bool wasPaused = _isPaused;
         _isPaused = true;
 
-        _configuredColumns = Math.Clamp(nextColumns, 32, 512);
+        _configuredRows = Math.Clamp(nextRows, MinRows, MaxRows);
         _configuredDepth = Math.Clamp(nextDepth, 3, 96);
-        _engine.Configure(_configuredColumns, _configuredDepth, _currentAspectRatio);
+        _engine.Configure(_configuredRows, _configuredDepth, _currentAspectRatio);
+        _configuredRows = _engine.Rows;
+        SnapWindowToAspect(preserveHeight: true);
         RebuildSurface();
 
         _isPaused = wasPaused;
@@ -1590,6 +1602,7 @@ public partial class MainWindow : Window
         var targetState = _previousWindowState == WindowState.Minimized ? WindowState.Normal : _previousWindowState;
         WindowState = targetState;
         _isFullscreen = false;
+        SnapWindowToAspect(preserveHeight: true);
         SaveConfig();
         UpdateFullscreenMenuItem();
     }
@@ -1873,6 +1886,80 @@ public partial class MainWindow : Window
 
         _rowMap = _displayHeight == _rowMap.Length ? _rowMap : new int[_displayHeight];
         _colMap = _displayWidth == _colMap.Length ? _colMap : new int[_displayWidth];
+    }
+
+    private void SnapWindowToAspect(bool preserveHeight)
+    {
+        if (_isFullscreen)
+        {
+            return;
+        }
+
+        double aspect = _currentAspectRatio > 0 ? _currentAspectRatio : DefaultAspectRatio;
+        double clientWidth = Root.ActualWidth > 0 ? Root.ActualWidth : ActualWidth;
+        double clientHeight = Root.ActualHeight > 0 ? Root.ActualHeight : ActualHeight;
+        if (clientWidth <= 0 || clientHeight <= 0)
+        {
+            return;
+        }
+
+        double chromeWidth = Math.Max(0, ActualWidth - clientWidth);
+        double chromeHeight = Math.Max(0, ActualHeight - clientHeight);
+
+        _suppressWindowResize = true;
+        if (preserveHeight)
+        {
+            double targetClientWidth = Math.Max(1, clientHeight * aspect);
+            Width = targetClientWidth + chromeWidth;
+        }
+        else
+        {
+            double targetClientHeight = Math.Max(1, clientWidth / aspect);
+            Height = targetClientHeight + chromeHeight;
+        }
+        _suppressWindowResize = false;
+        _lastWindowSize = new Size(ActualWidth, ActualHeight);
+        _lastClientSize = new Size(Root.ActualWidth, Root.ActualHeight);
+    }
+
+    private void MainWindow_OnSizeChanged(object sender, SizeChangedEventArgs e)
+    {
+        if (_suppressWindowResize || _isFullscreen)
+        {
+            _lastWindowSize = new Size(ActualWidth, ActualHeight);
+            _lastClientSize = new Size(Root.ActualWidth, Root.ActualHeight);
+            return;
+        }
+
+        double aspect = _currentAspectRatio > 0 ? _currentAspectRatio : DefaultAspectRatio;
+        double clientWidth = Root.ActualWidth > 0 ? Root.ActualWidth : e.NewSize.Width;
+        double clientHeight = Root.ActualHeight > 0 ? Root.ActualHeight : e.NewSize.Height;
+        if (clientWidth <= 0 || clientHeight <= 0)
+        {
+            return;
+        }
+
+        double deltaWidth = Math.Abs(clientWidth - _lastClientSize.Width);
+        double deltaHeight = Math.Abs(clientHeight - _lastClientSize.Height);
+        bool preserveHeight = deltaHeight >= deltaWidth;
+
+        double chromeWidth = Math.Max(0, e.NewSize.Width - clientWidth);
+        double chromeHeight = Math.Max(0, e.NewSize.Height - clientHeight);
+
+        _suppressWindowResize = true;
+        if (preserveHeight)
+        {
+            double targetClientWidth = Math.Max(1, clientHeight * aspect);
+            Width = targetClientWidth + chromeWidth;
+        }
+        else
+        {
+            double targetClientHeight = Math.Max(1, clientWidth / aspect);
+            Height = targetClientHeight + chromeHeight;
+        }
+        _suppressWindowResize = false;
+        _lastWindowSize = new Size(ActualWidth, ActualHeight);
+        _lastClientSize = new Size(Root.ActualWidth, Root.ActualHeight);
     }
 
     private static bool TryGetPrimaryDimensions(List<CaptureSource> sources, out int width, out int height)
@@ -2801,7 +2888,19 @@ public partial class MainWindow : Window
             }
             _invertComposite = config.InvertComposite;
             _showFps = config.ShowFps;
-            _configuredColumns = Math.Clamp(config.Columns, 32, 512);
+            if (config.Height > 0)
+            {
+                _configuredRows = Math.Clamp(config.Height, MinRows, MaxRows);
+            }
+            else if (config.Columns > 0)
+            {
+                _pendingLegacyColumns = config.Columns;
+                _configuredRows = DefaultRows;
+            }
+            else
+            {
+                _configuredRows = DefaultRows;
+            }
             _configuredDepth = Math.Clamp(config.Depth, 3, 96);
             _passthroughEnabled = config.Passthrough;
             _fpsOscillationEnabled = config.OscillationEnabled;
@@ -2825,6 +2924,13 @@ public partial class MainWindow : Window
 
             _pendingFullscreen = config.Fullscreen;
             RestoreSources(config.Sources);
+            if (_pendingLegacyColumns.HasValue)
+            {
+                double targetAspect = _aspectRatioLocked ? _lockedAspectRatio
+                    : (_sources.Count > 0 ? _sources[0].AspectRatio : DefaultAspectRatio);
+                _configuredRows = Math.Clamp((int)Math.Round(_pendingLegacyColumns.Value / targetAspect), MinRows, MaxRows);
+                _pendingLegacyColumns = null;
+            }
         }
         catch
         {
@@ -2860,7 +2966,7 @@ public partial class MainWindow : Window
                 LifeOpacity = _lifeOpacity,
                 InvertComposite = _invertComposite,
                 ShowFps = _showFps,
-                Columns = _configuredColumns,
+                Height = _configuredRows,
                 Depth = _configuredDepth,
                 Passthrough = _passthroughEnabled,
                 OscillationEnabled = _fpsOscillationEnabled,
@@ -2933,10 +3039,19 @@ public partial class MainWindow : Window
         var webcams = _webcamCapture.EnumerateCameras();
         RestoreSourceList(configs, _sources, windows, webcams);
 
+        double targetAspect = _aspectRatioLocked ? _lockedAspectRatio
+            : (_sources.Count > 0 ? _sources[0].AspectRatio : DefaultAspectRatio);
+
+        if (_pendingLegacyColumns.HasValue)
+        {
+            _configuredRows = Math.Clamp((int)Math.Round(_pendingLegacyColumns.Value / targetAspect), MinRows, MaxRows);
+            _pendingLegacyColumns = null;
+        }
+
         if (_sources.Count > 0)
         {
-            _currentAspectRatio = _aspectRatioLocked ? _lockedAspectRatio : _sources[0].AspectRatio;
-            ApplyDimensions(null, null, _currentAspectRatio, persist: false);
+            _currentAspectRatio = targetAspect;
+            ApplyDimensions(_configuredRows, null, _currentAspectRatio, persist: false);
         }
     }
 
@@ -3042,7 +3157,9 @@ public partial class MainWindow : Window
         public double LifeOpacity { get; set; } = 1.0;
         public bool InvertComposite { get; set; }
         public bool ShowFps { get; set; }
-        public int Columns { get; set; } = DefaultColumns;
+        public int Height { get; set; } = DefaultRows;
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+        public int Columns { get; set; }
         public int Depth { get; set; } = DefaultDepth;
         public bool Passthrough { get; set; }
         public bool OscillationEnabled { get; set; }

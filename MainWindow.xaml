@@ -8,6 +8,9 @@
         Width="1200"
         Height="675"
         Background="#0B0B0B"
+        ResizeMode="CanResizeWithGrip"
+        WindowStyle="SingleBorderWindow"
+        SizeChanged="MainWindow_OnSizeChanged"
         WindowStartupLocation="CenterScreen">
     <Grid x:Name="Root" Background="#0B0B0B">
         <Grid.ContextMenu>
@@ -19,14 +22,16 @@
                 <MenuItem Header="Randomize"
                           Click="Randomize_Click" />
                 <Separator />
-                <MenuItem Header="Columns">
-                    <MenuItem Header="64" Click="PresetColumns_Click" />
-                    <MenuItem Header="96" Click="PresetColumns_Click" />
-                    <MenuItem Header="128" Click="PresetColumns_Click" />
-                    <MenuItem Header="192" Click="PresetColumns_Click" />
-                    <MenuItem Header="256" Click="PresetColumns_Click" />
+                <MenuItem Header="Height">
+                    <MenuItem Header="144" Click="PresetHeight_Click" />
+                    <MenuItem Header="240" Click="PresetHeight_Click" />
+                    <MenuItem Header="480" Click="PresetHeight_Click" />
+                    <MenuItem Header="720" Click="PresetHeight_Click" />
+                    <MenuItem Header="1080" Click="PresetHeight_Click" />
+                    <MenuItem Header="1440" Click="PresetHeight_Click" />
+                    <MenuItem Header="2160" Click="PresetHeight_Click" />
                     <Separator />
-                    <MenuItem Header="Custom..." Click="SetColumns_Click" />
+                    <MenuItem Header="Custom..." Click="SetHeight_Click" />
                 </MenuItem>
                 <MenuItem Header="Depth">
                     <MenuItem Header="12" Click="PresetDepth_Click" />

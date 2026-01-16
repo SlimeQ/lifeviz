@@ -30,7 +30,7 @@ Right-click the scene and use **Sources** to stack multiple windows, OBS-style:
 
 ## Configuration
 
-- Settings persist to `%AppData%\lifeviz\config.json` after the app finishes loading (columns/depth, framerate, blend/composite toggles, thresholds, opacity, passthrough, etc.) and restore on next launch.
+- Settings persist to `%AppData%\lifeviz\config.json` after the app finishes loading (height/rows, depth, framerate, blend/composite toggles, thresholds, opacity, passthrough, etc.) and restore on next launch. The window keeps the current aspect ratio and can be resized from the corner grip; use height presets or fullscreen to change simulation resolution without letterboxing.
 - The source stack is restored too: window sources are matched by title, webcams by device id/name, file sources by path, keeping order (including nested layer groups) plus per-layer blend mode, fit mode, opacity, and mirror settings when the inputs are available.
 - Aspect ratio lock state persists (default lock ratio is 16:9).
 - Fullscreen preference is remembered and re-applied on launch using the active monitor bounds so the taskbar stays hidden.

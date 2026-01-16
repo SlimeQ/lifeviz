@@ -25,8 +25,10 @@ namespace lifeviz;
         PulseWidthModulation
     }
 
+        private const int MinRows = 72;
+        private const int MaxRows = 2160;
         private const int MinColumns = 32;
-        private const int MaxColumns = 512;
+        private const int MaxColumns = 4096;
         private const int MinDepth = 3;
         private const int MaxDepth = 96;
         private const double DefaultAspectRatio = 16d / 9d;
@@ -43,8 +45,8 @@ namespace lifeviz;
         private int _gDepth;
         private int _bDepth;
 
-    public int Columns { get; private set; } = 128;
-    public int Rows { get; private set; } = 72;
+    public int Columns { get; private set; } = 256;
+    public int Rows { get; private set; } = 144;
     public int Depth { get; private set; } = 24;
     public double AspectRatio => _aspectRatio;
     public LifeMode Mode => _mode;
@@ -56,16 +58,19 @@ namespace lifeviz;
 
     public IReadOnlyList<bool[,]> Frames => _history;
 
-    public void Configure(int requestedColumns, int requestedDepth, double? aspectRatio = null)
+    public void Configure(int requestedRows, int requestedDepth, double? aspectRatio = null)
     {
         if (aspectRatio.HasValue && aspectRatio.Value > 0.01)
         {
             _aspectRatio = aspectRatio.Value;
         }
 
-        Columns = Math.Clamp(requestedColumns, MinColumns, MaxColumns);
+        Rows = Math.Clamp(requestedRows, MinRows, MaxRows);
         Depth = Math.Clamp(requestedDepth, MinDepth, MaxDepth);
+        Columns = (int)Math.Round(Rows * _aspectRatio);
+        Columns = Math.Clamp(Columns, MinColumns, MaxColumns);
         Rows = Math.Max(9, (int)Math.Round(Columns / _aspectRatio));
+        Rows = Math.Clamp(Rows, MinRows, MaxRows);
 
         if (Rows < 3)
         {
@@ -221,7 +226,7 @@ namespace lifeviz;
             return;
         }
 
-        Configure(Columns, Depth, _aspectRatio);
+        Configure(Rows, Depth, _aspectRatio);
     }
 
     private bool[,] CreateFrame() => new bool[Rows, Columns];
