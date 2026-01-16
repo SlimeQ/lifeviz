@@ -368,6 +368,18 @@ internal sealed class FileCaptureService : IDisposable
         private bool _isReady;
         private bool _hasError;
 
+        // Throttling and Caching
+        private readonly Stopwatch _renderClock = Stopwatch.StartNew();
+        private double _lastRenderTimeMs;
+        private const double MinFrameIntervalMs = 33.0; // Cap at ~30 FPS
+        private bool _frameUpdated;
+        private int _lastTargetWidth;
+        private int _lastTargetHeight;
+        private FitMode _lastFitMode;
+
+        private int _renderWidth;
+        private int _renderHeight;
+
         public VideoSession(string path)
             : base(path, System.IO.Path.GetFileName(path), 0, 0)
         {
@@ -387,14 +399,28 @@ internal sealed class FileCaptureService : IDisposable
 
         public override FileCaptureFrame? CaptureFrame(int targetWidth, int targetHeight, FitMode fitMode, bool includeSource)
         {
-            if (_hasError || !_isReady || targetWidth <= 0 || targetHeight <= 0 || Width <= 0 || Height <= 0)
+            if (_hasError || !_isReady || targetWidth <= 0 || targetHeight <= 0 || _renderWidth <= 0 || _renderHeight <= 0)
             {
                 return null;
             }
 
+            // Attempt to render the latest frame from the video player.
+            // This method now includes throttling to avoid blocking the UI thread too often.
             if (!RenderLatestFrame())
             {
                 return null;
+            }
+
+            // If the source video frame hasn't changed and the requested output dimensions/mode are the same,
+            // we can reuse the previously downscaled buffer to save CPU cycles.
+            bool paramsChanged = targetWidth != _lastTargetWidth || targetHeight != _lastTargetHeight || fitMode != _lastFitMode;
+
+            if (!_frameUpdated && !paramsChanged && _downscaledBuffer != null && _latestBuffer != null)
+            {
+                return new FileCaptureFrame(_downscaledBuffer, targetWidth, targetHeight,
+                    includeSource ? _latestBuffer : null,
+                    _renderWidth,
+                    _renderHeight);
             }
 
             int downscaledLength = targetWidth * targetHeight * 4;
@@ -403,12 +429,17 @@ internal sealed class FileCaptureService : IDisposable
                 _downscaledBuffer = new byte[downscaledLength];
             }
 
-            Downscale(_latestBuffer!, Width, Height, _downscaledBuffer, targetWidth, targetHeight, fitMode);
+            Downscale(_latestBuffer!, _renderWidth, _renderHeight, _downscaledBuffer, targetWidth, targetHeight, fitMode);
+
+            _frameUpdated = false;
+            _lastTargetWidth = targetWidth;
+            _lastTargetHeight = targetHeight;
+            _lastFitMode = fitMode;
 
             return new FileCaptureFrame(_downscaledBuffer, targetWidth, targetHeight,
                 includeSource ? _latestBuffer : null,
-                Width,
-                Height);
+                _renderWidth,
+                _renderHeight);
         }
 
         public override void Dispose()
@@ -423,7 +454,38 @@ internal sealed class FileCaptureService : IDisposable
         {
             Width = _player.NaturalVideoWidth;
             Height = _player.NaturalVideoHeight;
-            _isReady = Width > 0 && Height > 0;
+
+            if (Width > 0 && Height > 0)
+            {
+                // Cap render resolution to max 1080p to avoid performance issues with 4K/8K videos
+                // while preserving aspect ratio.
+                if (Width > 1920 || Height > 1080)
+                {
+                    double aspect = (double)Width / Height;
+                    if (Width > 1920)
+                    {
+                        _renderWidth = 1920;
+                        _renderHeight = (int)(1920 / aspect);
+                    }
+                    else
+                    {
+                        _renderHeight = 1080;
+                        _renderWidth = (int)(1080 * aspect);
+                    }
+                }
+                else
+                {
+                    _renderWidth = Width;
+                    _renderHeight = Height;
+                }
+                _isReady = true;
+            }
+            else
+            {
+                _renderWidth = 0;
+                _renderHeight = 0;
+                _isReady = false;
+            }
         }
 
         private void PlayerOnMediaEnded(object? sender, EventArgs e)
@@ -440,31 +502,42 @@ internal sealed class FileCaptureService : IDisposable
 
         private bool RenderLatestFrame()
         {
-            if (Width <= 0 || Height <= 0)
+            if (_renderWidth <= 0 || _renderHeight <= 0)
             {
                 return false;
             }
 
-            if (_renderTarget == null || _renderTarget.PixelWidth != Width || _renderTarget.PixelHeight != Height)
+            // Throttling: Check if enough time has passed since the last expensive render
+            double now = _renderClock.Elapsed.TotalMilliseconds;
+            if (_latestBuffer != null && (now - _lastRenderTimeMs < MinFrameIntervalMs))
             {
-                _renderTarget = new RenderTargetBitmap(Width, Height, 96, 96, PixelFormats.Pbgra32);
+                return true;
+            }
+            _lastRenderTimeMs = now;
+
+            if (_renderTarget == null || _renderTarget.PixelWidth != _renderWidth || _renderTarget.PixelHeight != _renderHeight)
+            {
+                _renderTarget = new RenderTargetBitmap(_renderWidth, _renderHeight, 96, 96, PixelFormats.Pbgra32);
             }
 
             using (var dc = _visual.RenderOpen())
             {
-                dc.DrawRectangle(Brushes.Black, null, new System.Windows.Rect(0, 0, Width, Height));
-                dc.DrawVideo(_player, new System.Windows.Rect(0, 0, Width, Height));
+                // Draw at scaled resolution
+                var rect = new System.Windows.Rect(0, 0, _renderWidth, _renderHeight);
+                dc.DrawRectangle(Brushes.Black, null, rect);
+                dc.DrawVideo(_player, rect);
             }
 
             _renderTarget.Render(_visual);
 
-            int required = Width * Height * 4;
+            int required = _renderWidth * _renderHeight * 4;
             if (_latestBuffer == null || _latestBuffer.Length != required)
             {
                 _latestBuffer = new byte[required];
             }
 
-            _renderTarget.CopyPixels(_latestBuffer, Width * 4, 0);
+            _renderTarget.CopyPixels(_latestBuffer, _renderWidth * 4, 0);
+            _frameUpdated = true;
             return true;
         }
     }

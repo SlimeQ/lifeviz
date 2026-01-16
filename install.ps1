@@ -16,7 +16,14 @@ $publishDir = Join-Path $root 'artifacts\local-install'
 Write-Host "[install] Publishing to $publishDir" -ForegroundColor Cyan
 
 if (Test-Path $publishDir) {
-    Remove-Item -Path $publishDir -Recurse -Force
+    try {
+        Remove-Item -Path $publishDir -Recurse -Force
+    }
+    catch {
+        $timestamp = Get-Date -Format 'yyyyMMdd_HHmmss'
+        $publishDir = Join-Path $root "artifacts\local-install_$timestamp"
+        Write-Warning "[install] Previous install is locked. Publishing to $publishDir instead."
+    }
 }
 
 New-Item -Path $publishDir -ItemType Directory | Out-Null

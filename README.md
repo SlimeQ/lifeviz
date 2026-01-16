@@ -11,7 +11,7 @@ dotnet run
 
 The new Rider solution (`lifeviz.sln`) includes a "lifeviz: Run App" configuration so IDE runs mirror `dotnet run`.
 
-For a quick local install-style smoke test (publish to `artifacts\local-install` and launch the app):
+For a quick local install-style smoke test (publish to `artifacts\local-install` and launch the app; if the folder is locked it falls back to a timestamped path):
 
 ```powershell
 .\install.ps1

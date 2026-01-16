@@ -19,7 +19,7 @@ If you still publish via Rider's generated config, the project automatically dis
 
 ## Local Smoke Test Install
 
-`install.ps1` publishes a framework-dependent build to `artifacts\local-install` and launches it:
+`install.ps1` publishes a framework-dependent build to `artifacts\local-install` and launches it (if the folder is locked, it uses a timestamped path):
 
 ```powershell
 .\install.ps1

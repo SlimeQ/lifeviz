@@ -953,10 +953,102 @@ public partial class MainWindow : Window
         return dialogResult == true ? result : null;
     }
 
-    private void RootContextMenu_OnOpened(object sender, RoutedEventArgs e)
+    private string? PromptForText(string label, string current, int maxLength)
     {
-        PopulateSourcesMenu();
+        var dialog = new Window
+        {
+            Owner = this,
+            WindowStartupLocation = WindowStartupLocation.CenterOwner,
+            SizeToContent = SizeToContent.WidthAndHeight,
+            ResizeMode = ResizeMode.NoResize,
+            WindowStyle = WindowStyle.ToolWindow,
+            Background = new SolidColorBrush(Color.FromRgb(16, 16, 16)),
+            Foreground = Brushes.White,
+            ShowInTaskbar = false,
+            Title = label
+        };
+
+        var layout = new StackPanel
+        {
+            Margin = new Thickness(16),
+            Width = 260
+        };
+
+        var message = new TextBlock
+        {
+            Text = $"Enter {label}",
+            Margin = new Thickness(0, 0, 0, 8)
+        };
+
+        var input = new TextBox
+        {
+            Text = current,
+            Margin = new Thickness(0, 0, 0, 8),
+            MaxLength = Math.Max(1, maxLength)
+        };
+
+        var error = new TextBlock
+        {
+            Foreground = Brushes.IndianRed,
+            Visibility = Visibility.Collapsed,
+            Margin = new Thickness(0, 0, 0, 8)
+        };
+
+        var buttons = new StackPanel
+        {
+            Orientation = Orientation.Horizontal,
+            HorizontalAlignment = HorizontalAlignment.Right
+        };
+
+        string? result = null;
+
+        var okButton = new Button
+        {
+            Content = "OK",
+            IsDefault = true,
+            Width = 70,
+            Margin = new Thickness(0, 0, 8, 0)
+        };
+        okButton.Click += (_, _) =>
+        {
+            string value = input.Text.Trim();
+            if (string.IsNullOrWhiteSpace(value))
+            {
+                error.Text = "Please enter a name.";
+                error.Visibility = Visibility.Visible;
+                return;
+            }
+
+            result = value;
+            dialog.DialogResult = true;
+        };
+
+        var cancelButton = new Button
+        {
+            Content = "Cancel",
+            IsCancel = true,
+            Width = 70
+        };
+
+        buttons.Children.Add(okButton);
+        buttons.Children.Add(cancelButton);
+
+        layout.Children.Add(message);
+        layout.Children.Add(input);
+        layout.Children.Add(error);
+        layout.Children.Add(buttons);
+
+        dialog.Content = layout;
+
+        bool? dialogResult = dialog.ShowDialog();
+        return dialogResult == true ? result : null;
+    }
+
+    private async void RootContextMenu_OnOpened(object sender, RoutedEventArgs e)
+    {
         PopulateAudioMenu();
+        await PopulateSourcesMenuAsync();
+
         if (PassthroughMenuItem != null)
         {
             PassthroughMenuItem.IsChecked = _passthroughEnabled;
@@ -1090,7 +1182,7 @@ public partial class MainWindow : Window
         SaveConfig();
     }
 
-    private void PopulateSourcesMenu()
+    private async Task PopulateSourcesMenuAsync()
     {
         if (SourcesMenu == null)
         {
@@ -1098,11 +1190,29 @@ public partial class MainWindow : Window
         }
 
         SourcesMenu.Items.Clear();
+        SourcesMenu.Items.Add(new MenuItem { Header = "Loading...", IsEnabled = false });
 
-        _cachedWindows = _windowCapture.EnumerateWindows(_windowHandle);
+        var windowsTask = Task.Run(() => _windowCapture.EnumerateWindows(_windowHandle));
+        var camerasTask = Task.Run(() => _webcamCapture.EnumerateCameras());
+
+        await Task.WhenAll(windowsTask, camerasTask);
+
+        _cachedWindows = windowsTask.Result;
         Logger.Info($"Enumerated windows: count={_cachedWindows.Count}");
-        _cachedCameras = _webcamCapture.EnumerateCameras();
+        _cachedCameras = camerasTask.Result;
         Logger.Info($"Enumerated webcams: count={_cachedCameras.Count}");
+
+        RebuildSourcesMenu();
+    }
+
+    private void RebuildSourcesMenu()
+    {
+        if (SourcesMenu == null)
+        {
+            return;
+        }
+
+        SourcesMenu.Items.Clear();
 
         SourcesMenu.Items.Add(BuildAddLayerGroupMenuItem(null));
         SourcesMenu.Items.Add(BuildAddWindowMenuItem(null));
@@ -1285,6 +1395,13 @@ public partial class MainWindow : Window
             fitMenu.Items.Add(fitItem);
         }
 
+        MenuItem? renameItem = null;
+        if (source.Type == CaptureSource.SourceType.Group)
+        {
+            renameItem = new MenuItem { Header = "Rename Group..." };
+            renameItem.Click += (_, _) => RenameLayerGroup(source);
+        }
+
         var primaryItem = new MenuItem
         {
             Header = "Make Primary (adopt aspect)",
@@ -1360,6 +1477,10 @@ public partial class MainWindow : Window
 
         sourceItem.Items.Add(blendMenu);
         sourceItem.Items.Add(fitMenu);
+        if (renameItem != null)
+        {
+            sourceItem.Items.Add(renameItem);
+        }
         sourceItem.Items.Add(primaryItem);
         sourceItem.Items.Add(moveUpItem);
         sourceItem.Items.Add(moveDownItem);
@@ -1437,7 +1558,7 @@ public partial class MainWindow : Window
         if (Enum.TryParse<BlendMode>(header, ignoreCase: true, out var mode))
         {
             source.BlendMode = mode;
-            PopulateSourcesMenu();
+            RebuildSourcesMenu();
             RenderFrame();
             SaveConfig();
         }
@@ -1453,7 +1574,7 @@ public partial class MainWindow : Window
         if (Enum.TryParse<FitMode>(header, ignoreCase: true, out var fitMode))
         {
             source.FitMode = fitMode;
-            PopulateSourcesMenu();
+            RebuildSourcesMenu();
             RenderFrame();
             SaveConfig();
         }
@@ -1541,6 +1662,30 @@ public partial class MainWindow : Window
         Logger.Info("Inserted new layer group.");
         UpdatePrimaryAspectIfNeeded();
         RenderFrame();
+        SaveConfig();
+    }
+
+    private void RenameLayerGroup(CaptureSource source)
+    {
+        if (source.Type != CaptureSource.SourceType.Group)
+        {
+            return;
+        }
+
+        string? updated = PromptForText("Group Name", source.DisplayName, 60);
+        if (string.IsNullOrWhiteSpace(updated))
+        {
+            return;
+        }
+
+        if (string.Equals(updated, source.DisplayName, StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        source.SetDisplayName(updated);
+        Logger.Info($"Layer group renamed: {updated}");
+        RebuildSourcesMenu();
         SaveConfig();
     }
 
@@ -3735,7 +3880,7 @@ public partial class MainWindow : Window
         public WindowHandleInfo? Window { get; set; }
         public string? WebcamId { get; }
         public string? FilePath { get; }
-        public string DisplayName { get; }
+        public string DisplayName { get; private set; }
         public List<CaptureSource> Children { get; } = new();
         public BlendMode BlendMode { get; set; } = BlendMode.Normal;
         public FitMode FitMode { get; set; } = FitMode.Fit;
@@ -3753,6 +3898,11 @@ public partial class MainWindow : Window
         public int? FileHeight { get; private set; }
         public byte[]? CompositeDownscaledBuffer { get; set; }
         public byte[]? CompositeHighResBuffer { get; set; }
+
+        public void SetDisplayName(string displayName)
+        {
+            DisplayName = string.IsNullOrWhiteSpace(displayName) ? "Layer Group" : displayName.Trim();
+        }
 
         public double AspectRatio
         {
