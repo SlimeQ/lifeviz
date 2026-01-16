@@ -34,8 +34,9 @@ internal sealed class RecordingSession : IDisposable
 
     public static int EstimateBitrate(int width, int height, int fps)
     {
-        long raw = (long)width * height * fps * 4;
-        long bitrate = Math.Clamp(raw, 8_000_000, 320_000_000);
+        double bitsPerPixelPerSecond = 0.08;
+        long raw = (long)Math.Round(width * height * fps * bitsPerPixelPerSecond);
+        long bitrate = Math.Clamp(raw, 2_000_000, 40_000_000);
         return (int)bitrate;
     }
 

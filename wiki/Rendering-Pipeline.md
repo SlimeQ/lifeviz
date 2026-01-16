@@ -34,7 +34,7 @@
 
 ## Recording
 
-- **Start Recording** captures the final output buffer, then applies a pixel-perfect integer upscale to the nearest HD height (720/1080/1440/2160 when divisible) before encoding to H.264 MP4 with a high-bitrate software encoder to keep nearest-neighbor pixel art crisp.
+- **Start Recording** captures the final output buffer, then applies a pixel-perfect integer upscale to the nearest HD height (720/1080/1440/2160 when divisible) before encoding to H.264 MP4 with a tuned bitrate for crisp nearest-neighbor pixel art without huge files.
 - Recording uses the same composite buffers as the renderer (including passthrough blend mode and invert composite), then writes frames at the configured framerate.
 
 ## Life Modes
