@@ -30,8 +30,16 @@
                           Click="RecordMenuItem_Click" />
                 <MenuItem Header="Recording Quality"
                           x:Name="RecordingQualityMenu">
-                    <MenuItem Header="Lossless (AVI)"
+                    <MenuItem Header="Lossless (FFV1, MKV)"
                               Tag="Lossless"
+                              IsCheckable="True"
+                              Click="RecordingQualityItem_Click" />
+                    <MenuItem Header="Crisp (H.264, MP4)"
+                              Tag="LosslessCompatible"
+                              IsCheckable="True"
+                              Click="RecordingQualityItem_Click" />
+                    <MenuItem Header="Uncompressed (AVI)"
+                              Tag="Uncompressed"
                               IsCheckable="True"
                               Click="RecordingQualityItem_Click" />
                     <MenuItem Header="High (H.264)"

@@ -1,6 +1,8 @@
 using System;
 using System.Buffers;
 using System.Collections.Concurrent;
+using System.Diagnostics;
+using System.IO;
 using System.Runtime.InteropServices;
 using System.Threading.Tasks;
 
@@ -9,6 +11,8 @@ namespace lifeviz;
 internal enum RecordingQuality
 {
     Lossless,
+    LosslessCompatible,
+    Uncompressed,
     High,
     Balanced,
     Compact
@@ -16,7 +20,7 @@ internal enum RecordingQuality
 
 internal readonly struct RecordingSettings
 {
-    public RecordingSettings(RecordingQuality quality, Guid outputSubtype, string fileExtension, int bitrate, int? encoderQuality, int? encoderQualityVsSpeed)
+    public RecordingSettings(RecordingQuality quality, Guid outputSubtype, string fileExtension, int bitrate, int? encoderQuality, int? encoderQualityVsSpeed, bool useFfmpeg, string? ffmpegOutputArgs)
     {
         Quality = quality;
         OutputSubtype = outputSubtype;
@@ -24,6 +28,8 @@ internal readonly struct RecordingSettings
         Bitrate = bitrate;
         EncoderQuality = encoderQuality;
         EncoderQualityVsSpeed = encoderQualityVsSpeed;
+        UseFfmpeg = useFfmpeg;
+        FfmpegOutputArgs = ffmpegOutputArgs;
     }
 
     public RecordingQuality Quality { get; }
@@ -32,14 +38,28 @@ internal readonly struct RecordingSettings
     public int Bitrate { get; }
     public int? EncoderQuality { get; }
     public int? EncoderQualityVsSpeed { get; }
+    public bool UseFfmpeg { get; }
+    public string? FfmpegOutputArgs { get; }
 
-    public bool UseQualityRateControl => OutputSubtype == MfInterop.MFVideoFormat_H264 && EncoderQuality.HasValue;
+    public bool UseQualityRateControl => !UseFfmpeg && OutputSubtype == MfInterop.MFVideoFormat_H264 && EncoderQuality.HasValue;
 
     public static RecordingSettings FromQuality(RecordingQuality quality, int width, int height, int fps)
     {
         if (quality == RecordingQuality.Lossless)
         {
-            return new RecordingSettings(quality, MfInterop.MFVideoFormat_RGB32, "avi", 0, null, null);
+            return new RecordingSettings(quality, Guid.Empty, "mkv", 0, null, null, useFfmpeg: true,
+                ffmpegOutputArgs: "-c:v ffv1 -level 3 -g 1 -pix_fmt bgr0");
+        }
+
+        if (quality == RecordingQuality.LosslessCompatible)
+        {
+            return new RecordingSettings(quality, Guid.Empty, "mp4", 0, null, null, useFfmpeg: true,
+                ffmpegOutputArgs: "-c:v libx264 -preset veryfast -crf 1 -pix_fmt yuv420p -profile:v high -level 4.1 -movflags +faststart");
+        }
+
+        if (quality == RecordingQuality.Uncompressed)
+        {
+            return new RecordingSettings(quality, MfInterop.MFVideoFormat_RGB32, "avi", 0, null, null, useFfmpeg: false, ffmpegOutputArgs: null);
         }
 
         int bitrate = EstimateBitrate(width, height, fps, quality);
@@ -51,7 +71,7 @@ internal readonly struct RecordingSettings
             _ => (80, 50)
         };
 
-        return new RecordingSettings(quality, MfInterop.MFVideoFormat_H264, "mp4", bitrate, encoderQuality, encoderQualityVsSpeed);
+        return new RecordingSettings(quality, MfInterop.MFVideoFormat_H264, "mp4", bitrate, encoderQuality, encoderQualityVsSpeed, useFfmpeg: false, ffmpegOutputArgs: null);
     }
 
     private static int EstimateBitrate(int width, int height, int fps, RecordingQuality quality)
@@ -79,6 +99,11 @@ internal readonly struct RecordingSettings
         long bitrate = Math.Clamp(raw, min, max);
         return (int)bitrate;
     }
+}
+
+internal interface IRecordingWriter : IDisposable
+{
+    void WriteFrame(byte[] buffer, int length);
 }
 
 internal sealed class RecordingSession : IDisposable
@@ -132,14 +157,22 @@ internal sealed class RecordingSession : IDisposable
 
     private void ProcessFrames()
     {
-        MediaFoundationRecorder? recorder = null;
+        IRecordingWriter? recorder = null;
         try
         {
-            recorder = new MediaFoundationRecorder(_path, _width, _height, _fps, _settings);
+            recorder = _settings.UseFfmpeg
+                ? new FfmpegRecorder(_path, _width, _height, _fps, _settings)
+                : new MediaFoundationRecorder(_path, _width, _height, _fps, _settings);
             foreach (var buffer in _frames.GetConsumingEnumerable())
             {
-                recorder.WriteFrame(buffer, _frameSize);
-                ArrayPool<byte>.Shared.Return(buffer);
+                try
+                {
+                    recorder.WriteFrame(buffer, _frameSize);
+                }
+                finally
+                {
+                    ArrayPool<byte>.Shared.Return(buffer);
+                }
             }
         }
         catch (Exception ex)
@@ -149,7 +182,17 @@ internal sealed class RecordingSession : IDisposable
         }
         finally
         {
-            recorder?.Dispose();
+            if (recorder != null)
+            {
+                try
+                {
+                    recorder.Dispose();
+                }
+                catch (Exception ex)
+                {
+                    SetError(ex);
+                }
+            }
         }
     }
 
@@ -201,7 +244,7 @@ internal sealed class RecordingSession : IDisposable
     }
 }
 
-internal sealed class MediaFoundationRecorder : IDisposable
+internal sealed class MediaFoundationRecorder : IRecordingWriter
 {
     private const int MfVersion = 0x00020070;
     private const int MfStartupFull = 0;
@@ -440,6 +483,128 @@ internal sealed class MediaFoundationRecorder : IDisposable
         {
             // Ignore encoder configuration failures to keep recording available.
         }
+    }
+}
+
+internal sealed class FfmpegRecorder : IRecordingWriter
+{
+    private readonly Process _process;
+    private readonly Stream _stdin;
+    private readonly Task<string> _stderrTask;
+    private bool _disposed;
+
+    public FfmpegRecorder(string path, int width, int height, int fps, RecordingSettings settings)
+    {
+        if (string.IsNullOrWhiteSpace(settings.FfmpegOutputArgs))
+        {
+            throw new InvalidOperationException("Recording requires ffmpeg output settings.");
+        }
+
+        var startInfo = new ProcessStartInfo
+        {
+            FileName = "ffmpeg",
+            Arguments = BuildArguments(path, width, height, fps, settings.FfmpegOutputArgs),
+            UseShellExecute = false,
+            RedirectStandardInput = true,
+            RedirectStandardError = true,
+            CreateNoWindow = true
+        };
+
+        _process = Process.Start(startInfo) ?? throw new InvalidOperationException("Failed to start ffmpeg.");
+        _stdin = _process.StandardInput.BaseStream;
+        _stderrTask = Task.Run(() => _process.StandardError.ReadToEnd());
+    }
+
+    public void WriteFrame(byte[] buffer, int length)
+    {
+        if (_disposed)
+        {
+            return;
+        }
+
+        if (_process.HasExited)
+        {
+            throw new InvalidOperationException(BuildExitMessage());
+        }
+
+        _stdin.Write(buffer, 0, length);
+    }
+
+    public void Dispose()
+    {
+        if (_disposed)
+        {
+            return;
+        }
+
+        _disposed = true;
+        try
+        {
+            _stdin.Flush();
+        }
+        catch
+        {
+            // Ignore flush errors.
+        }
+
+        try
+        {
+            _stdin.Close();
+        }
+        catch
+        {
+            // Ignore close errors.
+        }
+
+        try
+        {
+            if (!_process.HasExited)
+            {
+                _process.WaitForExit();
+            }
+        }
+        catch
+        {
+            // Ignore wait errors.
+        }
+
+        if (_process.HasExited && _process.ExitCode != 0)
+        {
+            throw new InvalidOperationException(BuildExitMessage());
+        }
+
+        _process.Dispose();
+    }
+
+    private string BuildExitMessage()
+    {
+        string errorOutput = string.Empty;
+        if (_stderrTask.IsCompletedSuccessfully)
+        {
+            errorOutput = _stderrTask.Result;
+        }
+        else
+        {
+            try
+            {
+                errorOutput = _process.StandardError.ReadToEnd();
+            }
+            catch
+            {
+                errorOutput = string.Empty;
+            }
+        }
+
+        string trimmed = errorOutput.Trim();
+        return string.IsNullOrWhiteSpace(trimmed)
+            ? $"ffmpeg exited with code {_process.ExitCode}."
+            : trimmed;
+    }
+
+    private static string BuildArguments(string path, int width, int height, int fps, string outputArgs)
+    {
+        string safePath = path.Replace("\"", "\\\"");
+        return $"-hide_banner -loglevel error -y -f rawvideo -pix_fmt bgra -s {width}x{height} -r {fps} -i - {outputArgs} -an \"{safePath}\"";
     }
 }
 

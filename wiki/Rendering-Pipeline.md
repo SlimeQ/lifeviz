@@ -41,7 +41,7 @@
 
 ## Recording
 
-- **Start Recording** captures the final output buffer, then applies a pixel-perfect integer upscale to the nearest HD height (720/1080/1440/2160 when divisible). **Recording Quality** chooses between lossless uncompressed RGB (AVI) or H.264 tiers (High/Balanced/Compact). H.264 uses quality-based VBR with bitrate caps to preserve sharp pixel edges without runaway file sizes.
+- **Start Recording** captures the final output buffer, then applies a pixel-perfect integer upscale to the nearest HD height (720/1080/1440/2160 when divisible). **Recording Quality** chooses between lossless FFV1 in MKV (compressed, requires `ffmpeg`), crisp H.264 in MP4 (Windows Media Player compatible, requires `ffmpeg`), uncompressed RGB (AVI), or H.264 tiers (High/Balanced/Compact). H.264 uses quality-based VBR with bitrate caps to preserve sharp pixel edges without runaway file sizes.
 - Recording uses the same composite buffers as the renderer (including passthrough blend mode and invert composite), then writes frames at the configured framerate.
 
 ## Life Modes

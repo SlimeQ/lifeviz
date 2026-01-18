@@ -19,6 +19,17 @@ internal sealed class FileCaptureService : IDisposable
         ".mp4", ".mov", ".wmv", ".avi", ".mkv", ".webm", ".mpg", ".mpeg"
     };
 
+    internal static bool IsVideoPath(string path)
+    {
+        if (string.IsNullOrWhiteSpace(path))
+        {
+            return false;
+        }
+
+        string extension = Path.GetExtension(path);
+        return VideoExtensions.Contains(extension);
+    }
+
     private readonly Dictionary<string, FileSession> _sessions = new(StringComparer.OrdinalIgnoreCase);
     private readonly object _lock = new();
 
@@ -131,6 +142,33 @@ internal sealed class FileCaptureService : IDisposable
 
         session = new VideoSequenceSession(normalized);
         return true;
+    }
+
+    public bool RestartVideo(string path)
+    {
+        if (string.IsNullOrWhiteSpace(path))
+        {
+            return false;
+        }
+
+        if (!TryNormalizePath(path, out var fullPath))
+        {
+            return false;
+        }
+
+        FileSession? session;
+        lock (_lock)
+        {
+            _sessions.TryGetValue(fullPath, out session);
+        }
+
+        if (session is VideoSession video)
+        {
+            video.RestartPlayback();
+            return true;
+        }
+
+        return false;
     }
 
     public FileCaptureFrame? CaptureFrame(string path, int targetWidth, int targetHeight, FitMode fitMode, bool includeSource = true)
@@ -863,6 +901,12 @@ internal sealed class FileCaptureService : IDisposable
             return true;
         }
 
+        public void RestartPlayback()
+        {
+            _blankFrameStreak = 0;
+            OpenPlayback(_playbackPath);
+        }
+
         private static string GetTranscodeCachePath(string originalPath)
         {
             var info = new FileInfo(originalPath);
@@ -965,6 +1009,15 @@ internal sealed class FileCaptureService : IDisposable
             }
 
             return frame;
+        }
+
+        public void Restart()
+        {
+            _hasError = false;
+            _errorStreak = 0;
+            _current?.Dispose();
+            _index = 0;
+            _current = new VideoSession(_paths[_index], loopPlayback: false);
         }
 
         public void Dispose()

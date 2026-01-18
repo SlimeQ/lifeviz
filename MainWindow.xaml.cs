@@ -1719,6 +1719,20 @@ public partial class MainWindow : Window
 
         var animationsMenu = BuildAnimationsMenu(source);
 
+        MenuItem? restartVideoItem = null;
+        bool isVideoLayer = source.Type == CaptureSource.SourceType.VideoSequence ||
+                            (source.Type == CaptureSource.SourceType.File &&
+                             !string.IsNullOrWhiteSpace(source.FilePath) &&
+                             FileCaptureService.IsVideoPath(source.FilePath));
+        if (isVideoLayer)
+        {
+            restartVideoItem = new MenuItem
+            {
+                Header = source.Type == CaptureSource.SourceType.VideoSequence ? "Restart Sequence" : "Restart Video"
+            };
+            restartVideoItem.Click += (_, _) => RestartVideoSource(source);
+        }
+
         MenuItem? renameItem = null;
         if (source.Type == CaptureSource.SourceType.Group)
         {
@@ -1802,6 +1816,10 @@ public partial class MainWindow : Window
         sourceItem.Items.Add(blendMenu);
         sourceItem.Items.Add(fitMenu);
         sourceItem.Items.Add(animationsMenu);
+        if (restartVideoItem != null)
+        {
+            sourceItem.Items.Add(restartVideoItem);
+        }
         if (renameItem != null)
         {
             sourceItem.Items.Add(renameItem);
@@ -2207,6 +2225,35 @@ public partial class MainWindow : Window
         Logger.Info($"Layer group renamed: {updated}");
         RebuildSourcesMenu();
         SaveConfig();
+    }
+
+    private void RestartVideoSource(CaptureSource source)
+    {
+        bool restarted = false;
+        if (source.Type == CaptureSource.SourceType.VideoSequence && source.VideoSequence != null)
+        {
+            source.VideoSequence.Restart();
+            restarted = true;
+        }
+        else if (source.Type == CaptureSource.SourceType.File &&
+                 !string.IsNullOrWhiteSpace(source.FilePath) &&
+                 FileCaptureService.IsVideoPath(source.FilePath))
+        {
+            restarted = _fileCapture.RestartVideo(source.FilePath);
+        }
+
+        if (!restarted)
+        {
+            Logger.Warn($"Restart video ignored (not ready): {source.DisplayName}");
+            return;
+        }
+
+        source.MissedFrames = 0;
+        source.FirstFrameReceived = false;
+        source.HasError = false;
+        source.AddedUtc = DateTime.UtcNow;
+        Logger.Info($"Restarted video source: {source.DisplayName}");
+        RenderFrame();
     }
 
     private IEnumerable<CaptureSource> EnumerateSources(IEnumerable<CaptureSource> sources)
