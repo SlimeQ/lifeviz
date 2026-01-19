@@ -82,6 +82,8 @@
                 <Separator />
                 <MenuItem Header="Sources"
                           x:Name="SourcesMenu" />
+                <MenuItem Header="Layer Editor..."
+                          Click="OpenLayerEditor_Click" />
                 <MenuItem Header="Audio Source"
                           x:Name="AudioSourceMenu" />
                 <Separator />

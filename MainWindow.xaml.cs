@@ -44,6 +44,8 @@ public partial class MainWindow : Window
     private readonly FileCaptureService _fileCapture = new();
     private readonly AudioBeatDetector _audioBeatDetector = new();
     private readonly BlendEffect _blendEffect = new();
+    private LayerEditorWindow? _layerEditorWindow;
+    private bool _suppressLayerEditorRefresh;
     private int _configuredRows = DefaultRows;
     private int _configuredDepth = DefaultDepth;
     private int? _pendingLegacyColumns;
@@ -599,6 +601,35 @@ public partial class MainWindow : Window
     {
         _engine.Randomize();
         RenderFrame();
+    }
+
+    private void OpenLayerEditor_Click(object sender, RoutedEventArgs e)
+    {
+        try
+        {
+            if (_layerEditorWindow == null)
+            {
+                _layerEditorWindow = new LayerEditorWindow(this);
+                _layerEditorWindow.Closed += (_, _) => _layerEditorWindow = null;
+                _layerEditorWindow.Show();
+                return;
+            }
+
+            if (_layerEditorWindow.WindowState == WindowState.Minimized)
+            {
+                _layerEditorWindow.WindowState = WindowState.Normal;
+            }
+
+            _layerEditorWindow.Activate();
+            _layerEditorWindow.RefreshFromSourcesIfLive();
+        }
+        catch (Exception ex)
+        {
+            Logger.Error("Failed to open Layer Editor window.", ex);
+            MessageBox.Show(this, $"Failed to open Layer Editor:\n{ex.Message}", "Layer Editor Error",
+                MessageBoxButton.OK, MessageBoxImage.Error);
+            _layerEditorWindow = null;
+        }
     }
 
     private void RecordMenuItem_Click(object sender, RoutedEventArgs e)
@@ -1257,6 +1288,31 @@ public partial class MainWindow : Window
         };
         clearItem.Click += (_, _) => ClearSources();
         SourcesMenu.Items.Add(clearItem);
+
+        NotifyLayerEditorSourcesChanged();
+    }
+
+    private void NotifyLayerEditorSourcesChanged()
+    {
+        if (_suppressLayerEditorRefresh)
+        {
+            return;
+        }
+
+        _layerEditorWindow?.RefreshFromSourcesIfLive();
+    }
+
+    private void RunWithoutLayerEditorRefresh(Action action)
+    {
+        _suppressLayerEditorRefresh = true;
+        try
+        {
+            action();
+        }
+        finally
+        {
+            _suppressLayerEditorRefresh = false;
+        }
     }
 
     private sealed class WindowAddTarget
@@ -1774,6 +1830,7 @@ public partial class MainWindow : Window
             Logger.Info($"Mirror toggled for {source.DisplayName}: {source.Mirror}");
             RenderFrame();
             SaveConfig();
+            NotifyLayerEditorSourcesChanged();
         };
 
         var opacityItem = new MenuItem
@@ -1803,6 +1860,7 @@ public partial class MainWindow : Window
             opacityValueItem.Header = $"{source.Opacity:P0}";
             RenderFrame();
             SaveConfig();
+            NotifyLayerEditorSourcesChanged();
         };
         opacityItem.Items.Add(opacityValueItem);
         opacityItem.Items.Add(opacitySlider);
@@ -2118,6 +2176,7 @@ public partial class MainWindow : Window
         UpdatePrimaryAspectIfNeeded();
         RenderFrame();
         SaveConfig();
+        NotifyLayerEditorSourcesChanged();
     }
 
     private void AddOrPromoteWebcamSource(WebcamCaptureService.CameraInfo camera, List<CaptureSource> targetList)
@@ -2137,6 +2196,7 @@ public partial class MainWindow : Window
         RenderFrame();
         SaveConfig();
         _webcamErrorShown = false;
+        NotifyLayerEditorSourcesChanged();
     }
 
     private void AddOrPromoteFileSource(string path, List<CaptureSource> targetList)
@@ -2164,6 +2224,7 @@ public partial class MainWindow : Window
         UpdatePrimaryAspectIfNeeded();
         RenderFrame();
         SaveConfig();
+        NotifyLayerEditorSourcesChanged();
     }
 
     private void AddVideoSequenceSource(IReadOnlyList<string> paths, List<CaptureSource> targetList)
@@ -2192,6 +2253,7 @@ public partial class MainWindow : Window
         UpdatePrimaryAspectIfNeeded();
         RenderFrame();
         SaveConfig();
+        NotifyLayerEditorSourcesChanged();
     }
 
     private void AddLayerGroup(List<CaptureSource> targetList)
@@ -2201,6 +2263,7 @@ public partial class MainWindow : Window
         UpdatePrimaryAspectIfNeeded();
         RenderFrame();
         SaveConfig();
+        NotifyLayerEditorSourcesChanged();
     }
 
     private void RenameLayerGroup(CaptureSource source)
@@ -2274,6 +2337,9 @@ public partial class MainWindow : Window
     private CaptureSource? FindSource(Func<CaptureSource, bool> predicate) =>
         EnumerateSources(_sources).FirstOrDefault(predicate);
 
+    private CaptureSource? FindSourceById(Guid id) =>
+        FindSource(source => source.Id == id);
+
     private bool ContainsWindowSource(IntPtr handle) =>
         FindSource(s => s.Type == CaptureSource.SourceType.Window && s.Window != null && s.Window.Handle == handle) != null;
 
@@ -2297,6 +2363,337 @@ public partial class MainWindow : Window
                     return parent;
                 }
             }
+        }
+
+        return null;
+    }
+
+    internal IReadOnlyList<WindowHandleInfo> GetAvailableWindows() =>
+        _windowCapture.EnumerateWindows(_windowHandle);
+
+    internal IReadOnlyList<WebcamCaptureService.CameraInfo> GetAvailableWebcams() =>
+        _webcamCapture.EnumerateCameras();
+
+    internal void AddLayerGroupFromEditor(Guid? parentId)
+    {
+        var targetList = ResolveTargetList(parentId);
+        if (targetList == null)
+        {
+            return;
+        }
+
+        RunWithoutLayerEditorRefresh(() => AddLayerGroup(targetList));
+    }
+
+    internal void AddWindowSourceFromEditor(WindowHandleInfo info, Guid? parentId)
+    {
+        var targetList = ResolveTargetList(parentId);
+        if (targetList == null)
+        {
+            return;
+        }
+
+        RunWithoutLayerEditorRefresh(() => AddOrPromoteWindowSource(info, targetList));
+    }
+
+    internal void AddWebcamSourceFromEditor(WebcamCaptureService.CameraInfo camera, Guid? parentId)
+    {
+        var targetList = ResolveTargetList(parentId);
+        if (targetList == null)
+        {
+            return;
+        }
+
+        RunWithoutLayerEditorRefresh(() => AddOrPromoteWebcamSource(camera, targetList));
+    }
+
+    internal void AddFileSourceFromEditor(string path, Guid? parentId)
+    {
+        var targetList = ResolveTargetList(parentId);
+        if (targetList == null)
+        {
+            return;
+        }
+
+        RunWithoutLayerEditorRefresh(() => AddOrPromoteFileSource(path, targetList));
+    }
+
+    internal void AddVideoSequenceFromEditor(IReadOnlyList<string> paths, Guid? parentId)
+    {
+        var targetList = ResolveTargetList(parentId);
+        if (targetList == null)
+        {
+            return;
+        }
+
+        RunWithoutLayerEditorRefresh(() => AddVideoSequenceSource(paths, targetList));
+    }
+
+    internal void UpdateSourceBlendMode(Guid sourceId, string blendMode)
+    {
+        RunWithoutLayerEditorRefresh(() =>
+        {
+            var source = FindSourceById(sourceId);
+            if (source == null)
+            {
+                return;
+            }
+
+            if (Enum.TryParse<BlendMode>(blendMode, true, out var mode))
+            {
+                source.BlendMode = mode;
+                RenderFrame();
+                SaveConfig();
+            }
+        });
+    }
+
+    internal void UpdateSourceFitMode(Guid sourceId, string fitMode)
+    {
+        RunWithoutLayerEditorRefresh(() =>
+        {
+            var source = FindSourceById(sourceId);
+            if (source == null)
+            {
+                return;
+            }
+
+            if (Enum.TryParse<FitMode>(fitMode, true, out var mode))
+            {
+                source.FitMode = mode;
+                RenderFrame();
+                SaveConfig();
+            }
+        });
+    }
+
+    internal void UpdateSourceOpacity(Guid sourceId, double opacity)
+    {
+        RunWithoutLayerEditorRefresh(() =>
+        {
+            var source = FindSourceById(sourceId);
+            if (source == null)
+            {
+                return;
+            }
+
+            source.Opacity = Math.Clamp(opacity, 0, 1);
+            RenderFrame();
+            SaveConfig();
+        });
+    }
+
+    internal void UpdateSourceMirror(Guid sourceId, bool mirror)
+    {
+        RunWithoutLayerEditorRefresh(() =>
+        {
+            var source = FindSourceById(sourceId);
+            if (source == null)
+            {
+                return;
+            }
+
+            source.Mirror = mirror;
+            RenderFrame();
+            SaveConfig();
+        });
+    }
+
+    internal void UpdateGroupName(Guid sourceId, string displayName)
+    {
+        RunWithoutLayerEditorRefresh(() =>
+        {
+            var source = FindSourceById(sourceId);
+            if (source == null || source.Type != CaptureSource.SourceType.Group)
+            {
+                return;
+            }
+
+            source.SetDisplayName(string.IsNullOrWhiteSpace(displayName) ? "Layer Group" : displayName);
+            SaveConfig();
+        });
+    }
+
+    internal void MakePrimaryFromEditor(Guid sourceId)
+    {
+        RunWithoutLayerEditorRefresh(() =>
+        {
+            var source = FindSourceById(sourceId);
+            if (source == null)
+            {
+                return;
+            }
+
+            MakePrimarySource(source);
+        });
+    }
+
+    internal void MoveSourceFromEditor(Guid sourceId, int delta)
+    {
+        RunWithoutLayerEditorRefresh(() =>
+        {
+            var source = FindSourceById(sourceId);
+            if (source == null)
+            {
+                return;
+            }
+
+            MoveSource(source, delta);
+        });
+    }
+
+    internal void RemoveSourceFromEditor(Guid sourceId)
+    {
+        RunWithoutLayerEditorRefresh(() =>
+        {
+            var source = FindSourceById(sourceId);
+            if (source == null)
+            {
+                return;
+            }
+
+            RemoveSource(source);
+        });
+    }
+
+    internal void RestartVideoFromEditor(Guid sourceId)
+    {
+        RunWithoutLayerEditorRefresh(() =>
+        {
+            var source = FindSourceById(sourceId);
+            if (source == null)
+            {
+                return;
+            }
+
+            RestartVideoSource(source);
+        });
+    }
+
+    internal void AddAnimationFromEditor(Guid sourceId, string type, string? translateDirection, string? rotationDirection)
+    {
+        RunWithoutLayerEditorRefresh(() =>
+        {
+            var source = FindSourceById(sourceId);
+            if (source == null)
+            {
+                return;
+            }
+
+            if (!Enum.TryParse<AnimationType>(type, true, out var animationType))
+            {
+                return;
+            }
+
+            var animation = new LayerAnimation
+            {
+                Type = animationType,
+                Loop = animationType == AnimationType.DvdBounce ? AnimationLoop.PingPong : AnimationLoop.Forward,
+                Speed = AnimationSpeed.Normal
+            };
+
+            if (!string.IsNullOrWhiteSpace(translateDirection) &&
+                Enum.TryParse<TranslateDirection>(translateDirection, true, out var translate))
+            {
+                animation.TranslateDirection = translate;
+            }
+
+            if (!string.IsNullOrWhiteSpace(rotationDirection) &&
+                Enum.TryParse<RotationDirection>(rotationDirection, true, out var rotate))
+            {
+                animation.RotationDirection = rotate;
+            }
+
+            source.Animations.Add(animation);
+            SaveConfig();
+        });
+    }
+
+    internal void RemoveAnimationFromEditor(Guid sourceId, Guid animationId)
+    {
+        RunWithoutLayerEditorRefresh(() =>
+        {
+            var source = FindSourceById(sourceId);
+            if (source == null)
+            {
+                return;
+            }
+
+            var animation = source.Animations.FirstOrDefault(item => item.Id == animationId);
+            if (animation == null)
+            {
+                return;
+            }
+
+            source.Animations.Remove(animation);
+            SaveConfig();
+        });
+    }
+
+    internal void UpdateAnimationFromEditor(Guid sourceId, LayerEditorAnimation model)
+    {
+        RunWithoutLayerEditorRefresh(() =>
+        {
+            var source = FindSourceById(sourceId);
+            if (source == null)
+            {
+                return;
+            }
+
+            var animation = source.Animations.FirstOrDefault(item => item.Id == model.Id);
+            if (animation == null)
+            {
+                return;
+            }
+
+            ApplyAnimationModel(animation, model);
+            SaveConfig();
+        });
+    }
+
+    private void ApplyAnimationModel(LayerAnimation animation, LayerEditorAnimation model)
+    {
+        if (Enum.TryParse<AnimationType>(model.Type, true, out var type))
+        {
+            animation.Type = type;
+        }
+        if (Enum.TryParse<AnimationLoop>(model.Loop, true, out var loop))
+        {
+            animation.Loop = loop;
+        }
+        if (Enum.TryParse<AnimationSpeed>(model.Speed, true, out var speed))
+        {
+            animation.Speed = speed;
+        }
+        if (Enum.TryParse<TranslateDirection>(model.TranslateDirection, true, out var translate))
+        {
+            animation.TranslateDirection = translate;
+        }
+        if (Enum.TryParse<RotationDirection>(model.RotationDirection, true, out var rotate))
+        {
+            animation.RotationDirection = rotate;
+        }
+        if (model.DvdScale > 0)
+        {
+            animation.DvdScale = Math.Clamp(model.DvdScale, 0.01, 1.0);
+        }
+        if (model.BeatsPerCycle > 0)
+        {
+            animation.BeatsPerCycle = Math.Clamp(model.BeatsPerCycle, 1, 4096);
+        }
+    }
+
+    private List<CaptureSource>? ResolveTargetList(Guid? parentId)
+    {
+        if (!parentId.HasValue)
+        {
+            return _sources;
+        }
+
+        var parent = FindSourceById(parentId.Value);
+        if (parent != null && parent.Type == CaptureSource.SourceType.Group)
+        {
+            return parent.Children;
         }
 
         return null;
@@ -2366,6 +2763,7 @@ public partial class MainWindow : Window
         UpdatePrimaryAspectIfNeeded();
         RenderFrame();
         SaveConfig();
+        NotifyLayerEditorSourcesChanged();
     }
 
     private void MoveSource(CaptureSource source, int delta)
@@ -2393,6 +2791,7 @@ public partial class MainWindow : Window
 
         UpdatePrimaryAspectIfNeeded();
         SaveConfig();
+        NotifyLayerEditorSourcesChanged();
     }
 
     private void RemoveSource(CaptureSource source)
@@ -2416,6 +2815,7 @@ public partial class MainWindow : Window
         UpdatePrimaryAspectIfNeeded();
         RenderFrame();
         SaveConfig();
+        NotifyLayerEditorSourcesChanged();
     }
 
     private void ClearSources()
@@ -2459,6 +2859,7 @@ public partial class MainWindow : Window
             RenderFrame();
         }
         SaveConfig();
+        NotifyLayerEditorSourcesChanged();
     }
 
     private void InjectCaptureFrames()
@@ -3128,6 +3529,7 @@ public partial class MainWindow : Window
 
     private sealed class LayerAnimation
     {
+        public Guid Id { get; } = Guid.NewGuid();
         public AnimationType Type { get; set; } = AnimationType.ZoomIn;
         public AnimationLoop Loop { get; set; } = AnimationLoop.Forward;
         public AnimationSpeed Speed { get; set; } = AnimationSpeed.Normal;
@@ -4659,6 +5061,286 @@ public partial class MainWindow : Window
         return configs;
     }
 
+    internal List<LayerEditorSource> BuildLayerEditorSources() => BuildLayerEditorSources(_sources, null);
+
+    private List<LayerEditorSource> BuildLayerEditorSources(List<CaptureSource> sources, LayerEditorSource? parent)
+    {
+        var list = new List<LayerEditorSource>(sources.Count);
+        foreach (var source in sources)
+        {
+            var model = new LayerEditorSource
+            {
+                Id = source.Id,
+                Kind = source.Type switch
+                {
+                    CaptureSource.SourceType.Window => LayerEditorSourceKind.Window,
+                    CaptureSource.SourceType.Webcam => LayerEditorSourceKind.Webcam,
+                    CaptureSource.SourceType.File => LayerEditorSourceKind.File,
+                    CaptureSource.SourceType.VideoSequence => LayerEditorSourceKind.VideoSequence,
+                    CaptureSource.SourceType.Group => LayerEditorSourceKind.Group,
+                    _ => LayerEditorSourceKind.File
+                },
+                DisplayName = source.DisplayName,
+                WindowTitle = source.Window?.Title,
+                WindowHandle = source.Window?.Handle,
+                WebcamId = source.WebcamId,
+                FilePath = source.FilePath,
+                BlendMode = source.BlendMode.ToString(),
+                FitMode = source.FitMode.ToString(),
+                Opacity = source.Opacity,
+                Mirror = source.Mirror,
+                Parent = parent
+            };
+
+            if (source.Type == CaptureSource.SourceType.VideoSequence && source.FilePaths.Count > 0)
+            {
+                model.FilePaths.AddRange(source.FilePaths);
+            }
+
+            foreach (var animation in source.Animations)
+            {
+                model.Animations.Add(new LayerEditorAnimation
+                {
+                    Id = animation.Id,
+                    Type = animation.Type.ToString(),
+                    Loop = animation.Loop.ToString(),
+                    Speed = animation.Speed.ToString(),
+                    TranslateDirection = animation.TranslateDirection.ToString(),
+                    RotationDirection = animation.RotationDirection.ToString(),
+                    DvdScale = animation.DvdScale,
+                    BeatsPerCycle = animation.BeatsPerCycle,
+                    Parent = model
+                });
+            }
+
+            if (source.Type == CaptureSource.SourceType.Group && source.Children.Count > 0)
+            {
+                foreach (var child in BuildLayerEditorSources(source.Children, model))
+                {
+                    model.Children.Add(child);
+                }
+            }
+
+            list.Add(model);
+        }
+
+        return list;
+    }
+
+    internal void ApplyLayerEditorSources(IReadOnlyList<LayerEditorSource> sources)
+    {
+        var existing = EnumerateSources(_sources).ToDictionary(source => source.Id);
+        var used = new HashSet<Guid>();
+        var windows = _windowCapture.EnumerateWindows(_windowHandle);
+        var webcams = _webcamCapture.EnumerateCameras();
+
+        var rebuilt = BuildSourcesFromEditor(sources, existing, used, windows, webcams);
+
+        if (rebuilt.Count == 0)
+        {
+            ClearSources();
+            return;
+        }
+
+        foreach (var source in EnumerateSources(_sources))
+        {
+            if (!used.Contains(source.Id))
+            {
+                CleanupSource(source);
+            }
+        }
+
+        _sources.Clear();
+        _sources.AddRange(rebuilt);
+
+        UpdatePrimaryAspectIfNeeded();
+        RenderFrame();
+        SaveConfig();
+        RebuildSourcesMenu();
+    }
+
+    private List<CaptureSource> BuildSourcesFromEditor(
+        IReadOnlyList<LayerEditorSource> models,
+        IDictionary<Guid, CaptureSource> existing,
+        HashSet<Guid> used,
+        IReadOnlyList<WindowHandleInfo> windows,
+        IReadOnlyList<WebcamCaptureService.CameraInfo> webcams)
+    {
+        var list = new List<CaptureSource>(models.Count);
+        foreach (var model in models)
+        {
+            var source = BuildSourceFromEditor(model, existing, used, windows, webcams);
+            if (source != null)
+            {
+                list.Add(source);
+            }
+        }
+
+        return list;
+    }
+
+    private CaptureSource? BuildSourceFromEditor(
+        LayerEditorSource model,
+        IDictionary<Guid, CaptureSource> existing,
+        HashSet<Guid> used,
+        IReadOnlyList<WindowHandleInfo> windows,
+        IReadOnlyList<WebcamCaptureService.CameraInfo> webcams)
+    {
+        if (!existing.TryGetValue(model.Id, out var source))
+        {
+            source = CreateSourceFromEditor(model, windows, webcams);
+            if (source == null)
+            {
+                return null;
+            }
+        }
+
+        used.Add(source.Id);
+        ApplySourceModel(source, model);
+
+        if (source.Type == CaptureSource.SourceType.Group)
+        {
+            source.Children.Clear();
+            foreach (var child in BuildSourcesFromEditor(model.Children, existing, used, windows, webcams))
+            {
+                source.Children.Add(child);
+            }
+        }
+        else if (source.Children.Count > 0)
+        {
+            source.Children.Clear();
+        }
+
+        return source;
+    }
+
+    private CaptureSource? CreateSourceFromEditor(
+        LayerEditorSource model,
+        IReadOnlyList<WindowHandleInfo> windows,
+        IReadOnlyList<WebcamCaptureService.CameraInfo> webcams)
+    {
+        switch (model.Kind)
+        {
+            case LayerEditorSourceKind.Group:
+                return CaptureSource.CreateGroup(string.IsNullOrWhiteSpace(model.DisplayName) ? null : model.DisplayName);
+
+            case LayerEditorSourceKind.Window:
+            {
+                WindowHandleInfo? match = null;
+                if (model.WindowHandle.HasValue)
+                {
+                    match = windows.FirstOrDefault(w => w.Handle == model.WindowHandle.Value);
+                }
+                if (match == null && !string.IsNullOrWhiteSpace(model.WindowTitle))
+                {
+                    match = windows.FirstOrDefault(w => string.Equals(w.Title, model.WindowTitle, StringComparison.OrdinalIgnoreCase));
+                }
+
+                return match != null ? CaptureSource.CreateWindow(match) : null;
+            }
+
+            case LayerEditorSourceKind.Webcam:
+            {
+                var camera = webcams.FirstOrDefault(c =>
+                    (!string.IsNullOrWhiteSpace(model.WebcamId) && string.Equals(c.Id, model.WebcamId, StringComparison.OrdinalIgnoreCase)) ||
+                    (!string.IsNullOrWhiteSpace(model.DisplayName) && string.Equals(c.Name, model.DisplayName, StringComparison.OrdinalIgnoreCase)));
+                return !string.IsNullOrWhiteSpace(camera.Id) ? CaptureSource.CreateWebcam(camera.Id, camera.Name) : null;
+            }
+
+            case LayerEditorSourceKind.File:
+            {
+                if (string.IsNullOrWhiteSpace(model.FilePath))
+                {
+                    return null;
+                }
+
+                if (_fileCapture.TryGetOrAdd(model.FilePath, out var info, out _))
+                {
+                    return CaptureSource.CreateFile(info.Path, info.DisplayName, info.Width, info.Height);
+                }
+
+                return null;
+            }
+
+            case LayerEditorSourceKind.VideoSequence:
+            {
+                var sequencePaths = model.FilePaths.Count > 0
+                    ? model.FilePaths
+                    : (!string.IsNullOrWhiteSpace(model.FilePath) ? new List<string> { model.FilePath } : null);
+                if (sequencePaths == null || sequencePaths.Count == 0)
+                {
+                    return null;
+                }
+
+                if (_fileCapture.TryCreateVideoSequence(sequencePaths, out var sequence, out _))
+                {
+                    return CaptureSource.CreateVideoSequence(sequence!);
+                }
+
+                return null;
+            }
+        }
+
+        return null;
+    }
+
+    private void ApplySourceModel(CaptureSource source, LayerEditorSource model)
+    {
+        if (Enum.TryParse<BlendMode>(model.BlendMode, true, out var blend))
+        {
+            source.BlendMode = blend;
+        }
+
+        if (Enum.TryParse<FitMode>(model.FitMode, true, out var fitMode))
+        {
+            source.FitMode = fitMode;
+        }
+
+        source.Opacity = Math.Clamp(model.Opacity, 0, 1);
+        source.Mirror = model.Mirror;
+
+        if (source.Type == CaptureSource.SourceType.Group)
+        {
+            source.SetDisplayName(string.IsNullOrWhiteSpace(model.DisplayName) ? "Layer Group" : model.DisplayName);
+        }
+
+        source.Animations.Clear();
+        foreach (var animationModel in model.Animations)
+        {
+            var animation = new LayerAnimation();
+            if (Enum.TryParse<AnimationType>(animationModel.Type, true, out var type))
+            {
+                animation.Type = type;
+            }
+            if (Enum.TryParse<AnimationLoop>(animationModel.Loop, true, out var loop))
+            {
+                animation.Loop = loop;
+            }
+            if (Enum.TryParse<AnimationSpeed>(animationModel.Speed, true, out var speed))
+            {
+                animation.Speed = speed;
+            }
+            if (Enum.TryParse<TranslateDirection>(animationModel.TranslateDirection, true, out var translate))
+            {
+                animation.TranslateDirection = translate;
+            }
+            if (Enum.TryParse<RotationDirection>(animationModel.RotationDirection, true, out var rotate))
+            {
+                animation.RotationDirection = rotate;
+            }
+            if (animationModel.DvdScale > 0)
+            {
+                animation.DvdScale = Math.Clamp(animationModel.DvdScale, 0.01, 1.0);
+            }
+            if (animationModel.BeatsPerCycle > 0)
+            {
+                animation.BeatsPerCycle = Math.Clamp(animationModel.BeatsPerCycle, 1, 4096);
+            }
+
+            source.Animations.Add(animation);
+        }
+    }
+
     private void RestoreSources(IReadOnlyList<AppConfig.SourceConfig>? configs)
     {
         if (configs == null || configs.Count == 0)
@@ -4949,6 +5631,7 @@ public partial class MainWindow : Window
         public static CaptureSource CreateGroup(string? displayName = null) =>
             new(SourceType.Group, null, null, null, displayName ?? "Layer Group", null, null) { AddedUtc = DateTime.UtcNow };
 
+        public Guid Id { get; } = Guid.NewGuid();
         public SourceType Type { get; }
         public WindowHandleInfo? Window { get; set; }
         public string? WebcamId { get; }
