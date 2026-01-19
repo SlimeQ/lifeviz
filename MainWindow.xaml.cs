@@ -4868,8 +4868,8 @@ public partial class MainWindow : Window
             public string? FilePath { get; set; }
             public List<string> FilePaths { get; set; } = new();
             public string? DisplayName { get; set; }
-            public string BlendMode { get; set; } = MainWindow.BlendMode.Normal.ToString();
-            public string FitMode { get; set; } = lifeviz.FitMode.Fit.ToString();
+            public string BlendMode { get; set; } = MainWindow.BlendMode.Additive.ToString();
+            public string FitMode { get; set; } = lifeviz.FitMode.Fill.ToString();
             public double Opacity { get; set; } = 1.0;
             public bool Mirror { get; set; }
             public List<AnimationConfig> Animations { get; set; } = new();
@@ -4958,8 +4958,8 @@ public partial class MainWindow : Window
         public string DisplayName { get; private set; }
         public List<CaptureSource> Children { get; } = new();
         public List<LayerAnimation> Animations { get; } = new();
-        public BlendMode BlendMode { get; set; } = BlendMode.Normal;
-        public FitMode FitMode { get; set; } = FitMode.Fit;
+        public BlendMode BlendMode { get; set; } = BlendMode.Additive;
+        public FitMode FitMode { get; set; } = FitMode.Fill;
         public SourceFrame? LastFrame { get; set; }
         public bool HasError { get; set; }
         public int MissedFrames { get; set; }
