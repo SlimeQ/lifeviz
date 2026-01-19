@@ -11,11 +11,13 @@ dotnet run
 
 The new Rider solution (`lifeviz.sln`) includes a "lifeviz: Run App" configuration so IDE runs mirror `dotnet run`.
 
-For a quick local install-style smoke test (publish to `artifacts\local-install` and launch the app; if the folder is locked it falls back to a timestamped path):
+For a quick local install-style smoke test (publish to `artifacts\local-install`, add Start Menu shortcuts, and launch the app; if the folder is locked it falls back to a timestamped path):
 
 ```powershell
 .\install.ps1
 ```
+
+The script also creates `LifeViz.lnk` and `LifeViz (Local).lnk` in the Start Menu and renames any ClickOnce `lifeviz*.appref-ms` entries to `LifeViz (ClickOnce)...` so search defaults to the local build.
 
 ## Live Window Injection
 
