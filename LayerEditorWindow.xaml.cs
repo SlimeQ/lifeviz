@@ -299,6 +299,8 @@ public partial class LayerEditorWindow : Window
 
     private void AnimationRotateDirection_Changed(object sender, SelectionChangedEventArgs e) => ApplyAnimationChange(sender);
 
+    private void AnimationRotateDegrees_Changed(object sender, RoutedPropertyChangedEventArgs<double> e) => ApplyAnimationChange(sender);
+
     private void AnimationSize_Changed(object sender, RoutedPropertyChangedEventArgs<double> e) => ApplyAnimationChange(sender);
 
     private void ApplyAnimationChange(object sender)

@@ -2673,6 +2673,7 @@ public partial class MainWindow : Window
         {
             animation.RotationDirection = rotate;
         }
+        animation.RotationDegrees = Math.Clamp(model.RotationDegrees, 0, 360);
         if (model.DvdScale > 0)
         {
             animation.DvdScale = Math.Clamp(model.DvdScale, 0.01, 1.0);
@@ -3535,6 +3536,7 @@ public partial class MainWindow : Window
         public AnimationSpeed Speed { get; set; } = AnimationSpeed.Normal;
         public TranslateDirection TranslateDirection { get; set; } = TranslateDirection.Right;
         public RotationDirection RotationDirection { get; set; } = RotationDirection.Clockwise;
+        public double RotationDegrees { get; set; } = AnimationRotateDegrees;
         public double DvdScale { get; set; } = AnimationDvdScale;
         public double BeatsPerCycle { get; set; } = 1.0;
     }
@@ -3988,7 +3990,7 @@ public partial class MainWindow : Window
                 }
                 case AnimationType.Rotate:
                 {
-                    double angle = DegreesToRadians(AnimationRotateDegrees * progress);
+                    double angle = DegreesToRadians(animation.RotationDegrees * progress);
                     if (animation.RotationDirection == RotationDirection.CounterClockwise)
                     {
                         angle = -angle;
@@ -5054,6 +5056,7 @@ public partial class MainWindow : Window
                 Speed = animation.Speed.ToString(),
                 TranslateDirection = animation.TranslateDirection.ToString(),
                 RotationDirection = animation.RotationDirection.ToString(),
+                RotationDegrees = animation.RotationDegrees,
                 DvdScale = animation.DvdScale,
                 BeatsPerCycle = animation.BeatsPerCycle
             });
@@ -5107,6 +5110,7 @@ public partial class MainWindow : Window
                     Speed = animation.Speed.ToString(),
                     TranslateDirection = animation.TranslateDirection.ToString(),
                     RotationDirection = animation.RotationDirection.ToString(),
+                    RotationDegrees = animation.RotationDegrees,
                     DvdScale = animation.DvdScale,
                     BeatsPerCycle = animation.BeatsPerCycle,
                     Parent = model
@@ -5493,6 +5497,7 @@ public partial class MainWindow : Window
                 {
                     animation.RotationDirection = rotate;
                 }
+                animation.RotationDegrees = Math.Clamp(animationConfig.RotationDegrees, 0, 360);
                 if (animationConfig.DvdScale > 0)
                 {
                     animation.DvdScale = Math.Clamp(animationConfig.DvdScale, 0.01, 1.0);
@@ -5565,6 +5570,7 @@ public partial class MainWindow : Window
             public string Speed { get; set; } = AnimationSpeed.Normal.ToString();
             public string TranslateDirection { get; set; } = global::lifeviz.MainWindow.TranslateDirection.Right.ToString();
             public string RotationDirection { get; set; } = global::lifeviz.MainWindow.RotationDirection.Clockwise.ToString();
+            public double RotationDegrees { get; set; } = AnimationRotateDegrees;
             public double DvdScale { get; set; } = AnimationDvdScale;
             public double BeatsPerCycle { get; set; } = 1.0;
         }

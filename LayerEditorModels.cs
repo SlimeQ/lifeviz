@@ -120,6 +120,7 @@ internal sealed class LayerEditorAnimation : LayerEditorNotify
     private string _speed = "Normal";
     private string _translateDirection = "Right";
     private string _rotationDirection = "Clockwise";
+    private double _rotationDegrees = 12.0;
     private double _dvdScale = 0.2;
     private double _beatsPerCycle = 1.0;
 
@@ -128,6 +129,7 @@ internal sealed class LayerEditorAnimation : LayerEditorNotify
         get => _id;
         set => SetField(ref _id, value);
     }
+
 
     public string Type
     {
@@ -168,6 +170,12 @@ internal sealed class LayerEditorAnimation : LayerEditorNotify
     {
         get => _rotationDirection;
         set => SetField(ref _rotationDirection, value);
+    }
+
+    public double RotationDegrees
+    {
+        get => _rotationDegrees;
+        set => SetField(ref _rotationDegrees, value);
     }
 
     public double DvdScale

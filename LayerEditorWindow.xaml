@@ -134,6 +134,20 @@
                                       Margin="6,0,0,0"
                                       Width="160"
                                       SelectionChanged="AnimationRotateDirection_Changed" />
+                            <TextBlock Text="Angle"
+                                       VerticalAlignment="Center"
+                                       Margin="12,0,0,0"/>
+                            <Slider Minimum="0"
+                                    Maximum="360"
+                                    Value="{Binding RotationDegrees}"
+                                    Width="120"
+                                    SmallChange="1"
+                                    LargeChange="15"
+                                    Margin="6,0,0,0"
+                                    ValueChanged="AnimationRotateDegrees_Changed" />
+                            <TextBlock Text="{Binding RotationDegrees, StringFormat={}{0:0}°}"
+                                       Margin="6,0,0,0"
+                                       VerticalAlignment="Center" />
                         </StackPanel>
                         <StackPanel Orientation="Horizontal"
                                     Margin="0,0,12,6"
