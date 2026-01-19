@@ -593,8 +593,10 @@ internal sealed class FileCaptureService : IDisposable
                         _downscaleInput = new byte[requiredSize];
                     }
                     
-                    // Fast copy
-                    Buffer.BlockCopy(_latestRawFrame, 0, _downscaleInput, 0, requiredSize);
+                    // Swap _latestRawFrame <-> _downscaleInput
+                    var temp = _latestRawFrame;
+                    _latestRawFrame = _downscaleInput;
+                    _downscaleInput = temp;
                     
                     _hasNewFrame = false;
                     _isDownscaling = true;
@@ -633,15 +635,15 @@ internal sealed class FileCaptureService : IDisposable
                                 _readyDownscaled = _downscaledOutput;
                                 _downscaledOutput = temp; // Recycle
                                 
-                                // Update Ready Raw (for includeSource)
-                                // We want to show the frame corresponding to the downscaled one, 
-                                // so we copy _downscaleInput to _readyRaw
-                                int rawSize = pWidth * pHeight * 4;
-                                if (_readyRaw == null || _readyRaw.Length != rawSize)
+                                // Swap Input (Raw) -> Ready Raw
+                                if (_readyRaw == null || _readyRaw.Length != _downscaleInput.Length)
                                 {
-                                    _readyRaw = new byte[rawSize];
+                                    _readyRaw = new byte[_downscaleInput.Length];
                                 }
-                                Buffer.BlockCopy(_downscaleInput, 0, _readyRaw, 0, rawSize);
+                                
+                                var tempRaw = _readyRaw;
+                                _readyRaw = _downscaleInput;
+                                _downscaleInput = tempRaw;
                                 
                                 _readyWidth = pWidth;
                                 _readyHeight = pHeight;
@@ -768,7 +770,11 @@ internal sealed class FileCaptureService : IDisposable
                         {
                             _latestRawFrame = new byte[frameSize];
                         }
-                        Buffer.BlockCopy(_readerBuffer, 0, _latestRawFrame, 0, frameSize);
+                        // Swap
+                        var temp = _latestRawFrame;
+                        _latestRawFrame = _readerBuffer;
+                        _readerBuffer = temp;
+                        
                         _hasNewFrame = true;
                     }
                 }
