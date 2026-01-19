@@ -485,8 +485,18 @@ internal sealed class FileCaptureService : IDisposable
         private readonly bool _loopPlayback;
         private readonly DrawingVisual _visual = new();
         private RenderTargetBitmap? _renderTarget;
-        private byte[]? _latestBuffer;
-        private byte[]? _downscaledBuffer;
+        
+        // Double buffering for Raw Video (UI Write -> Background Read)
+        private byte[]? _rawBufferWrite;
+        private byte[]? _rawBufferRead;
+        private byte[]? _rawBufferReady; // For includeSource return
+
+        // Double buffering for Downscaled Video (Background Write -> UI Read)
+        private byte[]? _downscaledBufferWrite;
+        private byte[]? _downscaledBufferReady;
+
+        private volatile bool _isProcessing;
+        
         private bool _isReady;
         private bool _hasError;
         private bool _errorShown;
@@ -506,13 +516,13 @@ internal sealed class FileCaptureService : IDisposable
         private const double MinFrameIntervalMs = 33.0; // Cap at ~30 FPS
         private const double MediaOpenTimeoutSeconds = 2.5;
         private const int BlankFrameThreshold = 5;
-        private bool _frameUpdated;
-        private int _lastTargetWidth;
-        private int _lastTargetHeight;
-        private FitMode _lastFitMode;
-
+        
         private int _renderWidth;
         private int _renderHeight;
+
+        // Current parameters for the ready frame
+        private int _readyWidth;
+        private int _readyHeight;
 
         public VideoSession(string path, bool loopPlayback)
             : base(path, System.IO.Path.GetFileName(path), 0, 0)
@@ -565,42 +575,90 @@ internal sealed class FileCaptureService : IDisposable
                 return null;
             }
 
-            // Attempt to render the latest frame from the video player.
-            // This method now includes throttling to avoid blocking the UI thread too often.
-            if (!RenderLatestFrame())
+            // 1. Attempt to render the latest frame from the video player on the UI thread.
+            bool newFrameRendered = RenderLatestFrame();
+
+            // 2. If we have a new frame and the background processor is idle, queue a downscale task.
+            //    Or if we haven't processed anything yet but have data.
+            if (newFrameRendered && !_isProcessing)
+            {
+                _isProcessing = true;
+
+                // Swap Write -> Read
+                // _rawBufferWrite contains the fresh frame.
+                // We move it to _rawBufferRead for the background task to use.
+                // The old _rawBufferRead (if any) becomes the new _rawBufferWrite to be overwritten next time.
+                var tempRaw = _rawBufferRead;
+                _rawBufferRead = _rawBufferWrite;
+                _rawBufferWrite = tempRaw;
+
+                // Capture parameters for the background task
+                int rWidth = _renderWidth;
+                int rHeight = _renderHeight;
+                int tWidth = targetWidth;
+                int tHeight = targetHeight;
+                FitMode mode = fitMode;
+
+                // Ensure the background write buffer is allocated and correct size
+                int requiredDownscaled = tWidth * tHeight * 4;
+                if (_downscaledBufferWrite == null || _downscaledBufferWrite.Length != requiredDownscaled)
+                {
+                    _downscaledBufferWrite = new byte[requiredDownscaled];
+                }
+
+                // Fire and forget (continuation handles state)
+                Task.Run(() =>
+                {
+                    try
+                    {
+                        if (_rawBufferRead != null)
+                        {
+                            Downscale(_rawBufferRead, rWidth, rHeight, _downscaledBufferWrite!, tWidth, tHeight, mode);
+
+                            // Swap Downscaled Write -> Ready
+                            var tempDs = _downscaledBufferReady;
+                            _downscaledBufferReady = _downscaledBufferWrite;
+                            _downscaledBufferWrite = tempDs; // Recycle buffer
+
+                            // Update Ready Raw Buffer (for includeSource)
+                            // We recycle _rawBufferReady back to Read pool? 
+                            // Actually, let's just rotate them. 
+                            // _rawBufferRead is done being read. It becomes the new Ready.
+                            // The old Ready becomes... well, we can just drop it or reuse it later if needed.
+                            // To avoid allocation, we want to put the old Ready back into circulation if possible.
+                            // But _rawBufferWrite is already waiting for next frame.
+                            // We can just swap Ready and Read. 
+                            // The "Read" buffer (holding source for this frame) becomes "Ready".
+                            // The "Ready" buffer (holding source for PREVIOUS frame) becomes "Read" (to be overwritten/swapped next time).
+                            var tempReady = _rawBufferReady;
+                            _rawBufferReady = _rawBufferRead;
+                            _rawBufferRead = tempReady;
+
+                            _readyWidth = rWidth;
+                            _readyHeight = rHeight;
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        Logger.Error($"Video downscale error: {ex.Message}", ex);
+                    }
+                    finally
+                    {
+                        _isProcessing = false;
+                    }
+                });
+            }
+
+            // 3. Return the last fully processed frame immediately.
+            if (_downscaledBufferReady == null)
             {
                 return null;
             }
 
-            // If the source video frame hasn't changed and the requested output dimensions/mode are the same,
-            // we can reuse the previously downscaled buffer to save CPU cycles.
-            bool paramsChanged = targetWidth != _lastTargetWidth || targetHeight != _lastTargetHeight || fitMode != _lastFitMode;
-
-            if (!_frameUpdated && !paramsChanged && _downscaledBuffer != null && _latestBuffer != null)
-            {
-                return new FileCaptureFrame(_downscaledBuffer, targetWidth, targetHeight,
-                    includeSource ? _latestBuffer : null,
-                    _renderWidth,
-                    _renderHeight);
-            }
-
-            int downscaledLength = targetWidth * targetHeight * 4;
-            if (_downscaledBuffer == null || _downscaledBuffer.Length != downscaledLength)
-            {
-                _downscaledBuffer = new byte[downscaledLength];
-            }
-
-            Downscale(_latestBuffer!, _renderWidth, _renderHeight, _downscaledBuffer, targetWidth, targetHeight, fitMode);
-
-            _frameUpdated = false;
-            _lastTargetWidth = targetWidth;
-            _lastTargetHeight = targetHeight;
-            _lastFitMode = fitMode;
-
-            return new FileCaptureFrame(_downscaledBuffer, targetWidth, targetHeight,
-                includeSource ? _latestBuffer : null,
-                _renderWidth,
-                _renderHeight);
+            return new FileCaptureFrame(_downscaledBufferReady, targetWidth, targetHeight,
+                includeSource ? _rawBufferReady : null,
+                _readyWidth,
+                _readyHeight);
         }
 
         public override void Dispose()
@@ -687,9 +745,11 @@ internal sealed class FileCaptureService : IDisposable
 
             // Throttling: Check if enough time has passed since the last expensive render
             double now = _renderClock.Elapsed.TotalMilliseconds;
-            if (_latestBuffer != null && (now - _lastRenderTimeMs < MinFrameIntervalMs))
+            if (_rawBufferWrite != null && (now - _lastRenderTimeMs < MinFrameIntervalMs))
             {
-                return true;
+                // Not time to render yet, but claim success so we might process the previous frame if pending?
+                // No, return false to indicate no *new* frame.
+                return false;
             }
             _lastRenderTimeMs = now;
 
@@ -709,13 +769,14 @@ internal sealed class FileCaptureService : IDisposable
             _renderTarget.Render(_visual);
 
             int required = _renderWidth * _renderHeight * 4;
-            if (_latestBuffer == null || _latestBuffer.Length != required)
+            if (_rawBufferWrite == null || _rawBufferWrite.Length != required)
             {
-                _latestBuffer = new byte[required];
+                _rawBufferWrite = new byte[required];
             }
 
-            _renderTarget.CopyPixels(_latestBuffer, _renderWidth * 4, 0);
-            if (IsBufferBlank(_latestBuffer))
+            _renderTarget.CopyPixels(_rawBufferWrite, _renderWidth * 4, 0);
+            
+            if (IsBufferBlank(_rawBufferWrite))
             {
                 _blankFrameStreak++;
                 if (_blankFrameStreak >= BlankFrameThreshold)
@@ -731,7 +792,7 @@ internal sealed class FileCaptureService : IDisposable
             {
                 _blankFrameStreak = 0;
             }
-            _frameUpdated = true;
+            
             return true;
         }
 
