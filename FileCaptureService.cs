@@ -9,6 +9,8 @@ using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.RegularExpressions;
+using System.Threading;
 
 namespace lifeviz;
 
@@ -481,526 +483,361 @@ internal sealed class FileCaptureService : IDisposable
 
     private sealed class VideoSession : FileSession
     {
-        private readonly MediaPlayer _player;
         private readonly bool _loopPlayback;
-        private readonly DrawingVisual _visual = new();
-        private RenderTargetBitmap? _renderTarget;
+        private Process? _process;
+        private CancellationTokenSource? _cts;
+        private Task? _workerTask;
         
-        // Double buffering for Raw Video (UI Write -> Background Read)
-        private byte[]? _rawBufferWrite;
-        private byte[]? _rawBufferRead;
-        private byte[]? _rawBufferReady; // For includeSource return
+        // Buffers
+        private byte[]? _readerBuffer;      // Worker writes here
+        private byte[]? _latestRawFrame;    // Latest complete frame from worker
+        private byte[]? _downscaleInput;    // Snapshot for downscaler
+        private byte[]? _downscaledOutput;  // Downscaler writes here
+        private byte[]? _readyDownscaled;   // Ready for UI
+        private byte[]? _readyRaw;          // Ready for UI (Source)
 
-        // Double buffering for Downscaled Video (Background Write -> UI Read)
-        private byte[]? _downscaledBufferWrite;
-        private byte[]? _downscaledBufferReady;
-
-        private volatile bool _isProcessing;
-        
-        private bool _isReady;
+        private readonly object _lock = new();
+        private volatile bool _hasNewFrame;
+        private volatile bool _isDownscaling;
         private bool _hasError;
-        private bool _errorShown;
-        private bool _ended;
-        private int _blankFrameStreak;
-        private readonly object _transcodeLock = new();
-        private bool _transcodeAttempted;
-        private bool _transcodeInProgress;
-        private bool _usingTranscoded;
-        private string? _transcodedPath;
-        private string _playbackPath;
-        private readonly Stopwatch _openClock = Stopwatch.StartNew();
+        private volatile bool _ended;
+        private string? _errorMessage;
 
-        // Throttling and Caching
-        private readonly Stopwatch _renderClock = Stopwatch.StartNew();
-        private double _lastRenderTimeMs;
-        private const double MinFrameIntervalMs = 33.0; // Cap at ~30 FPS
-        private const double MediaOpenTimeoutSeconds = 2.5;
-        private const int BlankFrameThreshold = 5;
+        private int _nativeWidth;
+        private int _nativeHeight;
+        private int _processWidth;
+        private int _processHeight;
         
-        private int _renderWidth;
-        private int _renderHeight;
-
-        // Current parameters for the ready frame
+        // Capture State tracking
         private int _readyWidth;
         private int _readyHeight;
 
         public VideoSession(string path, bool loopPlayback)
             : base(path, System.IO.Path.GetFileName(path), 0, 0)
         {
-            _playbackPath = path;
             _loopPlayback = loopPlayback;
-            _player = new MediaPlayer
+            Initialize();
+        }
+
+        private void Initialize()
+        {
+            try
             {
-                Volume = 0,
-                IsMuted = true
-            };
-            _player.MediaOpened += PlayerOnMediaOpened;
-            _player.MediaEnded += PlayerOnMediaEnded;
-            _player.MediaFailed += PlayerOnMediaFailed;
-            OpenPlayback(_playbackPath);
+                // 1. Probe video
+                if (!ProbeVideo(Path, out _nativeWidth, out _nativeHeight))
+                {
+                    _hasError = true;
+                    _errorMessage = "Failed to probe video dimensions.";
+                    Logger.Error(_errorMessage);
+                    return;
+                }
+
+                Width = _nativeWidth;
+                Height = _nativeHeight;
+
+                // 2. Determine processing resolution (cap at 1080p)
+                _processWidth = _nativeWidth;
+                _processHeight = _nativeHeight;
+                if (_nativeWidth > 1920 || _nativeHeight > 1080)
+                {
+                    double aspect = (double)_nativeWidth / _nativeHeight;
+                    if (_nativeWidth > 1920)
+                    {
+                        _processWidth = 1920;
+                        _processHeight = (int)(1920 / aspect);
+                    }
+                    else
+                    {
+                        _processHeight = 1080;
+                        _processWidth = (int)(1080 * aspect);
+                    }
+                    // Ensure even dimensions for ffmpeg compatibility
+                    _processWidth &= ~1;
+                    _processHeight &= ~1;
+                }
+
+                // 3. Start Worker
+                _cts = new CancellationTokenSource();
+                _workerTask = Task.Run(() => FfmpegWorker(_cts.Token));
+            }
+            catch (Exception ex)
+            {
+                _hasError = true;
+                _errorMessage = ex.Message;
+                Logger.Error($"Failed to initialize video session: {ex.Message}", ex);
+            }
         }
 
         public override FileSourceKind Kind => FileSourceKind.Video;
-        public override FileCaptureState State
-        {
-            get
-            {
-                if (_hasError)
-                {
-                    return FileCaptureState.Error;
-                }
-                if (_transcodeInProgress || !_isReady)
-                {
-                    return FileCaptureState.Pending;
-                }
-                return FileCaptureState.Ready;
-            }
-        }
+        public override FileCaptureState State => _hasError ? FileCaptureState.Error : (_readyDownscaled != null ? FileCaptureState.Ready : FileCaptureState.Pending);
 
         public override FileCaptureFrame? CaptureFrame(int targetWidth, int targetHeight, FitMode fitMode, bool includeSource)
         {
-            if (_hasError || targetWidth <= 0 || targetHeight <= 0)
+            if (_hasError) return null;
+
+            // Check if we have a new raw frame to process
+            bool launchDownscale = false;
+            lock (_lock)
             {
-                return null;
+                if (_hasNewFrame && !_isDownscaling && _latestRawFrame != null)
+                {
+                    // Swap latest raw to downscale input
+                    // We need a copy or just a reference swap?
+                    // _latestRawFrame is owned by the reader thread (producer) but only when it swaps.
+                    // Once it swaps, _latestRawFrame is stable until next swap.
+                    // But we can't read it while reader is swapping.
+                    // Let's copy reference to _downscaleInput
+                    int requiredSize = _processWidth * _processHeight * 4;
+                    if (_downscaleInput == null || _downscaleInput.Length != requiredSize)
+                    {
+                        _downscaleInput = new byte[requiredSize];
+                    }
+                    
+                    // Fast copy
+                    Buffer.BlockCopy(_latestRawFrame, 0, _downscaleInput, 0, requiredSize);
+                    
+                    _hasNewFrame = false;
+                    _isDownscaling = true;
+                    launchDownscale = true;
+                }
             }
 
-            if (_transcodeInProgress)
+            if (launchDownscale)
             {
-                return null;
-            }
-
-            if (!_isReady || _renderWidth <= 0 || _renderHeight <= 0)
-            {
-                TryStartTranscodeForMissingDimensions();
-                return null;
-            }
-
-            // 1. Attempt to render the latest frame from the video player on the UI thread.
-            bool newFrameRendered = RenderLatestFrame();
-
-            // 2. If we have a new frame and the background processor is idle, queue a downscale task.
-            //    Or if we haven't processed anything yet but have data.
-            if (newFrameRendered && !_isProcessing)
-            {
-                _isProcessing = true;
-
-                // Swap Write -> Read
-                // _rawBufferWrite contains the fresh frame.
-                // We move it to _rawBufferRead for the background task to use.
-                // The old _rawBufferRead (if any) becomes the new _rawBufferWrite to be overwritten next time.
-                var tempRaw = _rawBufferRead;
-                _rawBufferRead = _rawBufferWrite;
-                _rawBufferWrite = tempRaw;
-
-                // Capture parameters for the background task
-                int rWidth = _renderWidth;
-                int rHeight = _renderHeight;
+                // Capture params
+                int pWidth = _processWidth;
+                int pHeight = _processHeight;
                 int tWidth = targetWidth;
                 int tHeight = targetHeight;
                 FitMode mode = fitMode;
 
-                // Ensure the background write buffer is allocated and correct size
-                int requiredDownscaled = tWidth * tHeight * 4;
-                if (_downscaledBufferWrite == null || _downscaledBufferWrite.Length != requiredDownscaled)
+                // Ensure output buffer
+                int reqOut = tWidth * tHeight * 4;
+                if (_downscaledOutput == null || _downscaledOutput.Length != reqOut)
                 {
-                    _downscaledBufferWrite = new byte[requiredDownscaled];
+                    _downscaledOutput = new byte[reqOut];
                 }
 
-                // Fire and forget (continuation handles state)
                 Task.Run(() =>
                 {
                     try
                     {
-                        if (_rawBufferRead != null)
+                        if (_downscaleInput != null)
                         {
-                            Downscale(_rawBufferRead, rWidth, rHeight, _downscaledBufferWrite!, tWidth, tHeight, mode);
-
-                            // Swap Downscaled Write -> Ready
-                            var tempDs = _downscaledBufferReady;
-                            _downscaledBufferReady = _downscaledBufferWrite;
-                            _downscaledBufferWrite = tempDs; // Recycle buffer
-
-                            // Update Ready Raw Buffer (for includeSource)
-                            // We recycle _rawBufferReady back to Read pool? 
-                            // Actually, let's just rotate them. 
-                            // _rawBufferRead is done being read. It becomes the new Ready.
-                            // The old Ready becomes... well, we can just drop it or reuse it later if needed.
-                            // To avoid allocation, we want to put the old Ready back into circulation if possible.
-                            // But _rawBufferWrite is already waiting for next frame.
-                            // We can just swap Ready and Read. 
-                            // The "Read" buffer (holding source for this frame) becomes "Ready".
-                            // The "Ready" buffer (holding source for PREVIOUS frame) becomes "Read" (to be overwritten/swapped next time).
-                            var tempReady = _rawBufferReady;
-                            _rawBufferReady = _rawBufferRead;
-                            _rawBufferRead = tempReady;
-
-                            _readyWidth = rWidth;
-                            _readyHeight = rHeight;
+                            Downscale(_downscaleInput, pWidth, pHeight, _downscaledOutput!, tWidth, tHeight, mode);
+                            
+                            lock (_lock)
+                            {
+                                // Swap Output -> Ready
+                                var temp = _readyDownscaled;
+                                _readyDownscaled = _downscaledOutput;
+                                _downscaledOutput = temp; // Recycle
+                                
+                                // Update Ready Raw (for includeSource)
+                                // We want to show the frame corresponding to the downscaled one, 
+                                // so we copy _downscaleInput to _readyRaw
+                                int rawSize = pWidth * pHeight * 4;
+                                if (_readyRaw == null || _readyRaw.Length != rawSize)
+                                {
+                                    _readyRaw = new byte[rawSize];
+                                }
+                                Buffer.BlockCopy(_downscaleInput, 0, _readyRaw, 0, rawSize);
+                                
+                                _readyWidth = pWidth;
+                                _readyHeight = pHeight;
+                            }
                         }
                     }
                     catch (Exception ex)
                     {
-                        Logger.Error($"Video downscale error: {ex.Message}", ex);
+                        Logger.Error($"Downscale error: {ex.Message}");
                     }
                     finally
                     {
-                        _isProcessing = false;
+                        _isDownscaling = false;
                     }
                 });
             }
 
-            // 3. Return the last fully processed frame immediately.
-            if (_downscaledBufferReady == null)
+            lock (_lock)
             {
-                return null;
-            }
+                if (_readyDownscaled == null) return null;
 
-            return new FileCaptureFrame(_downscaledBufferReady, targetWidth, targetHeight,
-                includeSource ? _rawBufferReady : null,
-                _readyWidth,
-                _readyHeight);
+                // Return copy or ref? 
+                // Ref is unsafe if we modify it in background.
+                // But we only modify _readyDownscaled by swapping the reference.
+                // So the reference we grab here is safe to read as long as we don't return the array instance to the pool 
+                // (we don't use a pool here, just simple double buffering).
+                // However, the caller might use it for a while.
+                // WPF rendering usually happens immediately.
+                // To be perfectly safe, we should probably let it be.
+                // But wait, if _readyDownscaled is overwritten next frame, it's fine, the array object itself is just dropped from our view.
+                // The only risk is if we REUSE the array instance in _downscaledOutput.
+                // We DO recycle: `_downscaledOutput = temp;`.
+                // So if we return _readyDownscaled, and then next frame we reuse it as _downscaledOutput and write to it...
+                // ...while WPF is rendering the previous frame... -> Tearing/Glitching.
+                //
+                // Fix: Allocate new buffer if we returned the previous one?
+                // Or just assume WPF consumes it fast enough.
+                // Given the performance issues, avoiding allocation is key.
+                // Let's perform a fast copy for the return value? 8MB copy is ~1ms. 
+                // Downscaled is small (e.g. 100x100). That's tiny.
+                // Raw (1080p) is big.
+                
+                // For downscaled: Copy it.
+                int dsLen = targetWidth * targetHeight * 4;
+                var safeDs = new byte[dsLen];
+                Buffer.BlockCopy(_readyDownscaled, 0, safeDs, 0, dsLen);
+
+                byte[]? safeRaw = null;
+                if (includeSource && _readyRaw != null)
+                {
+                    // Copy raw? 8MB. 
+                    // Use a cached buffer for the return value? 
+                    // The caller (FileCaptureService) wraps it in FileCaptureFrame.
+                    // MainWindow uses it.
+                    // If we want to be safe and fast, maybe just return the ref and hope we don't overwrite it too fast.
+                    // But we overwrite it in `DownscaleTask` -> `Swap`.
+                    // At 60fps, 16ms.
+                    // Let's copy for now. Reliability > Micro-optimization of 8MB copy (1-2ms).
+                    safeRaw = new byte[_readyRaw.Length];
+                    Buffer.BlockCopy(_readyRaw, 0, safeRaw, 0, safeRaw.Length);
+                }
+
+                return new FileCaptureFrame(safeDs, targetWidth, targetHeight, safeRaw, _readyWidth, _readyHeight);
+            }
         }
 
         public override void Dispose()
         {
-            _player.MediaOpened -= PlayerOnMediaOpened;
-            _player.MediaEnded -= PlayerOnMediaEnded;
-            _player.MediaFailed -= PlayerOnMediaFailed;
-            _player.Close();
+            _cts?.Cancel();
+            if (_process != null && !_process.HasExited)
+            {
+                try { _process.Kill(); } catch { }
+                _process.Dispose();
+            }
+            _cts?.Dispose();
         }
 
-        private void PlayerOnMediaOpened(object? sender, EventArgs e)
+        private void FfmpegWorker(CancellationToken token)
         {
-            Width = _player.NaturalVideoWidth;
-            Height = _player.NaturalVideoHeight;
-
-            if (Width > 0 && Height > 0)
-            {
-                // Cap render resolution to max 1080p to avoid performance issues with 4K/8K videos
-                // while preserving aspect ratio.
-                if (Width > 1920 || Height > 1080)
-                {
-                    double aspect = (double)Width / Height;
-                    if (Width > 1920)
-                    {
-                        _renderWidth = 1920;
-                        _renderHeight = (int)(1920 / aspect);
-                    }
-                    else
-                    {
-                        _renderHeight = 1080;
-                        _renderWidth = (int)(1080 * aspect);
-                    }
-                }
-                else
-                {
-                    _renderWidth = Width;
-                    _renderHeight = Height;
-                }
-                _isReady = true;
-            }
-            else
-            {
-                _renderWidth = 0;
-                _renderHeight = 0;
-                _isReady = false;
-                if (!BeginTranscodeIfNeeded($"Video opened without valid dimensions: {Path}. Attempting auto-transcode."))
-                {
-                    ReportVideoError($"Video opened without valid dimensions: {Path}. This file may use an unsupported codec (try H.264/AVC).");
-                }
-            }
-        }
-
-        private void PlayerOnMediaEnded(object? sender, EventArgs e)
-        {
-            if (_loopPlayback)
-            {
-                _player.Position = TimeSpan.Zero;
-                _player.Play();
-                _ended = false;
-            }
-            else
-            {
-                _ended = true;
-                _player.Pause();
-            }
-        }
-
-        private void PlayerOnMediaFailed(object? sender, ExceptionEventArgs e)
-        {
-            if (BeginTranscodeIfNeeded($"Video failed to play: {Path} ({e.ErrorException.Message})"))
-            {
-                return;
-            }
-
-            ReportVideoError($"Video failed to play: {Path} ({e.ErrorException.Message})");
-        }
-
-        private bool RenderLatestFrame()
-        {
-            if (_renderWidth <= 0 || _renderHeight <= 0)
-            {
-                return false;
-            }
-
-            // Throttling: Check if enough time has passed since the last expensive render
-            double now = _renderClock.Elapsed.TotalMilliseconds;
-            if (_rawBufferWrite != null && (now - _lastRenderTimeMs < MinFrameIntervalMs))
-            {
-                // Not time to render yet, but claim success so we might process the previous frame if pending?
-                // No, return false to indicate no *new* frame.
-                return false;
-            }
-            _lastRenderTimeMs = now;
-
-            if (_renderTarget == null || _renderTarget.PixelWidth != _renderWidth || _renderTarget.PixelHeight != _renderHeight)
-            {
-                _renderTarget = new RenderTargetBitmap(_renderWidth, _renderHeight, 96, 96, PixelFormats.Pbgra32);
-            }
-
-            using (var dc = _visual.RenderOpen())
-            {
-                // Draw at scaled resolution
-                var rect = new System.Windows.Rect(0, 0, _renderWidth, _renderHeight);
-                dc.DrawRectangle(Brushes.Black, null, rect);
-                dc.DrawVideo(_player, rect);
-            }
-
-            _renderTarget.Render(_visual);
-
-            int required = _renderWidth * _renderHeight * 4;
-            if (_rawBufferWrite == null || _rawBufferWrite.Length != required)
-            {
-                _rawBufferWrite = new byte[required];
-            }
-
-            _renderTarget.CopyPixels(_rawBufferWrite, _renderWidth * 4, 0);
-            
-            if (IsBufferBlank(_rawBufferWrite))
-            {
-                _blankFrameStreak++;
-                if (_blankFrameStreak >= BlankFrameThreshold)
-                {
-                    if (!BeginTranscodeIfNeeded($"Video frames are blank for {Path}. Attempting auto-transcode."))
-                    {
-                        ReportVideoError($"Video frames are blank for {Path}. This file may use an unsupported codec (try H.264/AVC).");
-                    }
-                }
-                return false;
-            }
-            else
-            {
-                _blankFrameStreak = 0;
-            }
-            
-            return true;
-        }
-
-        private void ReportVideoError(string message)
-        {
-            if (_hasError)
-            {
-                return;
-            }
-
-            _hasError = true;
-            Logger.Warn(message);
-            if (_errorShown)
-            {
-                return;
-            }
-
-            _errorShown = true;
-            if (System.Windows.Application.Current?.Dispatcher != null)
-            {
-                System.Windows.Application.Current.Dispatcher.BeginInvoke(() =>
-                {
-                    MessageBox.Show(message, "Video Source Error", MessageBoxButton.OK, MessageBoxImage.Warning);
-                });
-            }
-        }
-
-        private bool BeginTranscodeIfNeeded(string reason)
-        {
-            lock (_transcodeLock)
-            {
-                if (_transcodeInProgress)
-                {
-                    return true;
-                }
-                if (_usingTranscoded)
-                {
-                    return true;
-                }
-                if (_transcodeAttempted && _transcodedPath == null)
-                {
-                    return false;
-                }
-                _transcodeAttempted = true;
-                _transcodeInProgress = true;
-            }
-
-            string cachePath;
             try
             {
-                cachePath = GetTranscodeCachePath(Path);
-                if (File.Exists(cachePath) && new FileInfo(cachePath).Length > 0)
+                string args = $"-hide_banner -loglevel error";
+                if (_loopPlayback) args += " -stream_loop -1";
+                args += " -re"; // Realtime reading
+                args += $" -i \"{Path}\"";
+                args += $" -f rawvideo -pix_fmt bgra -s {_processWidth}x{_processHeight} -";
+
+                var psi = new ProcessStartInfo
                 {
-                    _transcodedPath = cachePath;
-                    _transcodeInProgress = false;
-                    SwitchToTranscoded(cachePath);
-                    return true;
+                    FileName = "ffmpeg",
+                    Arguments = args,
+                    UseShellExecute = false,
+                    RedirectStandardOutput = true,
+                    CreateNoWindow = true
+                };
+
+                _process = Process.Start(psi);
+                if (_process == null) throw new InvalidOperationException("Failed to start ffmpeg.");
+
+                using var stream = _process.StandardOutput.BaseStream;
+                int frameSize = _processWidth * _processHeight * 4;
+                _readerBuffer = new byte[frameSize];
+
+                while (!token.IsCancellationRequested && !_process.HasExited)
+                {
+                    int totalRead = 0;
+                    while (totalRead < frameSize)
+                    {
+                        int read = stream.Read(_readerBuffer, totalRead, frameSize - totalRead);
+                        if (read == 0) break; // EOF
+                        totalRead += read;
+                    }
+
+                    if (totalRead < frameSize) 
+                    {
+                        _ended = true;
+                        break; 
+                    }
+
+                    // We have a full frame. Publish it.
+                    lock (_lock)
+                    {
+                        if (_latestRawFrame == null || _latestRawFrame.Length != frameSize)
+                        {
+                            _latestRawFrame = new byte[frameSize];
+                        }
+                        Buffer.BlockCopy(_readerBuffer, 0, _latestRawFrame, 0, frameSize);
+                        _hasNewFrame = true;
+                    }
                 }
             }
             catch (Exception ex)
             {
-                Logger.Warn($"Failed to prepare transcode cache for {Path}: {ex.Message}");
-                _transcodeInProgress = false;
-                return false;
+                Logger.Error($"FFmpeg worker error: {ex.Message}");
+                _hasError = true;
             }
-
-            _ = Task.Run(() =>
-            {
-                try
-                {
-                    Directory.CreateDirectory(System.IO.Path.GetDirectoryName(cachePath)!);
-                    var startInfo = new ProcessStartInfo
-                    {
-                        FileName = "ffmpeg",
-                        Arguments = $"-hide_banner -loglevel error -y -i \"{Path}\" -c:v libx264 -pix_fmt yuv420p -preset veryfast -crf 18 -an \"{cachePath}\"",
-                        CreateNoWindow = true,
-                        UseShellExecute = false,
-                        RedirectStandardError = true,
-                        RedirectStandardOutput = true
-                    };
-
-                    using var process = Process.Start(startInfo);
-                    if (process == null)
-                    {
-                        throw new InvalidOperationException("Failed to start ffmpeg process.");
-                    }
-                    string errorOutput = process.StandardError.ReadToEnd();
-                    process.WaitForExit();
-                    if (process.ExitCode != 0 || !File.Exists(cachePath))
-                    {
-                        throw new InvalidOperationException(string.IsNullOrWhiteSpace(errorOutput)
-                            ? $"ffmpeg exited with code {process.ExitCode}."
-                            : errorOutput.Trim());
-                    }
-
-                    _transcodedPath = cachePath;
-                    _transcodeInProgress = false;
-                    if (Application.Current?.Dispatcher != null)
-                    {
-                        Application.Current.Dispatcher.BeginInvoke(() => SwitchToTranscoded(cachePath));
-                    }
-                    Logger.Info($"Auto-transcoded video for {Path} -> {cachePath}");
-                }
-                catch (Exception ex)
-                {
-                    _transcodeInProgress = false;
-                    ReportVideoError($"Auto-transcode failed for {Path}. Install ffmpeg or transcode manually.\n{ex.Message}");
-                }
-            });
-
-            Logger.Info($"Auto-transcode queued for {Path}. Reason: {reason}");
-            return true;
-        }
-
-        private void SwitchToTranscoded(string path)
-        {
-            if (string.IsNullOrWhiteSpace(path))
-            {
-                return;
-            }
-
-            _playbackPath = path;
-            _usingTranscoded = true;
-            _blankFrameStreak = 0;
-            OpenPlayback(_playbackPath);
-        }
-
-        private void OpenPlayback(string path)
-        {
-            _isReady = false;
-            _renderWidth = 0;
-            _renderHeight = 0;
-            _ended = false;
-            _openClock.Restart();
-            _player.Open(new Uri(path, UriKind.Absolute));
-            _player.Play();
-        }
-
-        private void TryStartTranscodeForMissingDimensions()
-        {
-            if (_hasError || _transcodeInProgress || _usingTranscoded)
-            {
-                return;
-            }
-
-            if (_openClock.Elapsed.TotalSeconds < MediaOpenTimeoutSeconds)
-            {
-                return;
-            }
-
-            if (_player.NaturalVideoWidth > 0 && _player.NaturalVideoHeight > 0)
-            {
-                return;
-            }
-
-            BeginTranscodeIfNeeded($"Video did not report dimensions for {Path} after {MediaOpenTimeoutSeconds:0.0}s.");
         }
 
         public bool ConsumeEnded()
         {
-            if (!_ended)
-            {
-                return false;
-            }
-
+            if (!_ended) return false;
             _ended = false;
             return true;
         }
 
         public void RestartPlayback()
         {
-            _blankFrameStreak = 0;
-            OpenPlayback(_playbackPath);
+            _cts?.Cancel();
+            try { _process?.Kill(); } catch { }
+            _process?.Dispose();
+            
+            _ended = false;
+            _hasError = false;
+            _cts = new CancellationTokenSource();
+            _workerTask = Task.Run(() => FfmpegWorker(_cts.Token));
         }
 
-        private static string GetTranscodeCachePath(string originalPath)
+        private static bool ProbeVideo(string path, out int width, out int height)
         {
-            var info = new FileInfo(originalPath);
-            string key = $"{originalPath}|{info.Length}|{info.LastWriteTimeUtc.Ticks}";
-            using var sha = SHA256.Create();
-            byte[] hash = sha.ComputeHash(Encoding.UTF8.GetBytes(key));
-            string hex = Convert.ToHexString(hash).Substring(0, 16).ToLowerInvariant();
-
-            string root = System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "lifeviz", "video-cache");
-            return System.IO.Path.Combine(root, $"{hex}.mp4");
-        }
-
-        private static bool IsBufferBlank(byte[] buffer)
-        {
-            if (buffer == null || buffer.Length < 4)
+            width = 0;
+            height = 0;
+            try
             {
-                return true;
-            }
-
-            int length = buffer.Length;
-            int step = Math.Max(4, length / 256);
-            int lastStart = length - 4;
-            for (int i = 0; i <= lastStart; i += step)
-            {
-                if (buffer[i] != 0 || buffer[i + 1] != 0 || buffer[i + 2] != 0)
+                var psi = new ProcessStartInfo
                 {
-                    return false;
+                    FileName = "ffmpeg",
+                    Arguments = $"-hide_banner -i \"{path}\"",
+                    UseShellExecute = false,
+                    RedirectStandardError = true,
+                    CreateNoWindow = true
+                };
+                
+                using var p = Process.Start(psi);
+                if (p == null) return false;
+                
+                string output = p.StandardError.ReadToEnd();
+                p.WaitForExit();
+                
+                // Regex for "Video: ..., 1920x1080"
+                var match = Regex.Match(output, @"Video:.*?, (\d+)x(\d+)");
+                if (match.Success)
+                {
+                    width = int.Parse(match.Groups[1].Value);
+                    height = int.Parse(match.Groups[2].Value);
+                    return width > 0 && height > 0;
                 }
             }
-
-            return true;
+            catch (Exception ex)
+            {
+                Logger.Warn($"Probe failed: {ex.Message}");
+            }
+            return false;
         }
     }
+
+
 
     internal sealed class VideoSequenceSession : IDisposable
     {
