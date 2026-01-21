@@ -27,6 +27,7 @@
   <ItemGroup>
     <PackageReference Include="System.Drawing.Common" Version="8.0.7" />
     <PackageReference Include="Microsoft.Windows.SDK.NET" Version="10.0.18362.6-preview" />
+    <PackageReference Include="YoutubeExplode" Version="6.5.6" />
   </ItemGroup>
   
   <ItemGroup>
@@ -35,7 +36,7 @@
   </ItemGroup>
 
   <Target Name="CompileShader" BeforeTargets="CoreBuild" Inputs="Assets\Blend.fx" Outputs="Assets\Blend.ps">
-    <Message Text="Compiling shader Assets\Blend.fx -> Assets\Blend.ps..." Importance="high" />
+    <Message Text="Compiling shader Assets\Blend.fx -&gt; Assets\Blend.ps..." Importance="high" />
     <Exec Command="&quot;$(FxcExePath)&quot; /T ps_3_0 /E main /nologo /Fo &quot;Assets\Blend.ps&quot; &quot;Assets\Blend.fx&quot;" Condition="Exists('$(FxcExePath)')" />
     <Error Text="Shader compiler (fxc.exe) not found at '$(FxcExePath)'. Please update the FxcExePath property in lifeviz.csproj." Condition="!Exists('$(FxcExePath)')" />
   </Target>

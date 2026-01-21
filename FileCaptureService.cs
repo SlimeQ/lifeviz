@@ -11,6 +11,8 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading;
+using YoutubeExplode;
+using YoutubeExplode.Videos.Streams;
 
 namespace lifeviz;
 
@@ -20,6 +22,8 @@ internal sealed class FileCaptureService : IDisposable
     {
         ".mp4", ".mov", ".wmv", ".avi", ".mkv", ".webm", ".mpg", ".mpeg"
     };
+
+    private readonly YoutubeClient _youtube = new();
 
     internal static bool IsVideoPath(string path)
     {
@@ -44,6 +48,29 @@ internal sealed class FileCaptureService : IDisposable
         {
             error = "No file path provided.";
             return false;
+        }
+
+        if (path.StartsWith("youtube:"))
+        {
+            string url = path.Substring(8);
+            try
+            {
+                var task = TryCreateYoutubeSource(url);
+                task.Wait();
+                var result = task.Result;
+                if (result.success)
+                {
+                    info = result.info;
+                    return true;
+                }
+                error = result.error;
+                return false;
+            }
+            catch (Exception ex)
+            {
+                error = ex.Message;
+                return false;
+            }
         }
 
         string fullPath;
@@ -87,6 +114,60 @@ internal sealed class FileCaptureService : IDisposable
             error = ex.Message;
             Logger.Error($"Failed to load file source: {fullPath}", ex);
             return false;
+        }
+    }
+
+    public async Task<(bool success, FileSourceInfo info, string? error)> TryCreateYoutubeSource(string url)
+    {
+        try
+        {
+            var video = await _youtube.Videos.GetAsync(url);
+            string title = video.Title;
+            string id = video.Id;
+            
+            // Unique key for session cache
+            string key = $"youtube:{id}";
+
+            lock (_lock)
+            {
+                if (_sessions.TryGetValue(key, out var existing))
+                {
+                    return (true, existing.GetInfo(), null);
+                }
+            }
+
+            // Resolver function to get the fresh stream URL
+            Func<Task<string>> resolver = async () =>
+            {
+                var manifest = await _youtube.Videos.Streams.GetManifestAsync(id);
+                var streamInfo = manifest.GetMuxedStreams().GetWithHighestVideoQuality();
+                if (streamInfo == null)
+                {
+                    // Fallback to video-only if no muxed stream (should be rare for standard videos)
+                    // But ffmpeg can handle it.
+                    var videoStream = manifest.GetVideoStreams().GetWithHighestVideoQuality();
+                    if (videoStream == null) throw new Exception("No suitable video stream found.");
+                    return videoStream.Url;
+                }
+                return streamInfo.Url;
+            };
+
+            // Pre-flight check (optional, but ensures we can actually get the URL)
+            // Actually, we'll let the session handle it so it retries on restart.
+            
+            var session = new VideoSession(key, title, loopPlayback: true, resolver);
+            
+            lock (_lock)
+            {
+                _sessions[key] = session;
+            }
+
+            return (true, session.GetInfo(), null);
+        }
+        catch (Exception ex)
+        {
+            Logger.Error($"Failed to create YouTube source: {url}", ex);
+            return (false, default, ex.Message);
         }
     }
 
@@ -153,20 +234,36 @@ internal sealed class FileCaptureService : IDisposable
             return false;
         }
 
+        // Check if it's a YouTube key
+        if (path.StartsWith("youtube:"))
+        {
+            FileSession? session;
+            lock (_lock)
+            {
+                _sessions.TryGetValue(path, out session);
+            }
+            if (session is VideoSession video)
+            {
+                video.RestartPlayback();
+                return true;
+            }
+            return false;
+        }
+
         if (!TryNormalizePath(path, out var fullPath))
         {
             return false;
         }
 
-        FileSession? session;
+        FileSession? fsSession;
         lock (_lock)
         {
-            _sessions.TryGetValue(fullPath, out session);
+            _sessions.TryGetValue(fullPath, out fsSession);
         }
 
-        if (session is VideoSession video)
+        if (fsSession is VideoSession vid)
         {
-            video.RestartPlayback();
+            vid.RestartPlayback();
             return true;
         }
 
@@ -180,27 +277,32 @@ internal sealed class FileCaptureService : IDisposable
             return null;
         }
 
-        if (!TryNormalizePath(path, out var fullPath))
-        {
-            return null;
-        }
-
         FileSession? session;
         lock (_lock)
         {
-            _sessions.TryGetValue(fullPath, out session);
+            // Direct lookup first (handles youtube keys)
+            if (!_sessions.TryGetValue(path, out session))
+            {
+                // Try normalizing path if not found
+                if (TryNormalizePath(path, out var fullPath))
+                {
+                     _sessions.TryGetValue(fullPath, out session);
+                }
+            }
         }
 
         if (session == null)
         {
-            if (!TryGetOrAdd(fullPath, out _, out _))
+            // Auto-load local files if missing
+            if (!path.StartsWith("youtube:") && TryNormalizePath(path, out var fullPath))
             {
-                return null;
-            }
-
-            lock (_lock)
-            {
-                _sessions.TryGetValue(fullPath, out session);
+                 if (TryGetOrAdd(fullPath, out _, out _))
+                 {
+                    lock (_lock)
+                    {
+                        _sessions.TryGetValue(fullPath, out session);
+                    }
+                 }
             }
         }
 
@@ -214,20 +316,19 @@ internal sealed class FileCaptureService : IDisposable
             return FileCaptureState.Error;
         }
 
-        if (!TryNormalizePath(path, out var fullPath))
-        {
-            return FileCaptureState.Error;
-        }
-
+        FileSession? session = null;
         lock (_lock)
         {
-            if (_sessions.TryGetValue(fullPath, out var session))
-            {
-                return session.State;
-            }
+             if (!_sessions.TryGetValue(path, out session))
+             {
+                 if (TryNormalizePath(path, out var fullPath))
+                 {
+                     _sessions.TryGetValue(fullPath, out session);
+                 }
+             }
         }
-
-        return FileCaptureState.Error;
+        
+        return session?.State ?? FileCaptureState.Error;
     }
 
     public void Remove(string path)
@@ -237,19 +338,20 @@ internal sealed class FileCaptureService : IDisposable
             return;
         }
 
-        if (!TryNormalizePath(path, out var fullPath))
+        string key = path;
+        if (!path.StartsWith("youtube:") && TryNormalizePath(path, out var fullPath))
         {
-            return;
+            key = fullPath;
         }
 
         FileSession? session;
         lock (_lock)
         {
-            if (!_sessions.TryGetValue(fullPath, out session))
+            if (!_sessions.TryGetValue(key, out session))
             {
                 return;
             }
-            _sessions.Remove(fullPath);
+            _sessions.Remove(key);
         }
 
         session.Dispose();
@@ -277,7 +379,7 @@ internal sealed class FileCaptureService : IDisposable
         string extension = Path.GetExtension(path);
         if (VideoExtensions.Contains(extension))
         {
-            return new VideoSession(path, loopPlayback: true);
+            return new VideoSession(path, System.IO.Path.GetFileName(path), loopPlayback: true);
         }
 
         bool isGif = string.Equals(extension, ".gif", StringComparison.OrdinalIgnoreCase);
@@ -484,6 +586,7 @@ internal sealed class FileCaptureService : IDisposable
     private sealed class VideoSession : FileSession
     {
         private readonly bool _loopPlayback;
+        private readonly Func<Task<string>>? _urlResolver;
         private Process? _process;
         private CancellationTokenSource? _cts;
         private Task? _workerTask;
@@ -512,53 +615,82 @@ internal sealed class FileCaptureService : IDisposable
         private int _readyWidth;
         private int _readyHeight;
 
-        public VideoSession(string path, bool loopPlayback)
-            : base(path, System.IO.Path.GetFileName(path), 0, 0)
+        public VideoSession(string path, string displayName, bool loopPlayback, Func<Task<string>>? urlResolver = null)
+            : base(path, displayName, 0, 0)
         {
             _loopPlayback = loopPlayback;
-            Initialize();
+            _urlResolver = urlResolver;
+
+            if (_urlResolver == null)
+            {
+                // Local file: Initialize immediately (blocking probe)
+                InitializeSync(path);
+            }
+            else
+            {
+                // Remote/Async: Initialize background
+                Task.Run(InitializeAsync);
+            }
         }
 
-        private void Initialize()
+        // Constructor for legacy usage
+        public VideoSession(string path, bool loopPlayback) 
+            : this(path, System.IO.Path.GetFileName(path), loopPlayback, null)
+        {
+        }
+
+        private void InitializeSync(string path)
         {
             try
             {
-                // 1. Probe video
-                if (!ProbeVideo(Path, out _nativeWidth, out _nativeHeight))
+                Logger.Info($"Initializing local video: {path}");
+                
+                if (!ProbeVideo(path, out _nativeWidth, out _nativeHeight))
                 {
                     _hasError = true;
                     _errorMessage = "Failed to probe video dimensions.";
                     Logger.Error(_errorMessage);
                     return;
                 }
+                
+                ConfigureDimensions();
+                
+                _cts = new CancellationTokenSource();
+                _workerTask = Task.Run(() => FfmpegWorker(path, _cts.Token));
+            }
+            catch (Exception ex)
+            {
+                _hasError = true;
+                Logger.Error($"Failed to initialize video session: {ex.Message}", ex);
+            }
+        }
 
-                Width = _nativeWidth;
-                Height = _nativeHeight;
-
-                // 2. Determine processing resolution (cap at 1080p)
-                _processWidth = _nativeWidth;
-                _processHeight = _nativeHeight;
-                if (_nativeWidth > 1920 || _nativeHeight > 1080)
+        private async Task InitializeAsync()
+        {
+            try
+            {
+                string targetUrl = Path;
+                if (_urlResolver != null)
                 {
-                    double aspect = (double)_nativeWidth / _nativeHeight;
-                    if (_nativeWidth > 1920)
-                    {
-                        _processWidth = 1920;
-                        _processHeight = (int)(1920 / aspect);
-                    }
-                    else
-                    {
-                        _processHeight = 1080;
-                        _processWidth = (int)(1080 * aspect);
-                    }
-                    // Ensure even dimensions for ffmpeg compatibility
-                    _processWidth &= ~1;
-                    _processHeight &= ~1;
+                    Logger.Info($"Resolving URL for: {DisplayName}...");
+                    targetUrl = await _urlResolver();
+                    Logger.Info($"Resolved URL: {targetUrl}");
                 }
 
-                // 3. Start Worker
+                Logger.Info($"Probing video: {targetUrl}");
+                if (!ProbeVideo(targetUrl, out _nativeWidth, out _nativeHeight))
+                {
+                    _hasError = true;
+                    _errorMessage = "Failed to probe video dimensions.";
+                    Logger.Error(_errorMessage);
+                    return;
+                }
+                Logger.Info($"Probe success: {_nativeWidth}x{_nativeHeight}");
+
+                ConfigureDimensions();
+
                 _cts = new CancellationTokenSource();
-                _workerTask = Task.Run(() => FfmpegWorker(_cts.Token));
+                _workerTask = Task.Run(() => FfmpegWorker(targetUrl, _cts.Token));
             }
             catch (Exception ex)
             {
@@ -566,6 +698,36 @@ internal sealed class FileCaptureService : IDisposable
                 _errorMessage = ex.Message;
                 Logger.Error($"Failed to initialize video session: {ex.Message}", ex);
             }
+        }
+
+        private void ConfigureDimensions()
+        {
+            Width = _nativeWidth;
+            Height = _nativeHeight;
+
+            _processWidth = _nativeWidth;
+            _processHeight = _nativeHeight;
+            
+            if (_nativeWidth > 1920 || _nativeHeight > 1080)
+            {
+                double aspect = (double)_nativeWidth / _nativeHeight;
+                if (_nativeWidth > 1920)
+                {
+                    _processWidth = 1920;
+                    _processHeight = (int)(1920 / aspect);
+                }
+                else
+                {
+                    _processHeight = 1080;
+                    _processWidth = (int)(1080 * aspect);
+                }
+            }
+            
+            // Ensure even dimensions for ffmpeg compatibility
+            _processWidth &= ~1;
+            _processHeight &= ~1;
+            
+            Logger.Info($"Video configured: Native={_nativeWidth}x{_nativeHeight}, Process={_processWidth}x{_processHeight}");
         }
 
         public override FileSourceKind Kind => FileSourceKind.Video;
@@ -582,18 +744,12 @@ internal sealed class FileCaptureService : IDisposable
                 if (_hasNewFrame && !_isDownscaling && _latestRawFrame != null)
                 {
                     // Swap latest raw to downscale input
-                    // We need a copy or just a reference swap?
-                    // _latestRawFrame is owned by the reader thread (producer) but only when it swaps.
-                    // Once it swaps, _latestRawFrame is stable until next swap.
-                    // But we can't read it while reader is swapping.
-                    // Let's copy reference to _downscaleInput
                     int requiredSize = _processWidth * _processHeight * 4;
                     if (_downscaleInput == null || _downscaleInput.Length != requiredSize)
                     {
                         _downscaleInput = new byte[requiredSize];
                     }
                     
-                    // Swap _latestRawFrame <-> _downscaleInput
                     var temp = _latestRawFrame;
                     _latestRawFrame = _downscaleInput;
                     _downscaleInput = temp;
@@ -665,28 +821,6 @@ internal sealed class FileCaptureService : IDisposable
             {
                 if (_readyDownscaled == null) return null;
 
-                // Return copy or ref? 
-                // Ref is unsafe if we modify it in background.
-                // But we only modify _readyDownscaled by swapping the reference.
-                // So the reference we grab here is safe to read as long as we don't return the array instance to the pool 
-                // (we don't use a pool here, just simple double buffering).
-                // However, the caller might use it for a while.
-                // WPF rendering usually happens immediately.
-                // To be perfectly safe, we should probably let it be.
-                // But wait, if _readyDownscaled is overwritten next frame, it's fine, the array object itself is just dropped from our view.
-                // The only risk is if we REUSE the array instance in _downscaledOutput.
-                // We DO recycle: `_downscaledOutput = temp;`.
-                // So if we return _readyDownscaled, and then next frame we reuse it as _downscaledOutput and write to it...
-                // ...while WPF is rendering the previous frame... -> Tearing/Glitching.
-                //
-                // Fix: Allocate new buffer if we returned the previous one?
-                // Or just assume WPF consumes it fast enough.
-                // Given the performance issues, avoiding allocation is key.
-                // Let's perform a fast copy for the return value? 8MB copy is ~1ms. 
-                // Downscaled is small (e.g. 100x100). That's tiny.
-                // Raw (1080p) is big.
-                
-                // For downscaled: Copy it.
                 int dsLen = targetWidth * targetHeight * 4;
                 var safeDs = new byte[dsLen];
                 Buffer.BlockCopy(_readyDownscaled, 0, safeDs, 0, dsLen);
@@ -694,14 +828,6 @@ internal sealed class FileCaptureService : IDisposable
                 byte[]? safeRaw = null;
                 if (includeSource && _readyRaw != null)
                 {
-                    // Copy raw? 8MB. 
-                    // Use a cached buffer for the return value? 
-                    // The caller (FileCaptureService) wraps it in FileCaptureFrame.
-                    // MainWindow uses it.
-                    // If we want to be safe and fast, maybe just return the ref and hope we don't overwrite it too fast.
-                    // But we overwrite it in `DownscaleTask` -> `Swap`.
-                    // At 60fps, 16ms.
-                    // Let's copy for now. Reliability > Micro-optimization of 8MB copy (1-2ms).
                     safeRaw = new byte[_readyRaw.Length];
                     Buffer.BlockCopy(_readyRaw, 0, safeRaw, 0, safeRaw.Length);
                 }
@@ -721,15 +847,17 @@ internal sealed class FileCaptureService : IDisposable
             _cts?.Dispose();
         }
 
-        private void FfmpegWorker(CancellationToken token)
+        private void FfmpegWorker(string url, CancellationToken token)
         {
             try
             {
-                string args = $"-hide_banner -loglevel error";
+                string args = $"-hide_banner -loglevel warning"; // increased verbosity for debug
                 if (_loopPlayback) args += " -stream_loop -1";
                 args += " -re"; // Realtime reading
-                args += $" -i \"{Path}\"";
+                args += $" -i \"{url}\"";
                 args += $" -f rawvideo -pix_fmt bgra -s {_processWidth}x{_processHeight} -";
+
+                Logger.Info($"Starting ffmpeg: {args}");
 
                 var psi = new ProcessStartInfo
                 {
@@ -737,15 +865,24 @@ internal sealed class FileCaptureService : IDisposable
                     Arguments = args,
                     UseShellExecute = false,
                     RedirectStandardOutput = true,
+                    RedirectStandardError = true,
                     CreateNoWindow = true
                 };
 
                 _process = Process.Start(psi);
                 if (_process == null) throw new InvalidOperationException("Failed to start ffmpeg.");
 
+                _process.ErrorDataReceived += (s, e) => 
+                {
+                    if (!string.IsNullOrWhiteSpace(e.Data)) Logger.Warn($"[ffmpeg] {e.Data}");
+                };
+                _process.BeginErrorReadLine();
+
                 using var stream = _process.StandardOutput.BaseStream;
                 int frameSize = _processWidth * _processHeight * 4;
                 _readerBuffer = new byte[frameSize];
+                
+                int framesRead = 0;
 
                 while (!token.IsCancellationRequested && !_process.HasExited)
                 {
@@ -759,8 +896,19 @@ internal sealed class FileCaptureService : IDisposable
 
                     if (totalRead < frameSize) 
                     {
+                        Logger.Warn($"ffmpeg stream ended (read {totalRead}/{frameSize} bytes). Exited: {_process.HasExited}");
                         _ended = true;
                         break; 
+                    }
+
+                    if (framesRead++ % 60 == 0)
+                    {
+                        // Sample center pixel
+                        int centerIdx = ((_processHeight / 2) * _processWidth * 4) + ((_processWidth / 2) * 4);
+                        if (centerIdx + 3 < _readerBuffer.Length)
+                        {
+                            Logger.Info($"ffmpeg frame {framesRead} acquired. Center px: B={_readerBuffer[centerIdx]} G={_readerBuffer[centerIdx+1]} R={_readerBuffer[centerIdx+2]} A={_readerBuffer[centerIdx+3]}");
+                        }
                     }
 
                     // We have a full frame. Publish it.
@@ -781,7 +929,7 @@ internal sealed class FileCaptureService : IDisposable
             }
             catch (Exception ex)
             {
-                Logger.Error($"FFmpeg worker error: {ex.Message}");
+                Logger.Error($"FFmpeg worker error: {ex.Message}", ex);
                 _hasError = true;
             }
         }
@@ -802,7 +950,7 @@ internal sealed class FileCaptureService : IDisposable
             _ended = false;
             _hasError = false;
             _cts = new CancellationTokenSource();
-            _workerTask = Task.Run(() => FfmpegWorker(_cts.Token));
+            _workerTask = Task.Run(InitializeAsync); // Re-initialize (and re-resolve URL if needed)
         }
 
         private static bool ProbeVideo(string path, out int width, out int height)
@@ -835,234 +983,233 @@ internal sealed class FileCaptureService : IDisposable
                     return width > 0 && height > 0;
                 }
             }
-            catch (Exception ex)
-            {
-                Logger.Warn($"Probe failed: {ex.Message}");
-            }
-            return false;
-        }
-    }
-
-
-
-    internal sealed class VideoSequenceSession : IDisposable
-    {
-        private readonly List<string> _paths;
-        private readonly string _displayName;
-        private int _index;
-        private VideoSession? _current;
-        private int _errorStreak;
-        private bool _hasError;
-
-        public VideoSequenceSession(IReadOnlyList<string> paths)
-        {
-            _paths = new List<string>(paths);
-            _displayName = BuildDisplayName(_paths);
-            _index = 0;
-            _current = new VideoSession(_paths[_index], loopPlayback: false);
-        }
-
-        public IReadOnlyList<string> Paths => _paths;
-        public string DisplayName => _displayName;
-
-        public FileCaptureState State
-        {
-            get
-            {
-                if (_hasError)
-                {
-                    return FileCaptureState.Error;
+                        catch (Exception ex)
+                        {
+                            Logger.Warn($"Probe failed: {ex.Message}");
+                        }
+                        return false;
+                    }
                 }
-
-                if (_current == null)
+            
+                internal sealed class VideoSequenceSession : IDisposable
                 {
-                    return FileCaptureState.Error;
+                    private readonly List<string> _paths;
+                    private readonly string _displayName;
+                    private int _index;
+                    private VideoSession? _current;
+                    private int _errorStreak;
+                    private bool _hasError;
+            
+                    public VideoSequenceSession(IReadOnlyList<string> paths)
+                    {
+                        _paths = new List<string>(paths);
+                        _displayName = BuildDisplayName(_paths);
+                        _index = 0;
+                        _current = new VideoSession(_paths[_index], loopPlayback: false);
+                    }
+            
+                    public IReadOnlyList<string> Paths => _paths;
+                    public string DisplayName => _displayName;
+            
+                    public FileCaptureState State
+                    {
+                        get
+                        {
+                            if (_hasError)
+                            {
+                                return FileCaptureState.Error;
+                            }
+            
+                            if (_current == null)
+                            {
+                                return FileCaptureState.Error;
+                            }
+            
+                            return _current.State;
+                        }
+                    }
+            
+                    public FileCaptureFrame? CaptureFrame(int targetWidth, int targetHeight, FitMode fitMode, bool includeSource)
+                    {
+                        if (_hasError || _current == null)
+                        {
+                            return null;
+                        }
+            
+                        var frame = _current.CaptureFrame(targetWidth, targetHeight, fitMode, includeSource);
+            
+                        if (_current.ConsumeEnded())
+                        {
+                            Advance(isError: false);
+                            return null;
+                        }
+            
+                        if (_current.State == FileCaptureState.Error)
+                        {
+                            if (!Advance(isError: true))
+                            {
+                                Logger.Warn($"All videos in sequence failed: {_displayName}");
+                                _hasError = true;
+                                return null;
+                            }
+                        }
+                        else if (frame.HasValue)
+                        {
+                            _errorStreak = 0;
+                        }
+            
+                        return frame;
+                    }
+            
+                    public void Restart()
+                    {
+                        _hasError = false;
+                        _errorStreak = 0;
+                        _current?.Dispose();
+                        _index = 0;
+                        _current = new VideoSession(_paths[_index], loopPlayback: false);
+                    }
+            
+                    public void Dispose()
+                    {
+                        _current?.Dispose();
+                        _current = null;
+                    }
+            
+                    private bool Advance(bool isError)
+                    {
+                        _current?.Dispose();
+                        _index = (_index + 1) % _paths.Count;
+                        _current = new VideoSession(_paths[_index], loopPlayback: false);
+            
+                        if (isError)
+                        {
+                            _errorStreak++;
+                            if (_errorStreak >= _paths.Count)
+                            {
+                                return false;
+                            }
+                        }
+                        else
+                        {
+                            _errorStreak = 0;
+                        }
+            
+                        return true;
+                    }
+            
+                    private static string BuildDisplayName(IReadOnlyList<string> paths)
+                    {
+                        if (paths == null || paths.Count == 0)
+                        {
+                            return "Video Sequence";
+                        }
+            
+                        string baseName = Path.GetFileName(paths[0]);
+                        if (paths.Count == 1)
+                        {
+                            return baseName;
+                        }
+            
+                        return $"{baseName} (+{paths.Count - 1})";
+                    }
                 }
-
-                return _current.State;
-            }
-        }
-
-        public FileCaptureFrame? CaptureFrame(int targetWidth, int targetHeight, FitMode fitMode, bool includeSource)
-        {
-            if (_hasError || _current == null)
-            {
-                return null;
-            }
-
-            var frame = _current.CaptureFrame(targetWidth, targetHeight, fitMode, includeSource);
-
-            if (_current.ConsumeEnded())
-            {
-                Advance(isError: false);
-                return null;
-            }
-
-            if (_current.State == FileCaptureState.Error)
-            {
-                if (!Advance(isError: true))
+            
+                internal readonly struct FileSourceInfo
                 {
-                    Logger.Warn($"All videos in sequence failed: {_displayName}");
-                    _hasError = true;
-                    return null;
+                    public FileSourceInfo(string path, string displayName, int width, int height, FileSourceKind kind)
+                    {
+                        Path = path;
+                        DisplayName = displayName;
+                        Width = width;
+                        Height = height;
+                        Kind = kind;
+                    }
+            
+                    public string Path { get; }
+                    public string DisplayName { get; }
+                    public int Width { get; }
+                    public int Height { get; }
+                    public FileSourceKind Kind { get; }
                 }
-            }
-            else if (frame.HasValue)
-            {
-                _errorStreak = 0;
-            }
-
-            return frame;
-        }
-
-        public void Restart()
-        {
-            _hasError = false;
-            _errorStreak = 0;
-            _current?.Dispose();
-            _index = 0;
-            _current = new VideoSession(_paths[_index], loopPlayback: false);
-        }
-
-        public void Dispose()
-        {
-            _current?.Dispose();
-            _current = null;
-        }
-
-        private bool Advance(bool isError)
-        {
-            _current?.Dispose();
-            _index = (_index + 1) % _paths.Count;
-            _current = new VideoSession(_paths[_index], loopPlayback: false);
-
-            if (isError)
-            {
-                _errorStreak++;
-                if (_errorStreak >= _paths.Count)
+            
+                internal readonly struct FileCaptureFrame
                 {
-                    return false;
+                    public FileCaptureFrame(byte[] overlayDownscaled, int downscaledWidth, int downscaledHeight, byte[]? overlaySource, int sourceWidth, int sourceHeight)
+                    {
+                        OverlayDownscaled = overlayDownscaled;
+                        DownscaledWidth = downscaledWidth;
+                        DownscaledHeight = downscaledHeight;
+                        OverlaySource = overlaySource;
+                        SourceWidth = sourceWidth;
+                        SourceHeight = sourceHeight;
+                    }
+            
+                    public byte[] OverlayDownscaled { get; }
+                    public int DownscaledWidth { get; }
+                    public int DownscaledHeight { get; }
+                    public byte[]? OverlaySource { get; }
+                    public int SourceWidth { get; }
+                    public int SourceHeight { get; }
                 }
-            }
-            else
+            
+            internal enum FileSourceKind
             {
-                _errorStreak = 0;
+                Image,
+                Gif,
+                Video
             }
-
-            return true;
-        }
-
-        private static string BuildDisplayName(IReadOnlyList<string> paths)
-        {
-            if (paths == null || paths.Count == 0)
+            
+            internal enum FileCaptureState
             {
-                return "Video Sequence";
+                Ready,
+                Pending,
+                Error
             }
-
-            string baseName = Path.GetFileName(paths[0]);
-            if (paths.Count == 1)
-            {
-                return baseName;
-            }
-
-            return $"{baseName} (+{paths.Count - 1})";
-        }
-    }
-
-    internal readonly struct FileSourceInfo
-    {
-        public FileSourceInfo(string path, string displayName, int width, int height, FileSourceKind kind)
-        {
-            Path = path;
-            DisplayName = displayName;
-            Width = width;
-            Height = height;
-            Kind = kind;
-        }
-
-        public string Path { get; }
-        public string DisplayName { get; }
-        public int Width { get; }
-        public int Height { get; }
-        public FileSourceKind Kind { get; }
-    }
-
-    internal readonly struct FileCaptureFrame
-    {
-        public FileCaptureFrame(byte[] overlayDownscaled, int downscaledWidth, int downscaledHeight, byte[]? overlaySource, int sourceWidth, int sourceHeight)
-        {
-            OverlayDownscaled = overlayDownscaled;
-            DownscaledWidth = downscaledWidth;
-            DownscaledHeight = downscaledHeight;
-            OverlaySource = overlaySource;
-            SourceWidth = sourceWidth;
-            SourceHeight = sourceHeight;
-        }
-
-        public byte[] OverlayDownscaled { get; }
-        public int DownscaledWidth { get; }
-        public int DownscaledHeight { get; }
-        public byte[]? OverlaySource { get; }
-        public int SourceWidth { get; }
-        public int SourceHeight { get; }
-    }
-
-internal enum FileSourceKind
-{
-    Image,
-    Gif,
-    Video
-}
-
-internal enum FileCaptureState
-{
-    Ready,
-    Pending,
-    Error
-}
-
-    private readonly struct FrameData
-    {
-        public FrameData(byte[] buffer, int width, int height)
-        {
-            Buffer = buffer;
-            Width = width;
-            Height = height;
-        }
-
-        public byte[] Buffer { get; }
-        public int Width { get; }
-        public int Height { get; }
-    }
-
-    private static void Downscale(byte[] source, int sourceWidth, int sourceHeight, byte[] destination, int targetWidth, int targetHeight, FitMode fitMode)
-    {
-        var mapping = ImageFit.GetMapping(fitMode, sourceWidth, sourceHeight, targetWidth, targetHeight);
-        int destStride = targetWidth * 4;
-        int sourceStride = sourceWidth * 4;
-
-        Parallel.For(0, targetHeight, row =>
-        {
-            int destRowOffset = row * destStride;
-
-            for (int col = 0; col < targetWidth; col++)
-            {
-                int destIndex = destRowOffset + (col * 4);
-                if (ImageFit.TryMapPixel(mapping, col, row, out int srcX, out int srcY))
+            
+                private readonly struct FrameData
                 {
-                    int srcIndex = (srcY * sourceStride) + (srcX * 4);
-                    destination[destIndex] = source[srcIndex];
-                    destination[destIndex + 1] = source[srcIndex + 1];
-                    destination[destIndex + 2] = source[srcIndex + 2];
+                    public FrameData(byte[] buffer, int width, int height)
+                    {
+                        Buffer = buffer;
+                        Width = width;
+                        Height = height;
+                    }
+            
+                    public byte[] Buffer { get; }
+                    public int Width { get; }
+                    public int Height { get; }
                 }
-                else
+            
+                private static void Downscale(byte[] source, int sourceWidth, int sourceHeight, byte[] destination, int targetWidth, int targetHeight, FitMode fitMode)
                 {
-                    destination[destIndex] = 0;
-                    destination[destIndex + 1] = 0;
-                    destination[destIndex + 2] = 0;
+                    var mapping = ImageFit.GetMapping(fitMode, sourceWidth, sourceHeight, targetWidth, targetHeight);
+                    int destStride = targetWidth * 4;
+                    int sourceStride = sourceWidth * 4;
+            
+                    Parallel.For(0, targetHeight, row =>
+                    {
+                        int destRowOffset = row * destStride;
+            
+                        for (int col = 0; col < targetWidth; col++)
+                        {
+                            int destIndex = destRowOffset + (col * 4);
+                            if (ImageFit.TryMapPixel(mapping, col, row, out int srcX, out int srcY))
+                            {
+                                int srcIndex = (srcY * sourceStride) + (srcX * 4);
+                                destination[destIndex] = source[srcIndex];
+                                destination[destIndex + 1] = source[srcIndex + 1];
+                                destination[destIndex + 2] = source[srcIndex + 2];
+                            }
+                            else
+                            {
+                                destination[destIndex] = 0;
+                                destination[destIndex + 1] = 0;
+                                destination[destIndex + 2] = 0;
+                            }
+                            destination[destIndex + 3] = 255;
+                        }
+                    });
                 }
-                destination[destIndex + 3] = 255;
             }
-        });
-    }
-}
+            

@@ -337,6 +337,10 @@
                                         Padding="8,2"
                                         Margin="0,0,6,0"
                                         Click="AddChildFile_Click" />
+                                <Button Content="YouTube"
+                                        Padding="8,2"
+                                        Margin="0,0,6,0"
+                                        Click="AddChildYoutube_Click" />
                                 <Button Content="Sequence"
                                         Padding="8,2"
                                         Click="AddChildSequence_Click" />
@@ -405,6 +409,10 @@
                             Padding="8,2"
                             Margin="0,0,6,0"
                             Click="AddRootFile_Click" />
+                    <Button Content="YouTube"
+                            Padding="8,2"
+                            Margin="0,0,6,0"
+                            Click="AddRootYoutube_Click" />
                     <Button Content="Sequence"
                             Padding="8,2"
                             Click="AddRootSequence_Click" />

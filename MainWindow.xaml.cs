@@ -1262,6 +1262,7 @@ public partial class MainWindow : Window
         SourcesMenu.Items.Add(BuildAddWindowMenuItem(null));
         SourcesMenu.Items.Add(BuildAddWebcamMenuItem(null));
         SourcesMenu.Items.Add(BuildAddFileMenuItem(null));
+        SourcesMenu.Items.Add(BuildAddYoutubeMenuItem(null));
         SourcesMenu.Items.Add(BuildAddVideoSequenceMenuItem(null));
         SourcesMenu.Items.Add(new Separator());
 
@@ -1442,6 +1443,66 @@ public partial class MainWindow : Window
         var addSequenceItem = new MenuItem { Header = "Add Video Sequence...", Tag = parentGroup };
         addSequenceItem.Click += AddVideoSequenceMenuItem_Click;
         return addSequenceItem;
+    }
+
+    private MenuItem BuildAddYoutubeMenuItem(CaptureSource? parentGroup)
+    {
+        var addYoutubeItem = new MenuItem { Header = "Add YouTube Source...", Tag = parentGroup };
+        addYoutubeItem.Click += AddYoutubeSourceMenuItem_Click;
+        return addYoutubeItem;
+    }
+
+    private async void AddYoutubeSourceMenuItem_Click(object sender, RoutedEventArgs e)
+    {
+        var menuItem = sender as MenuItem;
+        var parentGroup = menuItem?.Tag as CaptureSource;
+
+        var dialog = new TextInputDialog("Add YouTube Source", "Enter YouTube URL:", string.Empty)
+        {
+            Owner = this
+        };
+
+        if (dialog.ShowDialog() != true || string.IsNullOrWhiteSpace(dialog.InputText))
+        {
+            return;
+        }
+
+        string url = dialog.InputText.Trim();
+        
+        // Basic validation
+        if (!url.StartsWith("http", StringComparison.OrdinalIgnoreCase))
+        {
+            MessageBox.Show(this, "Please enter a valid URL.", "Invalid URL", MessageBoxButton.OK, MessageBoxImage.Warning);
+            return;
+        }
+
+        try
+        {
+            var (success, info, error) = await _fileCapture.TryCreateYoutubeSource(url);
+            if (!success)
+            {
+                MessageBox.Show(this, $"Failed to load YouTube video:\n{error}", "YouTube Error", MessageBoxButton.OK, MessageBoxImage.Error);
+                return;
+            }
+
+            var source = CaptureSource.CreateFile(info.Path, info.DisplayName, info.Width, info.Height);
+            
+            if (parentGroup != null)
+            {
+                parentGroup.Children.Add(source);
+            }
+            else
+            {
+                _sources.Add(source);
+            }
+
+            RebuildSourcesMenu();
+            NotifyLayerEditorSourcesChanged();
+        }
+        catch (Exception ex)
+        {
+             MessageBox.Show(this, $"An unexpected error occurred:\n{ex.Message}", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
+        }
     }
 
     private MenuItem BuildAnimationsMenu(CaptureSource source)
@@ -1741,6 +1802,7 @@ public partial class MainWindow : Window
             sourceItem.Items.Add(BuildAddWindowMenuItem(source));
             sourceItem.Items.Add(BuildAddWebcamMenuItem(source));
             sourceItem.Items.Add(BuildAddFileMenuItem(source));
+            sourceItem.Items.Add(BuildAddYoutubeMenuItem(source));
             sourceItem.Items.Add(BuildAddVideoSequenceMenuItem(source));
             sourceItem.Items.Add(new Separator());
         }
@@ -1779,7 +1841,7 @@ public partial class MainWindow : Window
         bool isVideoLayer = source.Type == CaptureSource.SourceType.VideoSequence ||
                             (source.Type == CaptureSource.SourceType.File &&
                              !string.IsNullOrWhiteSpace(source.FilePath) &&
-                             FileCaptureService.IsVideoPath(source.FilePath));
+                             (FileCaptureService.IsVideoPath(source.FilePath) || source.FilePath.StartsWith("youtube:")));
         if (isVideoLayer)
         {
             restartVideoItem = new MenuItem
@@ -2427,6 +2489,37 @@ public partial class MainWindow : Window
         }
 
         RunWithoutLayerEditorRefresh(() => AddVideoSequenceSource(paths, targetList));
+    }
+
+    internal async void AddYoutubeSourceFromEditor(string url, Guid? parentId)
+    {
+         var targetList = ResolveTargetList(parentId);
+         if (targetList == null)
+         {
+             return;
+         }
+
+         try
+         {
+             var (success, info, error) = await _fileCapture.TryCreateYoutubeSource(url);
+             if (!success)
+             {
+                 MessageBox.Show(this, $"Failed to load YouTube video:\n{error}", "YouTube Error", MessageBoxButton.OK, MessageBoxImage.Error);
+                 return;
+             }
+             
+             RunWithoutLayerEditorRefresh(() => 
+             {
+                 var source = CaptureSource.CreateFile(info.Path, info.DisplayName, info.Width, info.Height);
+                 targetList.Add(source);
+             });
+             
+             NotifyLayerEditorSourcesChanged();
+         }
+         catch (Exception ex)
+         {
+             Logger.Error($"Failed to add YouTube source from editor: {ex.Message}", ex);
+         }
     }
 
     internal void UpdateSourceBlendMode(Guid sourceId, string blendMode)
@@ -5279,6 +5372,39 @@ public partial class MainWindow : Window
                 if (_fileCapture.TryCreateVideoSequence(sequencePaths, out var sequence, out _))
                 {
                     return CaptureSource.CreateVideoSequence(sequence!);
+                }
+
+                return null;
+            }
+
+            case LayerEditorSourceKind.Youtube:
+            {
+                if (string.IsNullOrWhiteSpace(model.FilePath))
+                {
+                    return null;
+                }
+
+                string url = model.FilePath;
+                if (url.StartsWith("youtube:"))
+                {
+                    url = url.Substring(8);
+                }
+
+                // Blocking call for async resolution
+                try
+                {
+                    var task = _fileCapture.TryCreateYoutubeSource(url);
+                    task.Wait();
+                    var (success, info, _) = task.Result;
+
+                    if (success)
+                    {
+                        return CaptureSource.CreateFile(info.Path, info.DisplayName, info.Width, info.Height);
+                    }
+                }
+                catch
+                {
+                    // Ignore errors during apply
                 }
 
                 return null;

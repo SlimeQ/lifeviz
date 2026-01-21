@@ -332,6 +332,8 @@ public partial class LayerEditorWindow : Window
 
     private void AddRootFile_Click(object sender, RoutedEventArgs e) => AddSource(null, LayerEditorSourceKind.File);
 
+    private void AddRootYoutube_Click(object sender, RoutedEventArgs e) => AddSource(null, LayerEditorSourceKind.Youtube);
+
     private void AddRootSequence_Click(object sender, RoutedEventArgs e) => AddSource(null, LayerEditorSourceKind.VideoSequence);
 
     private void AddChildGroup_Click(object sender, RoutedEventArgs e) => AddSource(GetSourceContext(sender), LayerEditorSourceKind.Group);
@@ -341,6 +343,8 @@ public partial class LayerEditorWindow : Window
     private void AddChildWebcam_Click(object sender, RoutedEventArgs e) => AddSource(GetSourceContext(sender), LayerEditorSourceKind.Webcam);
 
     private void AddChildFile_Click(object sender, RoutedEventArgs e) => AddSource(GetSourceContext(sender), LayerEditorSourceKind.File);
+
+    private void AddChildYoutube_Click(object sender, RoutedEventArgs e) => AddSource(GetSourceContext(sender), LayerEditorSourceKind.Youtube);
 
     private void AddChildSequence_Click(object sender, RoutedEventArgs e) => AddSource(GetSourceContext(sender), LayerEditorSourceKind.VideoSequence);
 
@@ -398,6 +402,15 @@ public partial class LayerEditorWindow : Window
                 if (!string.IsNullOrWhiteSpace(path))
                 {
                     _owner.AddFileSourceFromEditor(path!, parentId);
+                }
+                break;
+            }
+            case LayerEditorSourceKind.Youtube:
+            {
+                var url = PromptForYoutube();
+                if (!string.IsNullOrWhiteSpace(url))
+                {
+                    _owner.AddYoutubeSourceFromEditor(url!, parentId);
                 }
                 break;
             }
@@ -480,6 +493,25 @@ public partial class LayerEditorWindow : Window
                     Kind = LayerEditorSourceKind.File,
                     DisplayName = Path.GetFileName(path),
                     FilePath = path,
+                    BlendMode = "Additive",
+                    FitMode = "Fill",
+                    Opacity = 1.0
+                };
+            }
+            case LayerEditorSourceKind.Youtube:
+            {
+                var url = PromptForYoutube();
+                if (string.IsNullOrWhiteSpace(url))
+                {
+                    return null;
+                }
+
+                return new LayerEditorSource
+                {
+                    Id = Guid.NewGuid(),
+                    Kind = LayerEditorSourceKind.Youtube,
+                    DisplayName = "YouTube Video",
+                    FilePath = "youtube:" + url,
                     BlendMode = "Additive",
                     FitMode = "Fill",
                     Opacity = 1.0
@@ -586,5 +618,11 @@ public partial class LayerEditorWindow : Window
         };
 
         return dialog.ShowDialog(this) == true ? dialog.FileNames : null;
+    }
+
+    private string? PromptForYoutube()
+    {
+        var dialog = new TextInputDialog("Add YouTube Source", "Enter YouTube URL:") { Owner = this };
+        return dialog.ShowDialog() == true && !string.IsNullOrWhiteSpace(dialog.InputText) ? dialog.InputText.Trim() : null;
     }
 }

@@ -12,7 +12,8 @@ internal enum LayerEditorSourceKind
     Webcam,
     File,
     VideoSequence,
-    Group
+    Group,
+    Youtube
 }
 
 internal sealed class LayerEditorOption
@@ -357,7 +358,8 @@ internal sealed class LayerEditorSource : LayerEditorNotify
     public bool IsWindow => Kind == LayerEditorSourceKind.Window;
     public bool IsVideo =>
         Kind == LayerEditorSourceKind.VideoSequence ||
-        (Kind == LayerEditorSourceKind.File && !string.IsNullOrWhiteSpace(FilePath) && FileCaptureService.IsVideoPath(FilePath));
+        (Kind == LayerEditorSourceKind.File && !string.IsNullOrWhiteSpace(FilePath) && 
+            (FileCaptureService.IsVideoPath(FilePath) || FilePath.StartsWith("youtube:")));
 
     public string KindLabel => Kind switch
     {
