@@ -39,6 +39,7 @@ The UI stays invisible until you right-click anywhere on the canvas, revealing t
 
 - Height, depth, thresholds, modes, opacity, framerate, blend/passthrough toggles, and preserve-res settings persist to `%AppData%\lifeviz\config.json` after the app finishes loading, so startup control events no longer overwrite prior configs.
 - The source stack (windows + webcams + files + layer groups) is restored on launch when inputs are present, including ordering plus per-source blend mode, fit mode, opacity, and mirror; windows are matched by title, webcams by device id/name, and files by path.
+- YouTube sources resolve asynchronously on startup so a slow or unavailable stream lookup does not block the UI; once resolved, the source starts feeding frames automatically (failures are logged).
 - Aspect ratio lock state persists between runs (lock ratio defaults to 16:9).
 - Fullscreen preference is persisted and applied after startup using the active monitor bounds so the taskbar stays hidden.
 

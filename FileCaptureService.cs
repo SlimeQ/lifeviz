@@ -121,7 +121,7 @@ internal sealed class FileCaptureService : IDisposable
     {
         try
         {
-            var video = await _youtube.Videos.GetAsync(url);
+            var video = await _youtube.Videos.GetAsync(url).ConfigureAwait(false);
             string title = video.Title;
             string id = video.Id;
             
@@ -139,7 +139,7 @@ internal sealed class FileCaptureService : IDisposable
             // Resolver function to get the fresh stream URL
             Func<Task<string>> resolver = async () =>
             {
-                var manifest = await _youtube.Videos.Streams.GetManifestAsync(id);
+                var manifest = await _youtube.Videos.Streams.GetManifestAsync(id).ConfigureAwait(false);
                 var streamInfo = manifest.GetMuxedStreams().GetWithHighestVideoQuality();
                 if (streamInfo == null)
                 {

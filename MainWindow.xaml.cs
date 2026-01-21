@@ -5384,13 +5384,23 @@ public partial class MainWindow : Window
                     return null;
                 }
 
-                string url = model.FilePath;
-                if (url.StartsWith("youtube:"))
+                string rawPath = model.FilePath.Trim();
+                string? youtubeKey = NormalizeYoutubeKey(rawPath);
+                if (youtubeKey != null)
+                {
+                    string displayName = string.IsNullOrWhiteSpace(model.DisplayName) ? "YouTube Source" : model.DisplayName;
+                    var source = CaptureSource.CreateFile(youtubeKey, displayName, 0, 0);
+                    QueueYoutubeResolution(youtubeKey, source);
+                    return source;
+                }
+
+                string url = rawPath;
+                if (url.StartsWith("youtube:", StringComparison.OrdinalIgnoreCase))
                 {
                     url = url.Substring(8);
                 }
 
-                // Blocking call for async resolution
+                // Blocking call for async resolution (fallback when the key is ambiguous).
                 try
                 {
                     var task = _fileCapture.TryCreateYoutubeSource(url);
@@ -5404,7 +5414,7 @@ public partial class MainWindow : Window
                 }
                 catch
                 {
-                    // Ignore errors during apply
+                    // Ignore errors during apply.
                 }
 
                 return null;
@@ -5469,6 +5479,88 @@ public partial class MainWindow : Window
 
             source.Animations.Add(animation);
         }
+    }
+
+    private static string? NormalizeYoutubeKey(string value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return null;
+        }
+
+        string trimmed = value.Trim();
+        if (trimmed.StartsWith("youtube:", StringComparison.OrdinalIgnoreCase))
+        {
+            string idCandidate = trimmed.Substring(8).Trim();
+            return IsLikelyYoutubeId(idCandidate) ? $"youtube:{idCandidate}" : null;
+        }
+
+        return IsLikelyYoutubeId(trimmed) ? $"youtube:{trimmed}" : null;
+    }
+
+    private static bool IsLikelyYoutubeId(string value)
+    {
+        if (value.Length != 11)
+        {
+            return false;
+        }
+
+        foreach (char ch in value)
+        {
+            if (!char.IsLetterOrDigit(ch) && ch != '-' && ch != '_')
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    private void QueueYoutubeResolution(string youtubeKey, CaptureSource source)
+    {
+        _ = ResolveYoutubeSourceAsync(youtubeKey, source);
+    }
+
+    private async Task ResolveYoutubeSourceAsync(string youtubeKey, CaptureSource source)
+    {
+        if (string.IsNullOrWhiteSpace(youtubeKey))
+        {
+            return;
+        }
+
+        string url = youtubeKey;
+        if (url.StartsWith("youtube:", StringComparison.OrdinalIgnoreCase))
+        {
+            url = url.Substring(8);
+        }
+
+        var (success, info, error) = await _fileCapture.TryCreateYoutubeSource(url);
+        if (!success)
+        {
+            Logger.Warn($"Failed to resolve YouTube source: {youtubeKey}. {error}");
+            return;
+        }
+
+        await Dispatcher.InvokeAsync(() =>
+        {
+            if (FindSourceById(source.Id) == null)
+            {
+                return;
+            }
+
+            source.UpdateFileDimensions(info.Width, info.Height);
+            if (string.IsNullOrWhiteSpace(source.DisplayName) ||
+                string.Equals(source.DisplayName, "YouTube Source", StringComparison.OrdinalIgnoreCase))
+            {
+                source.SetDisplayName(info.DisplayName);
+            }
+
+            UpdatePrimaryAspectIfNeeded();
+            RenderFrame();
+            SaveConfig();
+            RebuildSourcesMenu();
+            NotifyLayerEditorSourcesChanged();
+        });
     }
 
     private void RestoreSources(IReadOnlyList<AppConfig.SourceConfig>? configs)
@@ -5542,6 +5634,17 @@ public partial class MainWindow : Window
                 case CaptureSource.SourceType.File:
                     if (string.IsNullOrWhiteSpace(config.FilePath))
                     {
+                        break;
+                    }
+
+                    string? youtubeKey = NormalizeYoutubeKey(config.FilePath);
+                    if (youtubeKey != null)
+                    {
+                        string displayName = string.IsNullOrWhiteSpace(config.DisplayName)
+                            ? "YouTube Source"
+                            : config.DisplayName;
+                        restored = CaptureSource.CreateFile(youtubeKey, displayName, 0, 0);
+                        QueueYoutubeResolution(youtubeKey, restored);
                         break;
                     }
 
