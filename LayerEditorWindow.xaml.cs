@@ -131,6 +131,45 @@ public partial class LayerEditorWindow : Window
         }
     }
 
+    private void KeyEnabled_Changed(object sender, RoutedEventArgs e)
+    {
+        if (!ShouldApplyLive())
+        {
+            return;
+        }
+
+        if (sender is FrameworkElement { DataContext: LayerEditorSource source })
+        {
+            _owner.UpdateSourceKeyEnabled(source.Id, source.KeyEnabled);
+        }
+    }
+
+    private void KeyTolerance_Changed(object sender, RoutedPropertyChangedEventArgs<double> e)
+    {
+        if (!ShouldApplyLive())
+        {
+            return;
+        }
+
+        if (sender is FrameworkElement { DataContext: LayerEditorSource source })
+        {
+            _owner.UpdateSourceKeyTolerance(source.Id, source.KeyTolerance);
+        }
+    }
+
+    private void KeyColorHex_LostFocus(object sender, RoutedEventArgs e)
+    {
+        if (!ShouldApplyLive())
+        {
+            return;
+        }
+
+        if (sender is FrameworkElement { DataContext: LayerEditorSource source })
+        {
+            _owner.UpdateSourceKeyColor(source.Id, source.KeyColorHex);
+        }
+    }
+
     private void GroupName_Changed(object sender, TextChangedEventArgs e)
     {
         if (!ShouldApplyLive())
@@ -442,7 +481,9 @@ public partial class LayerEditorWindow : Window
                     DisplayName = "Layer Group",
                     BlendMode = "Additive",
                     FitMode = "Fill",
-                    Opacity = 1.0
+                    Opacity = 1.0,
+                    KeyColorHex = "#000000",
+                    KeyTolerance = 0.1
                 };
             case LayerEditorSourceKind.Window:
             {
@@ -461,7 +502,9 @@ public partial class LayerEditorWindow : Window
                     WindowHandle = window.Handle,
                     BlendMode = "Additive",
                     FitMode = "Fill",
-                    Opacity = 1.0
+                    Opacity = 1.0,
+                    KeyColorHex = "#000000",
+                    KeyTolerance = 0.1
                 };
             }
             case LayerEditorSourceKind.Webcam:
@@ -480,7 +523,9 @@ public partial class LayerEditorWindow : Window
                     WebcamId = camera.Value.Id,
                     BlendMode = "Additive",
                     FitMode = "Fill",
-                    Opacity = 1.0
+                    Opacity = 1.0,
+                    KeyColorHex = "#000000",
+                    KeyTolerance = 0.1
                 };
             }
             case LayerEditorSourceKind.File:
@@ -499,7 +544,9 @@ public partial class LayerEditorWindow : Window
                     FilePath = path,
                     BlendMode = "Additive",
                     FitMode = "Fill",
-                    Opacity = 1.0
+                    Opacity = 1.0,
+                    KeyColorHex = "#000000",
+                    KeyTolerance = 0.1
                 };
             }
             case LayerEditorSourceKind.Youtube:
@@ -518,7 +565,9 @@ public partial class LayerEditorWindow : Window
                     FilePath = "youtube:" + url,
                     BlendMode = "Additive",
                     FitMode = "Fill",
-                    Opacity = 1.0
+                    Opacity = 1.0,
+                    KeyColorHex = "#000000",
+                    KeyTolerance = 0.1
                 };
             }
             case LayerEditorSourceKind.VideoSequence:
@@ -536,7 +585,9 @@ public partial class LayerEditorWindow : Window
                     DisplayName = $"Sequence ({paths.Length})",
                     BlendMode = "Additive",
                     FitMode = "Fill",
-                    Opacity = 1.0
+                    Opacity = 1.0,
+                    KeyColorHex = "#000000",
+                    KeyTolerance = 0.1
                 };
                 source.FilePaths.AddRange(paths);
                 return source;

@@ -237,6 +237,9 @@ internal sealed class LayerEditorSource : LayerEditorNotify
     private string _fitMode = "Fill";
     private double _opacity = 1.0;
     private bool _mirror;
+    private bool _keyEnabled;
+    private string _keyColorHex = "#000000";
+    private double _keyTolerance = 0.1;
     private string _pendingTranslateDirection = "Right";
     private string _pendingRotationDirection = "Clockwise";
 
@@ -325,7 +328,13 @@ internal sealed class LayerEditorSource : LayerEditorNotify
     public string BlendMode
     {
         get => _blendMode;
-        set => SetField(ref _blendMode, value);
+        set
+        {
+            if (SetField(ref _blendMode, value))
+            {
+                OnPropertyChanged(nameof(IsNormalBlend));
+            }
+        }
     }
 
     public string FitMode
@@ -344,6 +353,24 @@ internal sealed class LayerEditorSource : LayerEditorNotify
     {
         get => _mirror;
         set => SetField(ref _mirror, value);
+    }
+
+    public bool KeyEnabled
+    {
+        get => _keyEnabled;
+        set => SetField(ref _keyEnabled, value);
+    }
+
+    public string KeyColorHex
+    {
+        get => _keyColorHex;
+        set => SetField(ref _keyColorHex, value);
+    }
+
+    public double KeyTolerance
+    {
+        get => _keyTolerance;
+        set => SetField(ref _keyTolerance, value);
     }
 
     public string PendingTranslateDirection
@@ -367,6 +394,7 @@ internal sealed class LayerEditorSource : LayerEditorNotify
     public bool IsGroup => Kind == LayerEditorSourceKind.Group;
     public bool IsWebcam => Kind == LayerEditorSourceKind.Webcam;
     public bool IsWindow => Kind == LayerEditorSourceKind.Window;
+    public bool IsNormalBlend => string.Equals(BlendMode, "Normal", StringComparison.OrdinalIgnoreCase);
     public bool IsVideo =>
         Kind == LayerEditorSourceKind.VideoSequence ||
         (Kind == LayerEditorSourceKind.File && !string.IsNullOrWhiteSpace(FilePath) && 

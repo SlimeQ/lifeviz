@@ -40,6 +40,8 @@ public partial class MainWindow : Window
     private const double AnimationBeatShakeFactor = 0.03;
     private const double AnimationBeatShakeFrequency = 24.0;
     private const double AnimationBeatShakeWindowBeats = 0.25;
+    private const double DefaultKeyTolerance = 0.1;
+    private const double MaxColorDistance = 441.6729559300637;
 
     private readonly GameOfLifeEngine _engine = new();
     private readonly WindowCaptureService _windowCapture = new();
@@ -1969,6 +1971,85 @@ public partial class MainWindow : Window
             NotifyLayerEditorSourcesChanged();
         };
 
+        var keyMenu = new MenuItem { Header = "Keying (Normal)" };
+        var keyEnabledItem = new MenuItem
+        {
+            Header = "Enable Keying",
+            IsCheckable = true,
+            IsChecked = source.KeyEnabled
+        };
+        keyEnabledItem.Click += (_, _) =>
+        {
+            source.KeyEnabled = !source.KeyEnabled;
+            Logger.Info($"Keying toggled for {source.DisplayName}: {source.KeyEnabled}");
+            RenderFrame();
+            SaveConfig();
+            NotifyLayerEditorSourcesChanged();
+        };
+
+        var keyColorItem = new MenuItem { Header = "Key Color..." };
+        keyColorItem.Click += (_, _) =>
+        {
+            string defaultValue = FormatHexColor(source.KeyColorR, source.KeyColorG, source.KeyColorB);
+            var dialog = new TextInputDialog("Key Color", "Enter hex color (#RRGGBB) or R,G,B:", defaultValue)
+            {
+                Owner = this
+            };
+            if (dialog.ShowDialog() == true)
+            {
+                if (TryParseHexColor(dialog.InputText, out var keyR, out var keyG, out var keyB))
+                {
+                    source.KeyColorR = keyR;
+                    source.KeyColorG = keyG;
+                    source.KeyColorB = keyB;
+                    RenderFrame();
+                    SaveConfig();
+                    NotifyLayerEditorSourcesChanged();
+                }
+                else
+                {
+                    MessageBox.Show(this, "Invalid color value. Use #RRGGBB or R,G,B.", "Key Color",
+                        MessageBoxButton.OK, MessageBoxImage.Warning);
+                }
+            }
+        };
+
+        var keyRangeItem = new MenuItem
+        {
+            Header = "Key Range",
+            StaysOpenOnClick = true
+        };
+        var keyRangeValueItem = new MenuItem
+        {
+            Header = $"{Math.Clamp(source.KeyTolerance, 0, 1):P0}",
+            IsEnabled = false
+        };
+        var keyRangeSlider = new Slider
+        {
+            Minimum = 0,
+            Maximum = 1,
+            Value = Math.Clamp(source.KeyTolerance, 0, 1),
+            Width = 140,
+            SmallChange = 0.01,
+            LargeChange = 0.05,
+            Margin = new Thickness(12, 4, 12, 8)
+        };
+        keyRangeSlider.ValueChanged += (_, args) =>
+        {
+            source.KeyTolerance = Math.Clamp(args.NewValue, 0, 1);
+            Logger.Info($"Key range changed: {source.DisplayName} = {source.KeyTolerance:F2}");
+            keyRangeValueItem.Header = $"{source.KeyTolerance:P0}";
+            RenderFrame();
+            SaveConfig();
+            NotifyLayerEditorSourcesChanged();
+        };
+        keyRangeItem.Items.Add(keyRangeValueItem);
+        keyRangeItem.Items.Add(keyRangeSlider);
+
+        keyMenu.Items.Add(keyEnabledItem);
+        keyMenu.Items.Add(keyColorItem);
+        keyMenu.Items.Add(keyRangeItem);
+
         var opacityItem = new MenuItem
         {
             Header = "Opacity",
@@ -2022,6 +2103,7 @@ public partial class MainWindow : Window
         sourceItem.Items.Add(moveUpItem);
         sourceItem.Items.Add(moveDownItem);
         sourceItem.Items.Add(mirrorItem);
+        sourceItem.Items.Add(keyMenu);
         sourceItem.Items.Add(opacityItem);
         sourceItem.Items.Add(new Separator());
         sourceItem.Items.Add(removeItem);
@@ -2710,6 +2792,59 @@ public partial class MainWindow : Window
             source.Mirror = mirror;
             RenderFrame();
             SaveConfig();
+        });
+    }
+
+    internal void UpdateSourceKeyEnabled(Guid sourceId, bool enabled)
+    {
+        RunWithoutLayerEditorRefresh(() =>
+        {
+            var source = FindSourceById(sourceId);
+            if (source == null)
+            {
+                return;
+            }
+
+            source.KeyEnabled = enabled;
+            RenderFrame();
+            SaveConfig();
+        });
+    }
+
+    internal void UpdateSourceKeyTolerance(Guid sourceId, double tolerance)
+    {
+        RunWithoutLayerEditorRefresh(() =>
+        {
+            var source = FindSourceById(sourceId);
+            if (source == null)
+            {
+                return;
+            }
+
+            source.KeyTolerance = Math.Clamp(tolerance, 0, 1);
+            RenderFrame();
+            SaveConfig();
+        });
+    }
+
+    internal void UpdateSourceKeyColor(Guid sourceId, string? value)
+    {
+        RunWithoutLayerEditorRefresh(() =>
+        {
+            var source = FindSourceById(sourceId);
+            if (source == null)
+            {
+                return;
+            }
+
+            if (TryParseHexColor(value, out var keyR, out var keyG, out var keyB))
+            {
+                source.KeyColorR = keyR;
+                source.KeyColorG = keyG;
+                source.KeyColorB = keyB;
+                RenderFrame();
+                SaveConfig();
+            }
         });
     }
 
@@ -3741,6 +3876,75 @@ public partial class MainWindow : Window
         return TryParseBlendMode(value, fallback, out var mode) ? mode : fallback;
     }
 
+    private static string FormatHexColor(byte r, byte g, byte b) => $"#{r:X2}{g:X2}{b:X2}";
+
+    private static bool TryParseHexColor(string? value, out byte r, out byte g, out byte b)
+    {
+        r = 0;
+        g = 0;
+        b = 0;
+
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return false;
+        }
+
+        string trimmed = value.Trim();
+        if (trimmed.StartsWith("#", StringComparison.Ordinal))
+        {
+            trimmed = trimmed.Substring(1);
+        }
+
+        if (trimmed.Length == 3)
+        {
+            if (TryParseHexPair(new string(trimmed[0], 2), out r) &&
+                TryParseHexPair(new string(trimmed[1], 2), out g) &&
+                TryParseHexPair(new string(trimmed[2], 2), out b))
+            {
+                return true;
+            }
+        }
+        else if (trimmed.Length == 6)
+        {
+            if (TryParseHexPair(trimmed.Substring(0, 2), out r) &&
+                TryParseHexPair(trimmed.Substring(2, 2), out g) &&
+                TryParseHexPair(trimmed.Substring(4, 2), out b))
+            {
+                return true;
+            }
+        }
+        else
+        {
+            var parts = trimmed.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+            if (parts.Length == 3 &&
+                byte.TryParse(parts[0], NumberStyles.Integer, CultureInfo.InvariantCulture, out r) &&
+                byte.TryParse(parts[1], NumberStyles.Integer, CultureInfo.InvariantCulture, out g) &&
+                byte.TryParse(parts[2], NumberStyles.Integer, CultureInfo.InvariantCulture, out b))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static bool TryParseHexPair(string value, out byte result)
+    {
+        result = 0;
+        if (value.Length != 2)
+        {
+            return false;
+        }
+
+        if (byte.TryParse(value, NumberStyles.HexNumber, CultureInfo.InvariantCulture, out var parsed))
+        {
+            result = parsed;
+            return true;
+        }
+
+        return false;
+    }
+
     private enum AnimationType
     {
         ZoomIn,
@@ -4067,6 +4271,46 @@ public partial class MainWindow : Window
         }
     }
 
+    private readonly struct KeyingSettings
+    {
+        public KeyingSettings(bool enabled, bool useAlpha, byte r, byte g, byte b, double tolerance)
+        {
+            Enabled = enabled;
+            UseAlpha = useAlpha;
+            R = r;
+            G = g;
+            B = b;
+            Tolerance = tolerance;
+        }
+
+        public bool Enabled { get; }
+        public bool UseAlpha { get; }
+        public byte R { get; }
+        public byte G { get; }
+        public byte B { get; }
+        public double Tolerance { get; }
+    }
+
+    private static double ComputeKeyAlpha(byte sb, byte sg, byte sr, in KeyingSettings keying)
+    {
+        if (!keying.Enabled)
+        {
+            return 1.0;
+        }
+
+        int dr = sr - keying.R;
+        int dg = sg - keying.G;
+        int db = sb - keying.B;
+        double distance = Math.Sqrt((dr * dr) + (dg * dg) + (db * db)) / MaxColorDistance;
+        double tolerance = Math.Clamp(keying.Tolerance, 0.0, 1.0);
+        if (tolerance <= 0.0)
+        {
+            return distance <= 0.0 ? 0.0 : 1.0;
+        }
+
+        return Math.Clamp(distance / tolerance, 0.0, 1.0);
+    }
+
     private CompositeFrame? BuildCompositeFrame(List<CaptureSource> sources, ref byte[]? downscaledBuffer, ref byte[]? highResBuffer, bool useEngineDimensions, double animationTime)
     {
         if (sources.Count == 0)
@@ -4132,11 +4376,18 @@ public partial class MainWindow : Window
             var downscaledTransform = BuildAnimationTransform(source, downscaledWidth, downscaledHeight, animationTime);
             double animationOpacity = BuildAnimationOpacity(source, animationTime);
             double effectiveOpacity = Math.Clamp(source.Opacity * animationOpacity, 0.0, 1.0);
+            var keying = new KeyingSettings(
+                source.KeyEnabled && source.BlendMode == BlendMode.Normal,
+                source.BlendMode == BlendMode.Normal,
+                source.KeyColorR,
+                source.KeyColorG,
+                source.KeyColorB,
+                source.KeyTolerance);
             if (!primedDownscaled)
             {
                 CopyIntoBuffer(downscaledBuffer, downscaledWidth, downscaledHeight,
                     frame.Downscaled, frame.DownscaledWidth, frame.DownscaledHeight, effectiveOpacity,
-                    source.Mirror && source.Type == CaptureSource.SourceType.Webcam, source.FitMode, downscaledTransform);
+                    source.Mirror && source.Type == CaptureSource.SourceType.Webcam, source.FitMode, downscaledTransform, keying);
                 primedDownscaled = true;
                 wroteDownscaled = true;
             }
@@ -4144,7 +4395,7 @@ public partial class MainWindow : Window
             {
                 CompositeIntoBuffer(downscaledBuffer, downscaledWidth, downscaledHeight,
                     frame.Downscaled, frame.DownscaledWidth, frame.DownscaledHeight, source.BlendMode, effectiveOpacity,
-                    source.Mirror && source.Type == CaptureSource.SourceType.Webcam, source.FitMode, downscaledTransform);
+                    source.Mirror && source.Type == CaptureSource.SourceType.Webcam, source.FitMode, downscaledTransform, keying);
                 wroteDownscaled = true;
             }
 
@@ -4158,14 +4409,14 @@ public partial class MainWindow : Window
                 if (!primedHighRes)
                 {
                     CopyIntoBuffer(highRes, targetWidth, targetHeight, sourceBuffer, sourceWidth, sourceHeight, effectiveOpacity,
-                        source.Mirror && source.Type == CaptureSource.SourceType.Webcam, source.FitMode, highResTransform);
+                        source.Mirror && source.Type == CaptureSource.SourceType.Webcam, source.FitMode, highResTransform, keying);
                     primedHighRes = true;
                     wroteHighRes = true;
                 }
                 else
                 {
                     CompositeIntoBuffer(highRes, targetWidth, targetHeight, sourceBuffer, sourceWidth, sourceHeight,
-                        source.BlendMode, effectiveOpacity, source.Mirror && source.Type == CaptureSource.SourceType.Webcam, source.FitMode, highResTransform);
+                        source.BlendMode, effectiveOpacity, source.Mirror && source.Type == CaptureSource.SourceType.Webcam, source.FitMode, highResTransform, keying);
                     wroteHighRes = true;
                 }
             }
@@ -4469,13 +4720,14 @@ public partial class MainWindow : Window
     private static double DegreesToRadians(double degrees) => degrees * (Math.PI / 180.0);
 
     private void CopyIntoBuffer(byte[] destination, int destWidth, int destHeight, byte[] source, int sourceWidth, int sourceHeight,
-        double opacity, bool mirror, FitMode fitMode, Transform2D transform)
+        double opacity, bool mirror, FitMode fitMode, Transform2D transform, in KeyingSettings keying)
     {
         opacity = Math.Clamp(opacity, 0.0, 1.0);
         int destStride = destWidth * 4;
         int sourceStride = sourceWidth * 4;
         var mapping = ImageFit.GetMapping(fitMode, sourceWidth, sourceHeight, destWidth, destHeight);
         bool useTransform = !transform.IsIdentity;
+        var keyingLocal = keying;
 
         Parallel.For(0, destHeight, row =>
         {
@@ -4486,6 +4738,7 @@ public partial class MainWindow : Window
                 byte sb = 0;
                 byte sg = 0;
                 byte sr = 0;
+                byte sa = 255;
                 bool mapped;
                 int srcX;
                 int srcY;
@@ -4509,18 +4762,22 @@ public partial class MainWindow : Window
                     sb = source[srcIndex];
                     sg = source[srcIndex + 1];
                     sr = source[srcIndex + 2];
+                    sa = source[srcIndex + 3];
                 }
 
-                destination[destIndex] = ClampToByte((int)(sb * opacity));
-                destination[destIndex + 1] = ClampToByte((int)(sg * opacity));
-                destination[destIndex + 2] = ClampToByte((int)(sr * opacity));
+                double keyAlpha = ComputeKeyAlpha(sb, sg, sr, keyingLocal);
+                double alpha = keyingLocal.UseAlpha ? (sa / 255.0) : 1.0;
+                double effectiveOpacity = opacity * keyAlpha * alpha;
+                destination[destIndex] = ClampToByte((int)(sb * effectiveOpacity));
+                destination[destIndex + 1] = ClampToByte((int)(sg * effectiveOpacity));
+                destination[destIndex + 2] = ClampToByte((int)(sr * effectiveOpacity));
                 destination[destIndex + 3] = 255;
             }
         });
     }
 
     private void CompositeIntoBuffer(byte[] destination, int destWidth, int destHeight, byte[] source, int sourceWidth, int sourceHeight,
-        BlendMode mode, double opacity, bool mirror, FitMode fitMode, Transform2D transform)
+        BlendMode mode, double opacity, bool mirror, FitMode fitMode, Transform2D transform, in KeyingSettings keying)
     {
         if (destination == null || source == null || destWidth <= 0 || destHeight <= 0 || sourceWidth <= 0 || sourceHeight <= 0)
         {
@@ -4537,6 +4794,8 @@ public partial class MainWindow : Window
         int destStride = destWidth * 4;
         int sourceStride = sourceWidth * 4;
 
+        var keyingLocal = keying;
+        bool applyKeying = keyingLocal.Enabled && mode == BlendMode.Normal;
         if (destWidth == sourceWidth && destHeight == sourceHeight && transform.IsIdentity)
         {
             Parallel.For(0, destHeight, row =>
@@ -4552,6 +4811,11 @@ public partial class MainWindow : Window
                     byte sg = source[srcIndex + 1];
                     byte sr = source[srcIndex + 2];
                     byte sa = source[srcIndex + 3];
+                    if (applyKeying)
+                    {
+                        double keyAlpha = ComputeKeyAlpha(sb, sg, sr, keyingLocal);
+                        sa = ClampToByte((int)Math.Round(sa * keyAlpha));
+                    }
                     BlendInto(destination, destIndex, sb, sg, sr, sa, mode, opacity);
                 }
             });
@@ -4594,6 +4858,11 @@ public partial class MainWindow : Window
                     sg = source[srcIndex + 1];
                     sr = source[srcIndex + 2];
                     sa = source[srcIndex + 3];
+                }
+                if (applyKeying)
+                {
+                    double keyAlpha = ComputeKeyAlpha(sb, sg, sr, keyingLocal);
+                    sa = ClampToByte((int)Math.Round(sa * keyAlpha));
                 }
                 BlendInto(destination, destIndex, sb, sg, sr, sa, mode, opacity);
             }
@@ -5394,6 +5663,9 @@ public partial class MainWindow : Window
                 FitMode = source.FitMode.ToString(),
                 Opacity = source.Opacity,
                 Mirror = source.Mirror,
+                KeyEnabled = source.KeyEnabled,
+                KeyColor = FormatHexColor(source.KeyColorR, source.KeyColorG, source.KeyColorB),
+                KeyTolerance = source.KeyTolerance,
                 Animations = BuildAnimationConfigs(source.Animations)
             };
 
@@ -5462,6 +5734,9 @@ public partial class MainWindow : Window
                 FitMode = source.FitMode.ToString(),
                 Opacity = source.Opacity,
                 Mirror = source.Mirror,
+                KeyEnabled = source.KeyEnabled,
+                KeyTolerance = source.KeyTolerance,
+                KeyColorHex = FormatHexColor(source.KeyColorR, source.KeyColorG, source.KeyColorB),
                 Parent = parent
             };
 
@@ -5713,6 +5988,14 @@ public partial class MainWindow : Window
 
         source.Opacity = Math.Clamp(model.Opacity, 0, 1);
         source.Mirror = model.Mirror;
+        source.KeyEnabled = model.KeyEnabled;
+        source.KeyTolerance = Math.Clamp(model.KeyTolerance, 0, 1);
+        if (TryParseHexColor(model.KeyColorHex, out var keyR, out var keyG, out var keyB))
+        {
+            source.KeyColorR = keyR;
+            source.KeyColorG = keyG;
+            source.KeyColorB = keyB;
+        }
 
         if (source.Type == CaptureSource.SourceType.Group)
         {
@@ -5971,6 +6254,14 @@ public partial class MainWindow : Window
 
         source.Opacity = Math.Clamp(config.Opacity, 0, 1);
         source.Mirror = config.Mirror;
+        source.KeyEnabled = config.KeyEnabled;
+        source.KeyTolerance = Math.Clamp(config.KeyTolerance, 0, 1);
+        if (TryParseHexColor(config.KeyColor, out var keyR, out var keyG, out var keyB))
+        {
+            source.KeyColorR = keyR;
+            source.KeyColorG = keyG;
+            source.KeyColorB = keyB;
+        }
 
         source.Animations.Clear();
         if (config.Animations != null && config.Animations.Count > 0)
@@ -6062,6 +6353,9 @@ public partial class MainWindow : Window
             public string FitMode { get; set; } = lifeviz.FitMode.Fill.ToString();
             public double Opacity { get; set; } = 1.0;
             public bool Mirror { get; set; }
+            public bool KeyEnabled { get; set; }
+            public string KeyColor { get; set; } = "#000000";
+            public double KeyTolerance { get; set; } = DefaultKeyTolerance;
             public List<AnimationConfig> Animations { get; set; } = new();
             public List<SourceConfig> Children { get; set; } = new();
         }
@@ -6160,6 +6454,11 @@ public partial class MainWindow : Window
         public DateTime AddedUtc { get; set; }
         public double Opacity { get; set; } = 1.0;
         public bool Mirror { get; set; }
+        public bool KeyEnabled { get; set; }
+        public double KeyTolerance { get; set; } = DefaultKeyTolerance;
+        public byte KeyColorR { get; set; }
+        public byte KeyColorG { get; set; }
+        public byte KeyColorB { get; set; }
         public bool RetryInitializationAttempted { get; set; }
 
         public bool IsInitialized { get; set; }

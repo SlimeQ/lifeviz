@@ -271,6 +271,38 @@
                                       Unchecked="Mirror_Changed" />
                         </WrapPanel>
 
+                        <WrapPanel Margin="0,2,0,0"
+                                  IsEnabled="{Binding IsNormalBlend}">
+                            <CheckBox Content="Key Background (Normal)"
+                                      Margin="0,0,12,6"
+                                      IsChecked="{Binding KeyEnabled}"
+                                      Checked="KeyEnabled_Changed"
+                                      Unchecked="KeyEnabled_Changed" />
+                            <StackPanel Orientation="Horizontal" Margin="0,0,12,6">
+                                <TextBlock Text="Key Color"
+                                           VerticalAlignment="Center" />
+                                <TextBox Text="{Binding KeyColorHex}"
+                                         Width="90"
+                                         Margin="6,0,0,0"
+                                         LostFocus="KeyColorHex_LostFocus" />
+                            </StackPanel>
+                            <StackPanel Orientation="Horizontal" Margin="0,0,12,6">
+                                <TextBlock Text="Key Range"
+                                           VerticalAlignment="Center" />
+                                <Slider Minimum="0"
+                                        Maximum="1"
+                                        Value="{Binding KeyTolerance}"
+                                        Width="140"
+                                        SmallChange="0.01"
+                                        LargeChange="0.05"
+                                        Margin="6,0,0,0"
+                                        ValueChanged="KeyTolerance_Changed" />
+                                <TextBlock Text="{Binding KeyTolerance, StringFormat={}{0:P0}}"
+                                           Margin="6,0,0,0"
+                                           VerticalAlignment="Center" />
+                            </StackPanel>
+                        </WrapPanel>
+
                         <StackPanel Margin="0,2,0,0"
                                     Visibility="{Binding IsGroup, Converter={StaticResource BoolToVisibility}}">
                             <WrapPanel>
