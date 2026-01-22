@@ -514,7 +514,8 @@ public partial class MainWindow : Window
             {
                 int destIndex = destRowOffset + (col * 4);
                 int overlayIndex = overlayRowOffset + (col * 4);
-                BlendInto(targetBuffer, destIndex, overlayBuffer[overlayIndex], overlayBuffer[overlayIndex + 1], overlayBuffer[overlayIndex + 2], _blendMode, 1.0);
+                BlendInto(targetBuffer, destIndex, overlayBuffer[overlayIndex], overlayBuffer[overlayIndex + 1], overlayBuffer[overlayIndex + 2],
+                    overlayBuffer[overlayIndex + 3], _blendMode, 1.0);
             }
         }
 
@@ -2041,7 +2042,7 @@ public partial class MainWindow : Window
             return;
         }
 
-        if (Enum.TryParse<BlendMode>(header, ignoreCase: true, out var mode))
+        if (TryParseBlendMode(header, source.BlendMode, out var mode))
         {
             source.BlendMode = mode;
             RebuildSourcesMenu();
@@ -2532,7 +2533,7 @@ public partial class MainWindow : Window
                 return;
             }
 
-            if (Enum.TryParse<BlendMode>(blendMode, true, out var mode))
+            if (TryParseBlendMode(blendMode, source.BlendMode, out var mode))
             {
                 source.BlendMode = mode;
                 RenderFrame();
@@ -3542,7 +3543,7 @@ public partial class MainWindow : Window
             return;
         }
 
-        if (Enum.TryParse<BlendMode>(header, ignoreCase: true, out var mode))
+        if (TryParseBlendMode(header, _blendMode, out var mode))
         {
             _blendMode = mode;
             UpdateBlendModeMenuChecks();
@@ -3561,7 +3562,7 @@ public partial class MainWindow : Window
         foreach (var item in BlendModeMenu.Items)
         {
             if (item is MenuItem menuItem && menuItem.Header is string header &&
-                Enum.TryParse<BlendMode>(header, ignoreCase: true, out var mode))
+                TryParseBlendMode(header, _blendMode, out var mode))
             {
                 menuItem.IsCheckable = true;
                 menuItem.IsChecked = mode == _blendMode;
@@ -3579,6 +3580,34 @@ public partial class MainWindow : Window
         Lighten,
         Darken,
         Subtractive
+    }
+
+    private static bool TryParseBlendMode(string? value, BlendMode fallback, out BlendMode mode)
+    {
+        mode = fallback;
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return false;
+        }
+
+        if (string.Equals(value, "Alpha", StringComparison.OrdinalIgnoreCase))
+        {
+            mode = BlendMode.Normal;
+            return true;
+        }
+
+        if (Enum.TryParse<BlendMode>(value, true, out var parsed))
+        {
+            mode = parsed;
+            return true;
+        }
+
+        return false;
+    }
+
+    private static BlendMode ParseBlendModeOrDefault(string? value, BlendMode fallback)
+    {
+        return TryParseBlendMode(value, fallback, out var mode) ? mode : fallback;
     }
 
     private enum AnimationType
@@ -4285,7 +4314,8 @@ public partial class MainWindow : Window
                     byte sb = source[srcIndex];
                     byte sg = source[srcIndex + 1];
                     byte sr = source[srcIndex + 2];
-                    BlendInto(destination, destIndex, sb, sg, sr, mode, opacity);
+                    byte sa = source[srcIndex + 3];
+                    BlendInto(destination, destIndex, sb, sg, sr, sa, mode, opacity);
                 }
             });
             return;
@@ -4302,6 +4332,7 @@ public partial class MainWindow : Window
                 byte sb = 0;
                 byte sg = 0;
                 byte sr = 0;
+                byte sa = 0;
                 bool mapped;
                 int srcX;
                 int srcY;
@@ -4325,13 +4356,14 @@ public partial class MainWindow : Window
                     sb = source[srcIndex];
                     sg = source[srcIndex + 1];
                     sr = source[srcIndex + 2];
+                    sa = source[srcIndex + 3];
                 }
-                BlendInto(destination, destIndex, sb, sg, sr, mode, opacity);
+                BlendInto(destination, destIndex, sb, sg, sr, sa, mode, opacity);
             }
         });
     }
 
-    private static void BlendInto(byte[] destination, int destIndex, byte sb, byte sg, byte sr, BlendMode mode, double opacity)
+    private static void BlendInto(byte[] destination, int destIndex, byte sb, byte sg, byte sr, byte sa, BlendMode mode, double opacity)
     {
         opacity = Math.Clamp(opacity, 0.0, 1.0);
         byte db = destination[destIndex];
@@ -4349,6 +4381,15 @@ public partial class MainWindow : Window
                 g = dg + sg;
                 r = dr + sr;
                 break;
+            case BlendMode.Normal:
+            {
+                double alpha = (sa / 255.0) * opacity;
+                destination[destIndex] = ClampToByte((int)(db + (sb - db) * alpha));
+                destination[destIndex + 1] = ClampToByte((int)(dg + (sg - dg) * alpha));
+                destination[destIndex + 2] = ClampToByte((int)(dr + (sr - dr) * alpha));
+                destination[destIndex + 3] = 255;
+                return;
+            }
             case BlendMode.Multiply:
                 b = db * sb / 255;
                 g = dg * sg / 255;
@@ -4379,7 +4420,6 @@ public partial class MainWindow : Window
                 g = dg - sg;
                 r = dr - sr;
                 break;
-            case BlendMode.Normal:
             default:
                 b = sb;
                 g = sg;
@@ -5018,10 +5058,7 @@ public partial class MainWindow : Window
                  _ = _audioBeatDetector.InitializeAsync(_selectedAudioDeviceId);
             }
 
-            if (Enum.TryParse<BlendMode>(config.BlendMode, out var blendMode))
-            {
-                _blendMode = blendMode;
-            }
+            _blendMode = ParseBlendModeOrDefault(config.BlendMode, _blendMode);
 
             _pendingFullscreen = config.Fullscreen;
             RestoreSources(config.Sources);
@@ -5426,10 +5463,7 @@ public partial class MainWindow : Window
 
     private void ApplySourceModel(CaptureSource source, LayerEditorSource model)
     {
-        if (Enum.TryParse<BlendMode>(model.BlendMode, true, out var blend))
-        {
-            source.BlendMode = blend;
-        }
+        source.BlendMode = ParseBlendModeOrDefault(model.BlendMode, source.BlendMode);
 
         if (Enum.TryParse<FitMode>(model.FitMode, true, out var fitMode))
         {
@@ -5687,10 +5721,7 @@ public partial class MainWindow : Window
 
     private static void ApplySourceSettings(CaptureSource source, AppConfig.SourceConfig config)
     {
-        if (Enum.TryParse<BlendMode>(config.BlendMode, true, out var blend))
-        {
-            source.BlendMode = blend;
-        }
+        source.BlendMode = ParseBlendModeOrDefault(config.BlendMode, source.BlendMode);
 
         if (Enum.TryParse<FitMode>(config.FitMode, true, out var fitMode))
         {

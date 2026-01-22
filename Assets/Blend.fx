@@ -4,7 +4,7 @@ sampler2D overlaySampler : register(s1);
 float mode; // 0=Additive,1=Normal,2=Multiply,3=Screen,4=Overlay,5=Lighten,6=Darken,7=Subtractive
 float useOverlay; // 0 or 1
 
-float3 Blend(float3 baseColor, float3 overlayColor)
+float3 Blend(float3 baseColor, float3 overlayColor, float overlayAlpha)
 {
     if (useOverlay < 0.5) return baseColor;
     if (mode < 0.5) // Additive
@@ -13,7 +13,7 @@ float3 Blend(float3 baseColor, float3 overlayColor)
     }
     else if (mode < 1.5) // Normal
     {
-        return overlayColor;
+        return lerp(baseColor, overlayColor, overlayAlpha);
     }
     else if (mode < 2.5) // Multiply
     {
@@ -34,13 +34,17 @@ float3 Blend(float3 baseColor, float3 overlayColor)
     {
         return max(baseColor, overlayColor);
     }
+    else if (mode < 6.5) // Darken
+    {
+        return min(baseColor, overlayColor);
+    }
     else if (mode < 7.5) // Subtractive
     {
         return saturate(baseColor - overlayColor);
     }
-    else // Darken
+    else
     {
-        return min(baseColor, overlayColor);
+        return overlayColor;
     }
 }
 
@@ -48,6 +52,6 @@ float4 main(float2 uv : TEXCOORD) : COLOR
 {
     float4 baseColor = tex2D(inputSampler, uv);
     float4 overlayColor = tex2D(overlaySampler, uv);
-    float3 blended = Blend(baseColor.rgb, overlayColor.rgb);
+    float3 blended = Blend(baseColor.rgb, overlayColor.rgb, overlayColor.a);
     return float4(blended, 1);
 }

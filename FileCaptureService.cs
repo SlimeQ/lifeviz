@@ -1200,14 +1200,15 @@ internal sealed class FileCaptureService : IDisposable
                                 destination[destIndex] = source[srcIndex];
                                 destination[destIndex + 1] = source[srcIndex + 1];
                                 destination[destIndex + 2] = source[srcIndex + 2];
+                                destination[destIndex + 3] = source[srcIndex + 3];
                             }
                             else
                             {
                                 destination[destIndex] = 0;
                                 destination[destIndex + 1] = 0;
                                 destination[destIndex + 2] = 0;
+                                destination[destIndex + 3] = 0;
                             }
-                            destination[destIndex + 3] = 255;
                         }
                     });
                 }
