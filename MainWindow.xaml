@@ -190,21 +190,28 @@
                     <MenuItem Header="144 fps" IsCheckable="True" Click="FramerateItem_Click" />
                 </MenuItem>
                 <MenuItem Header="Animation BPM" StaysOpenOnClick="True">
-                    <DockPanel Margin="8,4" Width="220">
-                        <TextBlock Text="BPM:" DockPanel.Dock="Left"/>
-                        <TextBlock x:Name="AnimationBpmValueText"
-                                   Text="140"
-                                   DockPanel.Dock="Right"
-                                   FontWeight="Bold"/>
-                        <Slider x:Name="AnimationBpmSlider"
-                                Minimum="40"
-                                Maximum="240"
-                                Value="140"
-                                SmallChange="1"
-                                LargeChange="10"
-                                Margin="8,0"
-                                ValueChanged="AnimationBpmSlider_OnValueChanged"/>
-                    </DockPanel>
+                    <StackPanel Margin="8,4" Width="220">
+                        <DockPanel>
+                            <TextBlock Text="BPM:" DockPanel.Dock="Left"/>
+                            <TextBlock x:Name="AnimationBpmValueText"
+                                       Text="140"
+                                       DockPanel.Dock="Right"
+                                       FontWeight="Bold"/>
+                            <Slider x:Name="AnimationBpmSlider"
+                                    Minimum="40"
+                                    Maximum="240"
+                                    Value="140"
+                                    SmallChange="1"
+                                    LargeChange="10"
+                                    Margin="8,0"
+                                    ValueChanged="AnimationBpmSlider_OnValueChanged"/>
+                        </DockPanel>
+                        <CheckBox x:Name="AnimationAudioSyncCheckBox"
+                                  Content="Sync to Audio BPM"
+                                  Margin="0,6,0,0"
+                                  Checked="AnimationAudioSync_OnChecked"
+                                  Unchecked="AnimationAudioSync_OnChecked"/>
+                    </StackPanel>
                 </MenuItem>
                 <MenuItem Header="FPS Modulation" StaysOpenOnClick="True">
                     <StackPanel Margin="4" Width="220">

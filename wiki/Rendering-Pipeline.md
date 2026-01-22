@@ -34,7 +34,7 @@
 
 ## Layer Animations
 
-- Each source (including layer groups) can stack animations: Zoom In, Translate, Rotate, Fade, and DVD Bounce (with an adjustable scale). Every animation includes a cycle length in beats, so long fades can stay locked to BPM.
+- Each source (including layer groups) can stack animations: Zoom In, Translate, Rotate, Beat Shake, Fade, and DVD Bounce (with an adjustable scale). Every animation includes a cycle length in beats, so long fades can stay locked to BPM; Beat Shake uses audio beat timestamps when *Sync to Audio BPM* is enabled (falling back to the animation BPM for a timed pulse when no audio device is configured), exposes an intensity control, and ignores speed/cycle settings so its amplitude stays consistent per beat.
 - Video sources rely on system codecs (WPF MediaPlayer). If a video cannot decode (blank frames or zero reported dimensions), LifeViz auto-transcodes to H.264 using `ffmpeg` (cached under `%LOCALAPPDATA%\\lifeviz\\video-cache`). While transcoding, the layer is skipped so it doesn't black out the stack. If `ffmpeg` is missing or the transcode fails, a warning is shown so you can transcode manually.
 - Animations are evaluated during compositing by transforming the destination sampling coordinates before the fit-mode mapping, so the animation affects both injection and rendering.
 - All animations share a global BPM (default 140) with per-animation half/normal/double time and forward or reverse (ping-pong) loops.

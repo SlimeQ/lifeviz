@@ -5,6 +5,7 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Runtime.InteropServices;
+using WinRT;
 using Windows.Devices.Enumeration;
 using Windows.Media;
 using Windows.Media.Audio;
@@ -36,6 +37,7 @@ internal sealed class AudioBeatDetector : IDisposable
     private double _detectedBpm = 120;
     
     public DateTime LastBeatTime { get; private set; } = DateTime.MinValue;
+    public long BeatCount { get; private set; }
 
     public double CurrentBpm => _detectedBpm;
     public bool IsBeat { get; private set; }
@@ -66,6 +68,7 @@ internal sealed class AudioBeatDetector : IDisposable
             }
 
             StopInternal();
+            ResetState();
 
             var settings = new AudioGraphSettings(AudioRenderCategory.Media);
             var result = await AudioGraph.CreateAsync(settings);
@@ -110,43 +113,128 @@ internal sealed class AudioBeatDetector : IDisposable
     {
         if (_graph != null)
         {
-            _graph.Stop();
+            try
+            {
+                _graph.Stop();
+            }
+            catch (ObjectDisposedException)
+            {
+                // Ignore shutdown races.
+            }
+            catch (COMException ex) when (ex.HResult == unchecked((int)0x80000013))
+            {
+                // Object has been closed.
+            }
+
             _graph.QuantumStarted -= Graph_QuantumStarted;
-            _graph.Dispose();
+            try
+            {
+                _graph.Dispose();
+            }
+            catch (ObjectDisposedException)
+            {
+                // Ignore shutdown races.
+            }
+            catch (COMException ex) when (ex.HResult == unchecked((int)0x80000013))
+            {
+                // Object has been closed.
+            }
             _graph = null;
         }
-        _inputNode?.Dispose();
-        _inputNode = null;
-        _frameOutputNode?.Dispose();
-        _frameOutputNode = null;
+        if (_inputNode != null)
+        {
+            try
+            {
+                _inputNode.Dispose();
+            }
+            catch (ObjectDisposedException)
+            {
+                // Ignore shutdown races.
+            }
+            catch (COMException ex) when (ex.HResult == unchecked((int)0x80000013))
+            {
+                // Object has been closed.
+            }
+            _inputNode = null;
+        }
+        if (_frameOutputNode != null)
+        {
+            try
+            {
+                _frameOutputNode.Dispose();
+            }
+            catch (ObjectDisposedException)
+            {
+                // Ignore shutdown races.
+            }
+            catch (COMException ex) when (ex.HResult == unchecked((int)0x80000013))
+            {
+                // Object has been closed.
+            }
+            _frameOutputNode = null;
+        }
         _currentDeviceId = null;
+    }
+
+    private void ResetState()
+    {
+        _energyHistory.Clear();
+        _beatTimestamps.Clear();
+        _localEnergyAverage = 0;
+        _detectedBpm = 120;
+        LastBeatTime = DateTime.MinValue;
+        IsBeat = false;
+        CurrentEnergy = 0;
+        BeatCount = 0;
     }
 
     private unsafe void Graph_QuantumStarted(AudioGraph sender, object args)
     {
-        if (_frameOutputNode == null) return;
-
-        using var frame = _frameOutputNode.GetFrame();
-        using var buffer = frame.LockBuffer(AudioBufferAccessMode.Read);
-        using var reference = buffer.CreateReference();
-
-        ((IMemoryBufferByteAccess)reference).GetBuffer(out IntPtr dataPtr, out uint capacity);
-        
-        // Assuming float audio (default for AudioGraph)
-        float* dataInFloat = (float*)dataPtr;
-        int sampleCount = (int)capacity / sizeof(float);
-        
-        if (sampleCount == 0) return;
-
-        double totalEnergy = 0;
-        for (int i = 0; i < sampleCount; i++)
+        var outputNode = _frameOutputNode;
+        if (outputNode == null)
         {
-            float sample = dataInFloat[i];
-            totalEnergy += sample * sample;
+            return;
         }
-        
-        double rms = Math.Sqrt(totalEnergy / sampleCount);
-        ProcessEnergy(rms);
+
+        try
+        {
+            using var frame = outputNode.GetFrame();
+            using var buffer = frame.LockBuffer(AudioBufferAccessMode.Read);
+            using var reference = buffer.CreateReference();
+
+            reference.As<IMemoryBufferByteAccess>().GetBuffer(out IntPtr dataPtr, out uint capacity);
+
+            // Assuming float audio (default for AudioGraph)
+            float* dataInFloat = (float*)dataPtr;
+            int sampleCount = (int)capacity / sizeof(float);
+
+            if (sampleCount == 0)
+            {
+                return;
+            }
+
+            double totalEnergy = 0;
+            for (int i = 0; i < sampleCount; i++)
+            {
+                float sample = dataInFloat[i];
+                totalEnergy += sample * sample;
+            }
+
+            double rms = Math.Sqrt(totalEnergy / sampleCount);
+            ProcessEnergy(rms);
+        }
+        catch (ObjectDisposedException)
+        {
+            // Audio graph shut down while a quantum callback was in-flight.
+        }
+        catch (COMException ex) when (ex.HResult == unchecked((int)0x80000013))
+        {
+            // Object has been closed - ignore during device swaps/shutdown.
+        }
+        catch (Exception ex)
+        {
+            Logger.Error("Audio beat detector frame read failed", ex);
+        }
     }
     
     [ComImport]
@@ -178,6 +266,7 @@ internal sealed class AudioBeatDetector : IDisposable
         {
             IsBeat = true;
             var now = DateTime.UtcNow;
+            BeatCount++;
             
             // Calculate BPM
             if (LastBeatTime != DateTime.MinValue)
@@ -207,6 +296,20 @@ internal sealed class AudioBeatDetector : IDisposable
         else
         {
             IsBeat = false;
+        }
+    }
+
+    public void Stop()
+    {
+        _lock.Wait();
+        try
+        {
+            StopInternal();
+            ResetState();
+        }
+        finally
+        {
+            _lock.Release();
         }
     }
 

@@ -234,6 +234,8 @@ public partial class LayerEditorWindow : Window
 
     private void AddDvd_Click(object sender, RoutedEventArgs e) => AddAnimation(sender, "DvdBounce", null, null);
 
+    private void AddBeatShake_Click(object sender, RoutedEventArgs e) => AddAnimation(sender, "BeatShake", null, null);
+
     private void AddFade_Click(object sender, RoutedEventArgs e) => AddAnimation(sender, "Fade", null, null);
 
     private void AddAnimation(object sender, string type, string? translateKey, string? rotateKey)
@@ -302,6 +304,8 @@ public partial class LayerEditorWindow : Window
     private void AnimationRotateDegrees_Changed(object sender, RoutedPropertyChangedEventArgs<double> e) => ApplyAnimationChange(sender);
 
     private void AnimationSize_Changed(object sender, RoutedPropertyChangedEventArgs<double> e) => ApplyAnimationChange(sender);
+
+    private void AnimationBeatShakeIntensity_Changed(object sender, RoutedPropertyChangedEventArgs<double> e) => ApplyAnimationChange(sender);
 
     private void ApplyAnimationChange(object sender)
     {

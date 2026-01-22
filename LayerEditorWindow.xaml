@@ -166,6 +166,23 @@
                                        Margin="6,0,0,0"
                                        VerticalAlignment="Center" />
                         </StackPanel>
+                        <StackPanel Orientation="Horizontal"
+                                    Margin="0,0,12,6"
+                                    Visibility="{Binding IsBeatShake, Converter={StaticResource BoolToVisibility}}">
+                            <TextBlock Text="Intensity"
+                                       VerticalAlignment="Center" />
+                            <Slider Minimum="0"
+                                    Maximum="2"
+                                    Value="{Binding BeatShakeIntensity}"
+                                    Width="160"
+                                    SmallChange="0.05"
+                                    LargeChange="0.2"
+                                    Margin="6,0,0,0"
+                                    ValueChanged="AnimationBeatShakeIntensity_Changed" />
+                            <TextBlock Text="{Binding BeatShakeIntensity, StringFormat={}{0:P0}}"
+                                       Margin="6,0,0,0"
+                                       VerticalAlignment="Center" />
+                        </StackPanel>
                     </WrapPanel>
                 </StackPanel>
             </Border>
@@ -308,6 +325,10 @@
                                             Padding="8,2"
                                             Margin="0,0,6,0"
                                             Click="AddDvd_Click" />
+                                    <Button Content="Beat Shake"
+                                            Padding="8,2"
+                                            Margin="0,0,6,0"
+                                            Click="AddBeatShake_Click" />
                                     <Button Content="Fade"
                                             Padding="8,2"
                                             Click="AddFade_Click" />

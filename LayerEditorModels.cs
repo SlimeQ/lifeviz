@@ -58,6 +58,7 @@ internal static class LayerEditorOptions
         new LayerEditorOption("Translate", "Translate"),
         new LayerEditorOption("Rotate", "Rotate"),
         new LayerEditorOption("DvdBounce", "DVD Bounce"),
+        new LayerEditorOption("BeatShake", "Beat Shake"),
         new LayerEditorOption("Fade", "Fade")
     };
 
@@ -123,6 +124,7 @@ internal sealed class LayerEditorAnimation : LayerEditorNotify
     private string _rotationDirection = "Clockwise";
     private double _rotationDegrees = 12.0;
     private double _dvdScale = 0.2;
+    private double _beatShakeIntensity = 1.0;
     private double _beatsPerCycle = 1.0;
 
     public Guid Id
@@ -142,6 +144,7 @@ internal sealed class LayerEditorAnimation : LayerEditorNotify
                 OnPropertyChanged(nameof(IsTranslate));
                 OnPropertyChanged(nameof(IsRotate));
                 OnPropertyChanged(nameof(IsDvd));
+                OnPropertyChanged(nameof(IsBeatShake));
                 OnPropertyChanged(nameof(DisplayName));
                 OnPropertyChanged(nameof(CycleMax));
                 OnPropertyChanged(nameof(CycleLargeChange));
@@ -185,6 +188,12 @@ internal sealed class LayerEditorAnimation : LayerEditorNotify
         set => SetField(ref _dvdScale, value);
     }
 
+    public double BeatShakeIntensity
+    {
+        get => _beatShakeIntensity;
+        set => SetField(ref _beatShakeIntensity, value);
+    }
+
     public double BeatsPerCycle
     {
         get => _beatsPerCycle;
@@ -194,6 +203,7 @@ internal sealed class LayerEditorAnimation : LayerEditorNotify
     public bool IsTranslate => string.Equals(Type, "Translate", StringComparison.OrdinalIgnoreCase);
     public bool IsRotate => string.Equals(Type, "Rotate", StringComparison.OrdinalIgnoreCase);
     public bool IsDvd => string.Equals(Type, "DvdBounce", StringComparison.OrdinalIgnoreCase);
+    public bool IsBeatShake => string.Equals(Type, "BeatShake", StringComparison.OrdinalIgnoreCase);
 
     public LayerEditorSource? Parent { get; set; }
 
@@ -201,6 +211,7 @@ internal sealed class LayerEditorAnimation : LayerEditorNotify
     {
         "ZoomIn" => "Zoom In",
         "DvdBounce" => "DVD Bounce",
+        "BeatShake" => "Beat Shake",
         _ => Type
     };
 

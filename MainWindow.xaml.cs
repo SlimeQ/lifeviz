@@ -37,6 +37,9 @@ public partial class MainWindow : Window
     private const double AnimationDvdScale = 0.2;
     private const double AnimationDvdCycleBeats = 4.0;
     private const double AnimationDvdAspectFactor = 1.3;
+    private const double AnimationBeatShakeFactor = 0.03;
+    private const double AnimationBeatShakeFrequency = 24.0;
+    private const double AnimationBeatShakeWindowBeats = 0.25;
 
     private readonly GameOfLifeEngine _engine = new();
     private readonly WindowCaptureService _windowCapture = new();
@@ -123,6 +126,7 @@ public partial class MainWindow : Window
     private double _timeSinceLastStep;
     private bool _fpsOscillationEnabled;
     private bool _audioSyncEnabled;
+    private bool _animationAudioSyncEnabled;
     private string? _selectedAudioDeviceId;
     private double _oscillationBpm = 140;
     private double _oscillationMinFps = 30;
@@ -1153,6 +1157,11 @@ public partial class MainWindow : Window
         {
             AnimationBpmSlider.Value = _animationBpm;
             AnimationBpmValueText.Text = $"{_animationBpm:F0}";
+            AnimationBpmSlider.IsEnabled = !_animationAudioSyncEnabled;
+        }
+        if (AnimationAudioSyncCheckBox != null)
+        {
+            AnimationAudioSyncCheckBox.IsChecked = _animationAudioSyncEnabled;
         }
 
         if (FpsOscillationCheckBox != null)
@@ -1186,6 +1195,16 @@ public partial class MainWindow : Window
     {
         if (AudioSourceMenu == null) return;
         AudioSourceMenu.Items.Clear();
+
+        var noneItem = new MenuItem
+        {
+            Header = "None",
+            IsCheckable = true,
+            IsChecked = string.IsNullOrWhiteSpace(_selectedAudioDeviceId)
+        };
+        noneItem.Click += (_, _) => ClearAudioDeviceSelection();
+        AudioSourceMenu.Items.Add(noneItem);
+        AudioSourceMenu.Items.Add(new Separator());
 
         try
         {
@@ -1225,6 +1244,20 @@ public partial class MainWindow : Window
         _selectedAudioDeviceId = device.Id;
         await _audioBeatDetector.InitializeAsync(device.Id);
         SaveConfig();
+        PopulateAudioMenu();
+    }
+
+    private void ClearAudioDeviceSelection()
+    {
+        if (string.IsNullOrWhiteSpace(_selectedAudioDeviceId))
+        {
+            return;
+        }
+
+        _selectedAudioDeviceId = null;
+        _audioBeatDetector.Stop();
+        SaveConfig();
+        PopulateAudioMenu();
     }
 
     private async Task PopulateSourcesMenuAsync()
@@ -1552,6 +1585,14 @@ public partial class MainWindow : Window
         addDvdItem.Click += AddAnimationMenuItem_Click;
         animationsMenu.Items.Add(addDvdItem);
 
+        var addBeatShakeItem = new MenuItem
+        {
+            Header = "Add Beat Shake",
+            Tag = new AnimationAddTarget(source, AnimationType.BeatShake)
+        };
+        addBeatShakeItem.Click += AddAnimationMenuItem_Click;
+        animationsMenu.Items.Add(addBeatShakeItem);
+
         var addFadeItem = new MenuItem
         {
             Header = "Add Fade",
@@ -1705,6 +1746,38 @@ public partial class MainWindow : Window
                 sizeItem.Items.Add(sizeValueItem);
                 sizeItem.Items.Add(sizeSlider);
                 animationItem.Items.Add(sizeItem);
+            }
+            else if (animation.Type == AnimationType.BeatShake)
+            {
+                var intensityItem = new MenuItem
+                {
+                    Header = "Intensity",
+                    StaysOpenOnClick = true
+                };
+                var intensityValueItem = new MenuItem
+                {
+                    Header = DescribeShakeIntensity(animation.BeatShakeIntensity),
+                    IsEnabled = false
+                };
+                var intensitySlider = new Slider
+                {
+                    Minimum = 0,
+                    Maximum = 2,
+                    Value = Math.Clamp(animation.BeatShakeIntensity, 0, 2),
+                    Width = 140,
+                    SmallChange = 0.05,
+                    LargeChange = 0.2,
+                    Margin = new Thickness(12, 4, 12, 8)
+                };
+                intensitySlider.ValueChanged += (_, args) =>
+                {
+                    animation.BeatShakeIntensity = Math.Clamp(args.NewValue, 0, 2);
+                    intensityValueItem.Header = DescribeShakeIntensity(animation.BeatShakeIntensity);
+                    SaveConfig();
+                };
+                intensityItem.Items.Add(intensityValueItem);
+                intensityItem.Items.Add(intensitySlider);
+                animationItem.Items.Add(intensityItem);
             }
 
             var removeItem = new MenuItem
@@ -2076,6 +2149,7 @@ public partial class MainWindow : Window
             AnimationType.Translate => $"{prefix}Translate {animation.TranslateDirection} ({DescribeLoop(animation.Loop)}, {DescribeSpeed(animation.Speed)})",
             AnimationType.Rotate => $"{prefix}Rotate {animation.RotationDirection} ({DescribeLoop(animation.Loop)}, {DescribeSpeed(animation.Speed)})",
             AnimationType.DvdBounce => $"{prefix}DVD Bounce ({DescribeLoop(animation.Loop)}, {DescribeSpeed(animation.Speed)}, {DescribeScale(animation.DvdScale)})",
+            AnimationType.BeatShake => $"{prefix}Beat Shake ({DescribeLoop(animation.Loop)}, {DescribeSpeed(animation.Speed)}, {DescribeShakeIntensity(animation.BeatShakeIntensity)})",
             AnimationType.Fade => $"{prefix}Fade ({DescribeLoop(animation.Loop)}, {DescribeSpeed(animation.Speed)})",
             _ => $"{prefix}Animation"
         };
@@ -2095,6 +2169,8 @@ public partial class MainWindow : Window
     };
 
     private static string DescribeScale(double value) => $"{Math.Clamp(value, 0.01, 1):P0}";
+
+    private static string DescribeShakeIntensity(double value) => $"{Math.Clamp(value, 0, 2):P0}";
 
     private string DescribeCycleBeats(double beats)
     {
@@ -2118,6 +2194,50 @@ public partial class MainWindow : Window
         AnimationSpeed.Octuple => 8.0,
         _ => 1.0
     };
+
+    private bool TryGetAnimationBeatTiming(double timeSeconds, out double beatDuration, out double beatsElapsed, out bool beatAligned)
+    {
+        double bpm = _animationBpm > 0 ? _animationBpm : DefaultAnimationBpm;
+        bool audioRequested = _animationAudioSyncEnabled && !string.IsNullOrWhiteSpace(_selectedAudioDeviceId);
+        double effectiveBpm = bpm;
+        if (audioRequested)
+        {
+            double detectedBpm = _audioBeatDetector.CurrentBpm;
+            if (!double.IsNaN(detectedBpm) && !double.IsInfinity(detectedBpm) && detectedBpm > 0)
+            {
+                effectiveBpm = detectedBpm;
+            }
+        }
+
+        effectiveBpm = Math.Clamp(effectiveBpm, 10, 300);
+        beatDuration = 60.0 / effectiveBpm;
+        if (beatDuration <= 0.000001)
+        {
+            beatsElapsed = 0;
+            beatAligned = false;
+            return false;
+        }
+
+        beatAligned = audioRequested &&
+                      _audioBeatDetector.LastBeatTime != DateTime.MinValue &&
+                      _audioBeatDetector.BeatCount > 0;
+
+        if (beatAligned)
+        {
+            double timeSinceBeat = (DateTime.UtcNow - _audioBeatDetector.LastBeatTime).TotalSeconds;
+            if (timeSinceBeat < 0)
+            {
+                timeSinceBeat = 0;
+            }
+
+            long beatIndex = Math.Max(0, _audioBeatDetector.BeatCount - 1);
+            beatsElapsed = beatIndex + (timeSinceBeat / beatDuration);
+            return true;
+        }
+
+        beatsElapsed = timeSeconds / beatDuration;
+        return true;
+    }
 
     private void AddAnimationMenuItem_Click(object sender, RoutedEventArgs e)
     {
@@ -2772,6 +2892,7 @@ public partial class MainWindow : Window
         {
             animation.DvdScale = Math.Clamp(model.DvdScale, 0.01, 1.0);
         }
+        animation.BeatShakeIntensity = Math.Clamp(model.BeatShakeIntensity, 0, 2);
         if (model.BeatsPerCycle > 0)
         {
             animation.BeatsPerCycle = Math.Clamp(model.BeatsPerCycle, 1, 4096);
@@ -3432,6 +3553,16 @@ public partial class MainWindow : Window
         SaveConfig();
     }
 
+    private void AnimationAudioSync_OnChecked(object sender, RoutedEventArgs e)
+    {
+        _animationAudioSyncEnabled = AnimationAudioSyncCheckBox?.IsChecked == true;
+        if (AnimationBpmSlider != null)
+        {
+            AnimationBpmSlider.IsEnabled = !_animationAudioSyncEnabled;
+        }
+        SaveConfig();
+    }
+
     private void InvertThresholdCheckBox_OnChecked(object sender, RoutedEventArgs e)
     {
         _invertThreshold = InvertThresholdCheckBox?.IsChecked == true;
@@ -3616,6 +3747,7 @@ public partial class MainWindow : Window
         Translate,
         Rotate,
         DvdBounce,
+        BeatShake,
         Fade
     }
 
@@ -3660,6 +3792,7 @@ public partial class MainWindow : Window
         public RotationDirection RotationDirection { get; set; } = RotationDirection.Clockwise;
         public double RotationDegrees { get; set; } = AnimationRotateDegrees;
         public double DvdScale { get; set; } = AnimationDvdScale;
+        public double BeatShakeIntensity { get; set; } = 1.0;
         public double BeatsPerCycle { get; set; } = 1.0;
     }
 
@@ -4054,9 +4187,7 @@ public partial class MainWindow : Window
             return Transform2D.Identity;
         }
 
-        double bpm = _animationBpm > 0 ? _animationBpm : DefaultAnimationBpm;
-        double beatDuration = 60.0 / Math.Max(1.0, bpm);
-        if (beatDuration <= 0)
+        if (!TryGetAnimationBeatTiming(timeSeconds, out _, out double beatsElapsed, out _))
         {
             return Transform2D.Identity;
         }
@@ -4069,13 +4200,17 @@ public partial class MainWindow : Window
         {
             double tempoMultiplier = GetSpeedMultiplier(animation.Speed);
             double beatsPerCycle = Math.Clamp(animation.BeatsPerCycle, 1, 4096);
-            double cycle = beatDuration * beatsPerCycle / Math.Max(tempoMultiplier, 0.000001);
-            if (cycle <= 0.000001)
+            double cycleBeats = beatsPerCycle / Math.Max(tempoMultiplier, 0.000001);
+            if (cycleBeats <= 0.000001)
             {
                 continue;
             }
 
-            double phase = (timeSeconds % cycle) / cycle;
+            double phase = (beatsElapsed / cycleBeats) % 1.0;
+            if (phase < 0)
+            {
+                phase += 1.0;
+            }
             double progress = GetLoopProgress(phase, animation.Loop);
 
             Transform2D animTransform = Transform2D.Identity;
@@ -4122,16 +4257,24 @@ public partial class MainWindow : Window
                 }
                 case AnimationType.DvdBounce:
                 {
-                    double baseCycle = beatDuration * AnimationDvdCycleBeats * beatsPerCycle / Math.Max(tempoMultiplier, 0.000001);
-                    if (baseCycle <= 0.000001)
+                    double baseCycleBeats = (AnimationDvdCycleBeats * beatsPerCycle) / Math.Max(tempoMultiplier, 0.000001);
+                    if (baseCycleBeats <= 0.000001)
                     {
                         break;
                     }
 
-                    double cycleX = baseCycle;
-                    double cycleY = baseCycle * AnimationDvdAspectFactor;
-                    double phaseX = (timeSeconds % cycleX) / cycleX;
-                    double phaseY = (timeSeconds % cycleY) / cycleY;
+                    double cycleXBeats = baseCycleBeats;
+                    double cycleYBeats = baseCycleBeats * AnimationDvdAspectFactor;
+                    double phaseX = (beatsElapsed / cycleXBeats) % 1.0;
+                    double phaseY = (beatsElapsed / cycleYBeats) % 1.0;
+                    if (phaseX < 0)
+                    {
+                        phaseX += 1.0;
+                    }
+                    if (phaseY < 0)
+                    {
+                        phaseY += 1.0;
+                    }
                     double progressX = GetLoopProgress(phaseX, animation.Loop);
                     double progressY = GetLoopProgress(phaseY, animation.Loop);
 
@@ -4144,6 +4287,77 @@ public partial class MainWindow : Window
                     var scaleTransform = CreateScaleAtOrigin(scale);
                     var translateTransform = CreateTranslation(posX, posY);
                     animTransform = Transform2D.Multiply(translateTransform, scaleTransform);
+                    break;
+                }
+                case AnimationType.BeatShake:
+                {
+                    double baseBpm = _animationBpm > 0 ? _animationBpm : DefaultAnimationBpm;
+                    bool audioRequested = _animationAudioSyncEnabled && !string.IsNullOrWhiteSpace(_selectedAudioDeviceId);
+                    bool beatAligned = audioRequested &&
+                                       _audioBeatDetector.LastBeatTime != DateTime.MinValue &&
+                                       _audioBeatDetector.BeatCount > 0;
+                    double detectedBpm = audioRequested ? _audioBeatDetector.CurrentBpm : baseBpm;
+                    if (double.IsNaN(detectedBpm) || double.IsInfinity(detectedBpm) || detectedBpm <= 0)
+                    {
+                        detectedBpm = baseBpm;
+                    }
+
+                    double shakeBpm = Math.Clamp(detectedBpm, 10, 300);
+                    double shakeBeatDuration = 60.0 / shakeBpm;
+                    double shakeWindow = shakeBeatDuration * AnimationBeatShakeWindowBeats;
+                    if (shakeBeatDuration <= 0.000001 || shakeWindow <= 0.000001)
+                    {
+                        break;
+                    }
+
+                    double timeSinceBeat;
+                    long beatSeed;
+                    if (beatAligned)
+                    {
+                        timeSinceBeat = (DateTime.UtcNow - _audioBeatDetector.LastBeatTime).TotalSeconds;
+                        beatSeed = _audioBeatDetector.LastBeatTime.Ticks;
+                    }
+                    else
+                    {
+                        timeSinceBeat = timeSeconds % shakeBeatDuration;
+                        beatSeed = (long)(timeSeconds / shakeBeatDuration);
+                    }
+
+                    if (timeSinceBeat < 0)
+                    {
+                        timeSinceBeat = 0;
+                    }
+
+                    if (timeSinceBeat >= shakeWindow)
+                    {
+                        break;
+                    }
+
+                    double progressShake = timeSinceBeat / shakeWindow;
+                    double envelope = 1.0 - progressShake;
+                    envelope *= envelope;
+
+                    double intensity = Math.Clamp(animation.BeatShakeIntensity, 0, 2);
+                    double amplitude = Math.Min(destWidth, destHeight) * AnimationBeatShakeFactor * intensity * envelope;
+                    if (amplitude <= 0.0001)
+                    {
+                        break;
+                    }
+
+                    double frequency = AnimationBeatShakeFrequency;
+                    ulong seed = BuildBeatShakeSeed(source.Id, beatSeed);
+                    double phaseX = SeedToRadians(seed);
+                    double phaseY = SeedToRadians(ScrambleSeed(seed + 0x9E3779B97F4A7C15UL));
+
+                    double t = timeSinceBeat;
+                    double shakeX = Math.Sin(2 * Math.PI * frequency * t + phaseX) +
+                                    0.5 * Math.Sin(2 * Math.PI * (frequency * 1.9) * t + phaseY);
+                    double shakeY = Math.Cos(2 * Math.PI * (frequency * 1.3) * t + phaseY) +
+                                    0.5 * Math.Sin(2 * Math.PI * (frequency * 2.3) * t + phaseX);
+
+                    double dx = amplitude * 0.6 * shakeX;
+                    double dy = amplitude * 0.6 * shakeY;
+                    animTransform = CreateTranslation(dx, dy);
                     break;
                 }
                 case AnimationType.Fade:
@@ -4170,9 +4384,7 @@ public partial class MainWindow : Window
             return 1.0;
         }
 
-        double bpm = _animationBpm > 0 ? _animationBpm : DefaultAnimationBpm;
-        double beatDuration = 60.0 / Math.Max(1.0, bpm);
-        if (beatDuration <= 0)
+        if (!TryGetAnimationBeatTiming(timeSeconds, out _, out double beatsElapsed, out _))
         {
             return 1.0;
         }
@@ -4187,13 +4399,17 @@ public partial class MainWindow : Window
 
             double tempoMultiplier = GetSpeedMultiplier(animation.Speed);
             double beatsPerCycle = Math.Clamp(animation.BeatsPerCycle, 1, 4096);
-            double cycle = beatDuration * beatsPerCycle / Math.Max(tempoMultiplier, 0.000001);
-            if (cycle <= 0.000001)
+            double cycleBeats = beatsPerCycle / Math.Max(tempoMultiplier, 0.000001);
+            if (cycleBeats <= 0.000001)
             {
                 continue;
             }
 
-            double phase = (timeSeconds % cycle) / cycle;
+            double phase = (beatsElapsed / cycleBeats) % 1.0;
+            if (phase < 0)
+            {
+                phase += 1.0;
+            }
             double progress = GetLoopProgress(phase, animation.Loop);
             opacity *= Math.Clamp(progress, 0.0, 1.0);
         }
@@ -4210,6 +4426,27 @@ public partial class MainWindow : Window
         }
         return phase;
     }
+
+    private static ulong BuildBeatShakeSeed(Guid id, long beatSeed)
+    {
+        var bytes = id.ToByteArray();
+        ulong left = BitConverter.ToUInt64(bytes, 0);
+        ulong right = BitConverter.ToUInt64(bytes, 8);
+        ulong seed = left ^ right ^ (ulong)beatSeed;
+        return ScrambleSeed(seed);
+    }
+
+    private static ulong ScrambleSeed(ulong seed)
+    {
+        seed ^= seed >> 33;
+        seed *= 0xff51afd7ed558ccdUL;
+        seed ^= seed >> 33;
+        seed *= 0xc4ceb9fe1a85ec53UL;
+        seed ^= seed >> 33;
+        return seed;
+    }
+
+    private static double SeedToRadians(ulong seed) => (seed / (double)ulong.MaxValue) * (Math.PI * 2.0);
 
     private static Transform2D CreateTranslation(double dx, double dy) => new(1, 0, 0, 1, dx, dy);
 
@@ -5024,6 +5261,7 @@ public partial class MainWindow : Window
             {
                 _animationBpm = Math.Clamp(config.AnimationBpm, 10, 300);
             }
+            _animationAudioSyncEnabled = config.AnimationAudioSyncEnabled;
             if (!string.IsNullOrWhiteSpace(config.RecordingQuality) &&
                 Enum.TryParse<RecordingQuality>(config.RecordingQuality, true, out var recordingQuality))
             {
@@ -5105,6 +5343,7 @@ public partial class MainWindow : Window
                 InvertComposite = _invertComposite,
                 ShowFps = _showFps,
                 AnimationBpm = _animationBpm,
+                AnimationAudioSyncEnabled = _animationAudioSyncEnabled,
                 RecordingQuality = _recordingQuality.ToString(),
                 Height = _configuredRows,
                 Depth = _configuredDepth,
@@ -5188,6 +5427,7 @@ public partial class MainWindow : Window
                 RotationDirection = animation.RotationDirection.ToString(),
                 RotationDegrees = animation.RotationDegrees,
                 DvdScale = animation.DvdScale,
+                BeatShakeIntensity = animation.BeatShakeIntensity,
                 BeatsPerCycle = animation.BeatsPerCycle
             });
         }
@@ -5242,6 +5482,7 @@ public partial class MainWindow : Window
                     RotationDirection = animation.RotationDirection.ToString(),
                     RotationDegrees = animation.RotationDegrees,
                     DvdScale = animation.DvdScale,
+                    BeatShakeIntensity = animation.BeatShakeIntensity,
                     BeatsPerCycle = animation.BeatsPerCycle,
                     Parent = model
                 });
@@ -5762,6 +6003,7 @@ public partial class MainWindow : Window
                 {
                     animation.DvdScale = Math.Clamp(animationConfig.DvdScale, 0.01, 1.0);
                 }
+                animation.BeatShakeIntensity = Math.Clamp(animationConfig.BeatShakeIntensity, 0, 2);
                 if (animationConfig.BeatsPerCycle > 0)
                 {
                     animation.BeatsPerCycle = Math.Clamp(animationConfig.BeatsPerCycle, 1, 4096);
@@ -5789,6 +6031,7 @@ public partial class MainWindow : Window
         public bool InvertComposite { get; set; }
         public bool ShowFps { get; set; }
         public double AnimationBpm { get; set; } = DefaultAnimationBpm;
+        public bool AnimationAudioSyncEnabled { get; set; }
         public string RecordingQuality { get; set; } = global::lifeviz.RecordingQuality.High.ToString();
         public int Height { get; set; } = DefaultRows;
         [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
@@ -5832,6 +6075,7 @@ public partial class MainWindow : Window
             public string RotationDirection { get; set; } = global::lifeviz.MainWindow.RotationDirection.Clockwise.ToString();
             public double RotationDegrees { get; set; } = AnimationRotateDegrees;
             public double DvdScale { get; set; } = AnimationDvdScale;
+            public double BeatShakeIntensity { get; set; } = 1.0;
             public double BeatsPerCycle { get; set; } = 1.0;
         }
     }
