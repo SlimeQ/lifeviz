@@ -266,6 +266,10 @@
                         </DockPanel>
                     </StackPanel>
                 </MenuItem>
+                <Separator />
+                <MenuItem x:Name="UpdateMenuItem"
+                          Header="Update to Latest Release..."
+                          Click="UpdateToLatestRelease_Click" />
             </ContextMenu>
         </Grid.ContextMenu>
 

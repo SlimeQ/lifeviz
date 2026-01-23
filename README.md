@@ -32,6 +32,7 @@ Right-click the scene and use **Sources** to stack multiple windows, OBS-style:
 - **Composite Blend** still controls how the finished composite mixes with the Game of Life output (Additive default via the pixel shader; Normal is transparency-aware).
 - **Passthrough Underlay** shows that composite behind the simulation; **Preserve Window Resolution** renders at the primary source's native size before scaling.
 - **Fullscreen** toggle lives in the context menu and persists; it now sizes to the active monitor bounds, stays topmost, and covers the taskbar.
+- **Update to Latest Release...** pulls down the newest GitHub release installer and runs it to upgrade the current installation in place (LifeViz closes while the installer runs).
 - Capture uses DPI-correct window bounds (via DWM) so the full surface is normalized even for PiP/scaled windows, and the composited buffer feeds the injection path (threshold window + noise + life/binning modes) on every tick.
 - Capture buffers are pooled and source-resolution copies are only produced when **Preserve Window Resolution** is enabled, eliminating GC spikes from per-frame allocations.
 - Webcam sources stream via WinRT `MediaCapture`; clearing sources or closing the app releases the camera. Cameras retry initialization once and wait longer for first frames before being removed.

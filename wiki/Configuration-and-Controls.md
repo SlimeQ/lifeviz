@@ -23,6 +23,7 @@ The UI stays invisible until you right-click anywhere on the canvas, revealing t
 - **Capture Threshold Window** - two sliders (min/max) plus *Invert Window*. Pixels inside the window set cells alive when injecting captures; invert selects the wrapped outside range instead.
 - **Injection Noise** - slider (0-1) that randomly skips injection per pixel to introduce noise.
 - **Fullscreen** - toggles a topmost, borderless view sized to the active monitor (covers the taskbar); state is remembered between runs.
+- **Update to Latest Release...** - downloads the newest GitHub release installer and launches it to upgrade the current installation in place (LifeViz closes while the installer runs).
 - **Animation BPM** - global tempo for layer animations (Zoom/Translate/Rotate/Fade/DVD Bounce). Each animation can run at expanded speeds (1/8x–8x), loop forward or reverse, and set a cycle length in beats for long durations (e.g., 10-minute fades). Use **Sync to Audio BPM** to align all animations to detected audio tempo when a device is selected.
 
 ## Custom Inputs

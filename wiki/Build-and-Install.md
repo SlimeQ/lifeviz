@@ -68,6 +68,8 @@ The custom neon "LV" mark lives in `Assets/lifeviz.ico` and is referenced via `<
 
 Because `deploy.ps1` embeds a unique version for every publish and opens `lifeviz.application`, the installed app always refreshes to the latest build. Use `setup.exe` only when onboarding a clean machine that lacks prerequisites.
 
+For end users, the context menu now includes **Update to Latest Release...**, which downloads the newest GitHub release `lifeviz_installer.exe` and launches it to upgrade in place (LifeViz closes while the installer runs).
+
 ## Publish a Windows Release to GitHub
 
 Use `Publish-GitHubRelease.ps1` to package and upload a ClickOnce build as a GitHub release:

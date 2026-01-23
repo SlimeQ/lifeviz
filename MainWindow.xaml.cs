@@ -6,6 +6,7 @@ using System.IO;
 using System.Linq;
 using System.Runtime.InteropServices;
 using System.Buffers;
+using System.Net.Http;
 using System.Threading.Tasks;
 using Microsoft.Win32;
 using System.Windows;
@@ -42,6 +43,11 @@ public partial class MainWindow : Window
     private const double AnimationBeatShakeWindowBeats = 0.25;
     private const double DefaultKeyTolerance = 0.1;
     private const double MaxColorDistance = 441.6729559300637;
+    private const string GitHubRepoOwner = "SlimeQ";
+    private const string GitHubRepoName = "lifeviz";
+    private const string GitHubReleaseAssetName = "lifeviz_installer.exe";
+    private static readonly Uri GitHubLatestReleaseUri = new($"https://api.github.com/repos/{GitHubRepoOwner}/{GitHubRepoName}/releases/latest");
+    private static readonly JsonSerializerOptions GitHubJsonOptions = new() { PropertyNameCaseInsensitive = true };
 
     private readonly GameOfLifeEngine _engine = new();
     private readonly WindowCaptureService _windowCapture = new();
@@ -133,6 +139,7 @@ public partial class MainWindow : Window
     private double _oscillationBpm = 140;
     private double _oscillationMinFps = 30;
     private double _oscillationMaxFps = 60;
+    private bool _updateInProgress;
 
     public MainWindow()
     {
@@ -608,6 +615,138 @@ public partial class MainWindow : Window
     {
         _engine.Randomize();
         RenderFrame();
+    }
+
+    private void UpdateUpdateMenuItem()
+    {
+        if (UpdateMenuItem != null)
+        {
+            UpdateMenuItem.IsEnabled = !_updateInProgress;
+        }
+    }
+
+    private async void UpdateToLatestRelease_Click(object sender, RoutedEventArgs e)
+    {
+        if (_updateInProgress)
+        {
+            return;
+        }
+
+        var confirm = MessageBox.Show(this,
+            "Download and install the latest LifeViz release from GitHub? LifeViz will close while the installer runs.",
+            "Update LifeViz",
+            MessageBoxButton.YesNo,
+            MessageBoxImage.Question);
+        if (confirm != MessageBoxResult.Yes)
+        {
+            return;
+        }
+
+        _updateInProgress = true;
+        UpdateUpdateMenuItem();
+
+        try
+        {
+            var release = await FetchLatestReleaseAsync();
+            if (release == null)
+            {
+                MessageBox.Show(this, "Unable to reach the latest GitHub release.", "Update Failed",
+                    MessageBoxButton.OK, MessageBoxImage.Error);
+                return;
+            }
+
+            var asset = release.Assets.FirstOrDefault(entry =>
+                string.Equals(entry.Name, GitHubReleaseAssetName, StringComparison.OrdinalIgnoreCase));
+            if (asset == null || string.IsNullOrWhiteSpace(asset.DownloadUrl))
+            {
+                MessageBox.Show(this,
+                    $"The latest release ({release.TagName ?? "unknown"}) does not include {GitHubReleaseAssetName}.",
+                    "Update Failed",
+                    MessageBoxButton.OK,
+                    MessageBoxImage.Error);
+                return;
+            }
+
+            string tempRoot = Path.Combine(Path.GetTempPath(), "lifeviz-update");
+            Directory.CreateDirectory(tempRoot);
+            string? safeTag = SanitizeTag(release.TagName);
+            string installerName = string.IsNullOrWhiteSpace(safeTag)
+                ? GitHubReleaseAssetName
+                : $"lifeviz_installer_{safeTag}.exe";
+            string installerPath = Path.Combine(tempRoot, installerName);
+
+            await DownloadFileAsync(asset.DownloadUrl, installerPath);
+            Logger.Info($"Downloaded GitHub release {release.TagName ?? "unknown"} to {installerPath}");
+
+            MessageBox.Show(this,
+                "Update downloaded. The installer will launch now; LifeViz will close to finish the update.",
+                "Update Ready",
+                MessageBoxButton.OK,
+                MessageBoxImage.Information);
+
+            Process.Start(new ProcessStartInfo
+            {
+                FileName = installerPath,
+                UseShellExecute = true
+            });
+
+            Application.Current.Shutdown();
+        }
+        catch (Exception ex)
+        {
+            Logger.Error("Failed to update from GitHub release.", ex);
+            MessageBox.Show(this, $"Update failed:\n{ex.Message}", "Update Failed",
+                MessageBoxButton.OK, MessageBoxImage.Error);
+        }
+        finally
+        {
+            _updateInProgress = false;
+            UpdateUpdateMenuItem();
+        }
+    }
+
+    private static string? SanitizeTag(string? tag)
+    {
+        if (string.IsNullOrWhiteSpace(tag))
+        {
+            return null;
+        }
+
+        var invalid = Path.GetInvalidFileNameChars();
+        var cleaned = new string(tag.Where(ch => !invalid.Contains(ch)).ToArray()).Trim();
+        return string.IsNullOrWhiteSpace(cleaned) ? null : cleaned;
+    }
+
+    private static async Task<GitHubRelease?> FetchLatestReleaseAsync()
+    {
+        using var client = new HttpClient();
+        client.DefaultRequestHeaders.UserAgent.ParseAdd("lifeviz-updater");
+        client.DefaultRequestHeaders.Accept.ParseAdd("application/vnd.github+json");
+        client.Timeout = TimeSpan.FromSeconds(30);
+
+        using var response = await client.GetAsync(GitHubLatestReleaseUri, HttpCompletionOption.ResponseHeadersRead);
+        if (!response.IsSuccessStatusCode)
+        {
+            Logger.Warn($"GitHub release check failed ({(int)response.StatusCode} {response.ReasonPhrase}).");
+            return null;
+        }
+
+        await using var stream = await response.Content.ReadAsStreamAsync();
+        return await JsonSerializer.DeserializeAsync<GitHubRelease>(stream, GitHubJsonOptions);
+    }
+
+    private static async Task DownloadFileAsync(string url, string destination)
+    {
+        using var client = new HttpClient();
+        client.DefaultRequestHeaders.UserAgent.ParseAdd("lifeviz-updater");
+        client.Timeout = TimeSpan.FromMinutes(5);
+
+        using var response = await client.GetAsync(url, HttpCompletionOption.ResponseHeadersRead);
+        response.EnsureSuccessStatusCode();
+
+        await using var stream = await response.Content.ReadAsStreamAsync();
+        await using var fileStream = new FileStream(destination, FileMode.Create, FileAccess.Write, FileShare.Read);
+        await stream.CopyToAsync(fileStream);
     }
 
     private void OpenLayerEditor_Click(object sender, RoutedEventArgs e)
@@ -1191,6 +1330,8 @@ public partial class MainWindow : Window
             MaxFpsSlider.Value = _oscillationMaxFps;
             MaxFpsValueText.Text = $"{_oscillationMaxFps:F0}";
         }
+
+        UpdateUpdateMenuItem();
     }
 
     private async void PopulateAudioMenu()
@@ -6372,6 +6513,24 @@ public partial class MainWindow : Window
             public double BeatShakeIntensity { get; set; } = 1.0;
             public double BeatsPerCycle { get; set; } = 1.0;
         }
+    }
+
+    private sealed class GitHubRelease
+    {
+        [JsonPropertyName("tag_name")]
+        public string? TagName { get; set; }
+
+        [JsonPropertyName("assets")]
+        public List<GitHubReleaseAsset> Assets { get; set; } = new();
+    }
+
+    private sealed class GitHubReleaseAsset
+    {
+        [JsonPropertyName("name")]
+        public string? Name { get; set; }
+
+        [JsonPropertyName("browser_download_url")]
+        public string? DownloadUrl { get; set; }
     }
 
     private void BuildMappings(int width, int height, int engineCols, int engineRows)
