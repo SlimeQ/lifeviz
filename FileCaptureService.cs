@@ -822,6 +822,11 @@ internal sealed class FileCaptureService : IDisposable
                 if (_readyDownscaled == null) return null;
 
                 int dsLen = targetWidth * targetHeight * 4;
+                if (_readyDownscaled.Length != dsLen)
+                {
+                    _readyDownscaled = null;
+                    return null;
+                }
                 var safeDs = new byte[dsLen];
                 Buffer.BlockCopy(_readyDownscaled, 0, safeDs, 0, dsLen);
 
