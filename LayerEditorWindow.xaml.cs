@@ -2,6 +2,7 @@ using System;
 using System.Collections.ObjectModel;
 using System.IO;
 using System.Linq;
+using System.Text.Json;
 using System.Windows;
 using System.Windows.Controls;
 using Microsoft.Win32;
@@ -13,6 +14,7 @@ public partial class LayerEditorWindow : Window
     private readonly MainWindow _owner;
     private readonly LayerEditorViewModel _viewModel;
     private bool _suppressLiveUpdates;
+    private static readonly JsonSerializerOptions LayerConfigJsonOptions = new() { WriteIndented = true };
 
     public LayerEditorWindow(MainWindow owner)
     {
@@ -77,6 +79,79 @@ public partial class LayerEditorWindow : Window
 
         _owner.ApplyLayerEditorSources(_viewModel.Sources.ToList());
         RefreshFromSources();
+    }
+
+    private void SaveLayerConfig_Click(object sender, RoutedEventArgs e)
+    {
+        var dialog = new SaveFileDialog
+        {
+            Title = "Save Layer Configuration",
+            Filter = "LifeViz Layer Config (*.lifevizlayers.json)|*.lifevizlayers.json|JSON Files|*.json|All Files|*.*",
+            DefaultExt = ".lifevizlayers.json",
+            AddExtension = true,
+            OverwritePrompt = true
+        };
+
+        if (dialog.ShowDialog(this) != true)
+        {
+            return;
+        }
+
+        try
+        {
+            var config = LayerConfigFile.FromEditorSources(_viewModel.Sources);
+            string json = JsonSerializer.Serialize(config, LayerConfigJsonOptions);
+            File.WriteAllText(dialog.FileName, json);
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(this, $"Failed to save layer configuration:\n{ex.Message}", "Save Failed",
+                MessageBoxButton.OK, MessageBoxImage.Error);
+        }
+    }
+
+    private void LoadLayerConfig_Click(object sender, RoutedEventArgs e)
+    {
+        var dialog = new OpenFileDialog
+        {
+            Title = "Load Layer Configuration",
+            Filter = "LifeViz Layer Config (*.lifevizlayers.json)|*.lifevizlayers.json|JSON Files|*.json|All Files|*.*",
+            CheckFileExists = true,
+            Multiselect = false
+        };
+
+        if (dialog.ShowDialog(this) != true)
+        {
+            return;
+        }
+
+        try
+        {
+            string json = File.ReadAllText(dialog.FileName);
+            var config = JsonSerializer.Deserialize<LayerConfigFile>(json);
+            if (config == null)
+            {
+                MessageBox.Show(this, "That file did not contain a layer configuration.", "Load Failed",
+                    MessageBoxButton.OK, MessageBoxImage.Warning);
+                return;
+            }
+
+            var sources = config.ToEditorSources();
+            if (_viewModel.LiveMode)
+            {
+                _owner.ApplyLayerEditorSources(sources);
+                RefreshFromSources();
+            }
+            else
+            {
+                _viewModel.Sources = new ObservableCollection<LayerEditorSource>(sources);
+            }
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(this, $"Failed to load layer configuration:\n{ex.Message}", "Load Failed",
+                MessageBoxButton.OK, MessageBoxImage.Error);
+        }
     }
 
     private void BlendMode_Changed(object sender, SelectionChangedEventArgs e)
@@ -274,6 +349,8 @@ public partial class LayerEditorWindow : Window
     private void AddDvd_Click(object sender, RoutedEventArgs e) => AddAnimation(sender, "DvdBounce", null, null);
 
     private void AddBeatShake_Click(object sender, RoutedEventArgs e) => AddAnimation(sender, "BeatShake", null, null);
+
+    private void AddAudioGranular_Click(object sender, RoutedEventArgs e) => AddAnimation(sender, "AudioGranular", null, null);
 
     private void AddFade_Click(object sender, RoutedEventArgs e) => AddAnimation(sender, "Fade", null, null);
 

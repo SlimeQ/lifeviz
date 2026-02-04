@@ -13,7 +13,7 @@ internal sealed class WindowCaptureService : IDisposable
 {
     private readonly ConcurrentDictionary<IntPtr, WindowCaptureSession> _sessions = new();
 
-    public WindowCaptureFrame? CaptureFrame(WindowHandleInfo info, int targetColumns, int targetRows, FitMode fitMode, bool includeSource = true)
+    public WindowCaptureFrame? CaptureFrame(WindowHandleInfo info, int targetColumns, int targetRows, FitMode fitMode, bool includeSource = false)
     {
         if (targetColumns <= 0 || targetRows <= 0)
         {

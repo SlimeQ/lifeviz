@@ -47,7 +47,7 @@ internal sealed class WebcamCaptureService : IDisposable
         }
     }
 
-    public WebcamFrame? CaptureFrame(string cameraId, int targetWidth, int targetHeight, FitMode fitMode, bool includeSource = true)
+    public WebcamFrame? CaptureFrame(string cameraId, int targetWidth, int targetHeight, FitMode fitMode, bool includeSource = false)
     {
         if (string.IsNullOrWhiteSpace(cameraId) || targetWidth <= 0 || targetHeight <= 0)
         {

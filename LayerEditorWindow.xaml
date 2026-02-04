@@ -168,7 +168,7 @@
                         </StackPanel>
                         <StackPanel Orientation="Horizontal"
                                     Margin="0,0,12,6"
-                                    Visibility="{Binding IsBeatShake, Converter={StaticResource BoolToVisibility}}">
+                                    Visibility="{Binding IsIntensityVisible, Converter={StaticResource BoolToVisibility}}">
                             <TextBlock Text="Intensity"
                                        VerticalAlignment="Center" />
                             <Slider Minimum="0"
@@ -361,6 +361,10 @@
                                             Padding="8,2"
                                             Margin="0,0,6,0"
                                             Click="AddBeatShake_Click" />
+                                    <Button Content="Audio Granular"
+                                            Padding="8,2"
+                                            Margin="0,0,6,0"
+                                            Click="AddAudioGranular_Click" />
                                     <Button Content="Fade"
                                             Padding="8,2"
                                             Click="AddFade_Click" />
@@ -432,6 +436,16 @@
                           VerticalAlignment="Center"
                           Checked="LiveModeToggle"
                           Unchecked="LiveModeToggle" />
+                <Button x:Name="LoadLayersButton"
+                        Content="Load..."
+                        Padding="10,4"
+                        Margin="0,0,8,0"
+                        Click="LoadLayerConfig_Click" />
+                <Button x:Name="SaveLayersButton"
+                        Content="Save..."
+                        Padding="10,4"
+                        Margin="0,0,8,0"
+                        Click="SaveLayerConfig_Click" />
                 <Button x:Name="ApplyButton"
                         Content="Apply"
                         Padding="12,4"

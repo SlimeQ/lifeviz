@@ -4,6 +4,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using System.Numerics;
 using System.Runtime.InteropServices;
 using WinRT;
 using Windows.Devices.Enumeration;
@@ -25,8 +26,7 @@ internal sealed class AudioBeatDetector : IDisposable
     
     // Beat Detection State
     private readonly List<double> _energyHistory = new();
-    private const int HistorySize = 43; // ~1 second at 60fps-ish polling? No, audio runs faster.
-    // Actually, we process audio frames. 
+    private const int HistorySize = 60; // Longer history for better average
     
     private double _localEnergyAverage;
     private const double C = 1.3; // Threshold constant
@@ -42,6 +42,10 @@ internal sealed class AudioBeatDetector : IDisposable
     public double CurrentBpm => _detectedBpm;
     public bool IsBeat { get; private set; }
     public double CurrentEnergy { get; private set; }
+    public double MainFrequency { get; private set; }
+    public double BassEnergy { get; private set; }
+
+    private uint _sampleRate = 48000;
 
     public async Task<IReadOnlyList<AudioDeviceInfo>> EnumerateAudioDevices()
     {
@@ -79,6 +83,7 @@ internal sealed class AudioBeatDetector : IDisposable
             }
 
             _graph = result.Graph;
+            _sampleRate = _graph.EncodingProperties.SampleRate;
             _graph.QuantumStarted += Graph_QuantumStarted;
 
             var deviceResult = await _graph.CreateDeviceInputNodeAsync(MediaCategory.Media, _graph.EncodingProperties, await DeviceInformation.CreateFromIdAsync(deviceId));
@@ -221,6 +226,30 @@ internal sealed class AudioBeatDetector : IDisposable
             }
 
             double rms = Math.Sqrt(totalEnergy / sampleCount);
+            
+            // FFT Analysis
+            if (sampleCount >= 256)
+            {
+                // Use a power of 2 size
+                int fftSize = 1024;
+                while (fftSize > sampleCount) fftSize /= 2;
+                
+                if (fftSize >= 256)
+                {
+                    var fftBuffer = new Complex[fftSize];
+                    // Apply Hann window and copy last samples
+                    for (int i = 0; i < fftSize; i++)
+                    {
+                        float sample = dataInFloat[sampleCount - fftSize + i];
+                        double window = 0.5 * (1 - Math.Cos(2 * Math.PI * i / (fftSize - 1)));
+                        fftBuffer[i] = new Complex(sample * window, 0);
+                    }
+                    
+                    CalculateFFT(fftBuffer);
+                    AnalyzeSpectrum(fftBuffer, fftSize);
+                }
+            }
+
             ProcessEnergy(rms);
         }
         catch (ObjectDisposedException)
@@ -237,6 +266,99 @@ internal sealed class AudioBeatDetector : IDisposable
         }
     }
     
+    private void AnalyzeSpectrum(Complex[] fftBuffer, int fftSize)
+    {
+        double maxMagnitude = 0;
+        int maxIndex = 0;
+        double bassSum = 0;
+        
+        // Frequencies up to Nyquist (SampleRate / 2)
+        // Bin resolution = SampleRate / fftSize
+        double binRes = (double)_sampleRate / fftSize;
+        
+        // Define bass range: ~20Hz to ~150Hz
+        int bassStartBin = (int)(20 / binRes);
+        int bassEndBin = (int)(150 / binRes);
+        
+        // Only need to check first half (positive frequencies)
+        int halfSize = fftSize / 2;
+        
+        for (int i = 1; i < halfSize; i++) // Skip DC component at 0
+        {
+            double magnitude = fftBuffer[i].Magnitude;
+            if (magnitude > maxMagnitude)
+            {
+                maxMagnitude = magnitude;
+                maxIndex = i;
+            }
+            
+            if (i >= bassStartBin && i <= bassEndBin)
+            {
+                bassSum += magnitude;
+            }
+        }
+        
+        MainFrequency = maxIndex * binRes;
+        
+        int bassBins = bassEndBin - bassStartBin + 1;
+        if (bassBins > 0)
+        {
+            // Calculate average magnitude in bass range and normalize it
+            // For a 1024 FFT, magnitude can be up to ~256-512.
+            // Let's normalize it so 1.0 is a very strong bass.
+            double avgBassMag = bassSum / bassBins;
+            BassEnergy = Math.Clamp(avgBassMag / 50.0, 0, 10); 
+        }
+        else
+        {
+            BassEnergy = 0;
+        }
+    }
+
+    private static void CalculateFFT(Complex[] buffer)
+    {
+        int n = buffer.Length;
+        int m = (int)Math.Log2(n);
+
+        // Bit reversal
+        int j = 0;
+        for (int i = 0; i < n - 1; i++)
+        {
+            if (i < j)
+            {
+                (buffer[i], buffer[j]) = (buffer[j], buffer[i]);
+            }
+            int k = n / 2;
+            while (k <= j)
+            {
+                j -= k;
+                k /= 2;
+            }
+            j += k;
+        }
+
+        // Butterfly
+        for (int s = 1; s <= m; s++)
+        {
+            int m2 = 1 << s;
+            int halfM2 = m2 / 2;
+            Complex wm = Complex.FromPolarCoordinates(1, -Math.PI / halfM2);
+            
+            for (int k = 0; k < n; k += m2)
+            {
+                Complex w = 1;
+                for (int sub = 0; sub < halfM2; sub++)
+                {
+                    Complex t = w * buffer[k + sub + halfM2];
+                    Complex u = buffer[k + sub];
+                    buffer[k + sub] = u + t;
+                    buffer[k + sub + halfM2] = u - t;
+                    w *= wm;
+                }
+            }
+        }
+    }
+
     [ComImport]
     [Guid("5B0D3235-4DBA-4D44-865E-8F1D0E4FD04D")]
     [InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
@@ -262,7 +384,7 @@ internal sealed class AudioBeatDetector : IDisposable
         // Simple Beat Detection: Instant energy > C * Average Energy
         // And wait some time (debounce)
         
-        if (rms > _localEnergyAverage * C && (DateTime.UtcNow - LastBeatTime).TotalSeconds > 0.25) // Max 240 BPM
+        if (rms > _localEnergyAverage * C && (DateTime.UtcNow - LastBeatTime).TotalSeconds > 0.1) // Max 600 BPM
         {
             IsBeat = true;
             var now = DateTime.UtcNow;

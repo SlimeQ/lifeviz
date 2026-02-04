@@ -89,7 +89,6 @@ public partial class MainWindow : Window
     private ImageBrush? _inputBrush;
     private byte[]? _engineColorBuffer;
     private byte[]? _compositeDownscaledBuffer;
-    private byte[]? _compositeHighResBuffer;
     private byte[]? _invertScratchBuffer;
     private CompositeFrame? _lastCompositeFrame;
     private int _displayWidth;
@@ -102,7 +101,6 @@ public partial class MainWindow : Window
     private double _lockedAspectRatio = DefaultAspectRatio;
     private IntPtr _windowHandle;
     private bool _passthroughEnabled;
-    private bool _preserveResolution;
     private BlendMode _blendMode = BlendMode.Additive;
     private double _lifeOpacity = 1.0;
     private bool _invertComposite;
@@ -140,6 +138,9 @@ public partial class MainWindow : Window
     private double _oscillationMinFps = 30;
     private double _oscillationMaxFps = 60;
     private bool _updateInProgress;
+    private double _smoothedEnergy;
+    private double _smoothedBass;
+    private double _smoothedFreq;
 
     public MainWindow()
     {
@@ -256,6 +257,12 @@ public partial class MainWindow : Window
         double elapsed = _stepStopwatch.Elapsed.TotalSeconds;
         _stepStopwatch.Restart();
         _timeSinceLastStep += elapsed;
+
+        // Update smoothed audio values
+        double audioLerp = Math.Min(dt * 15.0, 1.0);
+        _smoothedEnergy = _smoothedEnergy + (Math.Clamp(_audioBeatDetector.CurrentEnergy, 0, 1) - _smoothedEnergy) * audioLerp;
+        _smoothedBass = _smoothedBass + (Math.Clamp(_audioBeatDetector.BassEnergy, 0, 100) - _smoothedBass) * audioLerp;
+        _smoothedFreq = _smoothedFreq + (Math.Clamp(_audioBeatDetector.MainFrequency, 0, 5000) - _smoothedFreq) * audioLerp;
 
         double desiredInterval = 1.0 / _currentFps;
 
@@ -475,26 +482,12 @@ public partial class MainWindow : Window
         byte[]? overlay = null;
         int overlayWidth = 0;
         int overlayHeight = 0;
-        if (_preserveResolution && composite.HighRes is { Length: > 0 } highRes)
+        if ((composite.DownscaledWidth == sourceWidth && composite.DownscaledHeight == sourceHeight) ||
+            (composite.DownscaledWidth == displayWidth && composite.DownscaledHeight == displayHeight))
         {
-            if ((composite.HighResWidth == sourceWidth && composite.HighResHeight == sourceHeight) ||
-                (composite.HighResWidth == displayWidth && composite.HighResHeight == displayHeight))
-            {
-                overlay = highRes;
-                overlayWidth = composite.HighResWidth;
-                overlayHeight = composite.HighResHeight;
-            }
-        }
-
-        if (overlay == null)
-        {
-            if ((composite.DownscaledWidth == sourceWidth && composite.DownscaledHeight == sourceHeight) ||
-                (composite.DownscaledWidth == displayWidth && composite.DownscaledHeight == displayHeight))
-            {
-                overlay = composite.Downscaled;
-                overlayWidth = composite.DownscaledWidth;
-                overlayHeight = composite.DownscaledHeight;
-            }
+            overlay = composite.Downscaled;
+            overlayWidth = composite.DownscaledWidth;
+            overlayHeight = composite.DownscaledHeight;
         }
 
         int overlayLength = overlayWidth > 0 && overlayHeight > 0 ? overlayWidth * overlayHeight * 4 : 0;
@@ -1239,12 +1232,6 @@ public partial class MainWindow : Window
             PassthroughMenuItem.IsChecked = _passthroughEnabled;
             PassthroughMenuItem.IsEnabled = _sources.Count > 0;
         }
-        if (PreserveResolutionMenuItem != null)
-        {
-            PreserveResolutionMenuItem.IsChecked = _preserveResolution;
-            PreserveResolutionMenuItem.IsEnabled = _sources.Count > 0;
-        }
-
         if (BlendModeMenu != null)
         {
             BlendModeMenu.IsEnabled = _sources.Count > 0;
@@ -1736,6 +1723,14 @@ public partial class MainWindow : Window
         addBeatShakeItem.Click += AddAnimationMenuItem_Click;
         animationsMenu.Items.Add(addBeatShakeItem);
 
+        var addAudioGranularItem = new MenuItem
+        {
+            Header = "Add Audio Granular",
+            Tag = new AnimationAddTarget(source, AnimationType.AudioGranular)
+        };
+        addAudioGranularItem.Click += AddAnimationMenuItem_Click;
+        animationsMenu.Items.Add(addAudioGranularItem);
+
         var addFadeItem = new MenuItem
         {
             Header = "Add Fade",
@@ -1890,7 +1885,7 @@ public partial class MainWindow : Window
                 sizeItem.Items.Add(sizeSlider);
                 animationItem.Items.Add(sizeItem);
             }
-            else if (animation.Type == AnimationType.BeatShake)
+            else if (animation.Type == AnimationType.BeatShake || animation.Type == AnimationType.AudioGranular)
             {
                 var intensityItem = new MenuItem
                 {
@@ -1902,11 +1897,14 @@ public partial class MainWindow : Window
                     Header = DescribeShakeIntensity(animation.BeatShakeIntensity),
                     IsEnabled = false
                 };
+                
+                double maxIntensity = animation.Type == AnimationType.AudioGranular ? 5.0 : 2.0;
+                
                 var intensitySlider = new Slider
                 {
                     Minimum = 0,
-                    Maximum = 2,
-                    Value = Math.Clamp(animation.BeatShakeIntensity, 0, 2),
+                    Maximum = maxIntensity,
+                    Value = Math.Clamp(animation.BeatShakeIntensity, 0, maxIntensity),
                     Width = 140,
                     SmallChange = 0.05,
                     LargeChange = 0.2,
@@ -1914,7 +1912,7 @@ public partial class MainWindow : Window
                 };
                 intensitySlider.ValueChanged += (_, args) =>
                 {
-                    animation.BeatShakeIntensity = Math.Clamp(args.NewValue, 0, 2);
+                    animation.BeatShakeIntensity = Math.Clamp(args.NewValue, 0, maxIntensity);
                     intensityValueItem.Header = DescribeShakeIntensity(animation.BeatShakeIntensity);
                     SaveConfig();
                 };
@@ -2373,6 +2371,7 @@ public partial class MainWindow : Window
             AnimationType.Rotate => $"{prefix}Rotate {animation.RotationDirection} ({DescribeLoop(animation.Loop)}, {DescribeSpeed(animation.Speed)})",
             AnimationType.DvdBounce => $"{prefix}DVD Bounce ({DescribeLoop(animation.Loop)}, {DescribeSpeed(animation.Speed)}, {DescribeScale(animation.DvdScale)})",
             AnimationType.BeatShake => $"{prefix}Beat Shake ({DescribeLoop(animation.Loop)}, {DescribeSpeed(animation.Speed)}, {DescribeShakeIntensity(animation.BeatShakeIntensity)})",
+            AnimationType.AudioGranular => $"{prefix}Audio Granular ({DescribeLoop(animation.Loop)}, {DescribeSpeed(animation.Speed)}, {DescribeShakeIntensity(animation.BeatShakeIntensity)})",
             AnimationType.Fade => $"{prefix}Fade ({DescribeLoop(animation.Loop)}, {DescribeSpeed(animation.Speed)})",
             _ => $"{prefix}Animation"
         };
@@ -2393,7 +2392,7 @@ public partial class MainWindow : Window
 
     private static string DescribeScale(double value) => $"{Math.Clamp(value, 0.01, 1):P0}";
 
-    private static string DescribeShakeIntensity(double value) => $"{Math.Clamp(value, 0, 2):P0}";
+    private static string DescribeShakeIntensity(double value) => $"{Math.Clamp(value, 0, 5):P0}";
 
     private string DescribeCycleBeats(double beats)
     {
@@ -3201,7 +3200,6 @@ public partial class MainWindow : Window
             }
             source.Children.Clear();
             source.CompositeDownscaledBuffer = null;
-            source.CompositeHighResBuffer = null;
             return;
         }
 
@@ -3323,17 +3321,12 @@ public partial class MainWindow : Window
         
         _sources.Clear();
         _lastCompositeFrame = null;
-        _preserveResolution = false;
         _passthroughEnabled = false;
         
         Logger.Info("Cleared all sources; reset webcam capture.");
         if (PassthroughMenuItem != null)
         {
             PassthroughMenuItem.IsChecked = false;
-        }
-        if (PreserveResolutionMenuItem != null)
-        {
-            PreserveResolutionMenuItem.IsChecked = false;
         }
         UpdateDisplaySurface(force: true);
         if (_aspectRatioLocked)
@@ -3376,7 +3369,7 @@ public partial class MainWindow : Window
             return;
         }
 
-        var composite = BuildCompositeFrame(_sources, ref _compositeDownscaledBuffer, ref _compositeHighResBuffer, useEngineDimensions: true, animationTime);
+        var composite = BuildCompositeFrame(_sources, ref _compositeDownscaledBuffer, useEngineDimensions: true, animationTime);
         if (composite == null)
         {
             _lastCompositeFrame = null;
@@ -3415,14 +3408,12 @@ public partial class MainWindow : Window
                 }
 
                 var groupDownscaled = source.CompositeDownscaledBuffer;
-                var groupHighRes = source.CompositeHighResBuffer;
-                var groupComposite = BuildCompositeFrame(source.Children, ref groupDownscaled, ref groupHighRes, useEngineDimensions: false, animationTime);
+                var groupComposite = BuildCompositeFrame(source.Children, ref groupDownscaled, useEngineDimensions: false, animationTime);
                 source.CompositeDownscaledBuffer = groupDownscaled;
-                source.CompositeHighResBuffer = groupHighRes;
                 if (groupComposite != null)
                 {
                     source.LastFrame = new SourceFrame(groupComposite.Downscaled, groupComposite.DownscaledWidth, groupComposite.DownscaledHeight,
-                        groupComposite.HighRes, groupComposite.HighResWidth, groupComposite.HighResHeight);
+                        null, groupComposite.DownscaledWidth, groupComposite.DownscaledHeight);
                     source.HasError = false;
                     source.MissedFrames = 0;
                     if (!source.FirstFrameReceived)
@@ -3455,7 +3446,7 @@ public partial class MainWindow : Window
             {
                 if (source.Type == CaptureSource.SourceType.Window && source.Window != null)
                 {
-                    var windowFrame = _windowCapture.CaptureFrame(source.Window, _engine.Columns, _engine.Rows, source.FitMode, _preserveResolution);
+                    var windowFrame = _windowCapture.CaptureFrame(source.Window, _engine.Columns, _engine.Rows, source.FitMode, includeSource: false);
                     if (windowFrame != null)
                     {
                         frame = new SourceFrame(windowFrame.OverlayDownscaled, windowFrame.DownscaledWidth, windowFrame.DownscaledHeight,
@@ -3472,7 +3463,7 @@ public partial class MainWindow : Window
                 }
                 else if (source.Type == CaptureSource.SourceType.Webcam && !string.IsNullOrWhiteSpace(source.WebcamId))
                 {
-                    var webcamFrame = _webcamCapture.CaptureFrame(source.WebcamId, _engine.Columns, _engine.Rows, source.FitMode, _preserveResolution);
+                    var webcamFrame = _webcamCapture.CaptureFrame(source.WebcamId, _engine.Columns, _engine.Rows, source.FitMode, includeSource: false);
                     if (webcamFrame != null)
                     {
                         frame = new SourceFrame(webcamFrame.OverlayDownscaled, webcamFrame.DownscaledWidth, webcamFrame.DownscaledHeight,
@@ -3488,7 +3479,7 @@ public partial class MainWindow : Window
                 }
                 else if (source.Type == CaptureSource.SourceType.VideoSequence && source.VideoSequence != null)
                 {
-                    var sequenceFrame = source.VideoSequence.CaptureFrame(_engine.Columns, _engine.Rows, source.FitMode, _preserveResolution);
+                    var sequenceFrame = source.VideoSequence.CaptureFrame(_engine.Columns, _engine.Rows, source.FitMode, includeSource: false);
                     if (sequenceFrame.HasValue)
                     {
                         var value = sequenceFrame.Value;
@@ -3506,7 +3497,7 @@ public partial class MainWindow : Window
                 }
                 else if (source.Type == CaptureSource.SourceType.File && !string.IsNullOrWhiteSpace(source.FilePath))
                 {
-                    var fileFrame = _fileCapture.CaptureFrame(source.FilePath, _engine.Columns, _engine.Rows, source.FitMode, _preserveResolution);
+                    var fileFrame = _fileCapture.CaptureFrame(source.FilePath, _engine.Columns, _engine.Rows, source.FitMode, includeSource: false);
                     if (fileFrame.HasValue)
                     {
                         var value = fileFrame.Value;
@@ -3931,18 +3922,6 @@ public partial class MainWindow : Window
         }
     }
 
-    private void TogglePreserveResolution_Click(object sender, RoutedEventArgs e)
-    {
-        _preserveResolution = !_preserveResolution;
-        if (PreserveResolutionMenuItem != null)
-        {
-            PreserveResolutionMenuItem.IsChecked = _preserveResolution;
-        }
-        UpdateDisplaySurface(force: true);
-        RenderFrame();
-        SaveConfig();
-    }
-
     private void BlendModeItem_Click(object sender, RoutedEventArgs e)
     {
         if (sender is not MenuItem { Header: string header })
@@ -4093,6 +4072,7 @@ public partial class MainWindow : Window
         Rotate,
         DvdBounce,
         BeatShake,
+        AudioGranular,
         Fade
     }
 
@@ -4145,21 +4125,6 @@ public partial class MainWindow : Window
     {
         int targetWidth = _engine.Columns;
         int targetHeight = _engine.Rows;
-
-        if (_preserveResolution && _sources.Count > 0)
-        {
-            if (_lastCompositeFrame?.HighRes != null && _lastCompositeFrame.HighResWidth > 0 && _lastCompositeFrame.HighResHeight > 0)
-            {
-                targetWidth = _lastCompositeFrame.HighResWidth;
-                targetHeight = _lastCompositeFrame.HighResHeight;
-            }
-            else
-            {
-                var primary = _sources[0];
-                targetWidth = primary.LastFrame?.SourceWidth ?? primary.FallbackWidth ?? _engine.Columns;
-                targetHeight = primary.LastFrame?.SourceHeight ?? primary.FallbackHeight ?? _engine.Rows;
-            }
-        }
 
         if (targetWidth <= 0 || targetHeight <= 0)
         {
@@ -4270,34 +4235,6 @@ public partial class MainWindow : Window
         _suppressWindowResize = false;
         _lastWindowSize = new Size(ActualWidth, ActualHeight);
         _lastClientSize = new Size(Root.ActualWidth, Root.ActualHeight);
-    }
-
-    private static bool TryGetPrimaryDimensions(List<CaptureSource> sources, out int width, out int height)
-    {
-        width = 0;
-        height = 0;
-
-        if (sources.Count == 0)
-        {
-            return false;
-        }
-
-        var primary = sources[0];
-        if (primary.LastFrame != null && primary.LastFrame.SourceWidth > 0 && primary.LastFrame.SourceHeight > 0)
-        {
-            width = primary.LastFrame.SourceWidth;
-            height = primary.LastFrame.SourceHeight;
-            return true;
-        }
-
-        if (primary.FallbackWidth.HasValue && primary.FallbackHeight.HasValue && primary.FallbackWidth > 0 && primary.FallbackHeight > 0)
-        {
-            width = primary.FallbackWidth.Value;
-            height = primary.FallbackHeight.Value;
-            return true;
-        }
-
-        return false;
     }
 
     private bool TryGetDownscaledDimensions(List<CaptureSource> sources, bool useEngineDimensions, out int width, out int height)
@@ -4452,7 +4389,7 @@ public partial class MainWindow : Window
         return Math.Clamp(distance / tolerance, 0.0, 1.0);
     }
 
-    private CompositeFrame? BuildCompositeFrame(List<CaptureSource> sources, ref byte[]? downscaledBuffer, ref byte[]? highResBuffer, bool useEngineDimensions, double animationTime)
+    private CompositeFrame? BuildCompositeFrame(List<CaptureSource> sources, ref byte[]? downscaledBuffer, bool useEngineDimensions, double animationTime)
     {
         if (sources.Count == 0)
         {
@@ -4470,36 +4407,8 @@ public partial class MainWindow : Window
             downscaledBuffer = new byte[downscaledLength];
         }
 
-        int targetWidth = downscaledWidth;
-        int targetHeight = downscaledHeight;
-        if (_preserveResolution && TryGetPrimaryDimensions(sources, out int primaryWidth, out int primaryHeight))
-        {
-            targetWidth = primaryWidth;
-            targetHeight = primaryHeight;
-        }
-
-        if (targetWidth <= 0 || targetHeight <= 0)
-        {
-            targetWidth = downscaledWidth;
-            targetHeight = downscaledHeight;
-        }
-
-        byte[]? highRes = null;
-        if (_preserveResolution)
-        {
-            int highResLength = targetWidth * targetHeight * 4;
-            if (highResBuffer == null || highResBuffer.Length != highResLength)
-            {
-                highResBuffer = new byte[highResLength];
-            }
-
-            highRes = highResBuffer;
-        }
-
         bool wroteDownscaled = false;
-        bool wroteHighRes = false;
         bool primedDownscaled = false;
-        bool primedHighRes = false;
 
         foreach (var source in sources)
         {
@@ -4540,27 +4449,6 @@ public partial class MainWindow : Window
                 wroteDownscaled = true;
             }
 
-            if (highRes != null && frame.Source != null)
-            {
-                var sourceBuffer = frame.Source;
-                int sourceWidth = frame.SourceWidth;
-                int sourceHeight = frame.SourceHeight;
-                var highResTransform = BuildAnimationTransform(source, targetWidth, targetHeight, animationTime);
-
-                if (!primedHighRes)
-                {
-                    CopyIntoBuffer(highRes, targetWidth, targetHeight, sourceBuffer, sourceWidth, sourceHeight, effectiveOpacity,
-                        source.Mirror && source.Type == CaptureSource.SourceType.Webcam, source.FitMode, highResTransform, keying);
-                    primedHighRes = true;
-                    wroteHighRes = true;
-                }
-                else
-                {
-                    CompositeIntoBuffer(highRes, targetWidth, targetHeight, sourceBuffer, sourceWidth, sourceHeight,
-                        source.BlendMode, effectiveOpacity, source.Mirror && source.Type == CaptureSource.SourceType.Webcam, source.FitMode, highResTransform, keying);
-                    wroteHighRes = true;
-                }
-            }
         }
 
         if (!wroteDownscaled)
@@ -4568,8 +4456,7 @@ public partial class MainWindow : Window
             return null;
         }
 
-        return new CompositeFrame(downscaledBuffer, downscaledWidth, downscaledHeight,
-            wroteHighRes ? highRes : null, targetWidth, targetHeight);
+        return new CompositeFrame(downscaledBuffer, downscaledWidth, downscaledHeight);
     }
 
     private Transform2D BuildAnimationTransform(CaptureSource source, int destWidth, int destHeight, double timeSeconds)
@@ -4750,6 +4637,50 @@ public partial class MainWindow : Window
                     double dx = amplitude * 0.6 * shakeX;
                     double dy = amplitude * 0.6 * shakeY;
                     animTransform = CreateTranslation(dx, dy);
+                    break;
+                }
+                case AnimationType.AudioGranular:
+                {
+                    double intensity = Math.Clamp(animation.BeatShakeIntensity, 0, 5);
+                    double energy = _smoothedEnergy;
+                    double bass = _smoothedBass;
+                    double freq = _smoothedFreq;
+
+                    // Lower noise gate
+                    if (energy < 0.001)
+                    {
+                        energy = 0;
+                        bass = 0;
+                        freq = 0;
+                    }
+
+                    // "Jump" on bass and overall energy
+                    // intensity 1.0 -> ~10% scale jump on strong bass
+                    double jumpTarget = (energy * 0.5 + bass * 0.5) * intensity * 0.2;
+                    double scaleFactor = 1.0 + Math.Clamp(jumpTarget, 0, 2);
+                    
+                    // "Vibrate" on frequency - mapped to a very visible range
+                    // Low freq (~100Hz) -> 5Hz vibration
+                    // High freq (~2000Hz) -> 25Hz vibration
+                    double vibFreq = 5.0 + (freq * 0.01); 
+                    double vibAmp = intensity * 30.0 * energy;
+                    
+                    // Use different phases for X and Y to create organic movement
+                    double vibX = Math.Sin(2 * Math.PI * vibFreq * timeSeconds) * vibAmp;
+                    double vibY = Math.Cos(2 * Math.PI * (vibFreq * 0.85) * timeSeconds) * vibAmp;
+                    
+                    // Granular jitter
+                    vibX += (Random.Shared.NextDouble() - 0.5) * intensity * 10.0 * energy;
+                    vibY += (Random.Shared.NextDouble() - 0.5) * intensity * 10.0 * energy;
+                    
+                    // Subtle rotation on frequency
+                    double rotation = intensity * (freq * 0.01) * energy;
+                    
+                    var scaleT = CreateScale(scaleFactor, centerX, centerY);
+                    var rotateT = CreateRotation(DegreesToRadians(rotation), centerX, centerY);
+                    var transT = CreateTranslation(vibX, vibY);
+                    
+                    animTransform = Transform2D.Multiply(transT, Transform2D.Multiply(rotateT, scaleT));
                     break;
                 }
                 case AnimationType.Fade:
@@ -5148,14 +5079,8 @@ public partial class MainWindow : Window
         byte[]? buffer = null;
         int stride = width * 4;
 
-        if (_preserveResolution && composite?.HighRes is { Length: > 0 } highRes &&
-            composite.HighResWidth == width && composite.HighResHeight == height)
-        {
-            buffer = highRes;
-            stride = composite.HighResWidth * 4;
-        }
-        else if (composite != null && composite.Downscaled.Length >= requiredLength &&
-                 composite.DownscaledWidth == width && composite.DownscaledHeight == height)
+        if (composite != null && composite.Downscaled.Length >= requiredLength &&
+            composite.DownscaledWidth == width && composite.DownscaledHeight == height)
         {
             buffer = composite.Downscaled;
         }
@@ -5659,7 +5584,6 @@ public partial class MainWindow : Window
             {
                 _binningMode = binMode;
             }
-            _preserveResolution = config.PreserveResolution;
             _injectionNoise = Math.Clamp(config.InjectionNoise, 0, 1);
             if (Enum.TryParse<GameOfLifeEngine.InjectionMode>(config.InjectionMode, out var injMode))
             {
@@ -5747,7 +5671,6 @@ public partial class MainWindow : Window
                 LifeMode = _lifeMode.ToString(),
                 BinningMode = _binningMode.ToString(),
                 InjectionMode = _injectionMode.ToString(),
-                PreserveResolution = _preserveResolution,
                 InjectionNoise = _injectionNoise,
                 LifeOpacity = _lifeOpacity,
                 InvertComposite = _invertComposite,
@@ -6175,6 +6098,8 @@ public partial class MainWindow : Window
             {
                 animation.BeatsPerCycle = Math.Clamp(animationModel.BeatsPerCycle, 1, 4096);
             }
+            animation.BeatShakeIntensity = Math.Clamp(animationModel.BeatShakeIntensity, 0, 5);
+            animation.RotationDegrees = Math.Clamp(animationModel.RotationDegrees, 0, 360);
 
             source.Animations.Add(animation);
         }
@@ -6435,7 +6360,7 @@ public partial class MainWindow : Window
                 {
                     animation.DvdScale = Math.Clamp(animationConfig.DvdScale, 0.01, 1.0);
                 }
-                animation.BeatShakeIntensity = Math.Clamp(animationConfig.BeatShakeIntensity, 0, 2);
+                animation.BeatShakeIntensity = Math.Clamp(animationConfig.BeatShakeIntensity, 0, 5);
                 if (animationConfig.BeatsPerCycle > 0)
                 {
                     animation.BeatsPerCycle = Math.Clamp(animationConfig.BeatsPerCycle, 1, 4096);
@@ -6457,7 +6382,6 @@ public partial class MainWindow : Window
         public string LifeMode { get; set; } = GameOfLifeEngine.LifeMode.NaiveGrayscale.ToString();
         public string BinningMode { get; set; } = GameOfLifeEngine.BinningMode.Fill.ToString();
         public string InjectionMode { get; set; } = GameOfLifeEngine.InjectionMode.Threshold.ToString();
-        public bool PreserveResolution { get; set; }
         public double InjectionNoise { get; set; } = 0.0;
         public double LifeOpacity { get; set; } = 1.0;
         public bool InvertComposite { get; set; }
@@ -6624,7 +6548,6 @@ public partial class MainWindow : Window
         public int? FileWidth { get; private set; }
         public int? FileHeight { get; private set; }
         public byte[]? CompositeDownscaledBuffer { get; set; }
-        public byte[]? CompositeHighResBuffer { get; set; }
 
         public void SetDisplayName(string displayName)
         {
@@ -6750,21 +6673,15 @@ public partial class MainWindow : Window
 
     private sealed class CompositeFrame
     {
-        public CompositeFrame(byte[] downscaled, int downscaledWidth, int downscaledHeight, byte[]? highRes, int highResWidth, int highResHeight)
+        public CompositeFrame(byte[] downscaled, int downscaledWidth, int downscaledHeight)
         {
             Downscaled = downscaled;
             DownscaledWidth = downscaledWidth;
             DownscaledHeight = downscaledHeight;
-            HighRes = highRes;
-            HighResWidth = highResWidth;
-            HighResHeight = highResHeight;
         }
 
         public byte[] Downscaled { get; }
         public int DownscaledWidth { get; }
         public int DownscaledHeight { get; }
-        public byte[]? HighRes { get; }
-        public int HighResWidth { get; }
-        public int HighResHeight { get; }
     }
 }

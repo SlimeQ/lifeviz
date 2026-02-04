@@ -20,8 +20,8 @@
 ## Source Capture Injection
 
 1. `WindowCaptureService` enumerates all visible, non-minimized windows (excluding LifeViz itself), grabs their DWM extended frame bounds to get physical pixel sizes (avoids DPI virtualization cropping), and captures each active window via BitBlt into a `System.Drawing.Bitmap`. `WebcamCaptureService` uses the modern WinRT `MediaCapture` API, which provides a high-performance path to stream frames directly into reusable memory buffers, avoiding the GC pressure associated with frequent allocations during capture. `FileCaptureService` loads static images (including WEBP) and GIFs via WPF bitmap decoders and uses `MediaPlayer` for videos; animated files loop, video sequences advance on end, and frames are converted to BGRA buffers for compositing.
-2. Each capture is downscaled to the grid size and stored as BGRA using the per-source fit mode (Fill default, plus Fit/Stretch/Center/Tile/Span); the primary source only materializes a source-resolution buffer when preserve-res rendering is enabled, and buffers are reused per window/webcam to avoid per-frame allocations.
-3. Sources are composited CPU-side in stack order using their selected blend modes (Normal, Additive, Multiply, Screen, Overlay, Lighten, Darken, Subtractive) into a shared downscaled buffer (and an optional high-res buffer when preserve-res is enabled). Normal uses the source pixel alpha (plus the layer opacity slider), so transparent PNGs blend cleanly without additive washout; optional keying (Normal-only) applies a per-layer key color + range to attenuate alpha before blending. Layer groups are composited recursively: each group blends its children into a private composite buffer sized to the group's primary aspect (fit within the engine grid), then that group composite is treated as a single layer in its parent stack.
+2. Each capture is downscaled to the grid size and stored as BGRA using the per-source fit mode (Fill default, plus Fit/Stretch/Center/Tile/Span); buffers are reused per window/webcam to avoid per-frame allocations.
+3. Sources are composited CPU-side in stack order using their selected blend modes (Normal, Additive, Multiply, Screen, Overlay, Lighten, Darken, Subtractive) into a shared downscaled buffer. Normal uses the source pixel alpha (plus the layer opacity slider), so transparent PNGs blend cleanly without additive washout; optional keying (Normal-only) applies a per-layer key color + range to attenuate alpha before blending. Layer groups are composited recursively: each group blends its children into a private composite buffer sized to the group's primary aspect (fit within the engine grid), then that group composite is treated as a single layer in its parent stack.
 4. The composited downscaled buffer feeds the injection path: luminance masks for *Naive Grayscale* or per-channel masks for *RGB Channel Bins*. If a source disappears, it is removed automatically; removing the last source restores the default aspect ratio (and webcam capture is released).
 
 ## Passthrough Underlay
@@ -29,8 +29,7 @@
 - When **Passthrough Underlay** is enabled, the composited buffer is preserved for presentation as well as injection.
 - Rendering blends the composited underlay with the simulation output per-pixel. Supported blend modes: Additive (default), Normal, Multiply, Screen, Overlay, Lighten, Darken, Subtractive.
 - Underlay rendering is skipped when no sources are active or the buffer dimensions disagree with the current surface (e.g., immediately after resizing).
-- **Preserve Window Resolution** renders the composite at the primary source's native resolution and samples the underlay bilinearly, then scales the Game of Life grid up to that size, reducing underlay pixelation.
-- Final blending still happens in a WPF pixel shader (GPU) so passthrough stays responsive even when rendering at source resolution; per-source blends occur CPU-side during the composite build.
+- Final blending happens in a WPF pixel shader (GPU) so passthrough stays responsive; per-source blends occur CPU-side during the composite build.
 
 ## Layer Animations
 
@@ -61,6 +60,6 @@ Because every new frame pushes down the history stack, movement leaves chromatic
 ## Performance Notes
 
 - Columns = round(rows * aspectRatio). The primary source replaces the default 16:9 ratio with its current ratio; removing all sources restores 16:9, and the selected height (rows) stays fixed while the width adapts.
-- Capture buffers are pooled (including the raw window/webcam readback), so toggling **Preserve Window Resolution** is the only time a source-resolution copy is kept alive; this removes GC spikes that caused occasional lurches.
+- Capture buffers are pooled (including the raw window/webcam readback), and only the downscaled composite is kept alive, removing GC spikes that caused occasional lurches.
 - Random fill uses 35% seed density to encourage interesting evolution when no source is selected.
 - All rendering is CPU-side; WPF's scaling handles presentation without smoothing (`NearestNeighbor`). Window capture uses GDI BitBlt, so extremely large or numerous sources may require smaller grids or lower tick rates if compositing falls behind.

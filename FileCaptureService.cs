@@ -270,7 +270,7 @@ internal sealed class FileCaptureService : IDisposable
         return false;
     }
 
-    public FileCaptureFrame? CaptureFrame(string path, int targetWidth, int targetHeight, FitMode fitMode, bool includeSource = true)
+    public FileCaptureFrame? CaptureFrame(string path, int targetWidth, int targetHeight, FitMode fitMode, bool includeSource = false)
     {
         if (string.IsNullOrWhiteSpace(path) || targetWidth <= 0 || targetHeight <= 0)
         {

@@ -59,6 +59,7 @@ internal static class LayerEditorOptions
         new LayerEditorOption("Rotate", "Rotate"),
         new LayerEditorOption("DvdBounce", "DVD Bounce"),
         new LayerEditorOption("BeatShake", "Beat Shake"),
+        new LayerEditorOption("AudioGranular", "Audio Granular"),
         new LayerEditorOption("Fade", "Fade")
     };
 
@@ -145,6 +146,8 @@ internal sealed class LayerEditorAnimation : LayerEditorNotify
                 OnPropertyChanged(nameof(IsRotate));
                 OnPropertyChanged(nameof(IsDvd));
                 OnPropertyChanged(nameof(IsBeatShake));
+                OnPropertyChanged(nameof(IsAudioGranular));
+                OnPropertyChanged(nameof(IsIntensityVisible));
                 OnPropertyChanged(nameof(DisplayName));
                 OnPropertyChanged(nameof(CycleMax));
                 OnPropertyChanged(nameof(CycleLargeChange));
@@ -204,6 +207,9 @@ internal sealed class LayerEditorAnimation : LayerEditorNotify
     public bool IsRotate => string.Equals(Type, "Rotate", StringComparison.OrdinalIgnoreCase);
     public bool IsDvd => string.Equals(Type, "DvdBounce", StringComparison.OrdinalIgnoreCase);
     public bool IsBeatShake => string.Equals(Type, "BeatShake", StringComparison.OrdinalIgnoreCase);
+    public bool IsAudioGranular => string.Equals(Type, "AudioGranular", StringComparison.OrdinalIgnoreCase);
+
+    public bool IsIntensityVisible => IsBeatShake || IsAudioGranular;
 
     public LayerEditorSource? Parent { get; set; }
 
@@ -212,6 +218,7 @@ internal sealed class LayerEditorAnimation : LayerEditorNotify
         "ZoomIn" => "Zoom In",
         "DvdBounce" => "DVD Bounce",
         "BeatShake" => "Beat Shake",
+        "AudioGranular" => "Audio Granular",
         _ => Type
     };
 

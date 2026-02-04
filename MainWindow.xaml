@@ -91,10 +91,6 @@
                           Header="Passthrough Underlay"
                           IsCheckable="True"
                           Click="TogglePassthrough_Click" />
-                <MenuItem x:Name="PreserveResolutionMenuItem"
-                          Header="Preserve Window Resolution"
-                          IsCheckable="True"
-                          Click="TogglePreserveResolution_Click" />
                 <MenuItem x:Name="ShowFpsMenuItem"
                           Header="Show FPS"
                           IsCheckable="True"
