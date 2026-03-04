@@ -11,6 +11,7 @@ using System.Threading.Tasks;
 using Microsoft.Win32;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Controls.Primitives;
 using System.Windows.Interop;
 using System.Windows.Media;
 using System.Windows.Media.Effects;
@@ -854,11 +855,25 @@ public partial class MainWindow : Window
         }
         catch (Exception ex)
         {
-            Logger.Error("Failed to open Layer Editor window.", ex);
-            MessageBox.Show(this, $"Failed to open Layer Editor:\n{ex.Message}", "Layer Editor Error",
+            Logger.Error("Failed to open Scene Editor window.", ex);
+            MessageBox.Show(this, $"Failed to open Scene Editor:\n{ex.Message}", "Scene Editor Error",
                 MessageBoxButton.OK, MessageBoxImage.Error);
             _layerEditorWindow = null;
         }
+    }
+
+    internal void OpenRootContextMenuAtScreenPoint(double screenX, double screenY)
+    {
+        if (RootContextMenu == null)
+        {
+            return;
+        }
+
+        RootContextMenu.Placement = PlacementMode.AbsolutePoint;
+        RootContextMenu.HorizontalOffset = screenX;
+        RootContextMenu.VerticalOffset = screenY;
+        RootContextMenu.IsOpen = false;
+        RootContextMenu.IsOpen = true;
     }
 
     private void RecordMenuItem_Click(object sender, RoutedEventArgs e)
@@ -1312,11 +1327,8 @@ public partial class MainWindow : Window
         return dialogResult == true ? result : null;
     }
 
-    private async void RootContextMenu_OnOpened(object sender, RoutedEventArgs e)
+    private void RootContextMenu_OnOpened(object sender, RoutedEventArgs e)
     {
-        PopulateAudioMenu();
-        await PopulateSourcesMenuAsync();
-
         if (PassthroughMenuItem != null)
         {
             PassthroughMenuItem.IsChecked = _passthroughEnabled;
@@ -1471,6 +1483,16 @@ public partial class MainWindow : Window
         UpdateAudioReactiveMenuState();
 
         UpdateUpdateMenuItem();
+    }
+
+    private async void SourcesMenu_OnSubmenuOpened(object sender, RoutedEventArgs e)
+    {
+        await PopulateSourcesMenuAsync();
+    }
+
+    private void AudioSourceMenu_OnSubmenuOpened(object sender, RoutedEventArgs e)
+    {
+        PopulateAudioMenu();
     }
 
     private async void PopulateAudioMenu()

@@ -276,6 +276,8 @@ internal sealed class LayerEditorSource : LayerEditorNotify
     private double _keyTolerance = 0.1;
     private string _pendingTranslateDirection = "Right";
     private string _pendingRotationDirection = "Clockwise";
+    private bool _isExpanded = true;
+    private bool _isSelected;
 
     public Guid Id
     {
@@ -309,6 +311,7 @@ internal sealed class LayerEditorSource : LayerEditorNotify
             if (SetField(ref _displayName, value))
             {
                 OnPropertyChanged(nameof(DisplayLabel));
+                OnPropertyChanged(nameof(TreeLabel));
             }
         }
     }
@@ -425,6 +428,18 @@ internal sealed class LayerEditorSource : LayerEditorNotify
 
     public ObservableCollection<LayerEditorAnimation> Animations { get; } = new();
 
+    public bool IsExpanded
+    {
+        get => _isExpanded;
+        set => SetField(ref _isExpanded, value);
+    }
+
+    public bool IsSelected
+    {
+        get => _isSelected;
+        set => SetField(ref _isSelected, value);
+    }
+
     public bool IsGroup => Kind == LayerEditorSourceKind.Group;
     public bool IsWebcam => Kind == LayerEditorSourceKind.Webcam;
     public bool IsWindow => Kind == LayerEditorSourceKind.Window;
@@ -445,6 +460,8 @@ internal sealed class LayerEditorSource : LayerEditorNotify
     };
 
     public string DisplayLabel => string.IsNullOrWhiteSpace(DisplayName) ? KindLabel : $"{KindLabel}: {DisplayName}";
+
+    public string TreeLabel => string.IsNullOrWhiteSpace(DisplayName) ? KindLabel : DisplayName;
 
     public string Details => Kind switch
     {
@@ -467,6 +484,7 @@ internal sealed class LayerEditorViewModel : LayerEditorNotify
 {
     private bool _liveMode = true;
     private ObservableCollection<LayerEditorSource> _sources = new();
+    private LayerEditorSource? _selectedSource;
 
     public bool LiveMode
     {
@@ -478,5 +496,11 @@ internal sealed class LayerEditorViewModel : LayerEditorNotify
     {
         get => _sources;
         set => SetField(ref _sources, value);
+    }
+
+    public LayerEditorSource? SelectedSource
+    {
+        get => _selectedSource;
+        set => SetField(ref _selectedSource, value);
     }
 }

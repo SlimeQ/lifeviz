@@ -81,11 +81,13 @@
                           Click="ToggleAspectRatioLock_Click" />
                 <Separator />
                 <MenuItem Header="Sources"
-                          x:Name="SourcesMenu" />
-                <MenuItem Header="Layer Editor..."
+                          x:Name="SourcesMenu"
+                          SubmenuOpened="SourcesMenu_OnSubmenuOpened" />
+                <MenuItem Header="Scene Editor..."
                           Click="OpenLayerEditor_Click" />
                 <MenuItem Header="Audio Source"
-                          x:Name="AudioSourceMenu" />
+                          x:Name="AudioSourceMenu"
+                          SubmenuOpened="AudioSourceMenu_OnSubmenuOpened" />
                 <MenuItem Header="Audio Reactivity"
                           StaysOpenOnClick="True">
                     <MenuItem x:Name="AudioReactiveEnabledMenuItem"

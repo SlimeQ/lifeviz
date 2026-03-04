@@ -1,10 +1,13 @@
 using System;
+using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.IO;
 using System.Linq;
 using System.Text.Json;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Input;
+using System.Windows.Media;
 using Microsoft.Win32;
 
 namespace lifeviz;
@@ -14,6 +17,9 @@ public partial class LayerEditorWindow : Window
     private readonly MainWindow _owner;
     private readonly LayerEditorViewModel _viewModel;
     private bool _suppressLiveUpdates;
+    private bool _updatingSelection;
+    private Point _dragStartPoint;
+    private LayerEditorSource? _draggedSource;
     private static readonly JsonSerializerOptions LayerConfigJsonOptions = new() { WriteIndented = true };
 
     public LayerEditorWindow(MainWindow owner)
@@ -37,17 +43,95 @@ public partial class LayerEditorWindow : Window
         RefreshFromSources();
     }
 
-    private void RefreshFromSources()
+    private void RefreshFromSources(Guid? preferredSelectionId = null)
     {
+        var expandedIds = CollectExpandedIds(_viewModel.Sources);
+        Guid? selectedId = preferredSelectionId ?? _viewModel.SelectedSource?.Id;
+
         _suppressLiveUpdates = true;
         try
         {
             var sources = _owner.BuildLayerEditorSources();
+            ApplyExpandedState(sources, expandedIds);
             _viewModel.Sources = new ObservableCollection<LayerEditorSource>(sources);
+
+            LayerEditorSource? selected = null;
+            if (selectedId.HasValue)
+            {
+                selected = FindSourceById(_viewModel.Sources, selectedId.Value);
+            }
+
+            selected ??= _viewModel.Sources.FirstOrDefault();
+            SetSelectedSource(selected);
         }
         finally
         {
             _suppressLiveUpdates = false;
+        }
+    }
+
+    private static HashSet<Guid> CollectExpandedIds(IEnumerable<LayerEditorSource> roots)
+    {
+        var ids = new HashSet<Guid>();
+        foreach (var source in EnumerateSources(roots))
+        {
+            if (source.IsExpanded)
+            {
+                ids.Add(source.Id);
+            }
+        }
+
+        return ids;
+    }
+
+    private static void ApplyExpandedState(IEnumerable<LayerEditorSource> roots, ISet<Guid> expandedIds)
+    {
+        foreach (var source in EnumerateSources(roots))
+        {
+            source.IsExpanded = expandedIds.Contains(source.Id);
+        }
+    }
+
+    private static IEnumerable<LayerEditorSource> EnumerateSources(IEnumerable<LayerEditorSource> roots)
+    {
+        foreach (var source in roots)
+        {
+            yield return source;
+            foreach (var child in EnumerateSources(source.Children))
+            {
+                yield return child;
+            }
+        }
+    }
+
+    private static LayerEditorSource? FindSourceById(IEnumerable<LayerEditorSource> roots, Guid id) =>
+        EnumerateSources(roots).FirstOrDefault(source => source.Id == id);
+
+    private void SetSelectedSource(LayerEditorSource? source)
+    {
+        if (ReferenceEquals(_viewModel.SelectedSource, source))
+        {
+            return;
+        }
+
+        _updatingSelection = true;
+        try
+        {
+            if (_viewModel.SelectedSource != null)
+            {
+                _viewModel.SelectedSource.IsSelected = false;
+            }
+
+            _viewModel.SelectedSource = source;
+
+            if (_viewModel.SelectedSource != null)
+            {
+                _viewModel.SelectedSource.IsSelected = true;
+            }
+        }
+        finally
+        {
+            _updatingSelection = false;
         }
     }
 
@@ -77,8 +161,15 @@ public partial class LayerEditorWindow : Window
             return;
         }
 
+        var selectedId = _viewModel.SelectedSource?.Id;
         _owner.ApplyLayerEditorSources(_viewModel.Sources.ToList());
-        RefreshFromSources();
+        RefreshFromSources(selectedId);
+    }
+
+    private void OpenAppControls_Click(object sender, RoutedEventArgs e)
+    {
+        Point anchor = AppControlsButton.PointToScreen(new Point(0, AppControlsButton.ActualHeight + 2));
+        _owner.OpenRootContextMenuAtScreenPoint(anchor.X, anchor.Y);
     }
 
     private void SaveLayerConfig_Click(object sender, RoutedEventArgs e)
@@ -145,6 +236,7 @@ public partial class LayerEditorWindow : Window
             else
             {
                 _viewModel.Sources = new ObservableCollection<LayerEditorSource>(sources);
+                SetSelectedSource(_viewModel.Sources.FirstOrDefault());
             }
         }
         catch (Exception ex)
@@ -154,6 +246,9 @@ public partial class LayerEditorWindow : Window
         }
     }
 
+    private LayerEditorSource? ResolveSourceContext(object sender) =>
+        sender is FrameworkElement { DataContext: LayerEditorSource source } ? source : _viewModel.SelectedSource;
+
     private void BlendMode_Changed(object sender, SelectionChangedEventArgs e)
     {
         if (!ShouldApplyLive())
@@ -161,7 +256,8 @@ public partial class LayerEditorWindow : Window
             return;
         }
 
-        if (sender is FrameworkElement { DataContext: LayerEditorSource source })
+        var source = ResolveSourceContext(sender);
+        if (source != null)
         {
             _owner.UpdateSourceBlendMode(source.Id, source.BlendMode);
         }
@@ -174,7 +270,8 @@ public partial class LayerEditorWindow : Window
             return;
         }
 
-        if (sender is FrameworkElement { DataContext: LayerEditorSource source })
+        var source = ResolveSourceContext(sender);
+        if (source != null)
         {
             _owner.UpdateSourceFitMode(source.Id, source.FitMode);
         }
@@ -187,7 +284,8 @@ public partial class LayerEditorWindow : Window
             return;
         }
 
-        if (sender is FrameworkElement { DataContext: LayerEditorSource source })
+        var source = ResolveSourceContext(sender);
+        if (source != null)
         {
             _owner.UpdateSourceOpacity(source.Id, source.Opacity);
         }
@@ -200,7 +298,8 @@ public partial class LayerEditorWindow : Window
             return;
         }
 
-        if (sender is FrameworkElement { DataContext: LayerEditorSource source })
+        var source = ResolveSourceContext(sender);
+        if (source != null)
         {
             _owner.UpdateSourceMirror(source.Id, source.Mirror);
         }
@@ -213,7 +312,8 @@ public partial class LayerEditorWindow : Window
             return;
         }
 
-        if (sender is FrameworkElement { DataContext: LayerEditorSource source })
+        var source = ResolveSourceContext(sender);
+        if (source != null)
         {
             _owner.UpdateSourceKeyEnabled(source.Id, source.KeyEnabled);
         }
@@ -226,7 +326,8 @@ public partial class LayerEditorWindow : Window
             return;
         }
 
-        if (sender is FrameworkElement { DataContext: LayerEditorSource source })
+        var source = ResolveSourceContext(sender);
+        if (source != null)
         {
             _owner.UpdateSourceKeyTolerance(source.Id, source.KeyTolerance);
         }
@@ -239,7 +340,8 @@ public partial class LayerEditorWindow : Window
             return;
         }
 
-        if (sender is FrameworkElement { DataContext: LayerEditorSource source })
+        var source = ResolveSourceContext(sender);
+        if (source != null)
         {
             _owner.UpdateSourceKeyColor(source.Id, source.KeyColorHex);
         }
@@ -252,7 +354,8 @@ public partial class LayerEditorWindow : Window
             return;
         }
 
-        if (sender is FrameworkElement { DataContext: LayerEditorSource source })
+        var source = ResolveSourceContext(sender);
+        if (source != null)
         {
             _owner.UpdateGroupName(source.Id, source.DisplayName);
         }
@@ -260,17 +363,17 @@ public partial class LayerEditorWindow : Window
 
     private void MakePrimary_Click(object sender, RoutedEventArgs e)
     {
-        if (sender is FrameworkElement { DataContext: LayerEditorSource source })
+        var source = ResolveSourceContext(sender);
+        if (source == null)
         {
-            if (_viewModel.LiveMode)
-            {
-                _owner.MakePrimaryFromEditor(source.Id);
-                RefreshFromSources();
-            }
-            else
-            {
-                MoveSourceToIndex(source, 0);
-            }
+            return;
+        }
+
+        MoveSourceToIndex(source, 0);
+
+        if (_viewModel.LiveMode)
+        {
+            _owner.MakePrimaryFromEditor(source.Id);
         }
     }
 
@@ -280,15 +383,9 @@ public partial class LayerEditorWindow : Window
 
     private void MoveSourceBy(object sender, int delta)
     {
-        if (sender is not FrameworkElement { DataContext: LayerEditorSource source })
+        var source = ResolveSourceContext(sender);
+        if (source == null)
         {
-            return;
-        }
-
-        if (_viewModel.LiveMode)
-        {
-            _owner.MoveSourceFromEditor(source.Id, delta);
-            RefreshFromSources();
             return;
         }
 
@@ -306,23 +403,50 @@ public partial class LayerEditorWindow : Window
         }
 
         list.Move(index, next);
+
+        if (_viewModel.LiveMode)
+        {
+            _owner.MoveSourceFromEditor(source.Id, delta);
+        }
     }
 
     private void RemoveSource_Click(object sender, RoutedEventArgs e)
     {
-        if (sender is not FrameworkElement { DataContext: LayerEditorSource source })
+        var source = ResolveSourceContext(sender);
+        if (source == null)
         {
             return;
         }
+
+        var parentCollection = GetParentCollection(source);
+        int index = parentCollection.IndexOf(source);
+        if (index < 0)
+        {
+            return;
+        }
+
+        parentCollection.RemoveAt(index);
+
+        LayerEditorSource? fallback = null;
+        if (index < parentCollection.Count)
+        {
+            fallback = parentCollection[index];
+        }
+        else if (parentCollection.Count > 0)
+        {
+            fallback = parentCollection[parentCollection.Count - 1];
+        }
+        else
+        {
+            fallback = source.Parent;
+        }
+
+        SetSelectedSource(fallback);
 
         if (_viewModel.LiveMode)
         {
             _owner.RemoveSourceFromEditor(source.Id);
-            RefreshFromSources();
-            return;
         }
-
-        GetParentCollection(source).Remove(source);
     }
 
     private void RestartVideo_Click(object sender, RoutedEventArgs e)
@@ -334,9 +458,32 @@ public partial class LayerEditorWindow : Window
             return;
         }
 
-        if (sender is FrameworkElement { DataContext: LayerEditorSource source })
+        var source = ResolveSourceContext(sender);
+        if (source != null)
         {
             _owner.RestartVideoFromEditor(source.Id);
+        }
+    }
+
+    private void ClearScene_Click(object sender, RoutedEventArgs e)
+    {
+        if (_viewModel.Sources.Count == 0)
+        {
+            return;
+        }
+
+        if (MessageBox.Show(this, "Remove all scene sources and groups?", "Clear Scene",
+                MessageBoxButton.YesNo, MessageBoxImage.Question) != MessageBoxResult.Yes)
+        {
+            return;
+        }
+
+        _viewModel.Sources.Clear();
+        SetSelectedSource(null);
+
+        if (_viewModel.LiveMode)
+        {
+            _owner.ApplyLayerEditorSources(Array.Empty<LayerEditorSource>());
         }
     }
 
@@ -356,7 +503,8 @@ public partial class LayerEditorWindow : Window
 
     private void AddAnimation(object sender, string type, string? translateKey, string? rotateKey)
     {
-        if (sender is not FrameworkElement { DataContext: LayerEditorSource source })
+        var source = ResolveSourceContext(sender);
+        if (source == null)
         {
             return;
         }
@@ -366,7 +514,7 @@ public partial class LayerEditorWindow : Window
             string? translateDirection = translateKey != null ? source.PendingTranslateDirection : null;
             string? rotationDirection = rotateKey != null ? source.PendingRotationDirection : null;
             _owner.AddAnimationFromEditor(source.Id, type, translateDirection, rotationDirection);
-            RefreshFromSources();
+            RefreshFromSources(source.Id);
             return;
         }
 
@@ -397,14 +545,12 @@ public partial class LayerEditorWindow : Window
             return;
         }
 
+        parent.Animations.Remove(animation);
+
         if (_viewModel.LiveMode)
         {
             _owner.RemoveAnimationFromEditor(parent.Id, animation.Id);
-            RefreshFromSources();
-            return;
         }
-
-        parent.Animations.Remove(animation);
     }
 
     private void AnimationLoop_Changed(object sender, SelectionChangedEventArgs e) => ApplyAnimationChange(sender);
@@ -459,27 +605,82 @@ public partial class LayerEditorWindow : Window
 
     private void AddRootSequence_Click(object sender, RoutedEventArgs e) => AddSource(null, LayerEditorSourceKind.VideoSequence);
 
-    private void AddChildGroup_Click(object sender, RoutedEventArgs e) => AddSource(GetSourceContext(sender), LayerEditorSourceKind.Group);
+    private void AddChildGroup_Click(object sender, RoutedEventArgs e)
+    {
+        var parent = ResolveSelectedGroup(sender);
+        if (parent != null)
+        {
+            AddSource(parent, LayerEditorSourceKind.Group);
+        }
+    }
 
-    private void AddChildWindow_Click(object sender, RoutedEventArgs e) => AddSource(GetSourceContext(sender), LayerEditorSourceKind.Window);
+    private void AddChildWindow_Click(object sender, RoutedEventArgs e)
+    {
+        var parent = ResolveSelectedGroup(sender);
+        if (parent != null)
+        {
+            AddSource(parent, LayerEditorSourceKind.Window);
+        }
+    }
 
-    private void AddChildWebcam_Click(object sender, RoutedEventArgs e) => AddSource(GetSourceContext(sender), LayerEditorSourceKind.Webcam);
+    private void AddChildWebcam_Click(object sender, RoutedEventArgs e)
+    {
+        var parent = ResolveSelectedGroup(sender);
+        if (parent != null)
+        {
+            AddSource(parent, LayerEditorSourceKind.Webcam);
+        }
+    }
 
-    private void AddChildFile_Click(object sender, RoutedEventArgs e) => AddSource(GetSourceContext(sender), LayerEditorSourceKind.File);
+    private void AddChildFile_Click(object sender, RoutedEventArgs e)
+    {
+        var parent = ResolveSelectedGroup(sender);
+        if (parent != null)
+        {
+            AddSource(parent, LayerEditorSourceKind.File);
+        }
+    }
 
-    private void AddChildYoutube_Click(object sender, RoutedEventArgs e) => AddSource(GetSourceContext(sender), LayerEditorSourceKind.Youtube);
+    private void AddChildYoutube_Click(object sender, RoutedEventArgs e)
+    {
+        var parent = ResolveSelectedGroup(sender);
+        if (parent != null)
+        {
+            AddSource(parent, LayerEditorSourceKind.Youtube);
+        }
+    }
 
-    private void AddChildSequence_Click(object sender, RoutedEventArgs e) => AddSource(GetSourceContext(sender), LayerEditorSourceKind.VideoSequence);
+    private void AddChildSequence_Click(object sender, RoutedEventArgs e)
+    {
+        var parent = ResolveSelectedGroup(sender);
+        if (parent != null)
+        {
+            AddSource(parent, LayerEditorSourceKind.VideoSequence);
+        }
+    }
 
-    private LayerEditorSource? GetSourceContext(object sender) =>
-        sender is FrameworkElement { DataContext: LayerEditorSource source } ? source : null;
+    private LayerEditorSource? ResolveSelectedGroup(object sender)
+    {
+        var source = ResolveSourceContext(sender);
+        if (source?.IsGroup == true)
+        {
+            return source;
+        }
+
+        MessageBox.Show(this, "Select a layer group in the Scene Tree first.", "Scene Editor",
+            MessageBoxButton.OK, MessageBoxImage.Information);
+        return null;
+    }
 
     private void AddSource(LayerEditorSource? parent, LayerEditorSourceKind kind)
     {
         if (_viewModel.LiveMode)
         {
-            AddSourceLive(parent, kind);
-            RefreshFromSources();
+            Guid? parentId = parent?.Id;
+            if (AddSourceLive(parent, kind))
+            {
+                RefreshFromSources(parentId);
+            }
             return;
         }
 
@@ -491,62 +692,80 @@ public partial class LayerEditorWindow : Window
 
         draft.Parent = parent;
         GetChildCollection(parent).Add(draft);
+        SetSelectedSource(draft);
     }
 
-    private void AddSourceLive(LayerEditorSource? parent, LayerEditorSourceKind kind)
+    private bool AddSourceLive(LayerEditorSource? parent, LayerEditorSourceKind kind)
     {
         Guid? parentId = parent?.Id;
         switch (kind)
         {
             case LayerEditorSourceKind.Group:
                 _owner.AddLayerGroupFromEditor(parentId);
-                break;
+                return true;
+
             case LayerEditorSourceKind.Window:
             {
                 var window = PromptForWindow();
-                if (window != null)
+                if (window == null)
                 {
-                    _owner.AddWindowSourceFromEditor(window, parentId);
+                    return false;
                 }
-                break;
+
+                _owner.AddWindowSourceFromEditor(window, parentId);
+                return true;
             }
+
             case LayerEditorSourceKind.Webcam:
             {
                 var webcam = PromptForWebcam();
-                if (webcam.HasValue)
+                if (!webcam.HasValue)
                 {
-                    _owner.AddWebcamSourceFromEditor(webcam.Value, parentId);
+                    return false;
                 }
-                break;
+
+                _owner.AddWebcamSourceFromEditor(webcam.Value, parentId);
+                return true;
             }
+
             case LayerEditorSourceKind.File:
             {
                 var path = PromptForFile();
-                if (!string.IsNullOrWhiteSpace(path))
+                if (string.IsNullOrWhiteSpace(path))
                 {
-                    _owner.AddFileSourceFromEditor(path!, parentId);
+                    return false;
                 }
-                break;
+
+                _owner.AddFileSourceFromEditor(path, parentId);
+                return true;
             }
+
             case LayerEditorSourceKind.Youtube:
             {
                 var url = PromptForYoutube();
-                if (!string.IsNullOrWhiteSpace(url))
+                if (string.IsNullOrWhiteSpace(url))
                 {
-                    _owner.AddYoutubeSourceFromEditor(url!, parentId);
+                    return false;
                 }
-                break;
+
+                _owner.AddYoutubeSourceFromEditor(url, parentId);
+                return true;
             }
+
             case LayerEditorSourceKind.VideoSequence:
             {
                 var paths = PromptForSequence();
-                if (paths != null && paths.Length > 0)
+                if (paths == null || paths.Length == 0)
                 {
-                    _owner.AddVideoSequenceFromEditor(paths, parentId);
+                    return false;
                 }
-                break;
+
+                _owner.AddVideoSequenceFromEditor(paths, parentId);
+                return true;
             }
         }
+
+        return false;
     }
 
     private LayerEditorSource? BuildDraftSource(LayerEditorSourceKind kind)
@@ -565,6 +784,7 @@ public partial class LayerEditorWindow : Window
                     KeyColorHex = "#000000",
                     KeyTolerance = 0.1
                 };
+
             case LayerEditorSourceKind.Window:
             {
                 var window = PromptForWindow();
@@ -587,6 +807,7 @@ public partial class LayerEditorWindow : Window
                     KeyTolerance = 0.1
                 };
             }
+
             case LayerEditorSourceKind.Webcam:
             {
                 var camera = PromptForWebcam();
@@ -608,6 +829,7 @@ public partial class LayerEditorWindow : Window
                     KeyTolerance = 0.1
                 };
             }
+
             case LayerEditorSourceKind.File:
             {
                 var path = PromptForFile();
@@ -629,6 +851,7 @@ public partial class LayerEditorWindow : Window
                     KeyTolerance = 0.1
                 };
             }
+
             case LayerEditorSourceKind.Youtube:
             {
                 var url = PromptForYoutube();
@@ -650,6 +873,7 @@ public partial class LayerEditorWindow : Window
                     KeyTolerance = 0.1
                 };
             }
+
             case LayerEditorSourceKind.VideoSequence:
             {
                 var paths = PromptForSequence();
@@ -687,13 +911,197 @@ public partial class LayerEditorWindow : Window
     {
         var list = GetParentCollection(source);
         int currentIndex = list.IndexOf(source);
-        if (currentIndex < 0 || currentIndex == index)
+        if (currentIndex < 0)
         {
             return;
         }
 
         index = Math.Clamp(index, 0, list.Count - 1);
+        if (currentIndex == index)
+        {
+            return;
+        }
+
         list.Move(currentIndex, index);
+    }
+
+    private void SceneTree_SelectedItemChanged(object sender, RoutedPropertyChangedEventArgs<object> e)
+    {
+        if (_updatingSelection)
+        {
+            return;
+        }
+
+        if (e.NewValue is LayerEditorSource source)
+        {
+            SetSelectedSource(source);
+        }
+        else
+        {
+            SetSelectedSource(null);
+        }
+    }
+
+    private void SceneTree_PreviewMouseLeftButtonDown(object sender, MouseButtonEventArgs e)
+    {
+        _dragStartPoint = e.GetPosition(SceneTree);
+        _draggedSource = FindAncestor<TreeViewItem>(e.OriginalSource as DependencyObject)?.DataContext as LayerEditorSource;
+    }
+
+    private void SceneTree_PreviewMouseMove(object sender, MouseEventArgs e)
+    {
+        if (e.LeftButton != MouseButtonState.Pressed || _draggedSource == null)
+        {
+            return;
+        }
+
+        var current = e.GetPosition(SceneTree);
+        if (Math.Abs(current.X - _dragStartPoint.X) < SystemParameters.MinimumHorizontalDragDistance &&
+            Math.Abs(current.Y - _dragStartPoint.Y) < SystemParameters.MinimumVerticalDragDistance)
+        {
+            return;
+        }
+
+        DragDrop.DoDragDrop(SceneTree, _draggedSource, DragDropEffects.Move);
+        _draggedSource = null;
+    }
+
+    private void SceneTree_DragOver(object sender, DragEventArgs e)
+    {
+        if (e.Data.GetData(typeof(LayerEditorSource)) is not LayerEditorSource dragged)
+        {
+            e.Effects = DragDropEffects.None;
+            e.Handled = true;
+            return;
+        }
+
+        e.Effects = TryGetDropTarget(e, dragged, out _, out _) ? DragDropEffects.Move : DragDropEffects.None;
+        e.Handled = true;
+    }
+
+    private void SceneTree_Drop(object sender, DragEventArgs e)
+    {
+        if (e.Data.GetData(typeof(LayerEditorSource)) is not LayerEditorSource dragged)
+        {
+            return;
+        }
+
+        if (!TryGetDropTarget(e, dragged, out var newParent, out var insertIndex))
+        {
+            return;
+        }
+
+        if (!MoveSource(dragged, newParent, insertIndex))
+        {
+            return;
+        }
+
+        SetSelectedSource(dragged);
+
+        if (_viewModel.LiveMode)
+        {
+            _owner.ApplyLayerEditorSources(_viewModel.Sources.ToList());
+        }
+    }
+
+    private bool TryGetDropTarget(DragEventArgs e, LayerEditorSource dragged, out LayerEditorSource? newParent, out int insertIndex)
+    {
+        var targetItem = FindAncestor<TreeViewItem>(e.OriginalSource as DependencyObject);
+        if (targetItem?.DataContext is not LayerEditorSource target)
+        {
+            newParent = null;
+            insertIndex = _viewModel.Sources.Count;
+            return true;
+        }
+
+        if (ReferenceEquals(target, dragged) || IsInSubtree(target, dragged))
+        {
+            newParent = null;
+            insertIndex = -1;
+            return false;
+        }
+
+        Point position = e.GetPosition(targetItem);
+        bool dropAsChild = target.IsGroup && position.X > 28;
+
+        if (dropAsChild)
+        {
+            newParent = target;
+            insertIndex = target.Children.Count;
+            return true;
+        }
+
+        newParent = target.Parent;
+        var siblings = GetChildCollection(newParent);
+        int targetIndex = siblings.IndexOf(target);
+        if (targetIndex < 0)
+        {
+            insertIndex = -1;
+            return false;
+        }
+
+        insertIndex = position.Y > targetItem.ActualHeight / 2 ? targetIndex + 1 : targetIndex;
+        return true;
+    }
+
+    private static bool IsInSubtree(LayerEditorSource node, LayerEditorSource potentialAncestor)
+    {
+        var current = node;
+        while (current != null)
+        {
+            if (ReferenceEquals(current, potentialAncestor))
+            {
+                return true;
+            }
+
+            current = current.Parent;
+        }
+
+        return false;
+    }
+
+    private bool MoveSource(LayerEditorSource source, LayerEditorSource? newParent, int index)
+    {
+        var oldCollection = GetParentCollection(source);
+        int oldIndex = oldCollection.IndexOf(source);
+        if (oldIndex < 0)
+        {
+            return false;
+        }
+
+        var newCollection = GetChildCollection(newParent);
+
+        if (ReferenceEquals(oldCollection, newCollection) && index > oldIndex)
+        {
+            index--;
+        }
+
+        index = Math.Clamp(index, 0, newCollection.Count);
+
+        if (ReferenceEquals(oldCollection, newCollection) && oldIndex == index)
+        {
+            return false;
+        }
+
+        oldCollection.RemoveAt(oldIndex);
+        source.Parent = newParent;
+        newCollection.Insert(index, source);
+        return true;
+    }
+
+    private static T? FindAncestor<T>(DependencyObject? current) where T : DependencyObject
+    {
+        while (current != null)
+        {
+            if (current is T typed)
+            {
+                return typed;
+            }
+
+            current = VisualTreeHelper.GetParent(current);
+        }
+
+        return null;
     }
 
     private WindowHandleInfo? PromptForWindow()

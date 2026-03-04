@@ -4,35 +4,36 @@
         xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
         xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
         mc:Ignorable="d"
-        Title="Layer Editor"
-        Width="980"
-        Height="820"
-        MinWidth="720"
-        MinHeight="520"
+        Title="Scene Editor"
+        Width="1240"
+        Height="860"
+        MinWidth="980"
+        MinHeight="620"
         Background="#0B0B0B"
         WindowStartupLocation="CenterOwner">
     <Window.Resources>
         <BooleanToVisibilityConverter x:Key="BoolToVisibility" />
+
         <Style TargetType="TextBlock">
-            <Setter Property="Foreground" Value="#FFFFFF" />
+            <Setter Property="Foreground" Value="#F5F5F5" />
         </Style>
         <Style TargetType="Label">
-            <Setter Property="Foreground" Value="#FFFFFF" />
+            <Setter Property="Foreground" Value="#F5F5F5" />
         </Style>
         <Style TargetType="GroupBox">
-            <Setter Property="Foreground" Value="#FFFFFF" />
-        </Style>
-        <Style TargetType="Expander">
-            <Setter Property="Foreground" Value="#FFFFFF" />
+            <Setter Property="Foreground" Value="#F5F5F5" />
+            <Setter Property="Margin" Value="0,0,0,10" />
         </Style>
         <Style TargetType="CheckBox">
-            <Setter Property="Foreground" Value="#FFFFFF" />
+            <Setter Property="Foreground" Value="#F5F5F5" />
         </Style>
         <Style TargetType="Button">
             <Setter Property="Background" Value="#262626" />
             <Setter Property="BorderBrush" Value="#3A3A3A" />
             <Setter Property="BorderThickness" Value="1" />
             <Setter Property="Foreground" Value="#F2F2F2" />
+            <Setter Property="Padding" Value="8,3" />
+            <Setter Property="Margin" Value="0,0,6,6" />
         </Style>
         <Style TargetType="TextBox">
             <Setter Property="Background" Value="#1A1A1A" />
@@ -50,12 +51,46 @@
             <Setter Property="Background" Value="#FFFFFF" />
             <Setter Property="Foreground" Value="#000000" />
         </Style>
+
+        <HierarchicalDataTemplate x:Key="SourceTreeTemplate" ItemsSource="{Binding Children}">
+            <Border Margin="0,1,0,1"
+                    Padding="4"
+                    Background="Transparent"
+                    CornerRadius="3">
+                <StackPanel>
+                    <DockPanel LastChildFill="False">
+                        <TextBlock Text="{Binding TreeLabel}"
+                                   FontWeight="SemiBold"
+                                   DockPanel.Dock="Left" />
+                        <TextBlock Text="{Binding KindLabel}"
+                                   Foreground="#9EA4AE"
+                                   FontSize="11"
+                                   DockPanel.Dock="Right" />
+                    </DockPanel>
+                    <TextBlock Text="{Binding Details}"
+                               Foreground="#8E8E8E"
+                               FontSize="11"
+                               TextTrimming="CharacterEllipsis"
+                               Margin="0,2,0,0" />
+                </StackPanel>
+            </Border>
+        </HierarchicalDataTemplate>
+
+        <Style TargetType="TreeViewItem">
+            <Setter Property="IsExpanded" Value="{Binding IsExpanded, Mode=TwoWay}" />
+            <Setter Property="IsSelected" Value="{Binding IsSelected, Mode=TwoWay}" />
+            <Setter Property="Foreground" Value="#F2F2F2" />
+            <Setter Property="Background" Value="Transparent" />
+            <Setter Property="Padding" Value="0" />
+        </Style>
+
         <DataTemplate x:Key="AnimationTemplate">
             <Border BorderBrush="#2A2A2A"
                     BorderThickness="1"
                     Padding="8"
-                    Margin="0,6,0,0"
-                    Background="#141414">
+                    Margin="0,0,0,8"
+                    Background="#141414"
+                    CornerRadius="4">
                 <StackPanel>
                     <DockPanel>
                         <TextBlock Text="{Binding DisplayName}"
@@ -70,8 +105,7 @@
 
                     <WrapPanel Margin="0,6,0,0">
                         <StackPanel Orientation="Horizontal" Margin="0,0,12,6">
-                            <TextBlock Text="Loop"
-                                       VerticalAlignment="Center" />
+                            <TextBlock Text="Loop" VerticalAlignment="Center" />
                             <ComboBox ItemsSource="{Binding LoopOptions}"
                                       DisplayMemberPath="Label"
                                       SelectedValuePath="Value"
@@ -81,8 +115,7 @@
                                       SelectionChanged="AnimationLoop_Changed" />
                         </StackPanel>
                         <StackPanel Orientation="Horizontal" Margin="0,0,12,6">
-                            <TextBlock Text="Speed"
-                                       VerticalAlignment="Center" />
+                            <TextBlock Text="Speed" VerticalAlignment="Center" />
                             <ComboBox ItemsSource="{Binding SpeedOptions}"
                                       DisplayMemberPath="Label"
                                       SelectedValuePath="Value"
@@ -92,8 +125,7 @@
                                       SelectionChanged="AnimationSpeed_Changed" />
                         </StackPanel>
                         <StackPanel Orientation="Horizontal" Margin="0,0,12,6">
-                            <TextBlock Text="Cycle"
-                                       VerticalAlignment="Center" />
+                            <TextBlock Text="Cycle" VerticalAlignment="Center" />
                             <Slider Minimum="1"
                                     Maximum="{Binding CycleMax}"
                                     Value="{Binding BeatsPerCycle}"
@@ -112,8 +144,7 @@
                         <StackPanel Orientation="Horizontal"
                                     Margin="0,0,12,6"
                                     Visibility="{Binding IsTranslate, Converter={StaticResource BoolToVisibility}}">
-                            <TextBlock Text="Direction"
-                                       VerticalAlignment="Center" />
+                            <TextBlock Text="Direction" VerticalAlignment="Center" />
                             <ComboBox ItemsSource="{Binding TranslateDirectionOptions}"
                                       DisplayMemberPath="Label"
                                       SelectedValuePath="Value"
@@ -125,8 +156,7 @@
                         <StackPanel Orientation="Horizontal"
                                     Margin="0,0,12,6"
                                     Visibility="{Binding IsRotate, Converter={StaticResource BoolToVisibility}}">
-                            <TextBlock Text="Direction"
-                                       VerticalAlignment="Center" />
+                            <TextBlock Text="Direction" VerticalAlignment="Center" />
                             <ComboBox ItemsSource="{Binding RotationDirectionOptions}"
                                       DisplayMemberPath="Label"
                                       SelectedValuePath="Value"
@@ -136,7 +166,7 @@
                                       SelectionChanged="AnimationRotateDirection_Changed" />
                             <TextBlock Text="Angle"
                                        VerticalAlignment="Center"
-                                       Margin="12,0,0,0"/>
+                                       Margin="12,0,0,0" />
                             <Slider Minimum="0"
                                     Maximum="360"
                                     Value="{Binding RotationDegrees}"
@@ -152,8 +182,7 @@
                         <StackPanel Orientation="Horizontal"
                                     Margin="0,0,12,6"
                                     Visibility="{Binding IsDvd, Converter={StaticResource BoolToVisibility}}">
-                            <TextBlock Text="Size"
-                                       VerticalAlignment="Center" />
+                            <TextBlock Text="Size" VerticalAlignment="Center" />
                             <Slider Minimum="0.05"
                                     Maximum="0.5"
                                     Value="{Binding DvdScale}"
@@ -169,8 +198,7 @@
                         <StackPanel Orientation="Horizontal"
                                     Margin="0,0,12,6"
                                     Visibility="{Binding IsIntensityVisible, Converter={StaticResource BoolToVisibility}}">
-                            <TextBlock Text="Intensity"
-                                       VerticalAlignment="Center" />
+                            <TextBlock Text="Intensity" VerticalAlignment="Center" />
                             <Slider Minimum="0"
                                     Maximum="{Binding IntensityMax}"
                                     Value="{Binding BeatShakeIntensity}"
@@ -186,8 +214,7 @@
                         <StackPanel Orientation="Horizontal"
                                     Margin="0,0,12,6"
                                     Visibility="{Binding IsAudioGranularEqVisible, Converter={StaticResource BoolToVisibility}}">
-                            <TextBlock Text="EQ Low"
-                                       VerticalAlignment="Center" />
+                            <TextBlock Text="EQ Low" VerticalAlignment="Center" />
                             <Slider Minimum="0"
                                     Maximum="3"
                                     Value="{Binding AudioGranularLowGain}"
@@ -199,8 +226,7 @@
                             <TextBlock Text="{Binding AudioGranularLowGain, StringFormat={}{0:P0}}"
                                        Margin="6,0,10,0"
                                        VerticalAlignment="Center" />
-                            <TextBlock Text="Mid"
-                                       VerticalAlignment="Center" />
+                            <TextBlock Text="Mid" VerticalAlignment="Center" />
                             <Slider Minimum="0"
                                     Maximum="3"
                                     Value="{Binding AudioGranularMidGain}"
@@ -212,8 +238,7 @@
                             <TextBlock Text="{Binding AudioGranularMidGain, StringFormat={}{0:P0}}"
                                        Margin="6,0,10,0"
                                        VerticalAlignment="Center" />
-                            <TextBlock Text="High"
-                                       VerticalAlignment="Center" />
+                            <TextBlock Text="High" VerticalAlignment="Center" />
                             <Slider Minimum="0"
                                     Maximum="3"
                                     Value="{Binding AudioGranularHighGain}"
@@ -230,231 +255,6 @@
                 </StackPanel>
             </Border>
         </DataTemplate>
-
-        <DataTemplate x:Key="LayerTemplate">
-            <Border BorderBrush="#2A2A2A"
-                    BorderThickness="1"
-                    CornerRadius="6"
-                    Padding="8"
-                    Margin="0,0,0,10"
-                    Background="#111111">
-                <Expander Header="{Binding DisplayLabel}"
-                          IsExpanded="True">
-                    <StackPanel Margin="0,6,0,0">
-                        <DockPanel>
-                            <StackPanel Orientation="Horizontal"
-                                        DockPanel.Dock="Left">
-                                <Button Content="Primary"
-                                        Padding="8,2"
-                                        Margin="0,0,8,0"
-                                        Click="MakePrimary_Click" />
-                                <Button Content="Up"
-                                        Padding="8,2"
-                                        Margin="0,0,6,0"
-                                        Click="MoveUp_Click" />
-                                <Button Content="Down"
-                                        Padding="8,2"
-                                        Margin="0,0,6,0"
-                                        Click="MoveDown_Click" />
-                                <Button Content="Remove"
-                                        Padding="8,2"
-                                        Margin="0,0,6,0"
-                                        Click="RemoveSource_Click" />
-                                <Button Content="Restart"
-                                        Padding="8,2"
-                                        Margin="0,0,6,0"
-                                        Visibility="{Binding IsVideo, Converter={StaticResource BoolToVisibility}}"
-                                        Click="RestartVideo_Click" />
-                            </StackPanel>
-                        </DockPanel>
-
-                        <WrapPanel Margin="0,6,0,0">
-                            <StackPanel Orientation="Horizontal" Margin="0,0,12,6">
-                                <TextBlock Text="Blend"
-                                           VerticalAlignment="Center" />
-                                <ComboBox ItemsSource="{Binding BlendModeOptions}"
-                                          DisplayMemberPath="Label"
-                                          SelectedValuePath="Value"
-                                          SelectedValue="{Binding BlendMode}"
-                                          Margin="6,0,0,0"
-                                          Width="160"
-                                          SelectionChanged="BlendMode_Changed" />
-                            </StackPanel>
-                            <StackPanel Orientation="Horizontal" Margin="0,0,12,6">
-                                <TextBlock Text="Fit"
-                                           VerticalAlignment="Center" />
-                                <ComboBox ItemsSource="{Binding FitModeOptions}"
-                                          DisplayMemberPath="Label"
-                                          SelectedValuePath="Value"
-                                          SelectedValue="{Binding FitMode}"
-                                          Margin="6,0,0,0"
-                                          Width="140"
-                                          SelectionChanged="FitMode_Changed" />
-                            </StackPanel>
-                            <StackPanel Orientation="Horizontal" Margin="0,0,12,6">
-                                <TextBlock Text="Opacity"
-                                           VerticalAlignment="Center" />
-                                <Slider Minimum="0"
-                                        Maximum="1"
-                                        Value="{Binding Opacity}"
-                                        Width="150"
-                                        SmallChange="0.05"
-                                        LargeChange="0.1"
-                                        Margin="6,0,0,0"
-                                        ValueChanged="Opacity_Changed" />
-                                <TextBlock Text="{Binding Opacity, StringFormat={}{0:P0}}"
-                                           Margin="6,0,0,0"
-                                           VerticalAlignment="Center" />
-                            </StackPanel>
-                            <CheckBox Content="Mirror Webcam"
-                                      Margin="0,0,12,6"
-                                      IsEnabled="{Binding IsWebcam}"
-                                      IsChecked="{Binding Mirror}"
-                                      Checked="Mirror_Changed"
-                                      Unchecked="Mirror_Changed" />
-                        </WrapPanel>
-
-                        <WrapPanel Margin="0,2,0,0"
-                                  IsEnabled="{Binding IsNormalBlend}">
-                            <CheckBox Content="Key Background (Normal)"
-                                      Margin="0,0,12,6"
-                                      IsChecked="{Binding KeyEnabled}"
-                                      Checked="KeyEnabled_Changed"
-                                      Unchecked="KeyEnabled_Changed" />
-                            <StackPanel Orientation="Horizontal" Margin="0,0,12,6">
-                                <TextBlock Text="Key Color"
-                                           VerticalAlignment="Center" />
-                                <TextBox Text="{Binding KeyColorHex}"
-                                         Width="90"
-                                         Margin="6,0,0,0"
-                                         LostFocus="KeyColorHex_LostFocus" />
-                            </StackPanel>
-                            <StackPanel Orientation="Horizontal" Margin="0,0,12,6">
-                                <TextBlock Text="Key Range"
-                                           VerticalAlignment="Center" />
-                                <Slider Minimum="0"
-                                        Maximum="1"
-                                        Value="{Binding KeyTolerance}"
-                                        Width="140"
-                                        SmallChange="0.01"
-                                        LargeChange="0.05"
-                                        Margin="6,0,0,0"
-                                        ValueChanged="KeyTolerance_Changed" />
-                                <TextBlock Text="{Binding KeyTolerance, StringFormat={}{0:P0}}"
-                                           Margin="6,0,0,0"
-                                           VerticalAlignment="Center" />
-                            </StackPanel>
-                        </WrapPanel>
-
-                        <StackPanel Margin="0,2,0,0"
-                                    Visibility="{Binding IsGroup, Converter={StaticResource BoolToVisibility}}">
-                            <WrapPanel>
-                                <TextBlock Text="Group Name"
-                                           VerticalAlignment="Center" />
-                                <TextBox Text="{Binding DisplayName}"
-                                         Width="240"
-                                         Margin="8,0,0,6"
-                                         TextChanged="GroupName_Changed" />
-                            </WrapPanel>
-                        </StackPanel>
-
-                        <TextBlock Text="{Binding Details}"
-                                   Margin="0,2,0,0"
-                                   Foreground="#B5B5B5" />
-
-                        <GroupBox Header="Animations"
-                                  Margin="0,10,0,0">
-                            <StackPanel Margin="6">
-                                <ItemsControl ItemsSource="{Binding Animations}"
-                                              ItemTemplate="{StaticResource AnimationTemplate}" />
-
-                                <WrapPanel Margin="0,10,0,0">
-                                    <TextBlock Text="Add"
-                                               VerticalAlignment="Center"
-                                               Margin="0,0,8,0" />
-                                    <Button Content="Zoom"
-                                            Padding="8,2"
-                                            Margin="0,0,6,0"
-                                            Click="AddZoom_Click" />
-                                    <ComboBox ItemsSource="{Binding TranslateDirectionOptions}"
-                                              DisplayMemberPath="Label"
-                                              SelectedValuePath="Value"
-                                              SelectedValue="{Binding PendingTranslateDirection}"
-                                              Width="110"
-                                              Margin="0,0,6,0" />
-                                    <Button Content="Translate"
-                                            Padding="8,2"
-                                            Margin="0,0,12,0"
-                                            Click="AddTranslate_Click" />
-                                    <ComboBox ItemsSource="{Binding RotationDirectionOptions}"
-                                              DisplayMemberPath="Label"
-                                              SelectedValuePath="Value"
-                                              SelectedValue="{Binding PendingRotationDirection}"
-                                              Width="140"
-                                              Margin="0,0,6,0" />
-                                    <Button Content="Rotate"
-                                            Padding="8,2"
-                                            Margin="0,0,12,0"
-                                            Click="AddRotate_Click" />
-                                    <Button Content="DVD"
-                                            Padding="8,2"
-                                            Margin="0,0,6,0"
-                                            Click="AddDvd_Click" />
-                                    <Button Content="Beat Shake"
-                                            Padding="8,2"
-                                            Margin="0,0,6,0"
-                                            Click="AddBeatShake_Click" />
-                                    <Button Content="Audio Granular"
-                                            Padding="8,2"
-                                            Margin="0,0,6,0"
-                                            Click="AddAudioGranular_Click" />
-                                    <Button Content="Fade"
-                                            Padding="8,2"
-                                            Click="AddFade_Click" />
-                                </WrapPanel>
-                            </StackPanel>
-                        </GroupBox>
-
-                        <StackPanel Margin="0,10,0,0"
-                                    Visibility="{Binding IsGroup, Converter={StaticResource BoolToVisibility}}">
-                            <WrapPanel>
-                                <TextBlock Text="Add Child"
-                                           VerticalAlignment="Center"
-                                           Margin="0,0,8,0" />
-                                <Button Content="Group"
-                                        Padding="8,2"
-                                        Margin="0,0,6,0"
-                                        Click="AddChildGroup_Click" />
-                                <Button Content="Window"
-                                        Padding="8,2"
-                                        Margin="0,0,6,0"
-                                        Click="AddChildWindow_Click" />
-                                <Button Content="Webcam"
-                                        Padding="8,2"
-                                        Margin="0,0,6,0"
-                                        Click="AddChildWebcam_Click" />
-                                <Button Content="File"
-                                        Padding="8,2"
-                                        Margin="0,0,6,0"
-                                        Click="AddChildFile_Click" />
-                                <Button Content="YouTube"
-                                        Padding="8,2"
-                                        Margin="0,0,6,0"
-                                        Click="AddChildYoutube_Click" />
-                                <Button Content="Sequence"
-                                        Padding="8,2"
-                                        Click="AddChildSequence_Click" />
-                            </WrapPanel>
-                        </StackPanel>
-
-                        <ItemsControl ItemsSource="{Binding Children}"
-                                      ItemTemplate="{DynamicResource LayerTemplate}"
-                                      Margin="12,10,0,0"
-                                      Visibility="{Binding IsGroup, Converter={StaticResource BoolToVisibility}}" />
-                    </StackPanel>
-                </Expander>
-            </Border>
-        </DataTemplate>
     </Window.Resources>
 
     <Grid Margin="12"
@@ -464,14 +264,13 @@
             <RowDefinition Height="*" />
         </Grid.RowDefinitions>
 
-        <DockPanel Grid.Row="0" LastChildFill="False">
-            <TextBlock Text="Layer Stack"
-                       FontSize="18"
+        <DockPanel Grid.Row="0" LastChildFill="False" Margin="0,0,0,10">
+            <TextBlock Text="Scene Editor"
+                       FontSize="20"
                        FontWeight="Bold"
                        DockPanel.Dock="Left"
                        VerticalAlignment="Center" />
-            <StackPanel Orientation="Horizontal"
-                        DockPanel.Dock="Right">
+            <StackPanel Orientation="Horizontal" DockPanel.Dock="Right">
                 <CheckBox x:Name="LiveModeCheckBox"
                           Content="Live Mode"
                           IsChecked="{Binding LiveMode}"
@@ -479,58 +278,314 @@
                           VerticalAlignment="Center"
                           Checked="LiveModeToggle"
                           Unchecked="LiveModeToggle" />
+                <Button x:Name="AppControlsButton"
+                        Content="App Controls..."
+                        Click="OpenAppControls_Click" />
                 <Button x:Name="LoadLayersButton"
                         Content="Load..."
-                        Padding="10,4"
-                        Margin="0,0,8,0"
                         Click="LoadLayerConfig_Click" />
                 <Button x:Name="SaveLayersButton"
                         Content="Save..."
-                        Padding="10,4"
-                        Margin="0,0,8,0"
                         Click="SaveLayerConfig_Click" />
                 <Button x:Name="ApplyButton"
                         Content="Apply"
-                        Padding="12,4"
                         Click="ApplyButton_Click" />
             </StackPanel>
         </DockPanel>
 
-        <ScrollViewer Grid.Row="1"
-                      VerticalScrollBarVisibility="Auto">
-            <StackPanel>
-                <WrapPanel Margin="0,0,0,12">
-                    <TextBlock Text="Add"
-                               VerticalAlignment="Center"
-                               Margin="0,0,8,0" />
-                    <Button Content="Group"
-                            Padding="8,2"
-                            Margin="0,0,6,0"
-                            Click="AddRootGroup_Click" />
-                    <Button Content="Window"
-                            Padding="8,2"
-                            Margin="0,0,6,0"
-                            Click="AddRootWindow_Click" />
-                    <Button Content="Webcam"
-                            Padding="8,2"
-                            Margin="0,0,6,0"
-                            Click="AddRootWebcam_Click" />
-                    <Button Content="File"
-                            Padding="8,2"
-                            Margin="0,0,6,0"
-                            Click="AddRootFile_Click" />
-                    <Button Content="YouTube"
-                            Padding="8,2"
-                            Margin="0,0,6,0"
-                            Click="AddRootYoutube_Click" />
-                    <Button Content="Sequence"
-                            Padding="8,2"
-                            Click="AddRootSequence_Click" />
-                </WrapPanel>
+        <Grid Grid.Row="1">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="430" />
+                <ColumnDefinition Width="12" />
+                <ColumnDefinition Width="*" />
+            </Grid.ColumnDefinitions>
 
-                <ItemsControl ItemsSource="{Binding Sources}"
-                              ItemTemplate="{StaticResource LayerTemplate}" />
-            </StackPanel>
-        </ScrollViewer>
+            <Border Grid.Column="0"
+                    BorderBrush="#2E2E2E"
+                    BorderThickness="1"
+                    CornerRadius="6"
+                    Padding="10"
+                    Background="#101010">
+                <Grid>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="*" />
+                        <RowDefinition Height="Auto" />
+                    </Grid.RowDefinitions>
+
+                    <WrapPanel Grid.Row="0" Margin="0,0,0,6">
+                        <TextBlock Text="Add Root"
+                                   VerticalAlignment="Center"
+                                   Margin="0,0,8,6" />
+                        <Button Content="Group" Click="AddRootGroup_Click" />
+                        <Button Content="Window" Click="AddRootWindow_Click" />
+                        <Button Content="Webcam" Click="AddRootWebcam_Click" />
+                        <Button Content="File" Click="AddRootFile_Click" />
+                        <Button Content="YouTube" Click="AddRootYoutube_Click" />
+                        <Button Content="Sequence" Click="AddRootSequence_Click" />
+                    </WrapPanel>
+
+                    <WrapPanel Grid.Row="1" Margin="0,0,0,8">
+                        <TextBlock Text="Add Child"
+                                   VerticalAlignment="Center"
+                                   Margin="0,0,8,6" />
+                        <Button Content="Group" Click="AddChildGroup_Click" />
+                        <Button Content="Window" Click="AddChildWindow_Click" />
+                        <Button Content="Webcam" Click="AddChildWebcam_Click" />
+                        <Button Content="File" Click="AddChildFile_Click" />
+                        <Button Content="YouTube" Click="AddChildYoutube_Click" />
+                        <Button Content="Sequence" Click="AddChildSequence_Click" />
+                    </WrapPanel>
+
+                    <Border Grid.Row="2"
+                            BorderBrush="#2A2A2A"
+                            BorderThickness="1"
+                            CornerRadius="4"
+                            Padding="4"
+                            Background="#141414"
+                            AllowDrop="True"
+                            DragOver="SceneTree_DragOver"
+                            Drop="SceneTree_Drop">
+                        <TreeView x:Name="SceneTree"
+                                  ItemsSource="{Binding Sources}"
+                                  ItemTemplate="{StaticResource SourceTreeTemplate}"
+                                  Background="Transparent"
+                                  BorderThickness="0"
+                                  SelectedItemChanged="SceneTree_SelectedItemChanged"
+                                  PreviewMouseLeftButtonDown="SceneTree_PreviewMouseLeftButtonDown"
+                                  PreviewMouseMove="SceneTree_PreviewMouseMove"
+                                  AllowDrop="True" />
+                    </Border>
+
+                    <WrapPanel Grid.Row="3" Margin="0,8,0,0">
+                        <Button Content="Make Primary"
+                                Click="MakePrimary_Click" />
+                        <Button Content="Move Up"
+                                Click="MoveUp_Click" />
+                        <Button Content="Move Down"
+                                Click="MoveDown_Click" />
+                        <Button Content="Remove"
+                                Click="RemoveSource_Click" />
+                        <Button Content="Restart"
+                                Click="RestartVideo_Click" />
+                        <Button Content="Clear Scene"
+                                Click="ClearScene_Click" />
+                    </WrapPanel>
+                </Grid>
+            </Border>
+
+            <Border Grid.Column="2"
+                    BorderBrush="#2E2E2E"
+                    BorderThickness="1"
+                    CornerRadius="6"
+                    Padding="12"
+                    Background="#101010">
+                <Grid>
+                    <StackPanel>
+                        <TextBlock Text="Select a layer or group in the tree to edit its settings."
+                                   Foreground="#A0A0A0"
+                                   FontSize="14"
+                                   Margin="0,0,0,8">
+                            <TextBlock.Style>
+                                <Style TargetType="TextBlock">
+                                    <Setter Property="Visibility" Value="Collapsed" />
+                                    <Style.Triggers>
+                                        <DataTrigger Binding="{Binding SelectedSource}" Value="{x:Null}">
+                                            <Setter Property="Visibility" Value="Visible" />
+                                        </DataTrigger>
+                                    </Style.Triggers>
+                                </Style>
+                            </TextBlock.Style>
+                        </TextBlock>
+
+                        <ScrollViewer VerticalScrollBarVisibility="Auto">
+                            <StackPanel DataContext="{Binding SelectedSource}">
+                                <StackPanel.Style>
+                                    <Style TargetType="StackPanel">
+                                        <Setter Property="Visibility" Value="Visible" />
+                                        <Style.Triggers>
+                                            <DataTrigger Binding="{Binding}" Value="{x:Null}">
+                                                <Setter Property="Visibility" Value="Collapsed" />
+                                            </DataTrigger>
+                                        </Style.Triggers>
+                                    </Style>
+                                </StackPanel.Style>
+
+                                <Border BorderBrush="#2A2A2A"
+                                        BorderThickness="1"
+                                        CornerRadius="4"
+                                        Padding="10"
+                                        Margin="0,0,0,10"
+                                        Background="#141414">
+                                    <StackPanel>
+                                        <DockPanel LastChildFill="False">
+                                            <TextBlock Text="{Binding TreeLabel}"
+                                                       FontSize="17"
+                                                       FontWeight="Bold"
+                                                       DockPanel.Dock="Left" />
+                                            <TextBlock Text="{Binding KindLabel}"
+                                                       Foreground="#9EA4AE"
+                                                       FontSize="12"
+                                                       DockPanel.Dock="Right" />
+                                        </DockPanel>
+                                        <TextBlock Text="{Binding Details}"
+                                                   Foreground="#9A9A9A"
+                                                   Margin="0,4,0,0" />
+                                    </StackPanel>
+                                </Border>
+
+                                <GroupBox Header="Layer Settings">
+                                    <StackPanel Margin="8">
+                                        <WrapPanel Margin="0,0,0,4">
+                                            <StackPanel Orientation="Horizontal" Margin="0,0,12,6">
+                                                <TextBlock Text="Blend"
+                                                           VerticalAlignment="Center" />
+                                                <ComboBox ItemsSource="{Binding BlendModeOptions}"
+                                                          DisplayMemberPath="Label"
+                                                          SelectedValuePath="Value"
+                                                          SelectedValue="{Binding BlendMode}"
+                                                          Margin="6,0,0,0"
+                                                          Width="160"
+                                                          SelectionChanged="BlendMode_Changed" />
+                                            </StackPanel>
+                                            <StackPanel Orientation="Horizontal" Margin="0,0,12,6">
+                                                <TextBlock Text="Fit"
+                                                           VerticalAlignment="Center" />
+                                                <ComboBox ItemsSource="{Binding FitModeOptions}"
+                                                          DisplayMemberPath="Label"
+                                                          SelectedValuePath="Value"
+                                                          SelectedValue="{Binding FitMode}"
+                                                          Margin="6,0,0,0"
+                                                          Width="140"
+                                                          SelectionChanged="FitMode_Changed" />
+                                            </StackPanel>
+                                            <StackPanel Orientation="Horizontal" Margin="0,0,12,6">
+                                                <TextBlock Text="Opacity"
+                                                           VerticalAlignment="Center" />
+                                                <Slider Minimum="0"
+                                                        Maximum="1"
+                                                        Value="{Binding Opacity}"
+                                                        Width="150"
+                                                        SmallChange="0.05"
+                                                        LargeChange="0.1"
+                                                        Margin="6,0,0,0"
+                                                        ValueChanged="Opacity_Changed" />
+                                                <TextBlock Text="{Binding Opacity, StringFormat={}{0:P0}}"
+                                                           Margin="6,0,0,0"
+                                                           VerticalAlignment="Center" />
+                                            </StackPanel>
+                                        </WrapPanel>
+
+                                        <WrapPanel Margin="0,0,0,4">
+                                            <CheckBox Content="Mirror Webcam"
+                                                      Margin="0,0,12,6"
+                                                      IsEnabled="{Binding IsWebcam}"
+                                                      IsChecked="{Binding Mirror}"
+                                                      Checked="Mirror_Changed"
+                                                      Unchecked="Mirror_Changed" />
+                                            <TextBlock Text="Group Name"
+                                                       VerticalAlignment="Center"
+                                                       Margin="0,0,8,6"
+                                                       Visibility="{Binding IsGroup, Converter={StaticResource BoolToVisibility}}" />
+                                            <TextBox Text="{Binding DisplayName}"
+                                                     Width="240"
+                                                     Margin="0,0,0,6"
+                                                     TextChanged="GroupName_Changed"
+                                                     Visibility="{Binding IsGroup, Converter={StaticResource BoolToVisibility}}" />
+                                        </WrapPanel>
+
+                                        <WrapPanel Margin="0,0,0,0"
+                                                  IsEnabled="{Binding IsNormalBlend}">
+                                            <CheckBox Content="Enable Keying (Normal)"
+                                                      Margin="0,0,12,6"
+                                                      IsChecked="{Binding KeyEnabled}"
+                                                      Checked="KeyEnabled_Changed"
+                                                      Unchecked="KeyEnabled_Changed" />
+                                            <StackPanel Orientation="Horizontal" Margin="0,0,12,6">
+                                                <TextBlock Text="Key Color"
+                                                           VerticalAlignment="Center" />
+                                                <TextBox Text="{Binding KeyColorHex}"
+                                                         Width="90"
+                                                         Margin="6,0,0,0"
+                                                         LostFocus="KeyColorHex_LostFocus" />
+                                            </StackPanel>
+                                            <StackPanel Orientation="Horizontal" Margin="0,0,12,6">
+                                                <TextBlock Text="Key Range"
+                                                           VerticalAlignment="Center" />
+                                                <Slider Minimum="0"
+                                                        Maximum="1"
+                                                        Value="{Binding KeyTolerance}"
+                                                        Width="140"
+                                                        SmallChange="0.01"
+                                                        LargeChange="0.05"
+                                                        Margin="6,0,0,0"
+                                                        ValueChanged="KeyTolerance_Changed" />
+                                                <TextBlock Text="{Binding KeyTolerance, StringFormat={}{0:P0}}"
+                                                           Margin="6,0,0,0"
+                                                           VerticalAlignment="Center" />
+                                            </StackPanel>
+                                        </WrapPanel>
+                                    </StackPanel>
+                                </GroupBox>
+
+                                <GroupBox Header="Animations">
+                                    <StackPanel Margin="8">
+                                        <ItemsControl ItemsSource="{Binding Animations}"
+                                                      ItemTemplate="{StaticResource AnimationTemplate}" />
+
+                                        <WrapPanel Margin="0,2,0,0">
+                                            <TextBlock Text="Add"
+                                                       VerticalAlignment="Center"
+                                                       Margin="0,0,8,6" />
+                                            <Button Content="Zoom"
+                                                    Padding="8,2"
+                                                    Margin="0,0,6,6"
+                                                    Click="AddZoom_Click" />
+                                            <ComboBox ItemsSource="{Binding TranslateDirectionOptions}"
+                                                      DisplayMemberPath="Label"
+                                                      SelectedValuePath="Value"
+                                                      SelectedValue="{Binding PendingTranslateDirection}"
+                                                      Width="110"
+                                                      Margin="0,0,6,6" />
+                                            <Button Content="Translate"
+                                                    Padding="8,2"
+                                                    Margin="0,0,12,6"
+                                                    Click="AddTranslate_Click" />
+                                            <ComboBox ItemsSource="{Binding RotationDirectionOptions}"
+                                                      DisplayMemberPath="Label"
+                                                      SelectedValuePath="Value"
+                                                      SelectedValue="{Binding PendingRotationDirection}"
+                                                      Width="140"
+                                                      Margin="0,0,6,6" />
+                                            <Button Content="Rotate"
+                                                    Padding="8,2"
+                                                    Margin="0,0,12,6"
+                                                    Click="AddRotate_Click" />
+                                            <Button Content="DVD"
+                                                    Padding="8,2"
+                                                    Margin="0,0,6,6"
+                                                    Click="AddDvd_Click" />
+                                            <Button Content="Beat Shake"
+                                                    Padding="8,2"
+                                                    Margin="0,0,6,6"
+                                                    Click="AddBeatShake_Click" />
+                                            <Button Content="Audio Granular"
+                                                    Padding="8,2"
+                                                    Margin="0,0,6,6"
+                                                    Click="AddAudioGranular_Click" />
+                                            <Button Content="Fade"
+                                                    Padding="8,2"
+                                                    Margin="0,0,0,6"
+                                                    Click="AddFade_Click" />
+                                        </WrapPanel>
+                                    </StackPanel>
+                                </GroupBox>
+                            </StackPanel>
+                        </ScrollViewer>
+                    </StackPanel>
+                </Grid>
+            </Border>
+        </Grid>
     </Grid>
 </Window>

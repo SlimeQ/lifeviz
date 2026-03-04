@@ -79,10 +79,18 @@ internal sealed class AudioBeatDetector : IDisposable
 
             try
             {
-                using var renderEnumerator = new MMDeviceEnumerator();
-                var renderDevices = renderEnumerator.EnumerateAudioEndPoints(DataFlow.Render, DeviceState.Active);
-                devices.AddRange(renderDevices.Select(d =>
-                    new AudioDeviceInfo(BuildRenderSelectionId(d.ID), $"Output: {d.FriendlyName}", AudioDeviceInfo.AudioDeviceKind.Render)));
+                var renderDevices = await Task.Run(() =>
+                {
+                    using var renderEnumerator = new MMDeviceEnumerator();
+                    return renderEnumerator
+                        .EnumerateAudioEndPoints(DataFlow.Render, DeviceState.Active)
+                        .Select(d => new AudioDeviceInfo(
+                            BuildRenderSelectionId(d.ID),
+                            $"Output: {d.FriendlyName}",
+                            AudioDeviceInfo.AudioDeviceKind.Render))
+                        .ToList();
+                });
+                devices.AddRange(renderDevices);
             }
             catch (Exception ex)
             {
