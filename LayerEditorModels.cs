@@ -270,6 +270,12 @@ internal sealed class LayerEditorSource : LayerEditorNotify
     private string _blendMode = "Additive";
     private string _fitMode = "Fill";
     private double _opacity = 1.0;
+    private bool _videoAudioEnabled;
+    private double _videoAudioVolume = 1.0;
+    private bool _videoPlaybackPaused;
+    private double _videoPlaybackPosition;
+    private double _videoPlaybackPositionSeconds;
+    private double _videoPlaybackDurationSeconds;
     private bool _mirror;
     private bool _keyEnabled;
     private string _keyColorHex = "#000000";
@@ -386,6 +392,61 @@ internal sealed class LayerEditorSource : LayerEditorNotify
         set => SetField(ref _opacity, value);
     }
 
+    public bool VideoAudioEnabled
+    {
+        get => _videoAudioEnabled;
+        set => SetField(ref _videoAudioEnabled, value);
+    }
+
+    public double VideoAudioVolume
+    {
+        get => _videoAudioVolume;
+        set => SetField(ref _videoAudioVolume, value);
+    }
+
+    public bool VideoPlaybackPaused
+    {
+        get => _videoPlaybackPaused;
+        set
+        {
+            if (SetField(ref _videoPlaybackPaused, value))
+            {
+                OnPropertyChanged(nameof(VideoPlaybackToggleLabel));
+            }
+        }
+    }
+
+    public double VideoPlaybackPosition
+    {
+        get => _videoPlaybackPosition;
+        set => SetField(ref _videoPlaybackPosition, value);
+    }
+
+    public double VideoPlaybackPositionSeconds
+    {
+        get => _videoPlaybackPositionSeconds;
+        set
+        {
+            if (SetField(ref _videoPlaybackPositionSeconds, value))
+            {
+                OnPropertyChanged(nameof(VideoPlaybackTimeLabel));
+            }
+        }
+    }
+
+    public double VideoPlaybackDurationSeconds
+    {
+        get => _videoPlaybackDurationSeconds;
+        set
+        {
+            if (SetField(ref _videoPlaybackDurationSeconds, value))
+            {
+                OnPropertyChanged(nameof(VideoPlaybackTimeLabel));
+                OnPropertyChanged(nameof(VideoSeekAvailable));
+            }
+        }
+    }
+
     public bool Mirror
     {
         get => _mirror;
@@ -446,13 +507,18 @@ internal sealed class LayerEditorSource : LayerEditorNotify
     public bool IsNormalBlend => string.Equals(BlendMode, "Normal", StringComparison.OrdinalIgnoreCase);
     public bool IsVideo =>
         Kind == LayerEditorSourceKind.VideoSequence ||
+        Kind == LayerEditorSourceKind.Youtube ||
         (Kind == LayerEditorSourceKind.File && !string.IsNullOrWhiteSpace(FilePath) && 
             (FileCaptureService.IsVideoPath(FilePath) || FilePath.StartsWith("youtube:")));
+    public bool VideoSeekAvailable => VideoPlaybackDurationSeconds > 0.001;
+    public string VideoPlaybackToggleLabel => VideoPlaybackPaused ? "Play" : "Pause";
+    public string VideoPlaybackTimeLabel => $"{FormatPlaybackTime(VideoPlaybackPositionSeconds)} / {FormatPlaybackTime(VideoPlaybackDurationSeconds)}";
 
     public string KindLabel => Kind switch
     {
         LayerEditorSourceKind.Webcam => "Camera",
         LayerEditorSourceKind.File => "File",
+        LayerEditorSourceKind.Youtube => "YouTube",
         LayerEditorSourceKind.VideoSequence => "Video Sequence",
         LayerEditorSourceKind.Group => "Group",
         LayerEditorSourceKind.Window => "Window",
@@ -468,6 +534,7 @@ internal sealed class LayerEditorSource : LayerEditorNotify
         LayerEditorSourceKind.Window => string.IsNullOrWhiteSpace(WindowTitle) ? "Window source" : WindowTitle,
         LayerEditorSourceKind.Webcam => string.IsNullOrWhiteSpace(WebcamId) ? "Webcam source" : $"Id: {WebcamId}",
         LayerEditorSourceKind.File => string.IsNullOrWhiteSpace(FilePath) ? "File source" : FilePath,
+        LayerEditorSourceKind.Youtube => string.IsNullOrWhiteSpace(FilePath) ? "YouTube source" : FilePath,
         LayerEditorSourceKind.VideoSequence => FilePaths.Count > 0 ? $"{FilePaths.Count} files" : "Video sequence",
         LayerEditorSourceKind.Group => "Layer group",
         _ => string.Empty
@@ -478,11 +545,29 @@ internal sealed class LayerEditorSource : LayerEditorNotify
     public IReadOnlyList<LayerEditorOption> AnimationTypeOptions => LayerEditorOptions.AnimationTypes;
     public IReadOnlyList<LayerEditorOption> TranslateDirectionOptions => LayerEditorOptions.TranslateDirections;
     public IReadOnlyList<LayerEditorOption> RotationDirectionOptions => LayerEditorOptions.RotationDirections;
+
+    private static string FormatPlaybackTime(double seconds)
+    {
+        if (double.IsNaN(seconds) || double.IsInfinity(seconds) || seconds < 0)
+        {
+            return "0:00";
+        }
+
+        var duration = TimeSpan.FromSeconds(seconds);
+        if (duration.TotalHours >= 1)
+        {
+            return duration.ToString(@"h\:mm\:ss");
+        }
+
+        return duration.ToString(@"m\:ss");
+    }
 }
 
 internal sealed class LayerEditorViewModel : LayerEditorNotify
 {
     private bool _liveMode = true;
+    private bool _sourceAudioMasterEnabled = true;
+    private double _sourceAudioMasterVolume = 1.0;
     private ObservableCollection<LayerEditorSource> _sources = new();
     private LayerEditorSource? _selectedSource;
 
@@ -490,6 +575,18 @@ internal sealed class LayerEditorViewModel : LayerEditorNotify
     {
         get => _liveMode;
         set => SetField(ref _liveMode, value);
+    }
+
+    public bool SourceAudioMasterEnabled
+    {
+        get => _sourceAudioMasterEnabled;
+        set => SetField(ref _sourceAudioMasterEnabled, value);
+    }
+
+    public double SourceAudioMasterVolume
+    {
+        get => _sourceAudioMasterVolume;
+        set => SetField(ref _sourceAudioMasterVolume, value);
     }
 
     public ObservableCollection<LayerEditorSource> Sources

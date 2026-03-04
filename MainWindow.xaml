@@ -82,12 +82,18 @@
                 <Separator />
                 <MenuItem Header="Sources"
                           x:Name="SourcesMenu"
-                          SubmenuOpened="SourcesMenu_OnSubmenuOpened" />
+                          SubmenuOpened="SourcesMenu_OnSubmenuOpened">
+                    <MenuItem Header="Loading..."
+                              IsEnabled="False" />
+                </MenuItem>
                 <MenuItem Header="Scene Editor..."
                           Click="OpenLayerEditor_Click" />
                 <MenuItem Header="Audio Source"
                           x:Name="AudioSourceMenu"
-                          SubmenuOpened="AudioSourceMenu_OnSubmenuOpened" />
+                          SubmenuOpened="AudioSourceMenu_OnSubmenuOpened">
+                    <MenuItem Header="Loading..."
+                              IsEnabled="False" />
+                </MenuItem>
                 <MenuItem Header="Audio Reactivity"
                           StaysOpenOnClick="True">
                     <MenuItem x:Name="AudioReactiveEnabledMenuItem"
@@ -314,6 +320,43 @@
                           x:Name="LifeModeMenu">
                     <MenuItem Header="Naive Grayscale" IsCheckable="True" Click="LifeModeItem_Click" />
                     <MenuItem Header="RGB Channel Bins" IsCheckable="True" Click="LifeModeItem_Click" />
+                </MenuItem>
+                <MenuItem x:Name="RgbHueShiftMenu"
+                          Header="RGB Hue Shift"
+                          StaysOpenOnClick="True">
+                    <StackPanel Margin="8,4" Width="220">
+                        <DockPanel Margin="0,0,0,4">
+                            <TextBlock Text="Offset:" DockPanel.Dock="Left"/>
+                            <TextBlock x:Name="RgbHueShiftValueText"
+                                       Text="0deg"
+                                       DockPanel.Dock="Right"
+                                       FontWeight="Bold"/>
+                            <Slider x:Name="RgbHueShiftSlider"
+                                    Minimum="0"
+                                    Maximum="360"
+                                    Value="0"
+                                    SmallChange="1"
+                                    LargeChange="15"
+                                    Margin="8,0"
+                                    ValueChanged="RgbHueShiftSlider_OnValueChanged"/>
+                        </DockPanel>
+                        <DockPanel>
+                            <TextBlock Text="Speed:" DockPanel.Dock="Left"/>
+                            <TextBlock x:Name="RgbHueShiftSpeedValueText"
+                                       Text="0deg/s"
+                                       DockPanel.Dock="Right"
+                                       FontWeight="Bold"/>
+                            <Slider x:Name="RgbHueShiftSpeedSlider"
+                                    Minimum="-180"
+                                    Maximum="180"
+                                    Value="0"
+                                    SmallChange="1"
+                                    LargeChange="10"
+                                    Margin="8,0"
+                                    PreviewMouseLeftButtonDown="RgbHueShiftSpeedSlider_OnPreviewMouseLeftButtonDown"
+                                    ValueChanged="RgbHueShiftSpeedSlider_OnValueChanged"/>
+                        </DockPanel>
+                    </StackPanel>
                 </MenuItem>
                 <MenuItem Header="Binning Mode"
                           x:Name="BinningModeMenu">

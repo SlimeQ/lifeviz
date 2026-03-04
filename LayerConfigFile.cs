@@ -41,6 +41,8 @@ internal sealed class LayerConfigFile
             BlendMode = source.BlendMode,
             FitMode = source.FitMode,
             Opacity = source.Opacity,
+            VideoAudioEnabled = source.VideoAudioEnabled,
+            VideoAudioVolume = source.VideoAudioVolume,
             Mirror = source.Mirror,
             KeyEnabled = source.KeyEnabled,
             KeyColor = source.KeyColorHex,
@@ -93,6 +95,8 @@ internal sealed class LayerConfigFile
             BlendMode = string.IsNullOrWhiteSpace(config.BlendMode) ? "Additive" : config.BlendMode,
             FitMode = string.IsNullOrWhiteSpace(config.FitMode) ? "Fill" : config.FitMode,
             Opacity = Math.Clamp(config.Opacity, 0, 1),
+            VideoAudioEnabled = config.VideoAudioEnabled,
+            VideoAudioVolume = Math.Clamp(config.VideoAudioVolume, 0, 1),
             Mirror = config.Mirror,
             KeyEnabled = config.KeyEnabled,
             KeyColorHex = string.IsNullOrWhiteSpace(config.KeyColor) ? "#000000" : config.KeyColor,
@@ -169,6 +173,8 @@ internal sealed class LayerConfigSource
     public string? BlendMode { get; set; }
     public string? FitMode { get; set; }
     public double Opacity { get; set; } = 1.0;
+    public bool VideoAudioEnabled { get; set; }
+    public double VideoAudioVolume { get; set; } = 1.0;
     public bool Mirror { get; set; }
     public bool KeyEnabled { get; set; }
     public string? KeyColor { get; set; }

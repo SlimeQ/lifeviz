@@ -8,6 +8,7 @@ using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Media;
+using System.Windows.Threading;
 using Microsoft.Win32;
 
 namespace lifeviz;
@@ -18,8 +19,10 @@ public partial class LayerEditorWindow : Window
     private readonly LayerEditorViewModel _viewModel;
     private bool _suppressLiveUpdates;
     private bool _updatingSelection;
+    private bool _updatingVideoTransportUi;
     private Point _dragStartPoint;
     private LayerEditorSource? _draggedSource;
+    private readonly DispatcherTimer _videoTransportTimer;
     private static readonly JsonSerializerOptions LayerConfigJsonOptions = new() { WriteIndented = true };
 
     public LayerEditorWindow(MainWindow owner)
@@ -29,8 +32,16 @@ public partial class LayerEditorWindow : Window
         Owner = owner;
         _viewModel = new LayerEditorViewModel();
         DataContext = _viewModel;
+        RefreshMasterAudioState();
         RefreshFromSources();
         UpdateApplyState();
+        _videoTransportTimer = new DispatcherTimer
+        {
+            Interval = TimeSpan.FromMilliseconds(250)
+        };
+        _videoTransportTimer.Tick += (_, _) => RefreshSelectedVideoTransportState();
+        _videoTransportTimer.Start();
+        Closed += (_, _) => _videoTransportTimer.Stop();
     }
 
     public void RefreshFromSourcesIfLive()
@@ -63,11 +74,19 @@ public partial class LayerEditorWindow : Window
 
             selected ??= _viewModel.Sources.FirstOrDefault();
             SetSelectedSource(selected);
+            RefreshMasterAudioState();
+            RefreshSelectedVideoTransportState();
         }
         finally
         {
             _suppressLiveUpdates = false;
         }
+    }
+
+    private void RefreshMasterAudioState()
+    {
+        _viewModel.SourceAudioMasterEnabled = _owner.GetSourceAudioMasterEnabled();
+        _viewModel.SourceAudioMasterVolume = _owner.GetSourceAudioMasterVolume();
     }
 
     private static HashSet<Guid> CollectExpandedIds(IEnumerable<LayerEditorSource> roots)
@@ -144,6 +163,55 @@ public partial class LayerEditorWindow : Window
     }
 
     private bool ShouldApplyLive() => _viewModel.LiveMode && !_suppressLiveUpdates;
+
+    private bool EnsureLiveModeForVideoTransport()
+    {
+        if (_viewModel.LiveMode)
+        {
+            return true;
+        }
+
+        MessageBox.Show(this, "Enable Live Mode to control video playback.", "Live Mode Required",
+            MessageBoxButton.OK, MessageBoxImage.Information);
+        return false;
+    }
+
+    private void RefreshSelectedVideoTransportState()
+    {
+        if (_suppressLiveUpdates)
+        {
+            return;
+        }
+
+        if (Mouse.LeftButton == MouseButtonState.Pressed)
+        {
+            return;
+        }
+
+        var source = _viewModel.SelectedSource;
+        if (source == null || !source.IsVideo)
+        {
+            return;
+        }
+
+        if (!_owner.TryGetSourceVideoPlaybackState(source.Id, out var playbackState))
+        {
+            return;
+        }
+
+        _updatingVideoTransportUi = true;
+        try
+        {
+            source.VideoPlaybackPaused = playbackState.IsPaused;
+            source.VideoPlaybackPosition = playbackState.NormalizedPosition;
+            source.VideoPlaybackPositionSeconds = playbackState.PositionSeconds;
+            source.VideoPlaybackDurationSeconds = playbackState.DurationSeconds;
+        }
+        finally
+        {
+            _updatingVideoTransportUi = false;
+        }
+    }
 
     private void LiveModeToggle(object sender, RoutedEventArgs e)
     {
@@ -303,6 +371,89 @@ public partial class LayerEditorWindow : Window
         {
             _owner.UpdateSourceMirror(source.Id, source.Mirror);
         }
+    }
+
+    private void VideoAudio_Changed(object sender, RoutedEventArgs e)
+    {
+        if (!ShouldApplyLive())
+        {
+            return;
+        }
+
+        var source = ResolveSourceContext(sender);
+        if (source != null)
+        {
+            _owner.UpdateSourceVideoAudioEnabled(source.Id, source.VideoAudioEnabled);
+        }
+    }
+
+    private void VideoAudioVolume_Changed(object sender, RoutedPropertyChangedEventArgs<double> e)
+    {
+        if (!ShouldApplyLive())
+        {
+            return;
+        }
+
+        var source = ResolveSourceContext(sender);
+        if (source != null)
+        {
+            _owner.UpdateSourceVideoAudioVolume(source.Id, source.VideoAudioVolume);
+        }
+    }
+
+    private void VideoPlayPause_Click(object sender, RoutedEventArgs e)
+    {
+        if (!EnsureLiveModeForVideoTransport())
+        {
+            return;
+        }
+
+        var source = ResolveSourceContext(sender);
+        if (source == null || !source.IsVideo)
+        {
+            return;
+        }
+
+        bool pause = !source.VideoPlaybackPaused;
+        _owner.UpdateSourceVideoPlaybackPaused(source.Id, pause);
+        RefreshSelectedVideoTransportState();
+    }
+
+    private void VideoSeek_PreviewMouseLeftButtonUp(object sender, MouseButtonEventArgs e)
+    {
+        if (!EnsureLiveModeForVideoTransport() || _updatingVideoTransportUi)
+        {
+            return;
+        }
+
+        var source = ResolveSourceContext(sender);
+        if (source == null || !source.IsVideo)
+        {
+            return;
+        }
+
+        _owner.SeekSourceVideo(source.Id, source.VideoPlaybackPosition);
+        RefreshSelectedVideoTransportState();
+    }
+
+    private void MasterVideoAudio_Changed(object sender, RoutedEventArgs e)
+    {
+        if (_suppressLiveUpdates)
+        {
+            return;
+        }
+
+        _owner.UpdateMasterSourceAudioEnabled(_viewModel.SourceAudioMasterEnabled);
+    }
+
+    private void MasterVideoAudioVolume_Changed(object sender, RoutedPropertyChangedEventArgs<double> e)
+    {
+        if (_suppressLiveUpdates)
+        {
+            return;
+        }
+
+        _owner.UpdateMasterSourceAudioVolume(_viewModel.SourceAudioMasterVolume);
     }
 
     private void KeyEnabled_Changed(object sender, RoutedEventArgs e)

@@ -1,9 +1,11 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Threading.Tasks;
+using NAudio.Wave;
 using System.Windows;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
@@ -38,6 +40,63 @@ internal sealed class FileCaptureService : IDisposable
 
     private readonly Dictionary<string, FileSession> _sessions = new(StringComparer.OrdinalIgnoreCase);
     private readonly object _lock = new();
+    private bool _masterVideoAudioEnabled = true;
+    private double _masterVideoAudioVolume = 1.0;
+
+    public void SetMasterVideoAudioEnabled(bool enabled)
+    {
+        List<FileSession>? sessionsToUpdate = null;
+        lock (_lock)
+        {
+            if (_masterVideoAudioEnabled == enabled)
+            {
+                return;
+            }
+
+            _masterVideoAudioEnabled = enabled;
+            sessionsToUpdate = _sessions.Values.ToList();
+        }
+
+        foreach (var session in sessionsToUpdate)
+        {
+            ApplyMasterAudioSettingsToSession(session);
+        }
+    }
+
+    public void SetMasterVideoAudioVolume(double volume)
+    {
+        double clamped = Math.Clamp(volume, 0, 1);
+        List<FileSession>? sessionsToUpdate = null;
+        lock (_lock)
+        {
+            if (Math.Abs(_masterVideoAudioVolume - clamped) < 0.0001)
+            {
+                return;
+            }
+
+            _masterVideoAudioVolume = clamped;
+            sessionsToUpdate = _sessions.Values.ToList();
+        }
+
+        foreach (var session in sessionsToUpdate)
+        {
+            ApplyMasterAudioSettingsToSession(session);
+        }
+    }
+
+    private void ApplyMasterAudioSettingsToSession(object session)
+    {
+        if (session is VideoSession videoSession)
+        {
+            videoSession.SetMasterAudio(_masterVideoAudioEnabled, _masterVideoAudioVolume);
+            return;
+        }
+
+        if (session is VideoSequenceSession videoSequenceSession)
+        {
+            videoSequenceSession.SetAudioMaster(_masterVideoAudioEnabled, _masterVideoAudioVolume);
+        }
+    }
 
     public bool TryGetOrAdd(string path, out FileSourceInfo info, out string? error)
     {
@@ -102,6 +161,7 @@ internal sealed class FileCaptureService : IDisposable
         try
         {
             var session = CreateSession(fullPath);
+            ApplyMasterAudioSettingsToSession(session);
             info = session.GetInfo();
             lock (_lock)
             {
@@ -136,26 +196,29 @@ internal sealed class FileCaptureService : IDisposable
                 }
             }
 
-            // Resolver function to get the fresh stream URL
-            Func<Task<string>> resolver = async () =>
+            // Resolver function to get fresh video/audio stream URLs
+            Func<Task<VideoSession.ResolvedPlayback>> resolver = async () =>
             {
                 var manifest = await _youtube.Videos.Streams.GetManifestAsync(id).ConfigureAwait(false);
-                var streamInfo = manifest.GetMuxedStreams().GetWithHighestVideoQuality();
-                if (streamInfo == null)
+                var muxedStream = manifest.GetMuxedStreams().GetWithHighestVideoQuality();
+                var videoOnlyStream = manifest.GetVideoStreams().GetWithHighestVideoQuality();
+                var audioOnlyStream = manifest.GetAudioOnlyStreams().GetWithHighestBitrate();
+
+                string? videoUrl = videoOnlyStream?.Url ?? muxedStream?.Url;
+                if (string.IsNullOrWhiteSpace(videoUrl))
                 {
-                    // Fallback to video-only if no muxed stream (should be rare for standard videos)
-                    // But ffmpeg can handle it.
-                    var videoStream = manifest.GetVideoStreams().GetWithHighestVideoQuality();
-                    if (videoStream == null) throw new Exception("No suitable video stream found.");
-                    return videoStream.Url;
+                    throw new Exception("No suitable video stream found.");
                 }
-                return streamInfo.Url;
+
+                string? audioUrl = audioOnlyStream?.Url ?? muxedStream?.Url;
+                return new VideoSession.ResolvedPlayback(videoUrl, audioUrl);
             };
 
             // Pre-flight check (optional, but ensures we can actually get the URL)
             // Actually, we'll let the session handle it so it retries on restart.
             
             var session = new VideoSession(key, title, loopPlayback: true, resolver);
+            ApplyMasterAudioSettingsToSession(session);
             
             lock (_lock)
             {
@@ -224,6 +287,7 @@ internal sealed class FileCaptureService : IDisposable
         }
 
         session = new VideoSequenceSession(normalized);
+        ApplyMasterAudioSettingsToSession(session);
         return true;
     }
 
@@ -265,6 +329,187 @@ internal sealed class FileCaptureService : IDisposable
         {
             vid.RestartPlayback();
             return true;
+        }
+
+        return false;
+    }
+
+    public bool SetVideoPaused(string path, bool paused)
+    {
+        if (string.IsNullOrWhiteSpace(path))
+        {
+            return false;
+        }
+
+        if (TryResolveVideoSession(path, out var session))
+        {
+            session.SetPlaybackPaused(paused);
+            return true;
+        }
+
+        return false;
+    }
+
+    public bool SeekVideo(string path, double normalizedPosition)
+    {
+        if (string.IsNullOrWhiteSpace(path))
+        {
+            return false;
+        }
+
+        if (TryResolveVideoSession(path, out var session))
+        {
+            session.SeekNormalized(normalizedPosition);
+            return true;
+        }
+
+        return false;
+    }
+
+    public bool TryGetVideoPlaybackState(string path, out VideoPlaybackState playbackState)
+    {
+        playbackState = default;
+
+        if (string.IsNullOrWhiteSpace(path))
+        {
+            return false;
+        }
+
+        if (TryResolveVideoSession(path, out var session))
+        {
+            return session.TryGetPlaybackState(out playbackState);
+        }
+
+        return false;
+    }
+
+    private bool TryResolveVideoSession(string path, out VideoSession session)
+    {
+        session = null!;
+        FileSession? fileSession = null;
+        lock (_lock)
+        {
+            if (!_sessions.TryGetValue(path, out fileSession))
+            {
+                if (!path.StartsWith("youtube:", StringComparison.OrdinalIgnoreCase) &&
+                    TryNormalizePath(path, out var fullPath))
+                {
+                    _sessions.TryGetValue(fullPath, out fileSession);
+                }
+            }
+        }
+
+        if (fileSession is VideoSession directSession)
+        {
+            session = directSession;
+            return true;
+        }
+
+        if (!path.StartsWith("youtube:", StringComparison.OrdinalIgnoreCase) &&
+            TryNormalizePath(path, out var normalizedPath) &&
+            TryGetOrAdd(normalizedPath, out _, out _))
+        {
+            lock (_lock)
+            {
+                _sessions.TryGetValue(normalizedPath, out fileSession);
+            }
+
+            if (fileSession is VideoSession recoveredSession)
+            {
+                session = recoveredSession;
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    public bool SetVideoAudioEnabled(string path, bool enabled)
+    {
+        if (string.IsNullOrWhiteSpace(path))
+        {
+            return false;
+        }
+
+        FileSession? session = null;
+        lock (_lock)
+        {
+            if (!_sessions.TryGetValue(path, out session))
+            {
+                if (!path.StartsWith("youtube:", StringComparison.OrdinalIgnoreCase) &&
+                    TryNormalizePath(path, out var fullPath))
+                {
+                    _sessions.TryGetValue(fullPath, out session);
+                }
+            }
+        }
+
+        if (session is VideoSession videoSession)
+        {
+            videoSession.SetAudioEnabled(enabled);
+            return true;
+        }
+
+        if (!path.StartsWith("youtube:", StringComparison.OrdinalIgnoreCase) &&
+            TryNormalizePath(path, out var normalizedPath) &&
+            TryGetOrAdd(normalizedPath, out _, out _))
+        {
+            lock (_lock)
+            {
+                _sessions.TryGetValue(normalizedPath, out session);
+            }
+
+            if (session is VideoSession recoveredVideoSession)
+            {
+                recoveredVideoSession.SetAudioEnabled(enabled);
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    public bool SetVideoAudioVolume(string path, double volume)
+    {
+        if (string.IsNullOrWhiteSpace(path))
+        {
+            return false;
+        }
+
+        double clamped = Math.Clamp(volume, 0, 1);
+        FileSession? session = null;
+        lock (_lock)
+        {
+            if (!_sessions.TryGetValue(path, out session))
+            {
+                if (!path.StartsWith("youtube:", StringComparison.OrdinalIgnoreCase) &&
+                    TryNormalizePath(path, out var fullPath))
+                {
+                    _sessions.TryGetValue(fullPath, out session);
+                }
+            }
+        }
+
+        if (session is VideoSession videoSession)
+        {
+            videoSession.SetAudioVolume(clamped);
+            return true;
+        }
+
+        if (!path.StartsWith("youtube:", StringComparison.OrdinalIgnoreCase) &&
+            TryNormalizePath(path, out var normalizedPath) &&
+            TryGetOrAdd(normalizedPath, out _, out _))
+        {
+            lock (_lock)
+            {
+                _sessions.TryGetValue(normalizedPath, out session);
+            }
+
+            if (session is VideoSession recoveredVideoSession)
+            {
+                recoveredVideoSession.SetAudioVolume(clamped);
+                return true;
+            }
         }
 
         return false;
@@ -370,6 +615,7 @@ internal sealed class FileCaptureService : IDisposable
         {
             session.Dispose();
         }
+
     }
 
     public void Dispose() => Clear();
@@ -585,11 +831,41 @@ internal sealed class FileCaptureService : IDisposable
 
     private sealed class VideoSession : FileSession
     {
+        public readonly struct ResolvedPlayback
+        {
+            public ResolvedPlayback(string videoUrl, string? audioUrl)
+            {
+                VideoUrl = videoUrl;
+                AudioUrl = audioUrl;
+            }
+
+            public string VideoUrl { get; }
+            public string? AudioUrl { get; }
+        }
+
         private readonly bool _loopPlayback;
-        private readonly Func<Task<string>>? _urlResolver;
+        private readonly Func<Task<ResolvedPlayback>>? _urlResolver;
+        private readonly object _audioLock = new();
         private Process? _process;
+        private Process? _audioDecodeProcess;
         private CancellationTokenSource? _cts;
         private Task? _workerTask;
+        private CancellationTokenSource? _audioDecodeCts;
+        private Task? _audioDecodeTask;
+        private WaveOutEvent? _audioOutput;
+        private BufferedWaveProvider? _audioBuffer;
+        private readonly Stopwatch _playbackClock = new();
+        private double _playbackBaseOffsetSeconds;
+        private double _pausedOffsetSeconds;
+        private bool _playbackPaused;
+        private bool _audioEnabled;
+        private bool _isDisposed;
+        private bool _masterAudioEnabled = true;
+        private double _masterAudioVolume = 1.0;
+        private double _sourceAudioVolume = 1.0;
+        private double _estimatedDurationSeconds;
+        private string? _videoPlaybackUrl;
+        private string? _audioPlaybackUrl;
         
         // Buffers
         private byte[]? _readerBuffer;      // Worker writes here
@@ -615,7 +891,7 @@ internal sealed class FileCaptureService : IDisposable
         private int _readyWidth;
         private int _readyHeight;
 
-        public VideoSession(string path, string displayName, bool loopPlayback, Func<Task<string>>? urlResolver = null)
+        public VideoSession(string path, string displayName, bool loopPlayback, Func<Task<ResolvedPlayback>>? urlResolver = null)
             : base(path, displayName, 0, 0)
         {
             _loopPlayback = loopPlayback;
@@ -645,7 +921,7 @@ internal sealed class FileCaptureService : IDisposable
             {
                 Logger.Info($"Initializing local video: {path}");
                 
-                if (!ProbeVideo(path, out _nativeWidth, out _nativeHeight))
+                if (!ProbeVideo(path, out _nativeWidth, out _nativeHeight, out var durationSeconds))
                 {
                     _hasError = true;
                     _errorMessage = "Failed to probe video dimensions.";
@@ -654,9 +930,33 @@ internal sealed class FileCaptureService : IDisposable
                 }
                 
                 ConfigureDimensions();
-                
-                _cts = new CancellationTokenSource();
-                _workerTask = Task.Run(() => FfmpegWorker(path, _cts.Token));
+                _videoPlaybackUrl = path;
+                _audioPlaybackUrl = path;
+                double startOffsetSeconds;
+                bool startPaused;
+                lock (_audioLock)
+                {
+                    _estimatedDurationSeconds = durationSeconds;
+                    startOffsetSeconds = NormalizeOffsetNoLock(_pausedOffsetSeconds);
+                    _pausedOffsetSeconds = startOffsetSeconds;
+                    _playbackBaseOffsetSeconds = startOffsetSeconds;
+                    startPaused = _playbackPaused;
+                    if (startPaused)
+                    {
+                        _playbackClock.Reset();
+                    }
+                    else
+                    {
+                        _playbackClock.Restart();
+                    }
+                }
+
+                if (!startPaused)
+                {
+                    _cts = new CancellationTokenSource();
+                    _workerTask = Task.Run(() => FfmpegWorker(path, _cts.Token, startOffsetSeconds));
+                    RefreshAudioPlayback();
+                }
             }
             catch (Exception ex)
             {
@@ -669,16 +969,27 @@ internal sealed class FileCaptureService : IDisposable
         {
             try
             {
-                string targetUrl = Path;
+                string targetVideoUrl = Path;
+                string? targetAudioUrl = Path;
                 if (_urlResolver != null)
                 {
                     Logger.Info($"Resolving URL for: {DisplayName}...");
-                    targetUrl = await _urlResolver();
-                    Logger.Info($"Resolved URL: {targetUrl}");
+                    var resolved = await _urlResolver();
+                    targetVideoUrl = resolved.VideoUrl;
+                    targetAudioUrl = resolved.AudioUrl;
+                    Logger.Info($"Resolved video URL: {targetVideoUrl}");
+                    if (!string.IsNullOrWhiteSpace(targetAudioUrl))
+                    {
+                        Logger.Info($"Resolved audio URL for {DisplayName}.");
+                    }
+                    else
+                    {
+                        Logger.Warn($"No audio URL resolved for {DisplayName}.");
+                    }
                 }
 
-                Logger.Info($"Probing video: {targetUrl}");
-                if (!ProbeVideo(targetUrl, out _nativeWidth, out _nativeHeight))
+                Logger.Info($"Probing video: {targetVideoUrl}");
+                if (!ProbeVideo(targetVideoUrl, out _nativeWidth, out _nativeHeight, out var durationSeconds))
                 {
                     _hasError = true;
                     _errorMessage = "Failed to probe video dimensions.";
@@ -688,9 +999,33 @@ internal sealed class FileCaptureService : IDisposable
                 Logger.Info($"Probe success: {_nativeWidth}x{_nativeHeight}");
 
                 ConfigureDimensions();
+                _videoPlaybackUrl = targetVideoUrl;
+                _audioPlaybackUrl = targetAudioUrl;
+                double startOffsetSeconds;
+                bool startPaused;
+                lock (_audioLock)
+                {
+                    _estimatedDurationSeconds = durationSeconds;
+                    startOffsetSeconds = NormalizeOffsetNoLock(_pausedOffsetSeconds);
+                    _pausedOffsetSeconds = startOffsetSeconds;
+                    _playbackBaseOffsetSeconds = startOffsetSeconds;
+                    startPaused = _playbackPaused;
+                    if (startPaused)
+                    {
+                        _playbackClock.Reset();
+                    }
+                    else
+                    {
+                        _playbackClock.Restart();
+                    }
+                }
 
-                _cts = new CancellationTokenSource();
-                _workerTask = Task.Run(() => FfmpegWorker(targetUrl, _cts.Token));
+                if (!startPaused)
+                {
+                    _cts = new CancellationTokenSource();
+                    _workerTask = Task.Run(() => FfmpegWorker(targetVideoUrl, _cts.Token, startOffsetSeconds));
+                    RefreshAudioPlayback();
+                }
             }
             catch (Exception ex)
             {
@@ -843,20 +1178,25 @@ internal sealed class FileCaptureService : IDisposable
 
         public override void Dispose()
         {
-            _cts?.Cancel();
-            if (_process != null && !_process.HasExited)
+            lock (_audioLock)
             {
-                try { _process.Kill(); } catch { }
-                _process.Dispose();
+                _isDisposed = true;
+                _audioEnabled = false;
             }
-            _cts?.Dispose();
+
+            StopVideoPipeline();
+            StopAudioPlayback();
         }
 
-        private void FfmpegWorker(string url, CancellationToken token)
+        private void FfmpegWorker(string url, CancellationToken token, double startOffsetSeconds)
         {
             try
             {
                 string args = $"-hide_banner -loglevel warning"; // increased verbosity for debug
+                if (startOffsetSeconds > 0.05)
+                {
+                    args += $" -ss {startOffsetSeconds.ToString("0.###", CultureInfo.InvariantCulture)}";
+                }
                 if (_loopPlayback) args += " -stream_loop -1";
                 args += " -re"; // Realtime reading
                 args += $" -i \"{url}\"";
@@ -902,7 +1242,10 @@ internal sealed class FileCaptureService : IDisposable
                     if (totalRead < frameSize) 
                     {
                         Logger.Warn($"ffmpeg stream ended (read {totalRead}/{frameSize} bytes). Exited: {_process.HasExited}");
-                        _ended = true;
+                        if (!token.IsCancellationRequested && _process.HasExited && _process.ExitCode == 0)
+                        {
+                            _ended = true;
+                        }
                         break; 
                     }
 
@@ -948,20 +1291,673 @@ internal sealed class FileCaptureService : IDisposable
 
         public void RestartPlayback()
         {
-            _cts?.Cancel();
-            try { _process?.Kill(); } catch { }
-            _process?.Dispose();
-            
-            _ended = false;
-            _hasError = false;
-            _cts = new CancellationTokenSource();
-            _workerTask = Task.Run(InitializeAsync); // Re-initialize (and re-resolve URL if needed)
+            if (_isDisposed)
+            {
+                return;
+            }
+
+            RestartVideoPipeline(0, shouldPause: false, forceReResolve: true);
         }
 
-        private static bool ProbeVideo(string path, out int width, out int height)
+        public void SetPlaybackPaused(bool paused)
+        {
+            if (_isDisposed)
+            {
+                return;
+            }
+
+            double seekOffset = 0;
+            bool shouldRestart = false;
+            lock (_audioLock)
+            {
+                if (_playbackPaused == paused)
+                {
+                    return;
+                }
+
+                if (paused)
+                {
+                    _pausedOffsetSeconds = GetEstimatedPlaybackOffsetSecondsNoLock();
+                    _playbackPaused = true;
+                    _playbackClock.Reset();
+                }
+                else
+                {
+                    _playbackPaused = false;
+                    seekOffset = NormalizeOffsetNoLock(_pausedOffsetSeconds);
+                    _playbackBaseOffsetSeconds = seekOffset;
+                    _playbackClock.Restart();
+                    shouldRestart = true;
+                }
+            }
+
+            if (paused)
+            {
+                StopVideoPipeline();
+                StopAudioPlayback();
+                return;
+            }
+
+            if (shouldRestart)
+            {
+                RestartVideoPipeline(seekOffset, shouldPause: false, forceReResolve: false);
+            }
+        }
+
+        public void SeekNormalized(double normalizedPosition)
+        {
+            if (_isDisposed)
+            {
+                return;
+            }
+
+            double seekOffset;
+            bool paused;
+            lock (_audioLock)
+            {
+                double duration = _estimatedDurationSeconds;
+                if (duration <= 0.001)
+                {
+                    return;
+                }
+
+                double clamped = Math.Clamp(normalizedPosition, 0, 1);
+                seekOffset = NormalizeOffsetNoLock(duration * clamped);
+                _pausedOffsetSeconds = seekOffset;
+                _playbackBaseOffsetSeconds = seekOffset;
+                paused = _playbackPaused;
+                if (paused)
+                {
+                    _playbackClock.Reset();
+                }
+                else
+                {
+                    _playbackClock.Restart();
+                }
+            }
+
+            RestartVideoPipeline(seekOffset, shouldPause: paused, forceReResolve: false);
+        }
+
+        public bool TryGetPlaybackState(out VideoPlaybackState playbackState)
+        {
+            lock (_audioLock)
+            {
+                double duration = _estimatedDurationSeconds;
+                double position = GetEstimatedPlaybackOffsetSecondsNoLock();
+                bool isSeekable = duration > 0.001;
+                double normalized = isSeekable ? Math.Clamp(position / duration, 0, 1) : 0;
+                playbackState = new VideoPlaybackState(duration, position, normalized, _playbackPaused, isSeekable);
+                return true;
+            }
+        }
+
+        private void RestartVideoPipeline(double startOffsetSeconds, bool shouldPause, bool forceReResolve)
+        {
+            if (_isDisposed)
+            {
+                return;
+            }
+
+            StopVideoPipeline();
+            StopAudioPlayback();
+
+            _ended = false;
+            _hasError = false;
+
+            lock (_audioLock)
+            {
+                double normalized = NormalizeOffsetNoLock(startOffsetSeconds);
+                _pausedOffsetSeconds = normalized;
+                _playbackBaseOffsetSeconds = normalized;
+                _playbackPaused = shouldPause;
+                if (shouldPause)
+                {
+                    _playbackClock.Reset();
+                }
+                else
+                {
+                    _playbackClock.Restart();
+                }
+            }
+
+            if (shouldPause)
+            {
+                return;
+            }
+
+            if (forceReResolve || string.IsNullOrWhiteSpace(_videoPlaybackUrl))
+            {
+                _cts = new CancellationTokenSource();
+                _workerTask = Task.Run(InitializeAsync); // Re-initialize (and re-resolve URL if needed).
+                return;
+            }
+
+            _cts = new CancellationTokenSource();
+            _workerTask = Task.Run(() => FfmpegWorker(_videoPlaybackUrl!, _cts.Token, startOffsetSeconds));
+            RefreshAudioPlayback();
+        }
+
+        private void StopVideoPipeline()
+        {
+            var cts = _cts;
+            _cts = null;
+            try { cts?.Cancel(); } catch { }
+            try { _process?.Kill(); } catch { }
+            _process?.Dispose();
+            _process = null;
+            try { cts?.Dispose(); } catch { }
+        }
+
+        public void SetAudioEnabled(bool enabled)
+        {
+            lock (_audioLock)
+            {
+                _audioEnabled = enabled;
+            }
+
+            RefreshAudioPlayback();
+        }
+
+        public void SetMasterAudio(bool enabled, double volume)
+        {
+            bool shouldRefresh;
+            bool shouldStop;
+            lock (_audioLock)
+            {
+                _masterAudioEnabled = enabled;
+                _masterAudioVolume = Math.Clamp(volume, 0, 1);
+                ApplyOutputVolumeNoLock();
+                shouldStop = GetEffectiveVolumeNoLock() <= 0.0001;
+                shouldRefresh = !shouldStop && _audioEnabled && !_isDisposed &&
+                                (_audioDecodeProcess == null || _audioOutput == null || _audioOutput.PlaybackState != PlaybackState.Playing);
+            }
+
+            if (shouldStop)
+            {
+                StopAudioPlayback();
+                return;
+            }
+
+            if (shouldRefresh)
+            {
+                RefreshAudioPlayback();
+            }
+        }
+
+        public void SetAudioVolume(double volume)
+        {
+            bool shouldRefresh;
+            bool shouldStop;
+            lock (_audioLock)
+            {
+                _sourceAudioVolume = Math.Clamp(volume, 0, 1);
+                ApplyOutputVolumeNoLock();
+                shouldStop = GetEffectiveVolumeNoLock() <= 0.0001;
+                shouldRefresh = !shouldStop && _audioEnabled && !_isDisposed &&
+                                (_audioDecodeProcess == null || _audioOutput == null || _audioOutput.PlaybackState != PlaybackState.Playing);
+            }
+
+            if (shouldStop)
+            {
+                StopAudioPlayback();
+                return;
+            }
+
+            if (shouldRefresh)
+            {
+                RefreshAudioPlayback();
+            }
+        }
+
+        private double GetEffectiveVolumeNoLock()
+        {
+            if (!_masterAudioEnabled)
+            {
+                return 0;
+            }
+
+            return Math.Clamp(_masterAudioVolume * _sourceAudioVolume, 0, 1);
+        }
+
+        private void ApplyOutputVolumeNoLock()
+        {
+            if (_audioOutput == null)
+            {
+                return;
+            }
+
+            _audioOutput.Volume = (float)GetEffectiveVolumeNoLock();
+        }
+
+        private void RefreshAudioPlayback()
+        {
+            string? playbackUrl;
+            bool shouldBeEnabled;
+            lock (_audioLock)
+            {
+                playbackUrl = _audioPlaybackUrl ?? _videoPlaybackUrl;
+                shouldBeEnabled = !_isDisposed &&
+                                  _audioEnabled &&
+                                  !_playbackPaused &&
+                                  !string.IsNullOrWhiteSpace(playbackUrl) &&
+                                  GetEffectiveVolumeNoLock() > 0.0001;
+            }
+
+            if (!shouldBeEnabled)
+            {
+                StopAudioPlayback();
+                return;
+            }
+
+            lock (_audioLock)
+            {
+                if (_audioDecodeProcess != null &&
+                    !_audioDecodeProcess.HasExited &&
+                    _audioOutput != null &&
+                    _audioOutput.PlaybackState == PlaybackState.Playing)
+                {
+                    return;
+                }
+            }
+
+            if (string.IsNullOrWhiteSpace(playbackUrl))
+            {
+                return;
+            }
+
+            StartAudioPlayback(playbackUrl);
+        }
+
+        private void StartAudioPlayback(string playbackUrl)
+        {
+            StopAudioPlayback();
+
+            int fatalAudioError = 0;
+            var seekSeconds = GetEstimatedPlaybackOffsetSeconds();
+            string args = "-hide_banner -loglevel warning";
+            if (seekSeconds > 0.05)
+            {
+                args += $" -ss {seekSeconds.ToString("0.###", CultureInfo.InvariantCulture)}";
+            }
+            args += " -re";
+            args += $" -i \"{playbackUrl}\"";
+            args += " -map 0:a:0 -vn -ac 2 -ar 48000 -acodec pcm_s16le -f s16le -";
+
+            try
+            {
+                Logger.Info($"Starting ffmpeg audio decode: {args}");
+
+                var psi = new ProcessStartInfo
+                {
+                    FileName = "ffmpeg",
+                    Arguments = args,
+                    UseShellExecute = false,
+                    CreateNoWindow = true,
+                    RedirectStandardError = true,
+                    RedirectStandardOutput = true
+                };
+
+                var process = Process.Start(psi);
+                if (process == null)
+                {
+                    Logger.Warn($"Failed to start ffmpeg audio decode process for {DisplayName}.");
+                    return;
+                }
+
+                process.ErrorDataReceived += (_, e) =>
+                {
+                    if (!string.IsNullOrWhiteSpace(e.Data))
+                    {
+                        Logger.Warn($"[ffmpeg-audio:{DisplayName}] {e.Data}");
+                        if (IsFatalAudioError(e.Data))
+                        {
+                            Interlocked.Exchange(ref fatalAudioError, 1);
+                        }
+                    }
+                };
+                process.BeginErrorReadLine();
+
+                var bufferProvider = new BufferedWaveProvider(new WaveFormat(48000, 16, 2))
+                {
+                    BufferDuration = TimeSpan.FromSeconds(1.5),
+                    DiscardOnBufferOverflow = true
+                };
+                var output = new WaveOutEvent
+                {
+                    DesiredLatency = 80,
+                    NumberOfBuffers = 2
+                };
+                output.Init(bufferProvider);
+                lock (_audioLock)
+                {
+                    output.Volume = (float)GetEffectiveVolumeNoLock();
+                }
+                output.Play();
+
+                var audioCts = new CancellationTokenSource();
+                var decodeTask = Task.Run(
+                    () => AudioDecodeWorker(process, audioCts.Token, () => Volatile.Read(ref fatalAudioError) != 0),
+                    audioCts.Token);
+
+                bool shouldAbort = false;
+                lock (_audioLock)
+                {
+                    shouldAbort = _isDisposed || !_audioEnabled || _playbackPaused || GetEffectiveVolumeNoLock() <= 0.0001;
+                    if (!shouldAbort)
+                    {
+                        _audioDecodeProcess = process;
+                        _audioDecodeCts = audioCts;
+                        _audioDecodeTask = decodeTask;
+                        _audioBuffer = bufferProvider;
+                        _audioOutput = output;
+                    }
+                }
+
+                if (shouldAbort)
+                {
+                    try { audioCts.Cancel(); } catch { }
+                    SafeStopOutput(output);
+                    SafeKillProcess(process);
+                    audioCts.Dispose();
+                    return;
+                }
+
+                Logger.Info($"Started in-app audio for {DisplayName}.");
+            }
+            catch (Exception ex)
+            {
+                Logger.Warn($"Audio playback unavailable for {DisplayName}: {ex.Message}");
+            }
+        }
+
+        private static bool IsFatalAudioError(string line)
+        {
+            if (string.IsNullOrWhiteSpace(line)) return false;
+
+            return line.IndexOf("Failed to open file", StringComparison.OrdinalIgnoreCase) >= 0
+                || line.IndexOf("No such file or directory", StringComparison.OrdinalIgnoreCase) >= 0
+                || line.IndexOf("configure filtergraph", StringComparison.OrdinalIgnoreCase) >= 0
+                || line.IndexOf("does not contain any stream", StringComparison.OrdinalIgnoreCase) >= 0
+                || line.IndexOf("cannot open audio device", StringComparison.OrdinalIgnoreCase) >= 0
+                || line.IndexOf("error while opening", StringComparison.OrdinalIgnoreCase) >= 0
+                || line.IndexOf("matches no streams", StringComparison.OrdinalIgnoreCase) >= 0;
+        }
+
+        private double GetEstimatedPlaybackOffsetSeconds()
+        {
+            lock (_audioLock)
+            {
+                return GetEstimatedPlaybackOffsetSecondsNoLock();
+            }
+        }
+
+        private double GetEstimatedPlaybackOffsetSecondsNoLock()
+        {
+            if (_playbackPaused)
+            {
+                return NormalizeOffsetNoLock(_pausedOffsetSeconds);
+            }
+
+            double elapsed = _playbackClock.Elapsed.TotalSeconds;
+            double offset = _playbackBaseOffsetSeconds + elapsed;
+            return NormalizeOffsetNoLock(offset);
+        }
+
+        private double NormalizeOffsetNoLock(double offsetSeconds)
+        {
+            if (offsetSeconds < 0)
+            {
+                offsetSeconds = 0;
+            }
+
+            if (_loopPlayback && _estimatedDurationSeconds > 0.001)
+            {
+                offsetSeconds %= _estimatedDurationSeconds;
+                if (offsetSeconds < 0)
+                {
+                    offsetSeconds += _estimatedDurationSeconds;
+                }
+            }
+            else if (_estimatedDurationSeconds > 0.001)
+            {
+                offsetSeconds = Math.Clamp(offsetSeconds, 0, _estimatedDurationSeconds);
+            }
+
+            return offsetSeconds;
+        }
+
+        private void AudioDecodeWorker(Process process, CancellationToken token, Func<bool> hasFatalError)
+        {
+            int exitCode = 0;
+            try
+            {
+                using var stream = process.StandardOutput.BaseStream;
+                var buffer = new byte[8192];
+                while (!token.IsCancellationRequested)
+                {
+                    int read = stream.Read(buffer, 0, buffer.Length);
+                    if (read <= 0)
+                    {
+                        break;
+                    }
+
+                    BufferedWaveProvider? provider;
+                    lock (_audioLock)
+                    {
+                        provider = _audioBuffer;
+                    }
+
+                    provider?.AddSamples(buffer, 0, read);
+                }
+            }
+            catch (Exception ex)
+            {
+                if (!token.IsCancellationRequested)
+                {
+                    Logger.Warn($"Audio decode worker failed for {DisplayName}: {ex.Message}");
+                }
+            }
+            finally
+            {
+                try
+                {
+                    if (!process.HasExited)
+                    {
+                        process.WaitForExit(200);
+                    }
+                }
+                catch
+                {
+                    // Ignore wait failures.
+                }
+
+                try
+                {
+                    if (process.HasExited)
+                    {
+                        exitCode = process.ExitCode;
+                    }
+                }
+                catch
+                {
+                    // Ignore exit code failures.
+                }
+
+                ClearAudioStateForProcess(process);
+                Logger.Info($"ffmpeg audio decode exited for {DisplayName} (code {exitCode}).");
+
+                bool shouldRestart;
+                lock (_audioLock)
+                {
+                    shouldRestart = !token.IsCancellationRequested
+                        && _audioEnabled
+                        && !_playbackPaused
+                        && !_isDisposed
+                        && _loopPlayback
+                        && exitCode == 0
+                        && !hasFatalError();
+                }
+
+                if (shouldRestart)
+                {
+                    Logger.Info($"Restarting audio decode for looping source: {DisplayName}");
+                    Task.Run(RefreshAudioPlayback);
+                }
+            }
+        }
+
+        private void StopAudioPlayback()
+        {
+            Process? processToStop;
+            CancellationTokenSource? ctsToStop;
+            Task? taskToWait;
+            WaveOutEvent? outputToStop;
+            lock (_audioLock)
+            {
+                processToStop = _audioDecodeProcess;
+                _audioDecodeProcess = null;
+                ctsToStop = _audioDecodeCts;
+                _audioDecodeCts = null;
+                taskToWait = _audioDecodeTask;
+                _audioDecodeTask = null;
+                outputToStop = _audioOutput;
+                _audioOutput = null;
+                _audioBuffer = null;
+            }
+
+            try
+            {
+                ctsToStop?.Cancel();
+            }
+            catch
+            {
+                // Ignore cancellation failures.
+            }
+
+            SafeStopOutput(outputToStop);
+            SafeKillProcess(processToStop);
+
+            if (taskToWait != null && Task.CurrentId != taskToWait.Id)
+            {
+                try
+                {
+                    taskToWait.Wait(200);
+                }
+                catch
+                {
+                    // Ignore wait failures.
+                }
+            }
+
+            try
+            {
+                ctsToStop?.Dispose();
+            }
+            catch
+            {
+                // Ignore dispose failures.
+            }
+        }
+
+        private void ClearAudioStateForProcess(Process process)
+        {
+            WaveOutEvent? outputToDispose = null;
+            CancellationTokenSource? ctsToDispose = null;
+            bool ownsCurrentPipeline = false;
+            lock (_audioLock)
+            {
+                ownsCurrentPipeline = ReferenceEquals(_audioDecodeProcess, process);
+                if (ownsCurrentPipeline)
+                {
+                    _audioDecodeProcess = null;
+
+                    outputToDispose = _audioOutput;
+                    _audioOutput = null;
+                    _audioBuffer = null;
+
+                    ctsToDispose = _audioDecodeCts;
+                    _audioDecodeCts = null;
+                    _audioDecodeTask = null;
+                }
+            }
+
+            if (ownsCurrentPipeline)
+            {
+                SafeStopOutput(outputToDispose);
+            }
+            SafeKillProcess(process);
+            try
+            {
+                ctsToDispose?.Dispose();
+            }
+            catch
+            {
+                // Ignore dispose failures.
+            }
+        }
+
+        private static void SafeStopOutput(WaveOutEvent? output)
+        {
+            if (output == null)
+            {
+                return;
+            }
+
+            try
+            {
+                output.Stop();
+            }
+            catch
+            {
+                // Ignore stop failures.
+            }
+            try
+            {
+                output.Dispose();
+            }
+            catch
+            {
+                // Ignore dispose failures.
+            }
+        }
+
+        private static void SafeKillProcess(Process? process)
+        {
+            if (process == null)
+            {
+                return;
+            }
+
+            try
+            {
+                if (!process.HasExited)
+                {
+                    process.Kill();
+                }
+            }
+            catch
+            {
+                // Ignore cleanup failures.
+            }
+            finally
+            {
+                try
+                {
+                    process.Dispose();
+                }
+                catch
+                {
+                    // Ignore dispose failures.
+                }
+            }
+        }
+
+        private static bool ProbeVideo(string path, out int width, out int height, out double durationSeconds)
         {
             width = 0;
             height = 0;
+            durationSeconds = 0;
             try
             {
                 var psi = new ProcessStartInfo
@@ -978,6 +1974,15 @@ internal sealed class FileCaptureService : IDisposable
                 
                 string output = p.StandardError.ReadToEnd();
                 p.WaitForExit();
+
+                var durationMatch = Regex.Match(output, @"Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)");
+                if (durationMatch.Success &&
+                    int.TryParse(durationMatch.Groups[1].Value, out int hours) &&
+                    int.TryParse(durationMatch.Groups[2].Value, out int minutes) &&
+                    double.TryParse(durationMatch.Groups[3].Value, NumberStyles.Float, CultureInfo.InvariantCulture, out double seconds))
+                {
+                    durationSeconds = (hours * 3600) + (minutes * 60) + seconds;
+                }
                 
                 // Regex for "Video: ..., 1920x1080"
                 var match = Regex.Match(output, @"Video:.*?, (\d+)x(\d+)");
@@ -996,22 +2001,31 @@ internal sealed class FileCaptureService : IDisposable
                     }
                 }
             
-                internal sealed class VideoSequenceSession : IDisposable
-                {
-                    private readonly List<string> _paths;
-                    private readonly string _displayName;
-                    private int _index;
-                    private VideoSession? _current;
-                    private int _errorStreak;
-                    private bool _hasError;
+    internal sealed class VideoSequenceSession : IDisposable
+    {
+        private readonly List<string> _paths;
+        private readonly string _displayName;
+        private int _index;
+        private VideoSession? _current;
+        private int _errorStreak;
+        private bool _hasError;
+        private bool _audioEnabled;
+        private double _audioVolume = 1.0;
+        private bool _masterAudioEnabled = true;
+        private double _masterAudioVolume = 1.0;
+        private bool _playbackPaused;
             
-                    public VideoSequenceSession(IReadOnlyList<string> paths)
-                    {
-                        _paths = new List<string>(paths);
-                        _displayName = BuildDisplayName(_paths);
-                        _index = 0;
-                        _current = new VideoSession(_paths[_index], loopPlayback: false);
-                    }
+        public VideoSequenceSession(IReadOnlyList<string> paths)
+        {
+            _paths = new List<string>(paths);
+            _displayName = BuildDisplayName(_paths);
+            _index = 0;
+            _current = new VideoSession(_paths[_index], loopPlayback: false);
+            _current.SetMasterAudio(_masterAudioEnabled, _masterAudioVolume);
+            _current.SetAudioVolume(_audioVolume);
+            _current.SetAudioEnabled(_audioEnabled);
+            _current.SetPlaybackPaused(_playbackPaused);
+        }
             
                     public IReadOnlyList<string> Paths => _paths;
                     public string DisplayName => _displayName;
@@ -1066,14 +2080,59 @@ internal sealed class FileCaptureService : IDisposable
                         return frame;
                     }
             
-                    public void Restart()
-                    {
-                        _hasError = false;
-                        _errorStreak = 0;
-                        _current?.Dispose();
-                        _index = 0;
-                        _current = new VideoSession(_paths[_index], loopPlayback: false);
-                    }
+        public void Restart()
+        {
+            _hasError = false;
+            _errorStreak = 0;
+            _current?.Dispose();
+            _index = 0;
+            _current = new VideoSession(_paths[_index], loopPlayback: false);
+            _current.SetMasterAudio(_masterAudioEnabled, _masterAudioVolume);
+            _current.SetAudioVolume(_audioVolume);
+            _current.SetAudioEnabled(_audioEnabled);
+            _current.SetPlaybackPaused(_playbackPaused);
+        }
+
+        public void SetAudioEnabled(bool enabled)
+        {
+            _audioEnabled = enabled;
+            _current?.SetAudioEnabled(enabled);
+        }
+
+        public void SetAudioVolume(double volume)
+        {
+            _audioVolume = Math.Clamp(volume, 0, 1);
+            _current?.SetAudioVolume(_audioVolume);
+        }
+
+        public void SetAudioMaster(bool enabled, double volume)
+        {
+            _masterAudioEnabled = enabled;
+            _masterAudioVolume = Math.Clamp(volume, 0, 1);
+            _current?.SetMasterAudio(_masterAudioEnabled, _masterAudioVolume);
+        }
+
+        public void SetPlaybackPaused(bool paused)
+        {
+            _playbackPaused = paused;
+            _current?.SetPlaybackPaused(paused);
+        }
+
+        public void SeekNormalized(double normalizedPosition)
+        {
+            _current?.SeekNormalized(normalizedPosition);
+        }
+
+        public bool TryGetPlaybackState(out VideoPlaybackState playbackState)
+        {
+            if (_current == null)
+            {
+                playbackState = default;
+                return false;
+            }
+
+            return _current.TryGetPlaybackState(out playbackState);
+        }
             
                     public void Dispose()
                     {
@@ -1081,11 +2140,15 @@ internal sealed class FileCaptureService : IDisposable
                         _current = null;
                     }
             
-                    private bool Advance(bool isError)
-                    {
-                        _current?.Dispose();
-                        _index = (_index + 1) % _paths.Count;
-                        _current = new VideoSession(_paths[_index], loopPlayback: false);
+        private bool Advance(bool isError)
+        {
+            _current?.Dispose();
+            _index = (_index + 1) % _paths.Count;
+            _current = new VideoSession(_paths[_index], loopPlayback: false);
+            _current.SetMasterAudio(_masterAudioEnabled, _masterAudioVolume);
+            _current.SetAudioVolume(_audioVolume);
+            _current.SetAudioEnabled(_audioEnabled);
+            _current.SetPlaybackPaused(_playbackPaused);
             
                         if (isError)
                         {
@@ -1116,9 +2179,27 @@ internal sealed class FileCaptureService : IDisposable
                             return baseName;
                         }
             
-                        return $"{baseName} (+{paths.Count - 1})";
+                return $"{baseName} (+{paths.Count - 1})";
                     }
                 }
+
+    internal readonly struct VideoPlaybackState
+    {
+        public VideoPlaybackState(double durationSeconds, double positionSeconds, double normalizedPosition, bool isPaused, bool isSeekable)
+        {
+            DurationSeconds = durationSeconds;
+            PositionSeconds = positionSeconds;
+            NormalizedPosition = normalizedPosition;
+            IsPaused = isPaused;
+            IsSeekable = isSeekable;
+        }
+
+        public double DurationSeconds { get; }
+        public double PositionSeconds { get; }
+        public double NormalizedPosition { get; }
+        public bool IsPaused { get; }
+        public bool IsSeekable { get; }
+    }
             
                 internal readonly struct FileSourceInfo
                 {

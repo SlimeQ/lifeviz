@@ -271,6 +271,25 @@
                        DockPanel.Dock="Left"
                        VerticalAlignment="Center" />
             <StackPanel Orientation="Horizontal" DockPanel.Dock="Right">
+                <CheckBox Content="Master Audio"
+                          IsChecked="{Binding SourceAudioMasterEnabled}"
+                          Margin="0,0,8,0"
+                          VerticalAlignment="Center"
+                          Checked="MasterVideoAudio_Changed"
+                          Unchecked="MasterVideoAudio_Changed" />
+                <Slider Minimum="0"
+                        Maximum="1"
+                        Value="{Binding SourceAudioMasterVolume}"
+                        Width="120"
+                        SmallChange="0.05"
+                        LargeChange="0.1"
+                        Margin="0,0,6,0"
+                        VerticalAlignment="Center"
+                        ValueChanged="MasterVideoAudioVolume_Changed" />
+                <TextBlock Text="{Binding SourceAudioMasterVolume, StringFormat={}{0:P0}}"
+                           Margin="0,0,12,0"
+                           VerticalAlignment="Center"
+                           Foreground="#C8C8C8" />
                 <CheckBox x:Name="LiveModeCheckBox"
                           Content="Live Mode"
                           IsChecked="{Binding LiveMode}"
@@ -478,6 +497,54 @@
                                         </WrapPanel>
 
                                         <WrapPanel Margin="0,0,0,4">
+                                            <CheckBox Content="Play Audio (Video/YouTube)"
+                                                      Margin="0,0,12,6"
+                                                      IsEnabled="{Binding IsVideo}"
+                                                      IsChecked="{Binding VideoAudioEnabled}"
+                                                      Checked="VideoAudio_Changed"
+                                                      Unchecked="VideoAudio_Changed" />
+                                            <StackPanel Orientation="Horizontal" Margin="0,0,12,6">
+                                                <TextBlock Text="Audio Volume"
+                                                           VerticalAlignment="Center"
+                                                           Foreground="#D6D6D6" />
+                                                <Slider Minimum="0"
+                                                        Maximum="1"
+                                                        Value="{Binding VideoAudioVolume}"
+                                                        Width="130"
+                                                        SmallChange="0.05"
+                                                        LargeChange="0.1"
+                                                        Margin="6,0,0,0"
+                                                        IsEnabled="{Binding IsVideo}"
+                                                        ValueChanged="VideoAudioVolume_Changed" />
+                                                <TextBlock Text="{Binding VideoAudioVolume, StringFormat={}{0:P0}}"
+                                                           Margin="6,0,0,0"
+                                                           VerticalAlignment="Center"
+                                                           Foreground="#C8C8C8" />
+                                            </StackPanel>
+                                            <Button Content="{Binding VideoPlaybackToggleLabel}"
+                                                    Padding="8,2"
+                                                    Margin="0,0,8,6"
+                                                    IsEnabled="{Binding IsVideo}"
+                                                    Click="VideoPlayPause_Click" />
+                                            <StackPanel Orientation="Horizontal" Margin="0,0,12,6">
+                                                <TextBlock Text="Scrub"
+                                                           VerticalAlignment="Center"
+                                                           Foreground="#D6D6D6" />
+                                                <Slider Minimum="0"
+                                                        Maximum="1"
+                                                        Value="{Binding VideoPlaybackPosition}"
+                                                        Width="160"
+                                                        SmallChange="0.01"
+                                                        LargeChange="0.05"
+                                                        Margin="6,0,0,0"
+                                                        IsEnabled="{Binding VideoSeekAvailable}"
+                                                        IsMoveToPointEnabled="True"
+                                                        PreviewMouseLeftButtonUp="VideoSeek_PreviewMouseLeftButtonUp" />
+                                                <TextBlock Text="{Binding VideoPlaybackTimeLabel}"
+                                                           Margin="6,0,0,0"
+                                                           VerticalAlignment="Center"
+                                                           Foreground="#C8C8C8" />
+                                            </StackPanel>
                                             <CheckBox Content="Mirror Webcam"
                                                       Margin="0,0,12,6"
                                                       IsEnabled="{Binding IsWebcam}"

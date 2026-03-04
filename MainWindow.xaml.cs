@@ -58,6 +58,7 @@ public partial class MainWindow : Window
     private const double DefaultAudioReactiveSeedCooldownMs = 180.0;
     private const int MaxAudioReactiveSeedBurstsPerStep = 64;
     private const int MaxSimulationStepsPerRender = 8;
+    private const double MaxRgbHueShiftSpeedDegreesPerSecond = 180.0;
     private const double MaxColorDistance = 441.6729559300637;
     private const string GitHubRepoOwner = "SlimeQ";
     private const string GitHubRepoName = "lifeviz";
@@ -127,6 +128,9 @@ public partial class MainWindow : Window
     private bool _passthroughEnabled;
     private BlendMode _blendMode = BlendMode.Additive;
     private double _lifeOpacity = 1.0;
+    private double _rgbHueShiftDegrees;
+    private double _rgbHueShiftSpeedDegreesPerSecond;
+    private bool _suppressRgbHueShiftControlEvents;
     private bool _invertComposite;
     private bool _showFps;
     private readonly Stopwatch _simulationFpsStopwatch = new();
@@ -157,6 +161,8 @@ public partial class MainWindow : Window
     private bool _fpsOscillationEnabled;
     private bool _audioSyncEnabled;
     private bool _animationAudioSyncEnabled;
+    private bool _sourceAudioMasterEnabled = true;
+    private double _sourceAudioMasterVolume = 1.0;
     private string? _selectedAudioDeviceId;
     private double _oscillationBpm = 140;
     private double _oscillationMinFps = 30;
@@ -1347,6 +1353,7 @@ public partial class MainWindow : Window
         {
             LifeOpacitySlider.Value = _lifeOpacity;
         }
+        UpdateRgbHueShiftControls();
         if (InvertCompositeMenuItem != null)
         {
             InvertCompositeMenuItem.IsChecked = _invertComposite;
@@ -1487,11 +1494,21 @@ public partial class MainWindow : Window
 
     private async void SourcesMenu_OnSubmenuOpened(object sender, RoutedEventArgs e)
     {
+        if (!ReferenceEquals(sender, e.Source))
+        {
+            return;
+        }
+
         await PopulateSourcesMenuAsync();
     }
 
     private void AudioSourceMenu_OnSubmenuOpened(object sender, RoutedEventArgs e)
     {
+        if (!ReferenceEquals(sender, e.Source))
+        {
+            return;
+        }
+
         PopulateAudioMenu();
     }
 
@@ -2345,7 +2362,11 @@ public partial class MainWindow : Window
         bool isVideoLayer = source.Type == CaptureSource.SourceType.VideoSequence ||
                             (source.Type == CaptureSource.SourceType.File &&
                              !string.IsNullOrWhiteSpace(source.FilePath) &&
-                             (FileCaptureService.IsVideoPath(source.FilePath) || source.FilePath.StartsWith("youtube:")));
+                             IsVideoFileSourcePath(source.FilePath));
+        MenuItem? videoAudioItem = null;
+        MenuItem? videoAudioVolumeItem = null;
+        MenuItem? videoPlaybackItem = null;
+        MenuItem? videoSeekItem = null;
         if (isVideoLayer)
         {
             restartVideoItem = new MenuItem
@@ -2353,6 +2374,119 @@ public partial class MainWindow : Window
                 Header = source.Type == CaptureSource.SourceType.VideoSequence ? "Restart Sequence" : "Restart Video"
             };
             restartVideoItem.Click += (_, _) => RestartVideoSource(source);
+
+            bool hasPlaybackState = TryGetSourceVideoPlaybackState(source, out var playbackState);
+            if (hasPlaybackState)
+            {
+                source.VideoPlaybackPaused = playbackState.IsPaused;
+            }
+            videoPlaybackItem = new MenuItem
+            {
+                Header = source.VideoPlaybackPaused ? "Play" : "Pause"
+            };
+            videoPlaybackItem.Click += (_, _) =>
+            {
+                bool shouldPause = !source.VideoPlaybackPaused;
+                if (SetSourceVideoPlaybackPaused(source, shouldPause))
+                {
+                    source.VideoPlaybackPaused = shouldPause;
+                    videoPlaybackItem.Header = shouldPause ? "Play" : "Pause";
+                    NotifyLayerEditorSourcesChanged();
+                }
+            };
+
+            videoSeekItem = new MenuItem
+            {
+                Header = "Scrub",
+                StaysOpenOnClick = true,
+                IsEnabled = hasPlaybackState && playbackState.IsSeekable
+            };
+            var videoSeekValueItem = new MenuItem
+            {
+                Header = hasPlaybackState
+                    ? $"{FormatPlaybackTime(playbackState.PositionSeconds)} / {FormatPlaybackTime(playbackState.DurationSeconds)}"
+                    : "Unavailable",
+                IsEnabled = false
+            };
+            var videoSeekSlider = new Slider
+            {
+                Minimum = 0,
+                Maximum = 1,
+                Value = hasPlaybackState ? playbackState.NormalizedPosition : 0,
+                Width = 160,
+                SmallChange = 0.01,
+                LargeChange = 0.05,
+                IsEnabled = hasPlaybackState && playbackState.IsSeekable,
+                Margin = new Thickness(12, 4, 12, 8)
+            };
+            videoSeekSlider.ValueChanged += (_, args) =>
+            {
+                if (!videoSeekSlider.IsMouseCaptureWithin)
+                {
+                    return;
+                }
+
+                if (!SeekSourceVideo(source, args.NewValue))
+                {
+                    return;
+                }
+
+                if (TryGetSourceVideoPlaybackState(source, out var updatedState))
+                {
+                    source.VideoPlaybackPaused = updatedState.IsPaused;
+                    videoSeekValueItem.Header =
+                        $"{FormatPlaybackTime(updatedState.PositionSeconds)} / {FormatPlaybackTime(updatedState.DurationSeconds)}";
+                }
+                NotifyLayerEditorSourcesChanged();
+            };
+            videoSeekItem.Items.Add(videoSeekValueItem);
+            videoSeekItem.Items.Add(videoSeekSlider);
+
+            videoAudioItem = new MenuItem
+            {
+                Header = "Play Audio",
+                IsCheckable = true,
+                IsChecked = source.VideoAudioEnabled
+            };
+            videoAudioItem.Click += (_, _) =>
+            {
+                source.VideoAudioEnabled = !source.VideoAudioEnabled;
+                ApplySourceVideoAudioState(source);
+                Logger.Info($"Video audio toggled for {source.DisplayName}: {source.VideoAudioEnabled}");
+                SaveConfig();
+                NotifyLayerEditorSourcesChanged();
+            };
+
+            videoAudioVolumeItem = new MenuItem
+            {
+                Header = "Audio Volume",
+                StaysOpenOnClick = true
+            };
+            var videoAudioVolumeValueItem = new MenuItem
+            {
+                Header = $"{Math.Clamp(source.VideoAudioVolume, 0, 1):P0}",
+                IsEnabled = false
+            };
+            var videoAudioVolumeSlider = new Slider
+            {
+                Minimum = 0,
+                Maximum = 1,
+                Value = Math.Clamp(source.VideoAudioVolume, 0, 1),
+                Width = 140,
+                SmallChange = 0.05,
+                LargeChange = 0.1,
+                Margin = new Thickness(12, 4, 12, 8)
+            };
+            videoAudioVolumeSlider.ValueChanged += (_, args) =>
+            {
+                source.VideoAudioVolume = Math.Clamp(args.NewValue, 0, 1);
+                videoAudioVolumeValueItem.Header = $"{source.VideoAudioVolume:P0}";
+                ApplySourceVideoAudioState(source);
+                SaveConfig();
+                NotifyLayerEditorSourcesChanged();
+            };
+            videoAudioVolumeItem.Items.Add(videoAudioVolumeValueItem);
+            videoAudioVolumeItem.Items.Add(videoAudioVolumeSlider);
         }
 
         MenuItem? renameItem = null;
@@ -2523,6 +2657,22 @@ public partial class MainWindow : Window
         {
             sourceItem.Items.Add(restartVideoItem);
         }
+        if (videoPlaybackItem != null)
+        {
+            sourceItem.Items.Add(videoPlaybackItem);
+        }
+        if (videoSeekItem != null)
+        {
+            sourceItem.Items.Add(videoSeekItem);
+        }
+        if (videoAudioItem != null)
+        {
+            sourceItem.Items.Add(videoAudioItem);
+        }
+        if (videoAudioVolumeItem != null)
+        {
+            sourceItem.Items.Add(videoAudioVolumeItem);
+        }
         if (renameItem != null)
         {
             sourceItem.Items.Add(renameItem);
@@ -2550,6 +2700,22 @@ public partial class MainWindow : Window
             CaptureSource.SourceType.Group => $"{prefix}Group: {source.DisplayName}",
             _ => $"{prefix}{source.DisplayName}"
         };
+    }
+
+    private static string FormatPlaybackTime(double seconds)
+    {
+        if (double.IsNaN(seconds) || double.IsInfinity(seconds) || seconds < 0)
+        {
+            return "0:00";
+        }
+
+        var duration = TimeSpan.FromSeconds(seconds);
+        if (duration.TotalHours >= 1)
+        {
+            return duration.ToString(@"h\:mm\:ss");
+        }
+
+        return duration.ToString(@"m\:ss");
     }
 
     private void AddWindowSourceMenuItem_Click(object sender, RoutedEventArgs e)
@@ -2998,13 +3164,15 @@ public partial class MainWindow : Window
         if (source.Type == CaptureSource.SourceType.VideoSequence && source.VideoSequence != null)
         {
             source.VideoSequence.Restart();
+            ApplySourceVideoAudioState(source);
             restarted = true;
         }
         else if (source.Type == CaptureSource.SourceType.File &&
                  !string.IsNullOrWhiteSpace(source.FilePath) &&
-                 FileCaptureService.IsVideoPath(source.FilePath))
+                 IsVideoFileSourcePath(source.FilePath))
         {
             restarted = _fileCapture.RestartVideo(source.FilePath);
+            ApplySourceVideoAudioState(source);
         }
 
         if (!restarted)
@@ -3017,8 +3185,150 @@ public partial class MainWindow : Window
         source.FirstFrameReceived = false;
         source.HasError = false;
         source.AddedUtc = DateTime.UtcNow;
+        source.VideoPlaybackPaused = false;
         Logger.Info($"Restarted video source: {source.DisplayName}");
         RenderFrame();
+    }
+
+    private static bool IsVideoFileSourcePath(string path) =>
+        FileCaptureService.IsVideoPath(path) || path.StartsWith("youtube:", StringComparison.OrdinalIgnoreCase);
+
+    private bool IsVideoSource(CaptureSource source) =>
+        source.Type == CaptureSource.SourceType.VideoSequence ||
+        (source.Type == CaptureSource.SourceType.File &&
+         !string.IsNullOrWhiteSpace(source.FilePath) &&
+         IsVideoFileSourcePath(source.FilePath));
+
+    private void ApplySourceVideoAudioState(CaptureSource source)
+    {
+        if (!IsVideoSource(source))
+        {
+            return;
+        }
+
+        if (source.Type == CaptureSource.SourceType.VideoSequence)
+        {
+            source.VideoSequence?.SetAudioMaster(_sourceAudioMasterEnabled, _sourceAudioMasterVolume);
+            source.VideoSequence?.SetAudioVolume(source.VideoAudioVolume);
+            source.VideoSequence?.SetAudioEnabled(source.VideoAudioEnabled);
+            return;
+        }
+
+        if (!string.IsNullOrWhiteSpace(source.FilePath))
+        {
+            _fileCapture.SetVideoAudioVolume(source.FilePath, source.VideoAudioVolume);
+            if (!_fileCapture.SetVideoAudioEnabled(source.FilePath, source.VideoAudioEnabled))
+            {
+                Logger.Warn($"Failed to apply video audio state for {source.DisplayName} ({source.FilePath}).");
+            }
+        }
+    }
+
+    private void ApplyMasterVideoAudioState()
+    {
+        _fileCapture.SetMasterVideoAudioEnabled(_sourceAudioMasterEnabled);
+        _fileCapture.SetMasterVideoAudioVolume(_sourceAudioMasterVolume);
+
+        foreach (var source in EnumerateSources(_sources))
+        {
+            if (source.Type == CaptureSource.SourceType.VideoSequence)
+            {
+                source.VideoSequence?.SetAudioMaster(_sourceAudioMasterEnabled, _sourceAudioMasterVolume);
+            }
+        }
+    }
+
+    private bool TryGetSourceVideoPlaybackState(CaptureSource source, out FileCaptureService.VideoPlaybackState playbackState)
+    {
+        playbackState = default;
+        if (!IsVideoSource(source))
+        {
+            return false;
+        }
+
+        if (source.Type == CaptureSource.SourceType.VideoSequence)
+        {
+            return source.VideoSequence?.TryGetPlaybackState(out playbackState) == true;
+        }
+
+        if (!string.IsNullOrWhiteSpace(source.FilePath))
+        {
+            return _fileCapture.TryGetVideoPlaybackState(source.FilePath, out playbackState);
+        }
+
+        return false;
+    }
+
+    private bool SetSourceVideoPlaybackPaused(CaptureSource source, bool paused)
+    {
+        if (!IsVideoSource(source))
+        {
+            return false;
+        }
+
+        bool applied;
+        if (source.Type == CaptureSource.SourceType.VideoSequence)
+        {
+            if (source.VideoSequence == null)
+            {
+                return false;
+            }
+
+            source.VideoSequence.SetPlaybackPaused(paused);
+            applied = true;
+        }
+        else if (!string.IsNullOrWhiteSpace(source.FilePath))
+        {
+            applied = _fileCapture.SetVideoPaused(source.FilePath, paused);
+        }
+        else
+        {
+            return false;
+        }
+
+        if (applied)
+        {
+            source.VideoPlaybackPaused = paused;
+            RenderFrame();
+        }
+
+        return applied;
+    }
+
+    private bool SeekSourceVideo(CaptureSource source, double normalizedPosition)
+    {
+        if (!IsVideoSource(source))
+        {
+            return false;
+        }
+
+        double clamped = Math.Clamp(normalizedPosition, 0, 1);
+        bool applied;
+        if (source.Type == CaptureSource.SourceType.VideoSequence)
+        {
+            if (source.VideoSequence == null)
+            {
+                return false;
+            }
+
+            source.VideoSequence.SeekNormalized(clamped);
+            applied = true;
+        }
+        else if (!string.IsNullOrWhiteSpace(source.FilePath))
+        {
+            applied = _fileCapture.SeekVideo(source.FilePath, clamped);
+        }
+        else
+        {
+            return false;
+        }
+
+        if (applied)
+        {
+            RenderFrame();
+        }
+
+        return applied;
     }
 
     private IEnumerable<CaptureSource> EnumerateSources(IEnumerable<CaptureSource> sources)
@@ -3212,6 +3522,113 @@ public partial class MainWindow : Window
 
             source.Opacity = Math.Clamp(opacity, 0, 1);
             RenderFrame();
+            SaveConfig();
+        });
+    }
+
+    internal void UpdateSourceVideoAudioEnabled(Guid sourceId, bool enabled)
+    {
+        RunWithoutLayerEditorRefresh(() =>
+        {
+            var source = FindSourceById(sourceId);
+            if (source == null || !IsVideoSource(source))
+            {
+                return;
+            }
+
+            source.VideoAudioEnabled = enabled;
+            ApplySourceVideoAudioState(source);
+            SaveConfig();
+        });
+    }
+
+    internal void UpdateSourceVideoAudioVolume(Guid sourceId, double volume)
+    {
+        RunWithoutLayerEditorRefresh(() =>
+        {
+            var source = FindSourceById(sourceId);
+            if (source == null || !IsVideoSource(source))
+            {
+                return;
+            }
+
+            source.VideoAudioVolume = Math.Clamp(volume, 0, 1);
+            ApplySourceVideoAudioState(source);
+            SaveConfig();
+        });
+    }
+
+    internal bool TryGetSourceVideoPlaybackState(Guid sourceId, out FileCaptureService.VideoPlaybackState playbackState)
+    {
+        playbackState = default;
+        var source = FindSourceById(sourceId);
+        if (source == null)
+        {
+            return false;
+        }
+
+        bool success = TryGetSourceVideoPlaybackState(source, out playbackState);
+        if (success)
+        {
+            source.VideoPlaybackPaused = playbackState.IsPaused;
+        }
+        return success;
+    }
+
+    internal void UpdateSourceVideoPlaybackPaused(Guid sourceId, bool paused)
+    {
+        RunWithoutLayerEditorRefresh(() =>
+        {
+            var source = FindSourceById(sourceId);
+            if (source == null)
+            {
+                return;
+            }
+
+            if (!SetSourceVideoPlaybackPaused(source, paused))
+            {
+                Logger.Warn($"Failed to {(paused ? "pause" : "resume")} video source: {source.DisplayName}");
+            }
+        });
+    }
+
+    internal void SeekSourceVideo(Guid sourceId, double normalizedPosition)
+    {
+        RunWithoutLayerEditorRefresh(() =>
+        {
+            var source = FindSourceById(sourceId);
+            if (source == null)
+            {
+                return;
+            }
+
+            if (!SeekSourceVideo(source, normalizedPosition))
+            {
+                Logger.Warn($"Failed to seek video source: {source.DisplayName}");
+            }
+        });
+    }
+
+    internal bool GetSourceAudioMasterEnabled() => _sourceAudioMasterEnabled;
+
+    internal double GetSourceAudioMasterVolume() => _sourceAudioMasterVolume;
+
+    internal void UpdateMasterSourceAudioEnabled(bool enabled)
+    {
+        RunWithoutLayerEditorRefresh(() =>
+        {
+            _sourceAudioMasterEnabled = enabled;
+            ApplyMasterVideoAudioState();
+            SaveConfig();
+        });
+    }
+
+    internal void UpdateMasterSourceAudioVolume(double volume)
+    {
+        RunWithoutLayerEditorRefresh(() =>
+        {
+            _sourceAudioMasterVolume = Math.Clamp(volume, 0, 1);
+            ApplyMasterVideoAudioState();
             SaveConfig();
         });
     }
@@ -5518,6 +5935,28 @@ public partial class MainWindow : Window
 
     private static byte ClampToByte(int value) => (byte)(value < 0 ? 0 : value > 255 ? 255 : value);
 
+    private static void BuildHueRotationMatrix(double hueShiftDegrees,
+        out double rr, out double rg, out double rb,
+        out double gr, out double gg, out double gb,
+        out double br, out double bg, out double bb)
+    {
+        double radians = DegreesToRadians(hueShiftDegrees);
+        double cos = Math.Cos(radians);
+        double sin = Math.Sin(radians);
+
+        rr = 0.299 + (0.701 * cos) + (0.168 * sin);
+        rg = 0.587 - (0.587 * cos) + (0.330 * sin);
+        rb = 0.114 - (0.114 * cos) - (0.497 * sin);
+
+        gr = 0.299 - (0.299 * cos) - (0.328 * sin);
+        gg = 0.587 + (0.413 * cos) + (0.035 * sin);
+        gb = 0.114 - (0.114 * cos) + (0.292 * sin);
+
+        br = 0.299 - (0.300 * cos) + (1.250 * sin);
+        bg = 0.587 - (0.588 * cos) - (1.050 * sin);
+        bb = 0.114 + (0.886 * cos) - (0.203 * sin);
+    }
+
     private void EnsureEngineColorBuffer()
     {
         int size = _engine.Columns * _engine.Rows * 4;
@@ -5526,12 +5965,30 @@ public partial class MainWindow : Window
             _engineColorBuffer = new byte[size];
         }
 
+        double hueShiftDegrees = CurrentRgbHueShiftDegrees();
+        bool applyHueShift = _lifeMode == GameOfLifeEngine.LifeMode.RgbChannels && Math.Abs(hueShiftDegrees) > 0.001;
+        double rr = 0, rg = 0, rb = 0, gr = 0, gg = 0, gb = 0, br = 0, bg = 0, bb = 0;
+        if (applyHueShift)
+        {
+            BuildHueRotationMatrix(hueShiftDegrees, out rr, out rg, out rb, out gr, out gg, out gb, out br, out bg, out bb);
+        }
+
         Parallel.For(0, _engine.Rows, row =>
         {
             int rowOffset = row * _engine.Columns * 4;
             for (int col = 0; col < _engine.Columns; col++)
             {
                 var (r, g, b) = _engine.GetColor(row, col);
+                if (applyHueShift)
+                {
+                    int rotatedR = (int)Math.Round((rr * r) + (rg * g) + (rb * b));
+                    int rotatedG = (int)Math.Round((gr * r) + (gg * g) + (gb * b));
+                    int rotatedB = (int)Math.Round((br * r) + (bg * g) + (bb * b));
+                    r = ClampToByte(rotatedR);
+                    g = ClampToByte(rotatedG);
+                    b = ClampToByte(rotatedB);
+                }
+
                 int index = rowOffset + (col * 4);
                 _engineColorBuffer[index] = r;
                 _engineColorBuffer[index + 1] = g;
@@ -5836,6 +6293,51 @@ public partial class MainWindow : Window
         SaveConfig();
     }
 
+    private void RgbHueShiftSlider_OnValueChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
+    {
+        _rgbHueShiftDegrees = NormalizeHueDegrees(e.NewValue);
+        if (RgbHueShiftValueText != null)
+        {
+            RgbHueShiftValueText.Text = $"{_rgbHueShiftDegrees:0.#}deg";
+        }
+
+        if (_suppressRgbHueShiftControlEvents)
+        {
+            return;
+        }
+
+        RenderFrame();
+        SaveConfig();
+    }
+
+    private void RgbHueShiftSpeedSlider_OnValueChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
+    {
+        _rgbHueShiftSpeedDegreesPerSecond = Math.Clamp(e.NewValue, -MaxRgbHueShiftSpeedDegreesPerSecond, MaxRgbHueShiftSpeedDegreesPerSecond);
+        if (RgbHueShiftSpeedValueText != null)
+        {
+            RgbHueShiftSpeedValueText.Text = $"{_rgbHueShiftSpeedDegreesPerSecond:+0.#;-0.#;0}deg/s";
+        }
+
+        if (_suppressRgbHueShiftControlEvents)
+        {
+            return;
+        }
+
+        RenderFrame();
+        SaveConfig();
+    }
+
+    private void RgbHueShiftSpeedSlider_OnPreviewMouseLeftButtonDown(object sender, System.Windows.Input.MouseButtonEventArgs e)
+    {
+        if (e.ClickCount != 2 || sender is not Slider slider)
+        {
+            return;
+        }
+
+        slider.Value = 0;
+        e.Handled = true;
+    }
+
     private void InvertComposite_Click(object sender, RoutedEventArgs e)
     {
         _invertComposite = !_invertComposite;
@@ -5886,6 +6388,7 @@ public partial class MainWindow : Window
         _lifeMode = mode;
         _engine.SetMode(mode);
         _pulseStep = 0;
+        UpdateRgbHueShiftControls();
         UpdateDisplaySurface(force: true);
         RenderFrame();
         SaveConfig();
@@ -5908,6 +6411,77 @@ public partial class MainWindow : Window
                 menuItem.IsChecked = (isNaive && _lifeMode == GameOfLifeEngine.LifeMode.NaiveGrayscale) ||
                                      (isRgb && _lifeMode == GameOfLifeEngine.LifeMode.RgbChannels);
             }
+        }
+    }
+
+    private static double NormalizeHueDegrees(double value)
+    {
+        double normalized = value % 360.0;
+        if (normalized < 0)
+        {
+            normalized += 360.0;
+        }
+        return normalized;
+    }
+
+    private double CurrentRgbHueShiftDegrees()
+    {
+        if (_lifeMode != GameOfLifeEngine.LifeMode.RgbChannels)
+        {
+            return 0;
+        }
+
+        double animatedDegrees = _rgbHueShiftDegrees;
+        if (Math.Abs(_rgbHueShiftSpeedDegreesPerSecond) > 0.001)
+        {
+            animatedDegrees += _lifetimeStopwatch.Elapsed.TotalSeconds * _rgbHueShiftSpeedDegreesPerSecond;
+        }
+
+        return NormalizeHueDegrees(animatedDegrees);
+    }
+
+    private void UpdateRgbHueShiftControls()
+    {
+        bool rgbMode = _lifeMode == GameOfLifeEngine.LifeMode.RgbChannels;
+        if (RgbHueShiftMenu != null)
+        {
+            RgbHueShiftMenu.IsEnabled = rgbMode;
+        }
+
+        _suppressRgbHueShiftControlEvents = true;
+        try
+        {
+            if (RgbHueShiftSlider != null)
+            {
+                double normalizedOffset = NormalizeHueDegrees(_rgbHueShiftDegrees);
+                if (Math.Abs(RgbHueShiftSlider.Value - normalizedOffset) > 0.001)
+                {
+                    RgbHueShiftSlider.Value = normalizedOffset;
+                }
+            }
+
+            if (RgbHueShiftSpeedSlider != null)
+            {
+                double clampedSpeed = Math.Clamp(_rgbHueShiftSpeedDegreesPerSecond, -MaxRgbHueShiftSpeedDegreesPerSecond, MaxRgbHueShiftSpeedDegreesPerSecond);
+                if (Math.Abs(RgbHueShiftSpeedSlider.Value - clampedSpeed) > 0.001)
+                {
+                    RgbHueShiftSpeedSlider.Value = clampedSpeed;
+                }
+            }
+        }
+        finally
+        {
+            _suppressRgbHueShiftControlEvents = false;
+        }
+
+        if (RgbHueShiftValueText != null)
+        {
+            RgbHueShiftValueText.Text = $"{_rgbHueShiftDegrees:0.#}deg";
+        }
+
+        if (RgbHueShiftSpeedValueText != null)
+        {
+            RgbHueShiftSpeedValueText.Text = $"{_rgbHueShiftSpeedDegreesPerSecond:+0.#;-0.#;0}deg/s";
         }
     }
 
@@ -5980,6 +6554,15 @@ public partial class MainWindow : Window
             return (rMask, gMask, bMask);
         }
 
+        double hueShiftDegrees = CurrentRgbHueShiftDegrees();
+        bool remapToRotatedBins = Math.Abs(hueShiftDegrees) > 0.001;
+        double rr = 0, rg = 0, rb = 0, gr = 0, gg = 0, gb = 0, br = 0, bg = 0, bb = 0;
+        if (remapToRotatedBins)
+        {
+            // Convert captured RGB into the rotated bin basis so hue shift changes channel injection behavior.
+            BuildHueRotationMatrix(-hueShiftDegrees, out rr, out rg, out rb, out gr, out gg, out gb, out br, out bg, out bb);
+        }
+
         int stride = cols * 4;
         Parallel.For(0, rows, row =>
         {
@@ -5996,6 +6579,15 @@ public partial class MainWindow : Window
                 double nr = r / 255.0;
                 double ng = g / 255.0;
                 double nb = b / 255.0;
+                if (remapToRotatedBins)
+                {
+                    double mappedR = (rr * nr) + (rg * ng) + (rb * nb);
+                    double mappedG = (gr * nr) + (gg * ng) + (gb * nb);
+                    double mappedB = (br * nr) + (bg * ng) + (bb * nb);
+                    nr = Math.Clamp(mappedR, 0, 1);
+                    ng = Math.Clamp(mappedG, 0, 1);
+                    nb = Math.Clamp(mappedB, 0, 1);
+                }
 
                 double rGate = ComputePwmSignal(nr, min, max, invert);
                 double gGate = ComputePwmSignal(ng, min, max, invert);
@@ -6355,6 +6947,8 @@ public partial class MainWindow : Window
             _currentFpsFromConfig = Math.Clamp(config.Framerate, 5, 144);
             _currentFps = _currentFpsFromConfig;
             _lifeOpacity = Math.Clamp(config.LifeOpacity, 0, 1);
+            _rgbHueShiftDegrees = NormalizeHueDegrees(config.RgbHueShiftDegrees);
+            _rgbHueShiftSpeedDegreesPerSecond = Math.Clamp(config.RgbHueShiftSpeedDegreesPerSecond, -MaxRgbHueShiftSpeedDegreesPerSecond, MaxRgbHueShiftSpeedDegreesPerSecond);
             if (Enum.TryParse<GameOfLifeEngine.LifeMode>(config.LifeMode, out var lifeMode))
             {
                 _lifeMode = lifeMode;
@@ -6424,6 +7018,10 @@ public partial class MainWindow : Window
                 _audioReactiveSeedPattern = seedPattern;
             }
             _selectedAudioDeviceId = config.AudioDeviceId;
+            _sourceAudioMasterEnabled = config.SourceAudioMasterEnabled;
+            _sourceAudioMasterVolume = Math.Clamp(config.SourceAudioMasterVolume, 0, 1);
+            _fileCapture.SetMasterVideoAudioEnabled(_sourceAudioMasterEnabled);
+            _fileCapture.SetMasterVideoAudioVolume(_sourceAudioMasterVolume);
             ApplyAudioInputGainForSelection();
             _aspectRatioLocked = config.AspectRatioLocked;
             _lockedAspectRatio = config.LockedAspectRatio > 0 ? config.LockedAspectRatio : DefaultAspectRatio;
@@ -6438,6 +7036,7 @@ public partial class MainWindow : Window
 
             _pendingFullscreen = config.Fullscreen;
             RestoreSources(config.Sources);
+            ApplyMasterVideoAudioState();
             if (_pendingLegacyColumns.HasValue)
             {
                 double targetAspect = _aspectRatioLocked ? _lockedAspectRatio
@@ -6477,6 +7076,8 @@ public partial class MainWindow : Window
                 InjectionMode = _injectionMode.ToString(),
                 InjectionNoise = _injectionNoise,
                 LifeOpacity = _lifeOpacity,
+                RgbHueShiftDegrees = _rgbHueShiftDegrees,
+                RgbHueShiftSpeedDegreesPerSecond = _rgbHueShiftSpeedDegreesPerSecond,
                 InvertComposite = _invertComposite,
                 ShowFps = _showFps,
                 AnimationBpm = _animationBpm,
@@ -6507,6 +7108,8 @@ public partial class MainWindow : Window
                 AudioReactiveSeedCooldownMs = _audioReactiveSeedCooldownMs,
                 AudioReactiveSeedPattern = _audioReactiveSeedPattern.ToString(),
                 AudioDeviceId = _selectedAudioDeviceId,
+                SourceAudioMasterEnabled = _sourceAudioMasterEnabled,
+                SourceAudioMasterVolume = _sourceAudioMasterVolume,
                 BlendMode = _blendMode.ToString(),
                 Fullscreen = _isFullscreen,
                 AspectRatioLocked = _aspectRatioLocked,
@@ -6546,6 +7149,8 @@ public partial class MainWindow : Window
                 BlendMode = source.BlendMode.ToString(),
                 FitMode = source.FitMode.ToString(),
                 Opacity = source.Opacity,
+                VideoAudioEnabled = source.VideoAudioEnabled,
+                VideoAudioVolume = source.VideoAudioVolume,
                 Mirror = source.Mirror,
                 KeyEnabled = source.KeyEnabled,
                 KeyColor = FormatHexColor(source.KeyColorR, source.KeyColorG, source.KeyColorB),
@@ -6620,12 +7225,23 @@ public partial class MainWindow : Window
                 BlendMode = source.BlendMode.ToString(),
                 FitMode = source.FitMode.ToString(),
                 Opacity = source.Opacity,
+                VideoAudioEnabled = source.VideoAudioEnabled,
+                VideoAudioVolume = source.VideoAudioVolume,
                 Mirror = source.Mirror,
                 KeyEnabled = source.KeyEnabled,
                 KeyTolerance = source.KeyTolerance,
                 KeyColorHex = FormatHexColor(source.KeyColorR, source.KeyColorG, source.KeyColorB),
                 Parent = parent
             };
+
+            if (TryGetSourceVideoPlaybackState(source, out var playbackState))
+            {
+                model.VideoPlaybackPaused = playbackState.IsPaused;
+                model.VideoPlaybackPosition = playbackState.NormalizedPosition;
+                model.VideoPlaybackPositionSeconds = playbackState.PositionSeconds;
+                model.VideoPlaybackDurationSeconds = playbackState.DurationSeconds;
+                source.VideoPlaybackPaused = playbackState.IsPaused;
+            }
 
             if (source.Type == CaptureSource.SourceType.VideoSequence && source.FilePaths.Count > 0)
             {
@@ -6877,6 +7493,8 @@ public partial class MainWindow : Window
         }
 
         source.Opacity = Math.Clamp(model.Opacity, 0, 1);
+        source.VideoAudioEnabled = model.VideoAudioEnabled;
+        source.VideoAudioVolume = Math.Clamp(model.VideoAudioVolume, 0, 1);
         source.Mirror = model.Mirror;
         source.KeyEnabled = model.KeyEnabled;
         source.KeyTolerance = Math.Clamp(model.KeyTolerance, 0, 1);
@@ -6886,6 +7504,7 @@ public partial class MainWindow : Window
             source.KeyColorG = keyG;
             source.KeyColorB = keyB;
         }
+        ApplySourceVideoAudioState(source);
 
         if (source.Type == CaptureSource.SourceType.Group)
         {
@@ -7007,6 +7626,7 @@ public partial class MainWindow : Window
             {
                 source.SetDisplayName(info.DisplayName);
             }
+            ApplySourceVideoAudioState(source);
 
             UpdatePrimaryAspectIfNeeded();
             RenderFrame();
@@ -7138,7 +7758,7 @@ public partial class MainWindow : Window
         }
     }
 
-    private static void ApplySourceSettings(CaptureSource source, AppConfig.SourceConfig config)
+    private void ApplySourceSettings(CaptureSource source, AppConfig.SourceConfig config)
     {
         source.BlendMode = ParseBlendModeOrDefault(config.BlendMode, source.BlendMode);
 
@@ -7148,6 +7768,8 @@ public partial class MainWindow : Window
         }
 
         source.Opacity = Math.Clamp(config.Opacity, 0, 1);
+        source.VideoAudioEnabled = config.VideoAudioEnabled;
+        source.VideoAudioVolume = Math.Clamp(config.VideoAudioVolume, 0, 1);
         source.Mirror = config.Mirror;
         source.KeyEnabled = config.KeyEnabled;
         source.KeyTolerance = Math.Clamp(config.KeyTolerance, 0, 1);
@@ -7157,6 +7779,7 @@ public partial class MainWindow : Window
             source.KeyColorG = keyG;
             source.KeyColorB = keyB;
         }
+        ApplySourceVideoAudioState(source);
 
         source.Animations.Clear();
         if (config.Animations != null && config.Animations.Count > 0)
@@ -7216,6 +7839,8 @@ public partial class MainWindow : Window
         public string InjectionMode { get; set; } = GameOfLifeEngine.InjectionMode.Threshold.ToString();
         public double InjectionNoise { get; set; } = 0.0;
         public double LifeOpacity { get; set; } = 1.0;
+        public double RgbHueShiftDegrees { get; set; }
+        public double RgbHueShiftSpeedDegreesPerSecond { get; set; }
         public bool InvertComposite { get; set; }
         public bool ShowFps { get; set; }
         public double AnimationBpm { get; set; } = DefaultAnimationBpm;
@@ -7248,6 +7873,8 @@ public partial class MainWindow : Window
         public double AudioReactiveSeedCooldownMs { get; set; } = DefaultAudioReactiveSeedCooldownMs;
         public string AudioReactiveSeedPattern { get; set; } = MainWindow.AudioReactiveSeedPattern.Glider.ToString();
         public string? AudioDeviceId { get; set; }
+        public bool SourceAudioMasterEnabled { get; set; } = true;
+        public double SourceAudioMasterVolume { get; set; } = 1.0;
         public string BlendMode { get; set; } = MainWindow.BlendMode.Additive.ToString();
         public bool Fullscreen { get; set; }
         public bool AspectRatioLocked { get; set; }
@@ -7265,6 +7892,8 @@ public partial class MainWindow : Window
             public string BlendMode { get; set; } = MainWindow.BlendMode.Additive.ToString();
             public string FitMode { get; set; } = lifeviz.FitMode.Fill.ToString();
             public double Opacity { get; set; } = 1.0;
+            public bool VideoAudioEnabled { get; set; }
+            public double VideoAudioVolume { get; set; } = 1.0;
             public bool Mirror { get; set; }
             public bool KeyEnabled { get; set; }
             public string KeyColor { get; set; } = "#000000";
@@ -7387,6 +8016,9 @@ public partial class MainWindow : Window
         public bool FirstFrameReceived { get; set; }
         public DateTime AddedUtc { get; set; }
         public double Opacity { get; set; } = 1.0;
+        public bool VideoAudioEnabled { get; set; }
+        public double VideoAudioVolume { get; set; } = 1.0;
+        public bool VideoPlaybackPaused { get; set; }
         public bool Mirror { get; set; }
         public bool KeyEnabled { get; set; }
         public double KeyTolerance { get; set; } = DefaultKeyTolerance;
