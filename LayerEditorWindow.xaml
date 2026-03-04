@@ -172,14 +172,57 @@
                             <TextBlock Text="Intensity"
                                        VerticalAlignment="Center" />
                             <Slider Minimum="0"
-                                    Maximum="2"
+                                    Maximum="{Binding IntensityMax}"
                                     Value="{Binding BeatShakeIntensity}"
                                     Width="160"
                                     SmallChange="0.05"
-                                    LargeChange="0.2"
+                                    LargeChange="{Binding IntensityLargeChange}"
                                     Margin="6,0,0,0"
                                     ValueChanged="AnimationBeatShakeIntensity_Changed" />
                             <TextBlock Text="{Binding BeatShakeIntensity, StringFormat={}{0:P0}}"
+                                       Margin="6,0,0,0"
+                                       VerticalAlignment="Center" />
+                        </StackPanel>
+                        <StackPanel Orientation="Horizontal"
+                                    Margin="0,0,12,6"
+                                    Visibility="{Binding IsAudioGranularEqVisible, Converter={StaticResource BoolToVisibility}}">
+                            <TextBlock Text="EQ Low"
+                                       VerticalAlignment="Center" />
+                            <Slider Minimum="0"
+                                    Maximum="3"
+                                    Value="{Binding AudioGranularLowGain}"
+                                    Width="120"
+                                    SmallChange="0.05"
+                                    LargeChange="0.25"
+                                    Margin="6,0,0,0"
+                                    ValueChanged="AnimationAudioGranularLowEq_Changed" />
+                            <TextBlock Text="{Binding AudioGranularLowGain, StringFormat={}{0:P0}}"
+                                       Margin="6,0,10,0"
+                                       VerticalAlignment="Center" />
+                            <TextBlock Text="Mid"
+                                       VerticalAlignment="Center" />
+                            <Slider Minimum="0"
+                                    Maximum="3"
+                                    Value="{Binding AudioGranularMidGain}"
+                                    Width="120"
+                                    SmallChange="0.05"
+                                    LargeChange="0.25"
+                                    Margin="6,0,0,0"
+                                    ValueChanged="AnimationAudioGranularMidEq_Changed" />
+                            <TextBlock Text="{Binding AudioGranularMidGain, StringFormat={}{0:P0}}"
+                                       Margin="6,0,10,0"
+                                       VerticalAlignment="Center" />
+                            <TextBlock Text="High"
+                                       VerticalAlignment="Center" />
+                            <Slider Minimum="0"
+                                    Maximum="3"
+                                    Value="{Binding AudioGranularHighGain}"
+                                    Width="120"
+                                    SmallChange="0.05"
+                                    LargeChange="0.25"
+                                    Margin="6,0,0,0"
+                                    ValueChanged="AnimationAudioGranularHighEq_Changed" />
+                            <TextBlock Text="{Binding AudioGranularHighGain, StringFormat={}{0:P0}}"
                                        Margin="6,0,0,0"
                                        VerticalAlignment="Center" />
                         </StackPanel>

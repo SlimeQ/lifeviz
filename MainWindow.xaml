@@ -86,6 +86,190 @@
                           Click="OpenLayerEditor_Click" />
                 <MenuItem Header="Audio Source"
                           x:Name="AudioSourceMenu" />
+                <MenuItem Header="Audio Reactivity"
+                          StaysOpenOnClick="True">
+                    <MenuItem x:Name="AudioReactiveEnabledMenuItem"
+                              Header="Enable Audio Reactivity"
+                              IsCheckable="True"
+                              Click="AudioReactiveEnabled_OnChecked" />
+                    <MenuItem x:Name="AudioReactiveLevelToFpsMenuItem"
+                              Header="Level -> Framerate"
+                              IsCheckable="True"
+                              Click="AudioReactiveLevelToFps_OnChecked" />
+                    <MenuItem x:Name="AudioReactiveLevelToLifeOpacityMenuItem"
+                              Header="Level -> Life Opacity"
+                              IsCheckable="True"
+                              Click="AudioReactiveLevelToLifeOpacity_OnChecked" />
+                    <MenuItem x:Name="AudioReactiveLevelSeedMenuItem"
+                              Header="Level -> Seeder"
+                              IsCheckable="True"
+                              Click="AudioReactiveLevelSeed_OnChecked" />
+                    <MenuItem Header="Input Gain" StaysOpenOnClick="True">
+                        <DockPanel Margin="8,4" Width="220">
+                            <TextBlock Text="Gain:" DockPanel.Dock="Left"/>
+                            <TextBlock x:Name="AudioInputGainText"
+                                       Text="1.0x"
+                                       DockPanel.Dock="Right"
+                                       FontWeight="Bold"/>
+                            <Slider x:Name="AudioInputGainSlider"
+                                    Minimum="0.25"
+                                    Maximum="64"
+                                    Value="1"
+                                    SmallChange="0.25"
+                                    LargeChange="2"
+                                    Margin="8,0"
+                                    ValueChanged="AudioInputGainSlider_OnValueChanged"/>
+                        </DockPanel>
+                    </MenuItem>
+                    <MenuItem Header="Energy Gain" StaysOpenOnClick="True">
+                        <DockPanel Margin="8,4" Width="220">
+                            <TextBlock Text="Gain:" DockPanel.Dock="Left"/>
+                            <TextBlock x:Name="AudioReactiveEnergyGainText"
+                                       Text="16.0x"
+                                       DockPanel.Dock="Right"
+                                       FontWeight="Bold"/>
+                            <Slider x:Name="AudioReactiveEnergyGainSlider"
+                                    Minimum="1"
+                                    Maximum="48"
+                                    Value="16"
+                                    SmallChange="0.5"
+                                    LargeChange="2"
+                                    Margin="8,0"
+                                    ValueChanged="AudioReactiveEnergyGainSlider_OnValueChanged"/>
+                        </DockPanel>
+                    </MenuItem>
+                    <MenuItem Header="Max Level Seeds" StaysOpenOnClick="True">
+                        <DockPanel Margin="8,4" Width="220">
+                            <TextBlock Text="Bursts:" DockPanel.Dock="Left"/>
+                            <TextBlock x:Name="AudioReactiveLevelSeedMaxText"
+                                       Text="24"
+                                       DockPanel.Dock="Right"
+                                       FontWeight="Bold"/>
+                            <Slider x:Name="AudioReactiveLevelSeedMaxSlider"
+                                    Minimum="1"
+                                    Maximum="64"
+                                    Value="24"
+                                    TickFrequency="1"
+                                    IsSnapToTickEnabled="True"
+                                    SmallChange="1"
+                                    LargeChange="4"
+                                    Margin="8,0"
+                                    ValueChanged="AudioReactiveLevelSeedMaxSlider_OnValueChanged"/>
+                        </DockPanel>
+                    </MenuItem>
+                    <MenuItem Header="Framerate Boost" StaysOpenOnClick="True">
+                        <DockPanel Margin="8,4" Width="220">
+                            <TextBlock Text="Boost:" DockPanel.Dock="Left"/>
+                            <TextBlock x:Name="AudioReactiveFpsBoostText"
+                                       Text="+100%"
+                                       DockPanel.Dock="Right"
+                                       FontWeight="Bold"/>
+                            <Slider x:Name="AudioReactiveFpsBoostSlider"
+                                    Minimum="0"
+                                    Maximum="2"
+                                    Value="1"
+                                    SmallChange="0.05"
+                                    LargeChange="0.2"
+                                    Margin="8,0"
+                                    ValueChanged="AudioReactiveFpsBoostSlider_OnValueChanged"/>
+                        </DockPanel>
+                    </MenuItem>
+                    <MenuItem Header="Framerate Minimum" StaysOpenOnClick="True">
+                        <DockPanel Margin="8,4" Width="220">
+                            <TextBlock Text="Min:" DockPanel.Dock="Left"/>
+                            <TextBlock x:Name="AudioReactiveFpsMinText"
+                                       Text="10%"
+                                       DockPanel.Dock="Right"
+                                       FontWeight="Bold"/>
+                            <Slider x:Name="AudioReactiveFpsMinSlider"
+                                    Minimum="0"
+                                    Maximum="100"
+                                    Value="10"
+                                    TickFrequency="1"
+                                    IsSnapToTickEnabled="True"
+                                    SmallChange="1"
+                                    LargeChange="5"
+                                    Margin="8,0"
+                                    ValueChanged="AudioReactiveFpsMinSlider_OnValueChanged"/>
+                        </DockPanel>
+                    </MenuItem>
+                    <MenuItem Header="Opacity Min Scalar" StaysOpenOnClick="True">
+                        <DockPanel Margin="8,4" Width="220">
+                            <TextBlock Text="Min:" DockPanel.Dock="Left"/>
+                            <TextBlock x:Name="AudioReactiveOpacityMinScalarText"
+                                       Text="25%"
+                                       DockPanel.Dock="Right"
+                                       FontWeight="Bold"/>
+                            <Slider x:Name="AudioReactiveOpacityMinScalarSlider"
+                                    Minimum="0"
+                                    Maximum="100"
+                                    Value="25"
+                                    TickFrequency="1"
+                                    IsSnapToTickEnabled="True"
+                                    SmallChange="1"
+                                    LargeChange="5"
+                                    Margin="8,0"
+                                    ValueChanged="AudioReactiveOpacityMinScalarSlider_OnValueChanged"/>
+                        </DockPanel>
+                    </MenuItem>
+                    <MenuItem x:Name="AudioReactiveBeatSeedMenuItem"
+                              Header="Beat -> Seeder"
+                              IsCheckable="True"
+                              Click="AudioReactiveBeatSeed_OnChecked" />
+                    <MenuItem Header="Seeds Per Beat" StaysOpenOnClick="True">
+                        <DockPanel Margin="8,4" Width="220">
+                            <TextBlock Text="Count:" DockPanel.Dock="Left"/>
+                            <TextBlock x:Name="AudioReactiveSeedsPerBeatText"
+                                       Text="2"
+                                       DockPanel.Dock="Right"
+                                       FontWeight="Bold"/>
+                            <Slider x:Name="AudioReactiveSeedsPerBeatSlider"
+                                    Minimum="1"
+                                    Maximum="8"
+                                    Value="2"
+                                    TickFrequency="1"
+                                    IsSnapToTickEnabled="True"
+                                    SmallChange="1"
+                                    LargeChange="1"
+                                    Margin="8,0"
+                                    ValueChanged="AudioReactiveSeedsPerBeatSlider_OnValueChanged"/>
+                        </DockPanel>
+                    </MenuItem>
+                    <MenuItem Header="Seed Cooldown" StaysOpenOnClick="True">
+                        <DockPanel Margin="8,4" Width="220">
+                            <TextBlock Text="Cooldown:" DockPanel.Dock="Left"/>
+                            <TextBlock x:Name="AudioReactiveSeedCooldownText"
+                                       Text="180 ms"
+                                       DockPanel.Dock="Right"
+                                       FontWeight="Bold"/>
+                            <Slider x:Name="AudioReactiveSeedCooldownSlider"
+                                    Minimum="80"
+                                    Maximum="1000"
+                                    Value="180"
+                                    TickFrequency="20"
+                                    IsSnapToTickEnabled="True"
+                                    SmallChange="20"
+                                    LargeChange="100"
+                                    Margin="8,0"
+                                    ValueChanged="AudioReactiveSeedCooldownSlider_OnValueChanged"/>
+                        </DockPanel>
+                    </MenuItem>
+                    <MenuItem Header="Seed Pattern"
+                              x:Name="AudioReactivePatternMenu">
+                        <MenuItem Header="Glider"
+                                  IsCheckable="True"
+                                  Tag="Glider"
+                                  Click="AudioReactivePatternItem_Click" />
+                        <MenuItem Header="R-pentomino"
+                                  IsCheckable="True"
+                                  Tag="RPentomino"
+                                  Click="AudioReactivePatternItem_Click" />
+                        <MenuItem Header="Random Burst"
+                                  IsCheckable="True"
+                                  Tag="RandomBurst"
+                                  Click="AudioReactivePatternItem_Click" />
+                    </MenuItem>
+                </MenuItem>
                 <Separator />
                 <MenuItem x:Name="PassthroughMenuItem"
                           Header="Passthrough Underlay"
@@ -290,6 +474,7 @@
                    FontWeight="Bold"
                    Foreground="White"
                    Visibility="Collapsed"
+                   TextWrapping="Wrap"
                    Text="FPS" />
     </Grid>
 </Window>

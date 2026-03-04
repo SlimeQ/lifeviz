@@ -11,13 +11,13 @@ dotnet run
 
 The new Rider solution (`lifeviz.sln`) includes a "lifeviz: Run App" configuration so IDE runs mirror `dotnet run`.
 
-For a quick local install-style smoke test (publish to `artifacts\local-install`, add Start Menu shortcuts, and launch the app; if the folder is locked it falls back to a timestamped path):
+For a quick local ClickOnce install/update smoke test:
 
 ```powershell
 .\install.ps1
 ```
 
-The script also creates `LifeViz.lnk` and `LifeViz (Local).lnk` in the Start Menu and renames any ClickOnce `lifeviz*.appref-ms` entries to `LifeViz (ClickOnce)...` so search defaults to the local build.
+By default, `install.ps1` now runs `Install-ClickOnce.ps1` directly against the fresh publish output (more reliable for in-place updates). Use `-BundleInstaller` if you explicitly want a generated single-file `lifeviz_installer.exe`.
 
 ## Live Window Injection
 
@@ -27,7 +27,9 @@ Right-click the scene and use **Sources** to stack multiple windows, OBS-style:
 - Each source exposes a wallpaper-style fit mode (Fill default, plus Fit/Stretch/Center/Tile/Span) that controls how the layer scales into the frame.
 - Each source has its own blend mode applied during compositing (Additive default; Normal, Multiply, Screen, Overlay, Lighten, Darken, Subtractive). Normal respects per-pixel transparency in sources like PNGs, and can optionally key out a background color (default black) with an adjustable range.
 - **Layer Editor...** opens a separate window to manage the stack on another monitor. Enable **Live Mode** for immediate updates, or turn it off and use **Apply** to batch changes. The editor includes **Save...** and **Load...** buttons to export/import layer stacks as `.lifevizlayers.json`; live mode applies loads immediately, otherwise load into the draft and hit **Apply**.
-- Each source can stack animations (Zoom In, Translate, Rotate, Beat Shake, Fade, DVD Bounce) synced to the global animation BPM, with forward or reverse loops plus expanded speed steps (1/8x–8x) and per-animation cycle lengths for long fades; Beat Shake responds to detected audio beats when a device is selected (falls back to BPM if not) and includes an intensity slider (speed/cycle do not affect its amplitude), and DVD Bounce exposes a size control. Use **Animation BPM > Sync to Audio BPM** to beat-match all animations, and **Audio Source > None** to clear the input.
+- Each source can stack animations (Zoom In, Translate, Rotate, Beat Shake, Audio Granular, Fade, DVD Bounce) synced to the global animation BPM, with forward or reverse loops plus expanded speed steps (1/8x–8x) and per-animation cycle lengths for long fades; Beat Shake responds to detected audio beats when a device is selected (falls back to BPM if not) and includes an intensity slider (speed/cycle do not affect its amplitude), Audio Granular now uses a gated/compressed response curve with a per-layer 3-band EQ (Low/Mid/High) and a wider intensity range up to 1000% (with a stronger neutral 100/100/100 EQ baseline), and DVD Bounce exposes a size control. Use **Animation BPM > Sync to Audio BPM** to beat-match all animations, and **Audio Source > None** to clear the input.
+- **Audio Reactivity** adds configurable simulation modulation from the selected audio source: enable level-driven framerate scaling (`Level -> Framerate`, scales from a configurable minimum % to 100% of target FPS via `Framerate Minimum`), level-driven life opacity scalar (`Level -> Life Opacity`, with `Opacity Min Scalar` applied against the base `Life Opacity` slider), continuous level-driven seeding (`Level -> Seeder`, with `Max Level Seeds`), and beat-driven pattern seeding (`Beat -> Seeder`, with glider / R-pentomino / random burst patterns, seeds-per-beat, and cooldown controls). You can boost weak signal via `Input Gain` (remembered separately for input vs output devices), and **Audio Source** includes output devices (including `System Output (Default)` via WASAPI loopback) plus input devices.
+- Audio level percent shown in the FPS overlay is transient-focused (short-term energy above recent baseline), so it drops much more between hits than a long averaged loudness meter.
 - Video file sources depend on system codecs; if frames render blank, LifeViz will auto-transcode to H.264 using `ffmpeg` (cached under `%LOCALAPPDATA%\\lifeviz\\video-cache`). While transcoding, the layer is temporarily skipped (so it won't blank out the stack). Install `ffmpeg` on your PATH or transcode manually if needed.
 - **Composite Blend** still controls how the finished composite mixes with the Game of Life output (Additive default via the pixel shader; Normal is transparency-aware).
 - **Passthrough Underlay** shows the composite behind the simulation.
@@ -36,14 +38,15 @@ Right-click the scene and use **Sources** to stack multiple windows, OBS-style:
 - Capture uses DPI-correct window bounds (via DWM) so the full surface is normalized even for PiP/scaled windows, and the composited buffer feeds the injection path (threshold window + noise + life/binning modes) on every tick.
 - Capture buffers are pooled and only the downscaled composite is retained, eliminating GC spikes from per-frame allocations.
 - Webcam sources stream via WinRT `MediaCapture`; clearing sources or closing the app releases the camera. Cameras retry initialization once and wait longer for first frames before being removed.
-- Framerate lock: choose 15 / 30 / 60 fps from the context menu to match capture needs or ease CPU/GPU load.
+- Framerate lock: choose 15 / 30 / 60 / 144 fps from the context menu to match capture needs or ease CPU/GPU load. `Level -> Framerate` scales simulation speed between a configurable minimum floor and that selected target, based on audio level.
+- **Show FPS** now includes reactive diagnostics (target FPS, input gain, reactive multiplier, effective life opacity, beat count, and seed burst counts) so you can verify audio mapping is live.
 - Capture threshold window: adjustable min/max sliders (with optional invert) in the context menu; only pixels inside the window set cells alive during injection, applied before each simulation step.
 - Injection noise: adjustable slider (0-1) that randomly skips cell injection per pixel to introduce controlled noise.
 - Built-in recording: **Start Recording** writes to `%UserProfile%\\Videos\\LifeViz` using a pixel-perfect integer upscale to the nearest HD height (720/1080/1440/2160 when divisible). Use **Recording Quality** to pick Lossless (FFV1 in MKV, compressed), Crisp (H.264 in MP4, Windows Media Player compatible), Uncompressed (AVI, huge files), or H.264 tiers (High/Balanced/Compact); encoding favors quality-based VBR with bitrate caps so pixel lines stay crisp, and a taskbar overlay appears while active. Lossless and crisp recording use `ffmpeg` on PATH.
 
 ## Configuration
 
-- Settings persist to `%AppData%\lifeviz\config.json` after the app finishes loading (height/rows, depth, framerate, blend/composite toggles, thresholds, opacity, passthrough, etc.) and restore on next launch. The window keeps the current aspect ratio and can be resized from the corner grip; use height presets or fullscreen to change simulation resolution without letterboxing.
+- Settings persist to `%AppData%\lifeviz\config.json` after the app finishes loading (height/rows, depth, framerate, blend/composite toggles, thresholds, opacity, passthrough, audio reactivity controls, etc.) and restore on next launch. The window keeps the current aspect ratio and can be resized from the corner grip; use height presets or fullscreen to change simulation resolution without letterboxing.
 - The source stack is restored too: window sources are matched by title, webcams by device id/name, file sources by path (video sequences restore their ordered path list), keeping order (including nested layer groups) plus per-layer blend mode, fit mode, opacity, mirror, and keying settings (enable/color/range) when the inputs are available.
 - YouTube sources resolve asynchronously on launch so the UI can come up even if the stream lookup is slow; the layer starts once the stream URL is resolved (check logs for failures).
 - Aspect ratio lock state persists (default lock ratio is 16:9).

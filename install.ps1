@@ -1,5 +1,6 @@
 param(
     [string]$Configuration = 'Release',
+    [switch]$BundleInstaller,
     [switch]$NoRun
 )
 
@@ -152,20 +153,23 @@ if (Test-Path $installHelper) {
     Write-Warning "Install-ClickOnce.ps1 not found in root; installer may fail."
 }
 
-# 4. Bundle it
-$artifactsDir = Join-Path $root 'artifacts/local-install'
-if (-not (Test-Path $artifactsDir)) {
-    New-Item -ItemType Directory -Force -Path $artifactsDir | Out-Null
+# 4. Install path
+if ($BundleInstaller) {
+    $artifactsDir = Join-Path $root 'artifacts/local-install'
+    if (-not (Test-Path $artifactsDir)) {
+        New-Item -ItemType Directory -Force -Path $artifactsDir | Out-Null
+    }
+
+    $installerExe = Join-Path $artifactsDir 'lifeviz_installer.exe'
+    Build-SingleInstaller -PublishDir $publishDir -OutputExe $installerExe | Out-Null
+    Write-Host "Installer created at: $installerExe" -ForegroundColor Green
+
+    if (-not $NoRun) {
+        Write-Host "Launching bundled installer..." -ForegroundColor Cyan
+        Start-Process $installerExe
+    }
 }
-
-$installerExe = Join-Path $artifactsDir 'lifeviz_installer.exe'
-Build-SingleInstaller -PublishDir $publishDir -OutputExe $installerExe | Out-Null
-
-Write-Host "Installer created at: $installerExe" -ForegroundColor Green
-
-# 5. Run it
-if (-not $NoRun) {
-    Write-Host "Launching installer..." -ForegroundColor Cyan
-    Start-Process $installerExe
+elseif (-not $NoRun) {
+    Write-Host "Running Install-ClickOnce.ps1 directly from publish output..." -ForegroundColor Cyan
+    & $installHelper -SourcePath $publishDir
 }
-

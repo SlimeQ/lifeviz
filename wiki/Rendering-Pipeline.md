@@ -7,8 +7,9 @@
 
 ## Simulation Loop
 
-- `DispatcherTimer` in `MainWindow.xaml.cs` ticks at a user-selectable rate (15 / 30 / 60 fps) via the context menu.
-- Each tick (unless paused) captures every active source, composites them (per-source blend modes, ordered by the stack, including layer groups), injects the resulting buffer into the simulation, advances `_engine.Step()`, then calls `RenderFrame()`.
+- `CompositionTarget.Rendering` drives the frame loop in `MainWindow.xaml.cs`; simulation stepping uses a target interval derived from the selected framerate (15 / 30 / 60 / 144 fps), optional FPS oscillation, and optional audio-reactive FPS boost.
+- Each simulation step (unless paused) captures every active source, composites them (per-source blend modes, ordered by the stack, including layer groups), injects the resulting buffer into the simulation, applies optional audio seeding (continuous level-based and/or beat-triggered), advances `_engine.Step()`, then calls `RenderFrame()`.
+- When target simulation FPS exceeds display refresh, LifeViz runs multiple simulation steps per render callback (bounded catch-up) so high-rate modulation remains visible in evolution speed.
 - The engine maintains a depth stack (`List<bool[,]>`) where index 0 is the newest frame.
 
 ## Color Encoding
@@ -33,10 +34,24 @@
 
 ## Layer Animations
 
-- Each source (including layer groups) can stack animations: Zoom In, Translate, Rotate, Beat Shake, Fade, and DVD Bounce (with an adjustable scale). Every animation includes a cycle length in beats, so long fades can stay locked to BPM; Beat Shake uses audio beat timestamps when *Sync to Audio BPM* is enabled (falling back to the animation BPM for a timed pulse when no audio device is configured), exposes an intensity control, and ignores speed/cycle settings so its amplitude stays consistent per beat.
+- Each source (including layer groups) can stack animations: Zoom In, Translate, Rotate, Beat Shake, Audio Granular, Fade, and DVD Bounce (with an adjustable scale). Every animation includes a cycle length in beats, so long fades can stay locked to BPM; Beat Shake uses audio beat timestamps when *Sync to Audio BPM* is enabled (falling back to the animation BPM for a timed pulse when no audio device is configured), exposes an intensity control, and ignores speed/cycle settings so its amplitude stays consistent per beat. Audio Granular uses transient energy with a soft gate, nonlinear compression, and bounded transform caps so typical speech/noise does not stay over-animated; it also applies per-animation 3-band EQ gains (Low/Mid/High) to shape zoom/translation/rotation response and supports higher intensity scaling up to 1000%. Neutral EQ (100/100/100) now maps to a stronger baseline response so the effect is clearly visible without pushing intensity to extremes.
 - Video sources rely on system codecs (WPF MediaPlayer). If a video cannot decode (blank frames or zero reported dimensions), LifeViz auto-transcodes to H.264 using `ffmpeg` (cached under `%LOCALAPPDATA%\\lifeviz\\video-cache`). While transcoding, the layer is skipped so it doesn't black out the stack. If `ffmpeg` is missing or the transcode fails, a warning is shown so you can transcode manually.
 - Animations are evaluated during compositing by transforming the destination sampling coordinates before the fit-mode mapping, so the animation affects both injection and rendering.
 - All animations share a global BPM (default 140) with per-animation half/normal/double time and forward or reverse (ping-pong) loops.
+
+## Audio Reactivity
+
+- Audio input is analyzed continuously (`AudioBeatDetector`) for energy and beat events.
+- Device selection supports both capture inputs (microphones, via AudioGraph) and render outputs (via WASAPI loopback, including a default system output entry).
+- `Input Gain` scales raw samples before energy, beat, and FFT analysis so quiet microphones can drive reactivity; gain presets are tracked separately for input-device and output-device capture paths.
+- Spectrum outputs are signal-gated: when RMS falls below a small floor, reported bass/frequency collapse to zero to avoid noisy "fake frequency" readings on silence.
+- The displayed/reactive level is transient-weighted (current normalized energy vs a short moving baseline), not a long average loudness meter, so values can fall close to zero between hits.
+- *Level -> Framerate* maps smoothed, normalized loudness (derived from RMS in dB) to a configurable minimum..1.0 drive against the selected target FPS (quiet sections stay at the floor; loud sections run at the full target).
+- *Level -> Life Opacity* maps level to a configurable scalar floor..1.0 and multiplies the base Life Opacity setting, so simulation visibility breathes with the audio envelope.
+- *Level -> Seeder* converts the same loudness signal into per-step seed burst counts (with configurable max bursts), injecting selected patterns continuously as level rises.
+- When `Level -> Framerate` drives simulation speed near zero, level seeding still injects bursts so reactivity remains visible in the frame output.
+- *Beat -> Seeder* watches beat count edges and injects configurable seed bursts (Glider, R-pentomino, Random Burst) with a configurable cooldown to avoid runaway injection.
+- Audio-reactive controls are gated by audio device selection (`Audio Source`); with no device selected, reactivity remains configured but inactive.
 
 ## Recording
 

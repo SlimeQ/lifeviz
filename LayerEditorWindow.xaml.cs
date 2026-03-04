@@ -422,6 +422,9 @@ public partial class LayerEditorWindow : Window
     private void AnimationSize_Changed(object sender, RoutedPropertyChangedEventArgs<double> e) => ApplyAnimationChange(sender);
 
     private void AnimationBeatShakeIntensity_Changed(object sender, RoutedPropertyChangedEventArgs<double> e) => ApplyAnimationChange(sender);
+    private void AnimationAudioGranularLowEq_Changed(object sender, RoutedPropertyChangedEventArgs<double> e) => ApplyAnimationChange(sender);
+    private void AnimationAudioGranularMidEq_Changed(object sender, RoutedPropertyChangedEventArgs<double> e) => ApplyAnimationChange(sender);
+    private void AnimationAudioGranularHighEq_Changed(object sender, RoutedPropertyChangedEventArgs<double> e) => ApplyAnimationChange(sender);
 
     private void ApplyAnimationChange(object sender)
     {

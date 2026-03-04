@@ -41,13 +41,36 @@ public partial class MainWindow : Window
     private const double AnimationBeatShakeFactor = 0.03;
     private const double AnimationBeatShakeFrequency = 24.0;
     private const double AnimationBeatShakeWindowBeats = 0.25;
+    private const double MaxBeatShakeIntensity = 2.0;
+    private const double MaxAudioGranularIntensity = 10.0;
+    private const double DefaultAudioGranularEqBandGain = 1.0;
+    private const double MaxAudioGranularEqBandGain = 3.0;
     private const double DefaultKeyTolerance = 0.1;
+    private const double DefaultAudioReactiveEnergyGain = 16.0;
+    private const double DefaultAudioReactiveFpsBoost = 1.0;
+    private const double DefaultAudioReactiveFpsMinPercent = 0.10;
+    private const double DefaultAudioReactiveLifeOpacityMinScalar = 0.25;
+    private const int DefaultAudioReactiveLevelSeedMaxBursts = 24;
+    private const double DefaultAudioInputGain = 1.0;
+    private const double DefaultAudioOutputGain = 1.0;
+    private const int DefaultAudioReactiveSeedsPerBeat = 2;
+    private const double DefaultAudioReactiveSeedCooldownMs = 180.0;
+    private const int MaxAudioReactiveSeedBurstsPerStep = 64;
+    private const int MaxSimulationStepsPerRender = 8;
     private const double MaxColorDistance = 441.6729559300637;
     private const string GitHubRepoOwner = "SlimeQ";
     private const string GitHubRepoName = "lifeviz";
     private const string GitHubReleaseAssetName = "lifeviz_installer.exe";
     private static readonly Uri GitHubLatestReleaseUri = new($"https://api.github.com/repos/{GitHubRepoOwner}/{GitHubRepoName}/releases/latest");
     private static readonly JsonSerializerOptions GitHubJsonOptions = new() { PropertyNameCaseInsensitive = true };
+    private static readonly (int rowOffset, int colOffset)[] GliderPattern =
+    {
+        (0, 1), (1, 2), (2, 0), (2, 1), (2, 2)
+    };
+    private static readonly (int rowOffset, int colOffset)[] RPentominoPattern =
+    {
+        (0, 1), (0, 2), (1, 0), (1, 1), (2, 1)
+    };
 
     private readonly GameOfLifeEngine _engine = new();
     private readonly WindowCaptureService _windowCapture = new();
@@ -141,11 +164,35 @@ public partial class MainWindow : Window
     private double _smoothedEnergy;
     private double _smoothedBass;
     private double _smoothedFreq;
+    private readonly Random _audioReactiveRandom = new();
+    private bool _audioReactiveEnabled;
+    private bool _audioReactiveLevelToFpsEnabled = true;
+    private bool _audioReactiveLevelToLifeOpacityEnabled;
+    private bool _audioReactiveLevelSeedEnabled = true;
+    private bool _audioReactiveBeatSeedEnabled = true;
+    private double _audioInputGainCapture = DefaultAudioInputGain;
+    private double _audioInputGainRender = DefaultAudioOutputGain;
+    private double _audioInputGain = DefaultAudioInputGain;
+    private double _audioReactiveEnergyGain = DefaultAudioReactiveEnergyGain;
+    private double _audioReactiveFpsBoost = DefaultAudioReactiveFpsBoost;
+    private double _audioReactiveFpsMinPercent = DefaultAudioReactiveFpsMinPercent;
+    private double _audioReactiveLifeOpacityMinScalar = DefaultAudioReactiveLifeOpacityMinScalar;
+    private int _audioReactiveLevelSeedMaxBursts = DefaultAudioReactiveLevelSeedMaxBursts;
+    private int _audioReactiveSeedsPerBeat = DefaultAudioReactiveSeedsPerBeat;
+    private double _audioReactiveSeedCooldownMs = DefaultAudioReactiveSeedCooldownMs;
+    private AudioReactiveSeedPattern _audioReactiveSeedPattern = AudioReactiveSeedPattern.Glider;
+    private double _audioReactiveFpsMultiplier = 1.0;
+    private int _audioReactiveLevelSeedBurstsLastStep;
+    private int _audioReactiveBeatSeedBurstsLastStep;
+    private long _lastAudioReactiveBeatCount;
+    private DateTime _lastAudioReactiveSeedUtc = DateTime.MinValue;
+    private double _effectiveLifeOpacity = 1.0;
 
     public MainWindow()
     {
         Logger.Initialize();
         InitializeComponent();
+        ApplyAudioInputGainForSelection();
 
         Loaded += (_, _) =>
         {
@@ -185,6 +232,7 @@ public partial class MainWindow : Window
         _engine.SetBinningMode(_binningMode);
         _engine.SetInjectionMode(_injectionMode);
         _engine.Randomize();
+        _effectiveLifeOpacity = _lifeOpacity;
         UpdateDisplaySurface(force: true);
         InitializeEffect();
         UpdateFpsOverlay();
@@ -260,21 +308,63 @@ public partial class MainWindow : Window
 
         // Update smoothed audio values
         double audioLerp = Math.Min(dt * 15.0, 1.0);
-        _smoothedEnergy = _smoothedEnergy + (Math.Clamp(_audioBeatDetector.CurrentEnergy, 0, 1) - _smoothedEnergy) * audioLerp;
+        double energyTarget = Math.Clamp(_audioBeatDetector.TransientEnergy, 0, 1);
+        double energyAttackLerp = Math.Min(dt * 45.0, 1.0);
+        double energyReleaseLerp = Math.Min(dt * 70.0, 1.0);
+        double energyLerp = energyTarget > _smoothedEnergy ? energyAttackLerp : energyReleaseLerp;
+        _smoothedEnergy = _smoothedEnergy + (energyTarget - _smoothedEnergy) * energyLerp;
+        if (_smoothedEnergy < 0.001)
+        {
+            _smoothedEnergy = 0;
+        }
         _smoothedBass = _smoothedBass + (Math.Clamp(_audioBeatDetector.BassEnergy, 0, 100) - _smoothedBass) * audioLerp;
         _smoothedFreq = _smoothedFreq + (Math.Clamp(_audioBeatDetector.MainFrequency, 0, 5000) - _smoothedFreq) * audioLerp;
+        ApplyAudioReactiveFps();
+        ApplyAudioReactiveLifeOpacity();
+        _audioReactiveLevelSeedBurstsLastStep = 0;
+        _audioReactiveBeatSeedBurstsLastStep = 0;
 
-        double desiredInterval = 1.0 / _currentFps;
-
-        if (_timeSinceLastStep >= desiredInterval)
+        double effectiveStepFps = Math.Max(_currentFps, 0);
+        if (effectiveStepFps < 0.01)
         {
             if (!_isPaused)
             {
-                InjectCaptureFrames();
-                _engine.Step();
-                _simulationFrames++;
+                _audioReactiveLevelSeedBurstsLastStep = ApplyAudioReactiveLevelSeeding(1);
             }
-            _timeSinceLastStep -= desiredInterval;
+            _timeSinceLastStep = 0;
+        }
+        else
+        {
+            double desiredInterval = 1.0 / effectiveStepFps;
+            if (_timeSinceLastStep >= desiredInterval)
+            {
+                if (!_isPaused)
+                {
+                    int stepsToRun = (int)Math.Floor(_timeSinceLastStep / desiredInterval);
+                    stepsToRun = Math.Clamp(stepsToRun, 1, MaxSimulationStepsPerRender);
+                    InjectCaptureFrames();
+                    _audioReactiveBeatSeedBurstsLastStep = ApplyAudioReactiveBeatSeeding();
+                    _audioReactiveLevelSeedBurstsLastStep = ApplyAudioReactiveLevelSeeding(stepsToRun);
+
+                    for (int i = 0; i < stepsToRun; i++)
+                    {
+                        _engine.Step();
+                        _simulationFrames++;
+                    }
+
+                    _timeSinceLastStep -= stepsToRun * desiredInterval;
+                    if (stepsToRun >= MaxSimulationStepsPerRender &&
+                        _timeSinceLastStep > desiredInterval * MaxSimulationStepsPerRender)
+                    {
+                        // Drop excessive backlog if render stalls to avoid unbounded catch-up bursts.
+                        _timeSinceLastStep = desiredInterval;
+                    }
+                }
+                else
+                {
+                    _timeSinceLastStep = Math.Min(_timeSinceLastStep, desiredInterval);
+                }
+            }
         }
 
         // --- Rendering Step ---
@@ -452,7 +542,7 @@ public partial class MainWindow : Window
             targetBuffer = sourceBuffer;
         }
 
-        double lifeOpacity = Math.Clamp(_lifeOpacity, 0, 1);
+        double lifeOpacity = Math.Clamp(_effectiveLifeOpacity, 0, 1);
         for (int row = 0; row < sourceHeight; row++)
         {
             int srcRowOffset = row * displayStride;
@@ -1318,6 +1408,68 @@ public partial class MainWindow : Window
             MaxFpsValueText.Text = $"{_oscillationMaxFps:F0}";
         }
 
+        if (AudioReactiveEnabledMenuItem != null)
+        {
+            AudioReactiveEnabledMenuItem.IsChecked = _audioReactiveEnabled;
+        }
+        if (AudioReactiveLevelToFpsMenuItem != null)
+        {
+            AudioReactiveLevelToFpsMenuItem.IsChecked = _audioReactiveLevelToFpsEnabled;
+        }
+        if (AudioReactiveLevelToLifeOpacityMenuItem != null)
+        {
+            AudioReactiveLevelToLifeOpacityMenuItem.IsChecked = _audioReactiveLevelToLifeOpacityEnabled;
+        }
+        if (AudioReactiveLevelSeedMenuItem != null)
+        {
+            AudioReactiveLevelSeedMenuItem.IsChecked = _audioReactiveLevelSeedEnabled;
+        }
+        if (AudioReactiveBeatSeedMenuItem != null)
+        {
+            AudioReactiveBeatSeedMenuItem.IsChecked = _audioReactiveBeatSeedEnabled;
+        }
+        if (AudioReactiveEnergyGainSlider != null && AudioReactiveEnergyGainText != null)
+        {
+            AudioReactiveEnergyGainSlider.Value = _audioReactiveEnergyGain;
+            AudioReactiveEnergyGainText.Text = $"{_audioReactiveEnergyGain:0.0}x";
+        }
+        if (AudioInputGainSlider != null && AudioInputGainText != null)
+        {
+            UpdateAudioInputGainUi();
+        }
+        if (AudioReactiveLevelSeedMaxSlider != null && AudioReactiveLevelSeedMaxText != null)
+        {
+            AudioReactiveLevelSeedMaxSlider.Value = _audioReactiveLevelSeedMaxBursts;
+            AudioReactiveLevelSeedMaxText.Text = _audioReactiveLevelSeedMaxBursts.ToString(CultureInfo.InvariantCulture);
+        }
+        if (AudioReactiveFpsBoostSlider != null && AudioReactiveFpsBoostText != null)
+        {
+            AudioReactiveFpsBoostSlider.Value = _audioReactiveFpsBoost;
+            AudioReactiveFpsBoostText.Text = $"+{_audioReactiveFpsBoost * 100:0}%";
+        }
+        if (AudioReactiveFpsMinSlider != null && AudioReactiveFpsMinText != null)
+        {
+            AudioReactiveFpsMinSlider.Value = _audioReactiveFpsMinPercent * 100.0;
+            AudioReactiveFpsMinText.Text = $"{_audioReactiveFpsMinPercent * 100.0:0}%";
+        }
+        if (AudioReactiveOpacityMinScalarSlider != null && AudioReactiveOpacityMinScalarText != null)
+        {
+            AudioReactiveOpacityMinScalarSlider.Value = _audioReactiveLifeOpacityMinScalar * 100.0;
+            AudioReactiveOpacityMinScalarText.Text = $"{_audioReactiveLifeOpacityMinScalar * 100.0:0}%";
+        }
+        if (AudioReactiveSeedsPerBeatSlider != null && AudioReactiveSeedsPerBeatText != null)
+        {
+            AudioReactiveSeedsPerBeatSlider.Value = _audioReactiveSeedsPerBeat;
+            AudioReactiveSeedsPerBeatText.Text = _audioReactiveSeedsPerBeat.ToString(CultureInfo.InvariantCulture);
+        }
+        if (AudioReactiveSeedCooldownSlider != null && AudioReactiveSeedCooldownText != null)
+        {
+            AudioReactiveSeedCooldownSlider.Value = _audioReactiveSeedCooldownMs;
+            AudioReactiveSeedCooldownText.Text = $"{_audioReactiveSeedCooldownMs:0} ms";
+        }
+        UpdateAudioReactivePatternChecks();
+        UpdateAudioReactiveMenuState();
+
         UpdateUpdateMenuItem();
     }
 
@@ -1351,17 +1503,50 @@ public partial class MainWindow : Window
             return;
         }
 
-        foreach (var device in _cachedAudioDevices)
+        var outputDevices = _cachedAudioDevices
+            .Where(d => d.Kind == AudioBeatDetector.AudioDeviceInfo.AudioDeviceKind.Render)
+            .ToList();
+        var inputDevices = _cachedAudioDevices
+            .Where(d => d.Kind == AudioBeatDetector.AudioDeviceInfo.AudioDeviceKind.Capture)
+            .ToList();
+
+        if (outputDevices.Count > 0)
         {
-            var item = new MenuItem
+            AudioSourceMenu.Items.Add(new MenuItem { Header = "Output Devices", IsEnabled = false });
+            foreach (var device in outputDevices)
             {
-                Header = device.Name,
-                Tag = device,
-                IsCheckable = true,
-                IsChecked = _selectedAudioDeviceId == device.Id
-            };
-            item.Click += AudioDeviceMenuItem_Click;
-            AudioSourceMenu.Items.Add(item);
+                var item = new MenuItem
+                {
+                    Header = device.Name,
+                    Tag = device,
+                    IsCheckable = true,
+                    IsChecked = _selectedAudioDeviceId == device.Id
+                };
+                item.Click += AudioDeviceMenuItem_Click;
+                AudioSourceMenu.Items.Add(item);
+            }
+        }
+
+        if (inputDevices.Count > 0)
+        {
+            if (outputDevices.Count > 0)
+            {
+                AudioSourceMenu.Items.Add(new Separator());
+            }
+
+            AudioSourceMenu.Items.Add(new MenuItem { Header = "Input Devices", IsEnabled = false });
+            foreach (var device in inputDevices)
+            {
+                var item = new MenuItem
+                {
+                    Header = device.Name,
+                    Tag = device,
+                    IsCheckable = true,
+                    IsChecked = _selectedAudioDeviceId == device.Id
+                };
+                item.Click += AudioDeviceMenuItem_Click;
+                AudioSourceMenu.Items.Add(item);
+            }
         }
     }
 
@@ -1372,7 +1557,25 @@ public partial class MainWindow : Window
         if (_selectedAudioDeviceId == device.Id) return;
 
         _selectedAudioDeviceId = device.Id;
+        ApplyAudioInputGainForSelection();
+        UpdateAudioInputGainUi();
         await _audioBeatDetector.InitializeAsync(device.Id);
+        if (!_audioBeatDetector.IsRunning)
+        {
+            MessageBox.Show(this,
+                $"Could not initialize audio device \"{device.Name}\".\n\nIf this is an output device, loopback capture may not be available on this system/device.",
+                "Audio Device Error",
+                MessageBoxButton.OK,
+                MessageBoxImage.Warning);
+            _selectedAudioDeviceId = null;
+            ApplyAudioInputGainForSelection();
+            UpdateAudioInputGainUi();
+        }
+        _lastAudioReactiveBeatCount = _audioBeatDetector.BeatCount;
+        _lastAudioReactiveSeedUtc = DateTime.MinValue;
+        _audioReactiveLevelSeedBurstsLastStep = 0;
+        _audioReactiveBeatSeedBurstsLastStep = 0;
+        UpdateAudioReactiveMenuState();
         SaveConfig();
         PopulateAudioMenu();
     }
@@ -1386,6 +1589,14 @@ public partial class MainWindow : Window
 
         _selectedAudioDeviceId = null;
         _audioBeatDetector.Stop();
+        ApplyAudioInputGainForSelection();
+        UpdateAudioInputGainUi();
+        _lastAudioReactiveBeatCount = 0;
+        _lastAudioReactiveSeedUtc = DateTime.MinValue;
+        _audioReactiveFpsMultiplier = 1.0;
+        _audioReactiveLevelSeedBurstsLastStep = 0;
+        _audioReactiveBeatSeedBurstsLastStep = 0;
+        UpdateAudioReactiveMenuState();
         SaveConfig();
         PopulateAudioMenu();
     }
@@ -1898,27 +2109,46 @@ public partial class MainWindow : Window
                     IsEnabled = false
                 };
                 
-                double maxIntensity = animation.Type == AnimationType.AudioGranular ? 5.0 : 2.0;
+                double maxIntensity = GetAnimationIntensityMax(animation.Type);
+                double intensityLargeChange = animation.Type == AnimationType.AudioGranular ? 0.5 : 0.2;
                 
                 var intensitySlider = new Slider
                 {
                     Minimum = 0,
                     Maximum = maxIntensity,
-                    Value = Math.Clamp(animation.BeatShakeIntensity, 0, maxIntensity),
+                    Value = ClampAnimationIntensity(animation.Type, animation.BeatShakeIntensity),
                     Width = 140,
                     SmallChange = 0.05,
-                    LargeChange = 0.2,
+                    LargeChange = intensityLargeChange,
                     Margin = new Thickness(12, 4, 12, 8)
                 };
                 intensitySlider.ValueChanged += (_, args) =>
                 {
-                    animation.BeatShakeIntensity = Math.Clamp(args.NewValue, 0, maxIntensity);
+                    animation.BeatShakeIntensity = ClampAnimationIntensity(animation.Type, args.NewValue);
                     intensityValueItem.Header = DescribeShakeIntensity(animation.BeatShakeIntensity);
                     SaveConfig();
                 };
                 intensityItem.Items.Add(intensityValueItem);
                 intensityItem.Items.Add(intensitySlider);
                 animationItem.Items.Add(intensityItem);
+
+                if (animation.Type == AnimationType.AudioGranular)
+                {
+                    var eqMenu = new MenuItem { Header = "3-Band EQ" };
+                    eqMenu.Items.Add(BuildAudioGranularEqBandMenuItem(
+                        "Low",
+                        () => animation.AudioGranularLowGain,
+                        value => animation.AudioGranularLowGain = value));
+                    eqMenu.Items.Add(BuildAudioGranularEqBandMenuItem(
+                        "Mid",
+                        () => animation.AudioGranularMidGain,
+                        value => animation.AudioGranularMidGain = value));
+                    eqMenu.Items.Add(BuildAudioGranularEqBandMenuItem(
+                        "High",
+                        () => animation.AudioGranularHighGain,
+                        value => animation.AudioGranularHighGain = value));
+                    animationItem.Items.Add(eqMenu);
+                }
             }
 
             var removeItem = new MenuItem
@@ -1934,6 +2164,43 @@ public partial class MainWindow : Window
         }
 
         return animationsMenu;
+    }
+
+    private MenuItem BuildAudioGranularEqBandMenuItem(string label, Func<double> getter, Action<double> setter)
+    {
+        var bandItem = new MenuItem
+        {
+            Header = label,
+            StaysOpenOnClick = true
+        };
+
+        var valueItem = new MenuItem
+        {
+            Header = DescribeAudioGranularEqGain(getter()),
+            IsEnabled = false
+        };
+
+        var slider = new Slider
+        {
+            Minimum = 0,
+            Maximum = MaxAudioGranularEqBandGain,
+            Value = Math.Clamp(getter(), 0, MaxAudioGranularEqBandGain),
+            Width = 140,
+            SmallChange = 0.05,
+            LargeChange = 0.25,
+            Margin = new Thickness(12, 4, 12, 8)
+        };
+        slider.ValueChanged += (_, args) =>
+        {
+            double next = Math.Clamp(args.NewValue, 0, MaxAudioGranularEqBandGain);
+            setter(next);
+            valueItem.Header = DescribeAudioGranularEqGain(next);
+            SaveConfig();
+        };
+
+        bandItem.Items.Add(valueItem);
+        bandItem.Items.Add(slider);
+        return bandItem;
     }
 
     private MenuItem BuildAddWindowMenuItem(CaptureSource? parentGroup)
@@ -2392,7 +2659,15 @@ public partial class MainWindow : Window
 
     private static string DescribeScale(double value) => $"{Math.Clamp(value, 0.01, 1):P0}";
 
-    private static string DescribeShakeIntensity(double value) => $"{Math.Clamp(value, 0, 5):P0}";
+    private static string DescribeShakeIntensity(double value) => $"{Math.Clamp(value, 0, MaxAudioGranularIntensity):P0}";
+
+    private static string DescribeAudioGranularEqGain(double value) => $"{Math.Clamp(value, 0, MaxAudioGranularEqBandGain):P0}";
+
+    private static double GetAnimationIntensityMax(AnimationType type) =>
+        type == AnimationType.AudioGranular ? MaxAudioGranularIntensity : MaxBeatShakeIntensity;
+
+    private static double ClampAnimationIntensity(AnimationType type, double value) =>
+        Math.Clamp(value, 0, GetAnimationIntensityMax(type));
 
     private string DescribeCycleBeats(double beats)
     {
@@ -3167,7 +3442,10 @@ public partial class MainWindow : Window
         {
             animation.DvdScale = Math.Clamp(model.DvdScale, 0.01, 1.0);
         }
-        animation.BeatShakeIntensity = Math.Clamp(model.BeatShakeIntensity, 0, 2);
+        animation.BeatShakeIntensity = ClampAnimationIntensity(animation.Type, model.BeatShakeIntensity);
+        animation.AudioGranularLowGain = Math.Clamp(model.AudioGranularLowGain, 0, MaxAudioGranularEqBandGain);
+        animation.AudioGranularMidGain = Math.Clamp(model.AudioGranularMidGain, 0, MaxAudioGranularEqBandGain);
+        animation.AudioGranularHighGain = Math.Clamp(model.AudioGranularHighGain, 0, MaxAudioGranularEqBandGain);
         if (model.BeatsPerCycle > 0)
         {
             animation.BeatsPerCycle = Math.Clamp(model.BeatsPerCycle, 1, 4096);
@@ -3391,6 +3669,184 @@ public partial class MainWindow : Window
         }
 
         _pulseStep++;
+    }
+
+    private void ApplyAudioReactiveFps()
+    {
+        if (!_audioReactiveEnabled || !_audioReactiveLevelToFpsEnabled || string.IsNullOrWhiteSpace(_selectedAudioDeviceId))
+        {
+            _audioReactiveFpsMultiplier = 1.0;
+            return;
+        }
+
+        double gainScale = _audioReactiveEnergyGain / DefaultAudioReactiveEnergyGain;
+        double normalizedLevel = Math.Clamp(_smoothedEnergy * gainScale, 0, 1);
+        // Scale simulation rate from configured floor..100% of the current target FPS.
+        // FpsBoost increases how quickly loudness reaches full-speed, but never exceeds target.
+        double drive = Math.Clamp(normalizedLevel * (1.0 + _audioReactiveFpsBoost), 0, 1);
+        double shapedDrive = Math.Pow(drive, 0.8);
+        double minMultiplier = Math.Clamp(_audioReactiveFpsMinPercent, 0, 1);
+        double mappedMultiplier = minMultiplier + ((1.0 - minMultiplier) * shapedDrive);
+        _audioReactiveFpsMultiplier = mappedMultiplier;
+        _currentFps = Math.Clamp(_currentFps * mappedMultiplier, 0, 144);
+    }
+
+    private void ApplyAudioReactiveLifeOpacity()
+    {
+        if (!_audioReactiveEnabled || !_audioReactiveLevelToLifeOpacityEnabled || string.IsNullOrWhiteSpace(_selectedAudioDeviceId))
+        {
+            _effectiveLifeOpacity = _lifeOpacity;
+            return;
+        }
+
+        double gainScale = _audioReactiveEnergyGain / DefaultAudioReactiveEnergyGain;
+        double normalizedLevel = Math.Clamp(_smoothedEnergy * gainScale, 0, 1);
+        double shapedLevel = Math.Pow(normalizedLevel, 0.8);
+        double minScalar = Math.Clamp(_audioReactiveLifeOpacityMinScalar, 0, 1);
+        double scalar = minScalar + ((1.0 - minScalar) * shapedLevel);
+        _effectiveLifeOpacity = Math.Clamp(_lifeOpacity * scalar, 0, 1);
+    }
+
+    private int ApplyAudioReactiveLevelSeeding(int stepFactor)
+    {
+        if (!_audioReactiveEnabled || !_audioReactiveLevelSeedEnabled || string.IsNullOrWhiteSpace(_selectedAudioDeviceId))
+        {
+            return 0;
+        }
+
+        double gainScale = _audioReactiveEnergyGain / DefaultAudioReactiveEnergyGain;
+        double normalizedLevel = Math.Clamp(_smoothedEnergy * gainScale, 0, 1);
+        if (normalizedLevel < 0.002)
+        {
+            return 0;
+        }
+
+        int scaledMaxBursts = Math.Max(1, _audioReactiveLevelSeedMaxBursts * Math.Clamp(stepFactor, 1, 4));
+        double shapedLevel = Math.Pow(normalizedLevel, 0.6);
+        int burstCount = (int)Math.Ceiling(shapedLevel * scaledMaxBursts);
+        burstCount = Math.Clamp(burstCount, 1, MaxAudioReactiveSeedBurstsPerStep);
+
+        InjectAudioReactiveSeedBursts(burstCount);
+        return burstCount;
+    }
+
+    private int ApplyAudioReactiveBeatSeeding()
+    {
+        long beatCount = _audioBeatDetector.BeatCount;
+        if (!_audioReactiveEnabled || !_audioReactiveBeatSeedEnabled || string.IsNullOrWhiteSpace(_selectedAudioDeviceId))
+        {
+            _lastAudioReactiveBeatCount = beatCount;
+            return 0;
+        }
+
+        long beatDelta = beatCount - _lastAudioReactiveBeatCount;
+        if (beatDelta <= 0)
+        {
+            return 0;
+        }
+
+        _lastAudioReactiveBeatCount = beatCount;
+
+        var now = DateTime.UtcNow;
+        if (_lastAudioReactiveSeedUtc != DateTime.MinValue &&
+            (now - _lastAudioReactiveSeedUtc).TotalMilliseconds < _audioReactiveSeedCooldownMs)
+        {
+            return 0;
+        }
+
+        int beatFactor = (int)Math.Clamp(beatDelta, 1, 8);
+        int burstCount = Math.Clamp(beatFactor * _audioReactiveSeedsPerBeat, 1, MaxAudioReactiveSeedBurstsPerStep);
+        InjectAudioReactiveSeedBursts(burstCount);
+        _lastAudioReactiveSeedUtc = now;
+        return burstCount;
+    }
+
+    private void InjectAudioReactiveSeedBursts(int burstCount)
+    {
+        int rows = _engine.Rows;
+        int cols = _engine.Columns;
+        if (rows <= 0 || cols <= 0 || burstCount <= 0)
+        {
+            return;
+        }
+
+        var mask = new bool[rows, cols];
+        for (int i = 0; i < burstCount; i++)
+        {
+            int centerRow = _audioReactiveRandom.Next(rows);
+            int centerCol = _audioReactiveRandom.Next(cols);
+            InjectAudioReactivePattern(mask, centerRow, centerCol);
+        }
+
+        _engine.InjectFrame(mask);
+    }
+
+    private void InjectAudioReactivePattern(bool[,] mask, int centerRow, int centerCol)
+    {
+        switch (_audioReactiveSeedPattern)
+        {
+            case AudioReactiveSeedPattern.RPentomino:
+                PlacePatternWithRandomRotation(mask, centerRow, centerCol, RPentominoPattern);
+                break;
+            case AudioReactiveSeedPattern.RandomBurst:
+                PlaceRandomBurstPattern(mask, centerRow, centerCol);
+                break;
+            case AudioReactiveSeedPattern.Glider:
+            default:
+                PlacePatternWithRandomRotation(mask, centerRow, centerCol, GliderPattern);
+                break;
+        }
+    }
+
+    private void PlacePatternWithRandomRotation(bool[,] mask, int centerRow, int centerCol, IReadOnlyList<(int rowOffset, int colOffset)> pattern)
+    {
+        int rotation = _audioReactiveRandom.Next(4);
+        foreach (var (rowOffset, colOffset) in pattern)
+        {
+            int rotatedRow = rowOffset;
+            int rotatedCol = colOffset;
+            switch (rotation)
+            {
+                case 1:
+                    rotatedRow = -colOffset;
+                    rotatedCol = rowOffset;
+                    break;
+                case 2:
+                    rotatedRow = -rowOffset;
+                    rotatedCol = -colOffset;
+                    break;
+                case 3:
+                    rotatedRow = colOffset;
+                    rotatedCol = -rowOffset;
+                    break;
+            }
+
+            SetMaskCell(mask, centerRow + rotatedRow, centerCol + rotatedCol);
+        }
+    }
+
+    private void PlaceRandomBurstPattern(bool[,] mask, int centerRow, int centerCol)
+    {
+        for (int dr = -1; dr <= 1; dr++)
+        {
+            for (int dc = -1; dc <= 1; dc++)
+            {
+                if (_audioReactiveRandom.NextDouble() < 0.58)
+                {
+                    SetMaskCell(mask, centerRow + dr, centerCol + dc);
+                }
+            }
+        }
+    }
+
+    private static void SetMaskCell(bool[,] mask, int row, int col)
+    {
+        int rows = mask.GetLength(0);
+        int cols = mask.GetLength(1);
+        if (row >= 0 && row < rows && col >= 0 && col < cols)
+        {
+            mask[row, col] = true;
+        }
     }
 
     private bool CaptureSourceList(List<CaptureSource> sources, double animationTime)
@@ -3968,6 +4424,13 @@ public partial class MainWindow : Window
         Subtractive
     }
 
+    private enum AudioReactiveSeedPattern
+    {
+        Glider,
+        RPentomino,
+        RandomBurst
+    }
+
     private static bool TryParseBlendMode(string? value, BlendMode fallback, out BlendMode mode)
     {
         mode = fallback;
@@ -4118,6 +4581,9 @@ public partial class MainWindow : Window
         public double RotationDegrees { get; set; } = AnimationRotateDegrees;
         public double DvdScale { get; set; } = AnimationDvdScale;
         public double BeatShakeIntensity { get; set; } = 1.0;
+        public double AudioGranularLowGain { get; set; } = DefaultAudioGranularEqBandGain;
+        public double AudioGranularMidGain { get; set; } = DefaultAudioGranularEqBandGain;
+        public double AudioGranularHighGain { get; set; } = DefaultAudioGranularEqBandGain;
         public double BeatsPerCycle { get; set; } = 1.0;
     }
 
@@ -4616,7 +5082,7 @@ public partial class MainWindow : Window
                     double envelope = 1.0 - progressShake;
                     envelope *= envelope;
 
-                    double intensity = Math.Clamp(animation.BeatShakeIntensity, 0, 2);
+                    double intensity = Math.Clamp(animation.BeatShakeIntensity, 0, MaxBeatShakeIntensity);
                     double amplitude = Math.Min(destWidth, destHeight) * AnimationBeatShakeFactor * intensity * envelope;
                     if (amplitude <= 0.0001)
                     {
@@ -4641,45 +5107,61 @@ public partial class MainWindow : Window
                 }
                 case AnimationType.AudioGranular:
                 {
-                    double intensity = Math.Clamp(animation.BeatShakeIntensity, 0, 5);
-                    double energy = _smoothedEnergy;
-                    double bass = _smoothedBass;
-                    double freq = _smoothedFreq;
+                    double intensityRaw = Math.Clamp(animation.BeatShakeIntensity, 0, MaxAudioGranularIntensity);
+                    double intensity = Math.Pow(intensityRaw / MaxAudioGranularIntensity, 1.1) * 7.0;
+                    double energy = Math.Clamp(_smoothedEnergy, 0, 1);
+                    double bassNorm = Math.Clamp(_smoothedBass / 16.0, 0, 1);
+                    double freqNorm = Math.Clamp(_smoothedFreq / 4500.0, 0, 1);
+                    double lowEq = Math.Clamp(animation.AudioGranularLowGain, 0, MaxAudioGranularEqBandGain);
+                    double midEq = Math.Clamp(animation.AudioGranularMidGain, 0, MaxAudioGranularEqBandGain);
+                    double highEq = Math.Clamp(animation.AudioGranularHighGain, 0, MaxAudioGranularEqBandGain);
 
-                    // Lower noise gate
-                    if (energy < 0.001)
+                    // Keep small-signal chatter down, but do not bury normal content.
+                    double gatedEnergy = Math.Clamp((energy - 0.06) / 0.94, 0, 1);
+
+                    if (gatedEnergy < 0.001 || intensity <= 0.0001)
                     {
-                        energy = 0;
-                        bass = 0;
-                        freq = 0;
+                        break;
                     }
 
-                    // "Jump" on bass and overall energy
-                    // intensity 1.0 -> ~10% scale jump on strong bass
-                    double jumpTarget = (energy * 0.5 + bass * 0.5) * intensity * 0.2;
-                    double scaleFactor = 1.0 + Math.Clamp(jumpTarget, 0, 2);
-                    
-                    // "Vibrate" on frequency - mapped to a very visible range
-                    // Low freq (~100Hz) -> 5Hz vibration
-                    // High freq (~2000Hz) -> 25Hz vibration
-                    double vibFreq = 5.0 + (freq * 0.01); 
-                    double vibAmp = intensity * 30.0 * energy;
-                    
-                    // Use different phases for X and Y to create organic movement
-                    double vibX = Math.Sin(2 * Math.PI * vibFreq * timeSeconds) * vibAmp;
-                    double vibY = Math.Cos(2 * Math.PI * (vibFreq * 0.85) * timeSeconds) * vibAmp;
-                    
-                    // Granular jitter
-                    vibX += (Random.Shared.NextDouble() - 0.5) * intensity * 10.0 * energy;
-                    vibY += (Random.Shared.NextDouble() - 0.5) * intensity * 10.0 * energy;
-                    
-                    // Subtle rotation on frequency
-                    double rotation = intensity * (freq * 0.01) * energy;
-                    
+                    double energyDrive = Math.Pow(gatedEnergy, 1.45);
+                    double lowBand = bassNorm;
+                    double midFreqBand = Math.Clamp(1.0 - Math.Abs(freqNorm - 0.45) / 0.55, 0, 1);
+                    double midBand = Math.Clamp((0.55 * energy) + (0.45 * midFreqBand), 0, 1);
+                    double highBand = freqNorm;
+                    double eqWeightSum = Math.Max(0.001, lowEq + midEq + highEq);
+                    double lowDrive = Math.Clamp((lowBand * lowEq) / eqWeightSum * 3.0, 0, 1.5);
+                    double midDrive = Math.Clamp((midBand * midEq) / eqWeightSum * 3.0, 0, 1.5);
+                    double highDrive = Math.Clamp((highBand * highEq) / eqWeightSum * 3.0, 0, 1.5);
+
+                    // 1) 3-band EQ mix -> zoom and subtle vibration.
+                    double bandMix = Math.Clamp((0.40 * lowDrive) + (0.38 * midDrive) + (0.22 * highDrive), 0, 1.4);
+                    double zoomBase = 1.0 + (bandMix * 0.18 * intensity);
+                    double zoomVibrationFreq = 6.5 + (2.0 * midDrive) + (5.0 * highDrive);
+                    double zoomVibrationAmp = (0.003 + (0.013 * energyDrive)) * (0.55 + (0.45 * bandMix)) * intensity;
+                    double zoomVibration = Math.Sin(2 * Math.PI * zoomVibrationFreq * timeSeconds) * zoomVibrationAmp;
+                    double scaleFactor = Math.Clamp(zoomBase + zoomVibration, 0.90, 1.36);
+
+                    // 2) Mid/High emphasis -> bounded orbital translation.
+                    double shakeFreq = 0.55 + (1.4 * midDrive) + (2.2 * highDrive);
+                    double maxShake = Math.Min(destWidth, destHeight) * 0.05;
+                    double baseShake = Math.Min(destWidth, destHeight) * 0.034;
+                    double shakeBandAmp = Math.Clamp((0.20 * lowDrive) + (0.45 * midDrive) + (0.35 * highDrive), 0, 1.4);
+                    double shakeAmp = Math.Clamp(baseShake * energyDrive * shakeBandAmp * intensity, 0, maxShake);
+                    double transX = Math.Sin(2 * Math.PI * shakeFreq * timeSeconds) * shakeAmp;
+                    double transY = Math.Cos(2 * Math.PI * (shakeFreq * 0.91) * timeSeconds) * shakeAmp;
+
+                    // 3) Smooth rotational shake (no per-frame random jitter).
+                    ulong seed = BuildBeatShakeSeed(source.Id, 0);
+                    double rotPhase = SeedToRadians(seed);
+                    double rotFreq = 0.70 + (1.2 * midDrive) + (1.6 * highDrive);
+                    double rotBandAmp = Math.Clamp((0.12 * lowDrive) + (0.45 * midDrive) + (0.43 * highDrive), 0, 1.4);
+                    double rotAmp = (0.45 + (3.0 * energyDrive * rotBandAmp)) * intensity; // degrees
+                    double rotation = Math.Sin((2 * Math.PI * rotFreq * timeSeconds) + rotPhase) * rotAmp;
+
                     var scaleT = CreateScale(scaleFactor, centerX, centerY);
                     var rotateT = CreateRotation(DegreesToRadians(rotation), centerX, centerY);
-                    var transT = CreateTranslation(vibX, vibY);
-                    
+                    var transT = CreateTranslation(transX, transY);
                     animTransform = Transform2D.Multiply(transT, Transform2D.Multiply(rotateT, scaleT));
                     break;
                 }
@@ -5122,7 +5604,7 @@ public partial class MainWindow : Window
         if (_inputBrush != null && _bitmap != null)
         {
             _inputBrush.ImageSource = _bitmap;
-            _inputBrush.Opacity = _lifeOpacity;
+            _inputBrush.Opacity = Math.Clamp(_effectiveLifeOpacity, 0, 1);
         }
     }
 
@@ -5135,7 +5617,25 @@ public partial class MainWindow : Window
 
         if (_showFps)
         {
-            FpsText.Text = $"{_displayFps:0.0} fps";
+            string audioStats;
+            if (!string.IsNullOrWhiteSpace(_selectedAudioDeviceId))
+            {
+                string signalState = _smoothedEnergy >= 0.02 ? "Signal" : "Low/No Signal";
+                audioStats = $"\nAudio: {_smoothedEnergy * 100:0}% ({signalState}) | Bass: {_smoothedBass:0.0} | Freq: {_smoothedFreq:0}Hz";
+            }
+            else
+            {
+                audioStats = "\nAudio: None (Select Device)";
+            }
+
+            string reactiveStats = string.Empty;
+            if (_audioReactiveEnabled)
+            {
+                string deviceState = string.IsNullOrWhiteSpace(_selectedAudioDeviceId) ? "No Device" : "Active";
+                reactiveStats = $"\nReactive: {deviceState} | InGain x{_audioInputGain:0.00} | FPS x{_audioReactiveFpsMultiplier:0.00} (min {_audioReactiveFpsMinPercent * 100.0:0}%) | Opacity {_effectiveLifeOpacity:0.00} | Beats: {_audioBeatDetector.BeatCount} | Seeds L:{_audioReactiveLevelSeedBurstsLastStep} B:{_audioReactiveBeatSeedBurstsLastStep}";
+            }
+
+            FpsText.Text = $"{_displayFps:0.0} fps (target {_currentFps:0.0}){audioStats}{reactiveStats}";
             FpsText.Visibility = Visibility.Visible;
         }
         else
@@ -5307,6 +5807,7 @@ public partial class MainWindow : Window
     private void LifeOpacitySlider_OnValueChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
     {
         _lifeOpacity = Math.Clamp(e.NewValue, 0, 1);
+        ApplyAudioReactiveLifeOpacity();
         Logger.Info($"Life opacity set to {_lifeOpacity:F2}");
         UpdateEffectInput();
         RenderFrame();
@@ -5554,6 +6055,262 @@ public partial class MainWindow : Window
         SaveConfig();
     }
 
+    private void AudioReactiveEnabled_OnChecked(object sender, RoutedEventArgs e)
+    {
+        _audioReactiveEnabled = AudioReactiveEnabledMenuItem?.IsChecked == true;
+        if (!_audioReactiveEnabled)
+        {
+            _lastAudioReactiveBeatCount = _audioBeatDetector.BeatCount;
+            _audioReactiveFpsMultiplier = 1.0;
+            _audioReactiveLevelSeedBurstsLastStep = 0;
+            _audioReactiveBeatSeedBurstsLastStep = 0;
+        }
+        UpdateAudioReactiveMenuState();
+        SaveConfig();
+    }
+
+    private void AudioReactiveLevelToFps_OnChecked(object sender, RoutedEventArgs e)
+    {
+        _audioReactiveLevelToFpsEnabled = AudioReactiveLevelToFpsMenuItem?.IsChecked == true;
+        UpdateAudioReactiveMenuState();
+        SaveConfig();
+    }
+
+    private void AudioReactiveLevelToLifeOpacity_OnChecked(object sender, RoutedEventArgs e)
+    {
+        _audioReactiveLevelToLifeOpacityEnabled = AudioReactiveLevelToLifeOpacityMenuItem?.IsChecked == true;
+        ApplyAudioReactiveLifeOpacity();
+        UpdateEffectInput();
+        UpdateAudioReactiveMenuState();
+        SaveConfig();
+    }
+
+    private void AudioReactiveLevelSeed_OnChecked(object sender, RoutedEventArgs e)
+    {
+        _audioReactiveLevelSeedEnabled = AudioReactiveLevelSeedMenuItem?.IsChecked == true;
+        UpdateAudioReactiveMenuState();
+        SaveConfig();
+    }
+
+    private void AudioReactiveBeatSeed_OnChecked(object sender, RoutedEventArgs e)
+    {
+        _audioReactiveBeatSeedEnabled = AudioReactiveBeatSeedMenuItem?.IsChecked == true;
+        if (!_audioReactiveBeatSeedEnabled)
+        {
+            _lastAudioReactiveBeatCount = _audioBeatDetector.BeatCount;
+        }
+        UpdateAudioReactiveMenuState();
+        SaveConfig();
+    }
+
+    private void AudioReactiveEnergyGainSlider_OnValueChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
+    {
+        _audioReactiveEnergyGain = Math.Clamp(e.NewValue, 1, 48);
+        if (AudioReactiveEnergyGainText != null)
+        {
+            AudioReactiveEnergyGainText.Text = $"{_audioReactiveEnergyGain:0.0}x";
+        }
+        SaveConfig();
+    }
+
+    private bool IsOutputAudioSelection(string? deviceId) => AudioBeatDetector.IsRenderSelectionId(deviceId);
+
+    private void ApplyAudioInputGainForSelection()
+    {
+        _audioInputGain = IsOutputAudioSelection(_selectedAudioDeviceId)
+            ? _audioInputGainRender
+            : _audioInputGainCapture;
+        _audioBeatDetector.InputGain = _audioInputGain;
+    }
+
+    private void UpdateAudioInputGainUi()
+    {
+        if (AudioInputGainSlider != null && Math.Abs(AudioInputGainSlider.Value - _audioInputGain) > 0.0001)
+        {
+            AudioInputGainSlider.Value = _audioInputGain;
+        }
+
+        if (AudioInputGainText != null)
+        {
+            string sourceLabel = IsOutputAudioSelection(_selectedAudioDeviceId) ? "Output" : "Input";
+            AudioInputGainText.Text = $"{_audioInputGain:0.00}x ({sourceLabel})";
+        }
+    }
+
+    private void AudioInputGainSlider_OnValueChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
+    {
+        _audioInputGain = Math.Clamp(e.NewValue, 0.25, 64);
+        if (IsOutputAudioSelection(_selectedAudioDeviceId))
+        {
+            _audioInputGainRender = _audioInputGain;
+        }
+        else
+        {
+            _audioInputGainCapture = _audioInputGain;
+        }
+        _audioBeatDetector.InputGain = _audioInputGain;
+        UpdateAudioInputGainUi();
+        SaveConfig();
+    }
+
+    private void AudioReactiveLevelSeedMaxSlider_OnValueChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
+    {
+        _audioReactiveLevelSeedMaxBursts = Math.Clamp((int)Math.Round(e.NewValue), 1, 64);
+        if (AudioReactiveLevelSeedMaxText != null)
+        {
+            AudioReactiveLevelSeedMaxText.Text = _audioReactiveLevelSeedMaxBursts.ToString(CultureInfo.InvariantCulture);
+        }
+        SaveConfig();
+    }
+
+    private void AudioReactiveFpsBoostSlider_OnValueChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
+    {
+        _audioReactiveFpsBoost = Math.Clamp(e.NewValue, 0, 2);
+        if (AudioReactiveFpsBoostText != null)
+        {
+            AudioReactiveFpsBoostText.Text = $"+{_audioReactiveFpsBoost * 100:0}%";
+        }
+        SaveConfig();
+    }
+
+    private void AudioReactiveFpsMinSlider_OnValueChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
+    {
+        _audioReactiveFpsMinPercent = Math.Clamp(e.NewValue / 100.0, 0, 1);
+        if (AudioReactiveFpsMinText != null)
+        {
+            AudioReactiveFpsMinText.Text = $"{_audioReactiveFpsMinPercent * 100.0:0}%";
+        }
+        SaveConfig();
+    }
+
+    private void AudioReactiveOpacityMinScalarSlider_OnValueChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
+    {
+        _audioReactiveLifeOpacityMinScalar = Math.Clamp(e.NewValue / 100.0, 0, 1);
+        if (AudioReactiveOpacityMinScalarText != null)
+        {
+            AudioReactiveOpacityMinScalarText.Text = $"{_audioReactiveLifeOpacityMinScalar * 100.0:0}%";
+        }
+        ApplyAudioReactiveLifeOpacity();
+        UpdateEffectInput();
+        SaveConfig();
+    }
+
+    private void AudioReactiveSeedsPerBeatSlider_OnValueChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
+    {
+        _audioReactiveSeedsPerBeat = Math.Clamp((int)Math.Round(e.NewValue), 1, 8);
+        if (AudioReactiveSeedsPerBeatText != null)
+        {
+            AudioReactiveSeedsPerBeatText.Text = _audioReactiveSeedsPerBeat.ToString(CultureInfo.InvariantCulture);
+        }
+        SaveConfig();
+    }
+
+    private void AudioReactiveSeedCooldownSlider_OnValueChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
+    {
+        _audioReactiveSeedCooldownMs = Math.Clamp(e.NewValue, 80, 1000);
+        if (AudioReactiveSeedCooldownText != null)
+        {
+            AudioReactiveSeedCooldownText.Text = $"{_audioReactiveSeedCooldownMs:0} ms";
+        }
+        SaveConfig();
+    }
+
+    private void AudioReactivePatternItem_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is not MenuItem menuItem || menuItem.Tag is not string tag)
+        {
+            return;
+        }
+
+        if (Enum.TryParse<AudioReactiveSeedPattern>(tag, true, out var pattern))
+        {
+            _audioReactiveSeedPattern = pattern;
+            UpdateAudioReactivePatternChecks();
+            SaveConfig();
+        }
+    }
+
+    private void UpdateAudioReactivePatternChecks()
+    {
+        if (AudioReactivePatternMenu == null)
+        {
+            return;
+        }
+
+        foreach (var item in AudioReactivePatternMenu.Items)
+        {
+            if (item is MenuItem menuItem && menuItem.Tag is string tag &&
+                Enum.TryParse<AudioReactiveSeedPattern>(tag, true, out var pattern))
+            {
+                menuItem.IsCheckable = true;
+                menuItem.IsChecked = pattern == _audioReactiveSeedPattern;
+            }
+        }
+    }
+
+    private void UpdateAudioReactiveMenuState()
+    {
+        bool hasAudioDevice = !string.IsNullOrWhiteSpace(_selectedAudioDeviceId);
+        bool masterEnabled = _audioReactiveEnabled;
+        bool levelEnabled = masterEnabled && _audioReactiveLevelToFpsEnabled && hasAudioDevice;
+        bool levelOpacityEnabled = masterEnabled && _audioReactiveLevelToLifeOpacityEnabled && hasAudioDevice;
+        bool levelSeedEnabled = masterEnabled && _audioReactiveLevelSeedEnabled && hasAudioDevice;
+        bool beatSeedEnabled = masterEnabled && _audioReactiveBeatSeedEnabled && hasAudioDevice;
+
+        if (AudioReactiveLevelToFpsMenuItem != null)
+        {
+            AudioReactiveLevelToFpsMenuItem.IsEnabled = masterEnabled && hasAudioDevice;
+        }
+        if (AudioReactiveLevelToLifeOpacityMenuItem != null)
+        {
+            AudioReactiveLevelToLifeOpacityMenuItem.IsEnabled = masterEnabled && hasAudioDevice;
+        }
+        if (AudioReactiveLevelSeedMenuItem != null)
+        {
+            AudioReactiveLevelSeedMenuItem.IsEnabled = masterEnabled && hasAudioDevice;
+        }
+        if (AudioReactiveBeatSeedMenuItem != null)
+        {
+            AudioReactiveBeatSeedMenuItem.IsEnabled = masterEnabled && hasAudioDevice;
+        }
+        if (AudioReactiveEnergyGainSlider != null)
+        {
+            AudioReactiveEnergyGainSlider.IsEnabled = levelEnabled;
+        }
+        if (AudioInputGainSlider != null)
+        {
+            AudioInputGainSlider.IsEnabled = hasAudioDevice;
+        }
+        if (AudioReactiveFpsBoostSlider != null)
+        {
+            AudioReactiveFpsBoostSlider.IsEnabled = levelEnabled;
+        }
+        if (AudioReactiveFpsMinSlider != null)
+        {
+            AudioReactiveFpsMinSlider.IsEnabled = levelEnabled;
+        }
+        if (AudioReactiveOpacityMinScalarSlider != null)
+        {
+            AudioReactiveOpacityMinScalarSlider.IsEnabled = levelOpacityEnabled;
+        }
+        if (AudioReactiveLevelSeedMaxSlider != null)
+        {
+            AudioReactiveLevelSeedMaxSlider.IsEnabled = levelSeedEnabled;
+        }
+        if (AudioReactiveSeedsPerBeatSlider != null)
+        {
+            AudioReactiveSeedsPerBeatSlider.IsEnabled = beatSeedEnabled;
+        }
+        if (AudioReactiveSeedCooldownSlider != null)
+        {
+            AudioReactiveSeedCooldownSlider.IsEnabled = beatSeedEnabled;
+        }
+        if (AudioReactivePatternMenu != null)
+        {
+            AudioReactivePatternMenu.IsEnabled = beatSeedEnabled || levelSeedEnabled;
+        }
+    }
+
     private void LoadConfig()
     {
         try
@@ -5621,7 +6378,31 @@ public partial class MainWindow : Window
             _oscillationMinFps = Math.Clamp(config.OscillationMinFps, 1, 144);
             _oscillationMaxFps = Math.Clamp(config.OscillationMaxFps, 1, 144);
             _audioSyncEnabled = config.AudioSyncEnabled;
+            _audioReactiveEnabled = config.AudioReactiveEnabled;
+            _audioReactiveLevelToFpsEnabled = config.AudioReactiveLevelToFpsEnabled;
+            _audioReactiveLevelToLifeOpacityEnabled = config.AudioReactiveLevelToLifeOpacityEnabled;
+            _audioReactiveLevelSeedEnabled = config.AudioReactiveLevelSeedEnabled;
+            _audioInputGainCapture = config.AudioInputGainCapture > 0
+                ? Math.Clamp(config.AudioInputGainCapture, 0.25, 64)
+                : Math.Clamp(config.AudioInputGain, 0.25, 64);
+            _audioInputGainRender = config.AudioInputGainRender > 0
+                ? Math.Clamp(config.AudioInputGainRender, 0.25, 64)
+                : DefaultAudioOutputGain;
+            _audioReactiveEnergyGain = Math.Clamp(config.AudioReactiveEnergyGain, 1, 48);
+            _audioReactiveFpsBoost = Math.Clamp(config.AudioReactiveFpsBoost, 0, 2);
+            _audioReactiveFpsMinPercent = Math.Clamp(config.AudioReactiveFpsMinPercent, 0, 1);
+            _audioReactiveLifeOpacityMinScalar = Math.Clamp(config.AudioReactiveLifeOpacityMinScalar, 0, 1);
+            _audioReactiveLevelSeedMaxBursts = Math.Clamp(config.AudioReactiveLevelSeedMaxBursts, 1, 64);
+            _audioReactiveBeatSeedEnabled = config.AudioReactiveBeatSeedEnabled;
+            _audioReactiveSeedsPerBeat = Math.Clamp(config.AudioReactiveSeedsPerBeat, 1, 8);
+            _audioReactiveSeedCooldownMs = Math.Clamp(config.AudioReactiveSeedCooldownMs, 80, 1000);
+            if (!string.IsNullOrWhiteSpace(config.AudioReactiveSeedPattern) &&
+                Enum.TryParse<AudioReactiveSeedPattern>(config.AudioReactiveSeedPattern, true, out var seedPattern))
+            {
+                _audioReactiveSeedPattern = seedPattern;
+            }
             _selectedAudioDeviceId = config.AudioDeviceId;
+            ApplyAudioInputGainForSelection();
             _aspectRatioLocked = config.AspectRatioLocked;
             _lockedAspectRatio = config.LockedAspectRatio > 0 ? config.LockedAspectRatio : DefaultAspectRatio;
 
@@ -5629,6 +6410,7 @@ public partial class MainWindow : Window
             {
                  _ = _audioBeatDetector.InitializeAsync(_selectedAudioDeviceId);
             }
+            _lastAudioReactiveBeatCount = _audioBeatDetector.BeatCount;
 
             _blendMode = ParseBlendModeOrDefault(config.BlendMode, _blendMode);
 
@@ -5686,6 +6468,22 @@ public partial class MainWindow : Window
                 OscillationMinFps = _oscillationMinFps,
                 OscillationMaxFps = _oscillationMaxFps,
                 AudioSyncEnabled = _audioSyncEnabled,
+                AudioReactiveEnabled = _audioReactiveEnabled,
+                AudioReactiveLevelToFpsEnabled = _audioReactiveLevelToFpsEnabled,
+                AudioReactiveLevelToLifeOpacityEnabled = _audioReactiveLevelToLifeOpacityEnabled,
+                AudioReactiveLevelSeedEnabled = _audioReactiveLevelSeedEnabled,
+                AudioInputGain = _audioInputGainCapture,
+                AudioInputGainCapture = _audioInputGainCapture,
+                AudioInputGainRender = _audioInputGainRender,
+                AudioReactiveEnergyGain = _audioReactiveEnergyGain,
+                AudioReactiveFpsBoost = _audioReactiveFpsBoost,
+                AudioReactiveFpsMinPercent = _audioReactiveFpsMinPercent,
+                AudioReactiveLifeOpacityMinScalar = _audioReactiveLifeOpacityMinScalar,
+                AudioReactiveLevelSeedMaxBursts = _audioReactiveLevelSeedMaxBursts,
+                AudioReactiveBeatSeedEnabled = _audioReactiveBeatSeedEnabled,
+                AudioReactiveSeedsPerBeat = _audioReactiveSeedsPerBeat,
+                AudioReactiveSeedCooldownMs = _audioReactiveSeedCooldownMs,
+                AudioReactiveSeedPattern = _audioReactiveSeedPattern.ToString(),
                 AudioDeviceId = _selectedAudioDeviceId,
                 BlendMode = _blendMode.ToString(),
                 Fullscreen = _isFullscreen,
@@ -5764,6 +6562,9 @@ public partial class MainWindow : Window
                 RotationDegrees = animation.RotationDegrees,
                 DvdScale = animation.DvdScale,
                 BeatShakeIntensity = animation.BeatShakeIntensity,
+                AudioGranularLowGain = animation.AudioGranularLowGain,
+                AudioGranularMidGain = animation.AudioGranularMidGain,
+                AudioGranularHighGain = animation.AudioGranularHighGain,
                 BeatsPerCycle = animation.BeatsPerCycle
             });
         }
@@ -5822,6 +6623,9 @@ public partial class MainWindow : Window
                     RotationDegrees = animation.RotationDegrees,
                     DvdScale = animation.DvdScale,
                     BeatShakeIntensity = animation.BeatShakeIntensity,
+                    AudioGranularLowGain = animation.AudioGranularLowGain,
+                    AudioGranularMidGain = animation.AudioGranularMidGain,
+                    AudioGranularHighGain = animation.AudioGranularHighGain,
                     BeatsPerCycle = animation.BeatsPerCycle,
                     Parent = model
                 });
@@ -6098,7 +6902,10 @@ public partial class MainWindow : Window
             {
                 animation.BeatsPerCycle = Math.Clamp(animationModel.BeatsPerCycle, 1, 4096);
             }
-            animation.BeatShakeIntensity = Math.Clamp(animationModel.BeatShakeIntensity, 0, 5);
+            animation.BeatShakeIntensity = ClampAnimationIntensity(animation.Type, animationModel.BeatShakeIntensity);
+            animation.AudioGranularLowGain = Math.Clamp(animationModel.AudioGranularLowGain, 0, MaxAudioGranularEqBandGain);
+            animation.AudioGranularMidGain = Math.Clamp(animationModel.AudioGranularMidGain, 0, MaxAudioGranularEqBandGain);
+            animation.AudioGranularHighGain = Math.Clamp(animationModel.AudioGranularHighGain, 0, MaxAudioGranularEqBandGain);
             animation.RotationDegrees = Math.Clamp(animationModel.RotationDegrees, 0, 360);
 
             source.Animations.Add(animation);
@@ -6360,7 +7167,10 @@ public partial class MainWindow : Window
                 {
                     animation.DvdScale = Math.Clamp(animationConfig.DvdScale, 0.01, 1.0);
                 }
-                animation.BeatShakeIntensity = Math.Clamp(animationConfig.BeatShakeIntensity, 0, 5);
+                animation.BeatShakeIntensity = ClampAnimationIntensity(animation.Type, animationConfig.BeatShakeIntensity);
+                animation.AudioGranularLowGain = Math.Clamp(animationConfig.AudioGranularLowGain, 0, MaxAudioGranularEqBandGain);
+                animation.AudioGranularMidGain = Math.Clamp(animationConfig.AudioGranularMidGain, 0, MaxAudioGranularEqBandGain);
+                animation.AudioGranularHighGain = Math.Clamp(animationConfig.AudioGranularHighGain, 0, MaxAudioGranularEqBandGain);
                 if (animationConfig.BeatsPerCycle > 0)
                 {
                     animation.BeatsPerCycle = Math.Clamp(animationConfig.BeatsPerCycle, 1, 4096);
@@ -6399,6 +7209,22 @@ public partial class MainWindow : Window
         public double OscillationMinFps { get; set; } = 30;
         public double OscillationMaxFps { get; set; } = 60;
         public bool AudioSyncEnabled { get; set; }
+        public bool AudioReactiveEnabled { get; set; }
+        public bool AudioReactiveLevelToFpsEnabled { get; set; } = true;
+        public bool AudioReactiveLevelToLifeOpacityEnabled { get; set; }
+        public bool AudioReactiveLevelSeedEnabled { get; set; } = true;
+        public double AudioInputGain { get; set; } = DefaultAudioInputGain;
+        public double AudioInputGainCapture { get; set; } = DefaultAudioInputGain;
+        public double AudioInputGainRender { get; set; } = DefaultAudioOutputGain;
+        public double AudioReactiveEnergyGain { get; set; } = DefaultAudioReactiveEnergyGain;
+        public double AudioReactiveFpsBoost { get; set; } = DefaultAudioReactiveFpsBoost;
+        public double AudioReactiveFpsMinPercent { get; set; } = DefaultAudioReactiveFpsMinPercent;
+        public double AudioReactiveLifeOpacityMinScalar { get; set; } = DefaultAudioReactiveLifeOpacityMinScalar;
+        public int AudioReactiveLevelSeedMaxBursts { get; set; } = DefaultAudioReactiveLevelSeedMaxBursts;
+        public bool AudioReactiveBeatSeedEnabled { get; set; } = true;
+        public int AudioReactiveSeedsPerBeat { get; set; } = DefaultAudioReactiveSeedsPerBeat;
+        public double AudioReactiveSeedCooldownMs { get; set; } = DefaultAudioReactiveSeedCooldownMs;
+        public string AudioReactiveSeedPattern { get; set; } = MainWindow.AudioReactiveSeedPattern.Glider.ToString();
         public string? AudioDeviceId { get; set; }
         public string BlendMode { get; set; } = MainWindow.BlendMode.Additive.ToString();
         public bool Fullscreen { get; set; }
@@ -6435,6 +7261,9 @@ public partial class MainWindow : Window
             public double RotationDegrees { get; set; } = AnimationRotateDegrees;
             public double DvdScale { get; set; } = AnimationDvdScale;
             public double BeatShakeIntensity { get; set; } = 1.0;
+            public double AudioGranularLowGain { get; set; } = DefaultAudioGranularEqBandGain;
+            public double AudioGranularMidGain { get; set; } = DefaultAudioGranularEqBandGain;
+            public double AudioGranularHighGain { get; set; } = DefaultAudioGranularEqBandGain;
             public double BeatsPerCycle { get; set; } = 1.0;
         }
     }

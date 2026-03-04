@@ -20,18 +20,19 @@ If you still publish via Rider's generated config, the project automatically dis
 
 ## Local Smoke Test Install
 
-`install.ps1` publishes a framework-dependent build to `artifacts\local-install`, creates Start Menu shortcuts, and launches it (if the folder is locked, it uses a timestamped path):
+`install.ps1` publishes a ClickOnce payload and, by default, runs the local `Install-ClickOnce.ps1` flow against that fresh output:
 
 ```powershell
 .\install.ps1
 ```
 
-The script writes `LifeViz.lnk` and `LifeViz (Local).lnk` under the Start Menu and renames any ClickOnce `lifeviz*.appref-ms` entries to `LifeViz (ClickOnce)...` so the search entry points at the local build.
+By default, `install.ps1` now publishes and then runs `Install-ClickOnce.ps1` directly against the fresh publish output (more reliable for repeated in-place updates than relaunching through a generated bootstrapper each time). If you specifically need the single-file wrapper installer, pass `-BundleInstaller`.
 
 Optional parameters:
 
 ```powershell
-.\install.ps1 -Configuration Release -Runtime win-x64 -NoRun
+.\install.ps1 -Configuration Release -NoRun
+.\install.ps1 -BundleInstaller
 ```
 
 ## Branded Icon

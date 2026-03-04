@@ -126,6 +126,9 @@ internal sealed class LayerEditorAnimation : LayerEditorNotify
     private double _rotationDegrees = 12.0;
     private double _dvdScale = 0.2;
     private double _beatShakeIntensity = 1.0;
+    private double _audioGranularLowGain = 1.0;
+    private double _audioGranularMidGain = 1.0;
+    private double _audioGranularHighGain = 1.0;
     private double _beatsPerCycle = 1.0;
 
     public Guid Id
@@ -148,6 +151,9 @@ internal sealed class LayerEditorAnimation : LayerEditorNotify
                 OnPropertyChanged(nameof(IsBeatShake));
                 OnPropertyChanged(nameof(IsAudioGranular));
                 OnPropertyChanged(nameof(IsIntensityVisible));
+                OnPropertyChanged(nameof(IsAudioGranularEqVisible));
+                OnPropertyChanged(nameof(IntensityMax));
+                OnPropertyChanged(nameof(IntensityLargeChange));
                 OnPropertyChanged(nameof(DisplayName));
                 OnPropertyChanged(nameof(CycleMax));
                 OnPropertyChanged(nameof(CycleLargeChange));
@@ -197,6 +203,24 @@ internal sealed class LayerEditorAnimation : LayerEditorNotify
         set => SetField(ref _beatShakeIntensity, value);
     }
 
+    public double AudioGranularLowGain
+    {
+        get => _audioGranularLowGain;
+        set => SetField(ref _audioGranularLowGain, value);
+    }
+
+    public double AudioGranularMidGain
+    {
+        get => _audioGranularMidGain;
+        set => SetField(ref _audioGranularMidGain, value);
+    }
+
+    public double AudioGranularHighGain
+    {
+        get => _audioGranularHighGain;
+        set => SetField(ref _audioGranularHighGain, value);
+    }
+
     public double BeatsPerCycle
     {
         get => _beatsPerCycle;
@@ -210,6 +234,9 @@ internal sealed class LayerEditorAnimation : LayerEditorNotify
     public bool IsAudioGranular => string.Equals(Type, "AudioGranular", StringComparison.OrdinalIgnoreCase);
 
     public bool IsIntensityVisible => IsBeatShake || IsAudioGranular;
+    public bool IsAudioGranularEqVisible => IsAudioGranular;
+    public double IntensityMax => IsAudioGranular ? 10.0 : 2.0;
+    public double IntensityLargeChange => IsAudioGranular ? 1.0 : 0.2;
 
     public LayerEditorSource? Parent { get; set; }
 

@@ -64,6 +64,9 @@ internal sealed class LayerConfigFile
                 RotationDegrees = animation.RotationDegrees,
                 DvdScale = animation.DvdScale,
                 BeatShakeIntensity = animation.BeatShakeIntensity,
+                AudioGranularLowGain = animation.AudioGranularLowGain,
+                AudioGranularMidGain = animation.AudioGranularMidGain,
+                AudioGranularHighGain = animation.AudioGranularHighGain,
                 BeatsPerCycle = animation.BeatsPerCycle
             });
         }
@@ -122,6 +125,9 @@ internal sealed class LayerConfigFile
                 RotationDegrees = animation.RotationDegrees,
                 DvdScale = animation.DvdScale,
                 BeatShakeIntensity = animation.BeatShakeIntensity,
+                AudioGranularLowGain = animation.AudioGranularLowGain,
+                AudioGranularMidGain = animation.AudioGranularMidGain,
+                AudioGranularHighGain = animation.AudioGranularHighGain,
                 BeatsPerCycle = animation.BeatsPerCycle,
                 Parent = model
             });
@@ -181,5 +187,8 @@ internal sealed class LayerConfigAnimation
     public double RotationDegrees { get; set; } = 12.0;
     public double DvdScale { get; set; } = 0.2;
     public double BeatShakeIntensity { get; set; } = 1.0;
+    public double AudioGranularLowGain { get; set; } = 1.0;
+    public double AudioGranularMidGain { get; set; } = 1.0;
+    public double AudioGranularHighGain { get; set; } = 1.0;
     public double BeatsPerCycle { get; set; } = 1.0;
 }

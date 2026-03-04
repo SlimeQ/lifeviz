@@ -1,4 +1,5 @@
 using System;
+using System.Buffers;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Linq;
@@ -13,6 +14,8 @@ using Windows.Media.Audio;
 using Windows.Media.Capture;
 using Windows.Media.MediaProperties;
 using Windows.Media.Render;
+using NAudio.CoreAudioApi;
+using NAudio.Wave;
 
 namespace lifeviz;
 
@@ -21,20 +24,29 @@ internal sealed class AudioBeatDetector : IDisposable
     private AudioGraph? _graph;
     private AudioDeviceInputNode? _inputNode;
     private AudioFrameOutputNode? _frameOutputNode;
+    private MMDeviceEnumerator? _wasapiDeviceEnumerator;
+    private MMDevice? _wasapiRenderDevice;
+    private WasapiLoopbackCapture? _wasapiLoopbackCapture;
     private readonly SemaphoreSlim _lock = new(1, 1);
     private string? _currentDeviceId;
+    private double _inputGain = 1.0;
     
     // Beat Detection State
     private readonly List<double> _energyHistory = new();
     private const int HistorySize = 60; // Longer history for better average
     
     private double _localEnergyAverage;
-    private const double C = 1.3; // Threshold constant
+    private const double C = 1.18; // Threshold constant
     
     // BPM Calculation
     private readonly List<long> _beatTimestamps = new();
     private const int BeatHistorySize = 10;
     private double _detectedBpm = 120;
+    private const double SignalFloorRms = 0.0025;
+    private const double NormalizationFloorDb = -45.0;
+    private const string RenderSelectionPrefix = "render:";
+    private const string DefaultRenderSelectionId = "render:default";
+    private double _energyBaseline;
     
     public DateTime LastBeatTime { get; private set; } = DateTime.MinValue;
     public long BeatCount { get; private set; }
@@ -42,8 +54,17 @@ internal sealed class AudioBeatDetector : IDisposable
     public double CurrentBpm => _detectedBpm;
     public bool IsBeat { get; private set; }
     public double CurrentEnergy { get; private set; }
+    public double NormalizedEnergy { get; private set; }
+    public double TransientEnergy { get; private set; }
     public double MainFrequency { get; private set; }
     public double BassEnergy { get; private set; }
+    public bool IsRunning => (_graph != null && _inputNode != null) || _wasapiLoopbackCapture != null;
+
+    public double InputGain
+    {
+        get => _inputGain;
+        set => _inputGain = Math.Clamp(value, 0.25, 64.0);
+    }
 
     private uint _sampleRate = 48000;
 
@@ -51,8 +72,31 @@ internal sealed class AudioBeatDetector : IDisposable
     {
         try
         {
-            var devices = await DeviceInformation.FindAllAsync(DeviceClass.AudioCapture);
-            return devices.Select(d => new AudioDeviceInfo(d.Id, d.Name)).ToList();
+            var devices = new List<AudioDeviceInfo>
+            {
+                new(DefaultRenderSelectionId, "System Output (Default)", AudioDeviceInfo.AudioDeviceKind.Render, isSystemDefault: true)
+            };
+
+            try
+            {
+                using var renderEnumerator = new MMDeviceEnumerator();
+                var renderDevices = renderEnumerator.EnumerateAudioEndPoints(DataFlow.Render, DeviceState.Active);
+                devices.AddRange(renderDevices.Select(d =>
+                    new AudioDeviceInfo(BuildRenderSelectionId(d.ID), $"Output: {d.FriendlyName}", AudioDeviceInfo.AudioDeviceKind.Render)));
+            }
+            catch (Exception ex)
+            {
+                Logger.Warn($"Failed to enumerate render devices via WASAPI; falling back to WinRT. {ex.Message}");
+                var renderDevices = await DeviceInformation.FindAllAsync(DeviceClass.AudioRender);
+                devices.AddRange(renderDevices.Select(d =>
+                    new AudioDeviceInfo(BuildRenderSelectionId(d.Id), $"Output: {d.Name}", AudioDeviceInfo.AudioDeviceKind.Render)));
+            }
+
+            var captureDevices = await DeviceInformation.FindAllAsync(DeviceClass.AudioCapture);
+            devices.AddRange(captureDevices.Select(d =>
+                new AudioDeviceInfo(d.Id, $"Input: {d.Name}", AudioDeviceInfo.AudioDeviceKind.Capture)));
+
+            return devices;
         }
         catch (Exception ex)
         {
@@ -70,9 +114,19 @@ internal sealed class AudioBeatDetector : IDisposable
             {
                 return;
             }
+            if (_currentDeviceId == deviceId && _wasapiLoopbackCapture != null)
+            {
+                return;
+            }
 
             StopInternal();
             ResetState();
+
+            if (TryParseRenderSelectionId(deviceId, out string? renderDeviceId, out bool useSystemDefault))
+            {
+                StartWasapiLoopback(deviceId, renderDeviceId, useSystemDefault);
+                return;
+            }
 
             var settings = new AudioGraphSettings(AudioRenderCategory.Media);
             var result = await AudioGraph.CreateAsync(settings);
@@ -86,10 +140,11 @@ internal sealed class AudioBeatDetector : IDisposable
             _sampleRate = _graph.EncodingProperties.SampleRate;
             _graph.QuantumStarted += Graph_QuantumStarted;
 
-            var deviceResult = await _graph.CreateDeviceInputNodeAsync(MediaCategory.Media, _graph.EncodingProperties, await DeviceInformation.CreateFromIdAsync(deviceId));
+            var deviceInfo = await DeviceInformation.CreateFromIdAsync(deviceId);
+            var deviceResult = await _graph.CreateDeviceInputNodeAsync(MediaCategory.Media, _graph.EncodingProperties, deviceInfo);
             if (deviceResult.Status != AudioDeviceNodeCreationStatus.Success)
             {
-                Logger.Error($"Audio device node creation failed: {deviceResult.Status}");
+                Logger.Error($"Audio device node creation failed ({deviceId}): {deviceResult.Status}");
                 StopInternal();
                 return;
             }
@@ -101,7 +156,7 @@ internal sealed class AudioBeatDetector : IDisposable
 
             _graph.Start();
             _currentDeviceId = deviceId;
-            Logger.Info($"Audio beat detector initialized for device: {deviceId}");
+            Logger.Info($"Audio beat detector initialized for input device: {deviceId}");
         }
         catch (Exception ex)
         {
@@ -178,6 +233,27 @@ internal sealed class AudioBeatDetector : IDisposable
             }
             _frameOutputNode = null;
         }
+
+        if (_wasapiLoopbackCapture != null)
+        {
+            try
+            {
+                _wasapiLoopbackCapture.DataAvailable -= WasapiLoopbackCapture_DataAvailable;
+                _wasapiLoopbackCapture.RecordingStopped -= WasapiLoopbackCapture_RecordingStopped;
+                _wasapiLoopbackCapture.StopRecording();
+            }
+            catch
+            {
+                // Ignore shutdown races.
+            }
+            _wasapiLoopbackCapture.Dispose();
+            _wasapiLoopbackCapture = null;
+        }
+        _wasapiRenderDevice?.Dispose();
+        _wasapiRenderDevice = null;
+        _wasapiDeviceEnumerator?.Dispose();
+        _wasapiDeviceEnumerator = null;
+
         _currentDeviceId = null;
     }
 
@@ -190,6 +266,9 @@ internal sealed class AudioBeatDetector : IDisposable
         LastBeatTime = DateTime.MinValue;
         IsBeat = false;
         CurrentEnergy = 0;
+        NormalizedEnergy = 0;
+        TransientEnergy = 0;
+        _energyBaseline = 0;
         BeatCount = 0;
     }
 
@@ -218,39 +297,8 @@ internal sealed class AudioBeatDetector : IDisposable
                 return;
             }
 
-            double totalEnergy = 0;
-            for (int i = 0; i < sampleCount; i++)
-            {
-                float sample = dataInFloat[i];
-                totalEnergy += sample * sample;
-            }
-
-            double rms = Math.Sqrt(totalEnergy / sampleCount);
-            
-            // FFT Analysis
-            if (sampleCount >= 256)
-            {
-                // Use a power of 2 size
-                int fftSize = 1024;
-                while (fftSize > sampleCount) fftSize /= 2;
-                
-                if (fftSize >= 256)
-                {
-                    var fftBuffer = new Complex[fftSize];
-                    // Apply Hann window and copy last samples
-                    for (int i = 0; i < fftSize; i++)
-                    {
-                        float sample = dataInFloat[sampleCount - fftSize + i];
-                        double window = 0.5 * (1 - Math.Cos(2 * Math.PI * i / (fftSize - 1)));
-                        fftBuffer[i] = new Complex(sample * window, 0);
-                    }
-                    
-                    CalculateFFT(fftBuffer);
-                    AnalyzeSpectrum(fftBuffer, fftSize);
-                }
-            }
-
-            ProcessEnergy(rms);
+            var samples = new ReadOnlySpan<float>(dataInFloat, sampleCount);
+            ProcessPcmSamples(samples);
         }
         catch (ObjectDisposedException)
         {
@@ -264,6 +312,53 @@ internal sealed class AudioBeatDetector : IDisposable
         {
             Logger.Error("Audio beat detector frame read failed", ex);
         }
+    }
+
+    private void ProcessPcmSamples(ReadOnlySpan<float> samples)
+    {
+        if (samples.Length == 0)
+        {
+            return;
+        }
+
+        double inputGain = _inputGain;
+        double totalEnergy = 0;
+        for (int i = 0; i < samples.Length; i++)
+        {
+            double scaledSample = Math.Clamp(samples[i] * inputGain, -1.0, 1.0);
+            totalEnergy += scaledSample * scaledSample;
+        }
+
+        double rms = Math.Sqrt(totalEnergy / samples.Length);
+        bool hasSignal = rms >= SignalFloorRms;
+
+        if (hasSignal && samples.Length >= 256)
+        {
+            int fftSize = 1024;
+            while (fftSize > samples.Length) fftSize /= 2;
+
+            if (fftSize >= 256)
+            {
+                var fftBuffer = new Complex[fftSize];
+                int start = samples.Length - fftSize;
+                for (int i = 0; i < fftSize; i++)
+                {
+                    double sample = Math.Clamp(samples[start + i] * inputGain, -1.0, 1.0);
+                    double window = 0.5 * (1 - Math.Cos(2 * Math.PI * i / (fftSize - 1)));
+                    fftBuffer[i] = new Complex(sample * window, 0);
+                }
+
+                CalculateFFT(fftBuffer);
+                AnalyzeSpectrum(fftBuffer, fftSize);
+            }
+        }
+        else
+        {
+            MainFrequency = 0;
+            BassEnergy = 0;
+        }
+
+        ProcessEnergy(rms);
     }
     
     private void AnalyzeSpectrum(Complex[] fftBuffer, int fftSize)
@@ -370,6 +465,18 @@ internal sealed class AudioBeatDetector : IDisposable
     private void ProcessEnergy(double rms)
     {
         CurrentEnergy = rms;
+        double clampedRms = Math.Max(rms, 0.000001);
+        double db = 20.0 * Math.Log10(clampedRms);
+        NormalizedEnergy = Math.Clamp((db - NormalizationFloorDb) / -NormalizationFloorDb, 0, 1);
+
+        // Build a transient-focused envelope: how far we are above recent baseline.
+        _energyBaseline += (NormalizedEnergy - _energyBaseline) * 0.03;
+        double transient = NormalizedEnergy - (_energyBaseline * 0.92);
+        if (NormalizedEnergy < 0.03)
+        {
+            transient = 0;
+        }
+        TransientEnergy = Math.Clamp(transient * 3.2, 0, 1);
 
         // Maintain moving average of energy
         _energyHistory.Add(rms);
@@ -384,7 +491,9 @@ internal sealed class AudioBeatDetector : IDisposable
         // Simple Beat Detection: Instant energy > C * Average Energy
         // And wait some time (debounce)
         
-        if (rms > _localEnergyAverage * C && (DateTime.UtcNow - LastBeatTime).TotalSeconds > 0.1) // Max 600 BPM
+        if (TransientEnergy > 0.06 &&
+            rms > _localEnergyAverage * C &&
+            (DateTime.UtcNow - LastBeatTime).TotalSeconds > 0.08) // Max 750 BPM
         {
             IsBeat = true;
             var now = DateTime.UtcNow;
@@ -451,13 +560,215 @@ internal sealed class AudioBeatDetector : IDisposable
 
     internal sealed class AudioDeviceInfo
     {
-        public AudioDeviceInfo(string id, string name)
+        internal enum AudioDeviceKind
+        {
+            Capture,
+            Render
+        }
+
+        public AudioDeviceInfo(string id, string name, AudioDeviceKind kind, bool isSystemDefault = false)
         {
             Id = id;
             Name = name;
+            Kind = kind;
+            IsSystemDefault = isSystemDefault;
         }
 
         public string Id { get; }
         public string Name { get; }
+        public AudioDeviceKind Kind { get; }
+        public bool IsSystemDefault { get; }
+    }
+
+    private static string BuildRenderSelectionId(string deviceId) => $"{RenderSelectionPrefix}{deviceId}";
+
+    internal static bool IsRenderSelectionId(string? selectedId) =>
+        !string.IsNullOrWhiteSpace(selectedId) &&
+        selectedId.StartsWith(RenderSelectionPrefix, StringComparison.OrdinalIgnoreCase);
+
+    private static bool TryParseRenderSelectionId(string selectedId, out string? renderDeviceId, out bool useSystemDefault)
+    {
+        renderDeviceId = null;
+        useSystemDefault = false;
+        if (!IsRenderSelectionId(selectedId))
+        {
+            return false;
+        }
+
+        string suffix = selectedId[RenderSelectionPrefix.Length..];
+        if (string.Equals(suffix, "default", StringComparison.OrdinalIgnoreCase))
+        {
+            useSystemDefault = true;
+            return true;
+        }
+
+        renderDeviceId = suffix;
+        return !string.IsNullOrWhiteSpace(renderDeviceId);
+    }
+
+    private void StartWasapiLoopback(string selectionId, string? renderDeviceId, bool useSystemDefault)
+    {
+        _wasapiDeviceEnumerator = new MMDeviceEnumerator();
+        _wasapiRenderDevice = useSystemDefault
+            ? _wasapiDeviceEnumerator.GetDefaultAudioEndpoint(DataFlow.Render, Role.Multimedia)
+            : ResolveWasapiRenderDevice(renderDeviceId);
+
+        _wasapiLoopbackCapture = new WasapiLoopbackCapture(_wasapiRenderDevice);
+        _sampleRate = (uint)_wasapiLoopbackCapture.WaveFormat.SampleRate;
+        _wasapiLoopbackCapture.DataAvailable += WasapiLoopbackCapture_DataAvailable;
+        _wasapiLoopbackCapture.RecordingStopped += WasapiLoopbackCapture_RecordingStopped;
+        _wasapiLoopbackCapture.StartRecording();
+        _currentDeviceId = selectionId;
+        Logger.Info($"Audio beat detector initialized for output loopback: {selectionId}");
+    }
+
+    private MMDevice ResolveWasapiRenderDevice(string? renderDeviceId)
+    {
+        if (_wasapiDeviceEnumerator == null || string.IsNullOrWhiteSpace(renderDeviceId))
+        {
+            throw new InvalidOperationException("Render device ID is missing.");
+        }
+
+        var devices = _wasapiDeviceEnumerator.EnumerateAudioEndPoints(DataFlow.Render, DeviceState.Active);
+        foreach (var device in devices)
+        {
+            if (string.Equals(device.ID, renderDeviceId, StringComparison.OrdinalIgnoreCase))
+            {
+                return device;
+            }
+        }
+
+        Logger.Warn($"Render device not found in WASAPI endpoint list: {renderDeviceId}. Falling back to default output.");
+        return _wasapiDeviceEnumerator.GetDefaultAudioEndpoint(DataFlow.Render, Role.Multimedia);
+    }
+
+    private void WasapiLoopbackCapture_DataAvailable(object? sender, WaveInEventArgs e)
+    {
+        var capture = _wasapiLoopbackCapture;
+        if (capture == null || e.BytesRecorded <= 0)
+        {
+            return;
+        }
+
+        try
+        {
+            _sampleRate = (uint)capture.WaveFormat.SampleRate;
+            int channels = Math.Max(1, capture.WaveFormat.Channels);
+            var bufferSpan = e.Buffer.AsSpan(0, e.BytesRecorded);
+
+            if (capture.WaveFormat.Encoding == WaveFormatEncoding.IeeeFloat && capture.WaveFormat.BitsPerSample == 32)
+            {
+                var allSamples = MemoryMarshal.Cast<byte, float>(bufferSpan);
+                ProcessInterleavedSamples(allSamples, channels);
+                return;
+            }
+
+            if (capture.WaveFormat.BitsPerSample == 16)
+            {
+                var allSamples16 = MemoryMarshal.Cast<byte, short>(bufferSpan);
+                ProcessInterleavedPcm16Samples(allSamples16, channels);
+                return;
+            }
+
+            Logger.Warn($"Unsupported loopback audio format: {capture.WaveFormat.Encoding} {capture.WaveFormat.BitsPerSample}-bit");
+        }
+        catch (Exception ex)
+        {
+            Logger.Error("Loopback capture frame read failed", ex);
+        }
+    }
+
+    private void ProcessInterleavedSamples(ReadOnlySpan<float> interleaved, int channels)
+    {
+        if (interleaved.Length == 0)
+        {
+            return;
+        }
+
+        if (channels <= 1)
+        {
+            ProcessPcmSamples(interleaved);
+            return;
+        }
+
+        int frames = interleaved.Length / channels;
+        if (frames <= 0)
+        {
+            return;
+        }
+
+        float[] monoBuffer = ArrayPool<float>.Shared.Rent(frames);
+        try
+        {
+            for (int frame = 0; frame < frames; frame++)
+            {
+                int baseIndex = frame * channels;
+                float sum = 0;
+                for (int ch = 0; ch < channels; ch++)
+                {
+                    sum += interleaved[baseIndex + ch];
+                }
+                monoBuffer[frame] = sum / channels;
+            }
+
+            ProcessPcmSamples(monoBuffer.AsSpan(0, frames));
+        }
+        finally
+        {
+            ArrayPool<float>.Shared.Return(monoBuffer);
+        }
+    }
+
+    private void ProcessInterleavedPcm16Samples(ReadOnlySpan<short> interleaved, int channels)
+    {
+        if (interleaved.Length == 0)
+        {
+            return;
+        }
+
+        int frames = interleaved.Length / Math.Max(1, channels);
+        if (frames <= 0)
+        {
+            return;
+        }
+
+        float[] monoBuffer = ArrayPool<float>.Shared.Rent(frames);
+        try
+        {
+            if (channels <= 1)
+            {
+                for (int i = 0; i < frames; i++)
+                {
+                    monoBuffer[i] = interleaved[i] / 32768f;
+                }
+            }
+            else
+            {
+                for (int frame = 0; frame < frames; frame++)
+                {
+                    int baseIndex = frame * channels;
+                    int sum = 0;
+                    for (int ch = 0; ch < channels; ch++)
+                    {
+                        sum += interleaved[baseIndex + ch];
+                    }
+                    monoBuffer[frame] = (sum / (float)channels) / 32768f;
+                }
+            }
+
+            ProcessPcmSamples(monoBuffer.AsSpan(0, frames));
+        }
+        finally
+        {
+            ArrayPool<float>.Shared.Return(monoBuffer);
+        }
+    }
+
+    private void WasapiLoopbackCapture_RecordingStopped(object? sender, StoppedEventArgs e)
+    {
+        if (e.Exception != null)
+        {
+            Logger.Error("Output loopback capture stopped unexpectedly", e.Exception);
+        }
     }
 }
