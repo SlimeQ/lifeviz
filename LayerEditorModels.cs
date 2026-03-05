@@ -99,6 +99,13 @@ internal static class LayerEditorOptions
         new LayerEditorOption("Direct", "Direct (y = x)"),
         new LayerEditorOption("Inverse", "Inverse (y = 1 - x)")
     };
+
+    public static readonly IReadOnlyList<LayerEditorOption> SimulationInjectionModes = new[]
+    {
+        new LayerEditorOption("Threshold", "Threshold"),
+        new LayerEditorOption("RandomPulse", "Random Pulse"),
+        new LayerEditorOption("PulseWidthModulation", "Pulse Width Modulation")
+    };
 }
 
 internal abstract class LayerEditorNotify : INotifyPropertyChanged
@@ -624,6 +631,23 @@ internal sealed class LayerEditorViewModel : LayerEditorNotify
     public IReadOnlyList<LayerEditorOption> BlendModeOptions => LayerEditorOptions.BlendModes;
 }
 
+internal sealed class LayerEditorProjectSettings
+{
+    public int Height { get; set; } = 144;
+    public int Depth { get; set; } = 24;
+    public double Framerate { get; set; } = 60;
+    public string LifeMode { get; set; } = "NaiveGrayscale";
+    public string BinningMode { get; set; } = "Fill";
+    public string InjectionMode { get; set; } = "Threshold";
+    public double InjectionNoise { get; set; }
+    public double LifeOpacity { get; set; } = 1.0;
+    public double RgbHueShiftDegrees { get; set; }
+    public double RgbHueShiftSpeedDegreesPerSecond { get; set; }
+    public bool InvertComposite { get; set; }
+    public bool Passthrough { get; set; }
+    public string CompositeBlendMode { get; set; } = "Additive";
+}
+
 internal sealed class LayerEditorSimulationLayer : LayerEditorNotify
 {
     private Guid _id;
@@ -631,6 +655,10 @@ internal sealed class LayerEditorSimulationLayer : LayerEditorNotify
     private bool _enabled = true;
     private string _inputFunction = "Direct";
     private string _blendMode = "Subtractive";
+    private string _injectionMode = "Threshold";
+    private double _thresholdMin = 0.35;
+    private double _thresholdMax = 0.75;
+    private bool _invertThreshold;
     private bool _isExpanded = true;
     private bool _isSelected;
 
@@ -688,6 +716,54 @@ internal sealed class LayerEditorSimulationLayer : LayerEditorNotify
         }
     }
 
+    public string InjectionMode
+    {
+        get => _injectionMode;
+        set
+        {
+            if (SetField(ref _injectionMode, value))
+            {
+                OnPropertyChanged(nameof(Details));
+            }
+        }
+    }
+
+    public double ThresholdMin
+    {
+        get => _thresholdMin;
+        set
+        {
+            if (SetField(ref _thresholdMin, value))
+            {
+                OnPropertyChanged(nameof(Details));
+            }
+        }
+    }
+
+    public double ThresholdMax
+    {
+        get => _thresholdMax;
+        set
+        {
+            if (SetField(ref _thresholdMax, value))
+            {
+                OnPropertyChanged(nameof(Details));
+            }
+        }
+    }
+
+    public bool InvertThreshold
+    {
+        get => _invertThreshold;
+        set
+        {
+            if (SetField(ref _invertThreshold, value))
+            {
+                OnPropertyChanged(nameof(Details));
+            }
+        }
+    }
+
     public bool IsExpanded
     {
         get => _isExpanded;
@@ -702,8 +778,9 @@ internal sealed class LayerEditorSimulationLayer : LayerEditorNotify
 
     public string TreeLabel => string.IsNullOrWhiteSpace(Name) ? "Simulation Layer" : Name;
 
-    public string Details => $"{(Enabled ? "Enabled" : "Disabled")} | {InputFunction} | {BlendMode}";
+    public string Details => $"{(Enabled ? "Enabled" : "Disabled")} | {InputFunction} | {BlendMode} | {InjectionMode} | Th {ThresholdMin:P0}-{ThresholdMax:P0}{(InvertThreshold ? " inv" : string.Empty)}";
 
     public IReadOnlyList<LayerEditorOption> BlendModeOptions => LayerEditorOptions.BlendModes;
     public IReadOnlyList<LayerEditorOption> InputFunctionOptions => LayerEditorOptions.SimulationInputFunctions;
+    public IReadOnlyList<LayerEditorOption> InjectionModeOptions => LayerEditorOptions.SimulationInjectionModes;
 }

@@ -782,6 +782,59 @@
                                                                   Width="180"
                                                                   SelectionChanged="SimulationLayerBlendMode_Changed" />
                                                     </StackPanel>
+
+                                                    <StackPanel Orientation="Horizontal"
+                                                                Margin="0,8,0,0">
+                                                        <TextBlock Text="Injection"
+                                                                   VerticalAlignment="Center" />
+                                                        <ComboBox ItemsSource="{Binding InjectionModeOptions}"
+                                                                  DisplayMemberPath="Label"
+                                                                  SelectedValuePath="Value"
+                                                                  SelectedValue="{Binding InjectionMode}"
+                                                                  Margin="8,0,0,0"
+                                                                  Width="180"
+                                                                  SelectionChanged="SimulationLayerInjectionMode_Changed" />
+                                                    </StackPanel>
+
+                                                    <StackPanel Orientation="Horizontal"
+                                                                Margin="0,8,0,0">
+                                                        <TextBlock Text="Threshold Min"
+                                                                   VerticalAlignment="Center" />
+                                                        <Slider Minimum="0"
+                                                                Maximum="1"
+                                                                Value="{Binding ThresholdMin}"
+                                                                Width="160"
+                                                                SmallChange="0.01"
+                                                                LargeChange="0.05"
+                                                                Margin="8,0,0,0"
+                                                                ValueChanged="SimulationLayerThreshold_Changed" />
+                                                        <TextBlock Text="{Binding ThresholdMin, StringFormat={}{0:P0}}"
+                                                                   Margin="8,0,0,0"
+                                                                   VerticalAlignment="Center" />
+                                                    </StackPanel>
+
+                                                    <StackPanel Orientation="Horizontal"
+                                                                Margin="0,6,0,0">
+                                                        <TextBlock Text="Threshold Max"
+                                                                   VerticalAlignment="Center" />
+                                                        <Slider Minimum="0"
+                                                                Maximum="1"
+                                                                Value="{Binding ThresholdMax}"
+                                                                Width="160"
+                                                                SmallChange="0.01"
+                                                                LargeChange="0.05"
+                                                                Margin="8,0,0,0"
+                                                                ValueChanged="SimulationLayerThreshold_Changed" />
+                                                        <TextBlock Text="{Binding ThresholdMax, StringFormat={}{0:P0}}"
+                                                                   Margin="8,0,0,0"
+                                                                   VerticalAlignment="Center" />
+                                                    </StackPanel>
+
+                                                    <CheckBox Content="Invert Threshold Window"
+                                                              IsChecked="{Binding InvertThreshold}"
+                                                              Margin="0,8,0,0"
+                                                              Checked="SimulationLayerInvertThreshold_Changed"
+                                                              Unchecked="SimulationLayerInvertThreshold_Changed" />
                                                 </StackPanel>
                                             </GroupBox>
                                         </StackPanel>

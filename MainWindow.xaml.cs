@@ -452,7 +452,12 @@ public partial class MainWindow : Window
             .ToArray();
         bool hasEnabledSubtractiveSimulationLayer = activeLayers.Any(layer => layer.BlendMode == BlendMode.Subtractive);
         bool hasEnabledNonSubtractiveSimulationLayer = activeLayers.Any(layer => layer.BlendMode != BlendMode.Subtractive);
+        bool hasEnabledAdditiveSimulationLayer = activeLayers.Any(layer => layer.BlendMode == BlendMode.Additive);
+        bool hasEnabledNonAddSubSimulationLayer = activeLayers.Any(layer =>
+            layer.BlendMode != BlendMode.Additive &&
+            layer.BlendMode != BlendMode.Subtractive);
 
+        double lifeOpacity = Math.Clamp(_effectiveLifeOpacity, 0, 1);
         Parallel.For(0, height, row =>
         {
             int sourceRow = _rowMap[row];
@@ -473,9 +478,24 @@ public partial class MainWindow : Window
                 }
                 else
                 {
-                    // With passthrough off, only subtractive-only stacks use white identity.
-                    // Mixed additive/subtractive stacks stay on black baseline.
-                    int baseline = (hasEnabledSubtractiveSimulationLayer && !hasEnabledNonSubtractiveSimulationLayer) ? 255 : 0;
+                    int baseline;
+                    if (hasEnabledSubtractiveSimulationLayer && !hasEnabledNonSubtractiveSimulationLayer)
+                    {
+                        // Subtractive-only stacks use white identity.
+                        baseline = 255;
+                    }
+                    else if (hasEnabledAdditiveSimulationLayer &&
+                             hasEnabledSubtractiveSimulationLayer &&
+                             !hasEnabledNonAddSubSimulationLayer)
+                    {
+                        // Mixed additive/subtractive stacks converge around 50%; use a
+                        // neutral gray baseline to keep both layer families visible.
+                        baseline = 128;
+                    }
+                    else
+                    {
+                        baseline = 0;
+                    }
                     baseB = baseline;
                     baseG = baseline;
                     baseR = baseline;
@@ -497,6 +517,13 @@ public partial class MainWindow : Window
                     byte lg = colorBuffer[sourceIndex + 1];
                     byte lb = colorBuffer[sourceIndex + 2];
                     BlendSimulationLayerInto(ref outB, ref outG, ref outR, lr, lg, lb, layer.BlendMode);
+                }
+
+                if (lifeOpacity < 1.0)
+                {
+                    outB = (int)Math.Round(baseB + ((outB - baseB) * lifeOpacity));
+                    outG = (int)Math.Round(baseG + ((outG - baseG) * lifeOpacity));
+                    outR = (int)Math.Round(baseR + ((outR - baseR) * lifeOpacity));
                 }
 
                 _pixelBuffer[index] = ClampToByte(outB);
@@ -613,7 +640,6 @@ public partial class MainWindow : Window
             targetBuffer = sourceBuffer;
         }
 
-        double lifeOpacity = Math.Clamp(_effectiveLifeOpacity, 0, 1);
         for (int row = 0; row < sourceHeight; row++)
         {
             int srcRowOffset = row * displayStride;
@@ -622,9 +648,9 @@ public partial class MainWindow : Window
             {
                 int srcIndex = srcRowOffset + (col * 4);
                 int destIndex = destRowOffset + (col * 4);
-                targetBuffer[destIndex] = ClampToByte((int)(_pixelBuffer[srcIndex] * lifeOpacity));
-                targetBuffer[destIndex + 1] = ClampToByte((int)(_pixelBuffer[srcIndex + 1] * lifeOpacity));
-                targetBuffer[destIndex + 2] = ClampToByte((int)(_pixelBuffer[srcIndex + 2] * lifeOpacity));
+                targetBuffer[destIndex] = _pixelBuffer[srcIndex];
+                targetBuffer[destIndex + 1] = _pixelBuffer[srcIndex + 1];
+                targetBuffer[destIndex + 2] = _pixelBuffer[srcIndex + 2];
                 targetBuffer[destIndex + 3] = 255;
             }
         }
@@ -3682,6 +3708,95 @@ public partial class MainWindow : Window
 
     internal double GetSourceAudioMasterVolume() => _sourceAudioMasterVolume;
 
+    internal LayerEditorProjectSettings GetProjectSettingsForEditor()
+    {
+        return new LayerEditorProjectSettings
+        {
+            Height = _configuredRows,
+            Depth = _configuredDepth,
+            Framerate = _currentFpsFromConfig,
+            LifeMode = _lifeMode.ToString(),
+            BinningMode = _binningMode.ToString(),
+            InjectionMode = _injectionMode.ToString(),
+            InjectionNoise = _injectionNoise,
+            LifeOpacity = _lifeOpacity,
+            RgbHueShiftDegrees = _rgbHueShiftDegrees,
+            RgbHueShiftSpeedDegreesPerSecond = _rgbHueShiftSpeedDegreesPerSecond,
+            InvertComposite = _invertComposite,
+            Passthrough = _passthroughEnabled,
+            CompositeBlendMode = _blendMode.ToString()
+        };
+    }
+
+    internal void ApplyProjectSettingsFromEditor(LayerEditorProjectSettings? settings)
+    {
+        if (settings == null)
+        {
+            return;
+        }
+
+        RunWithoutLayerEditorRefresh(() =>
+        {
+            EnsureSimulationLayersInitialized();
+
+            int nextRows = Math.Clamp(settings.Height, MinRows, MaxRows);
+            int nextDepth = Math.Clamp(settings.Depth, 3, 96);
+            bool dimensionsChanged = nextRows != _configuredRows || nextDepth != _configuredDepth;
+
+            _configuredRows = nextRows;
+            _configuredDepth = nextDepth;
+            _currentFpsFromConfig = Math.Clamp(settings.Framerate, 5, 144);
+            _currentFps = _currentFpsFromConfig;
+            _injectionNoise = Math.Clamp(settings.InjectionNoise, 0, 1);
+            _lifeOpacity = Math.Clamp(settings.LifeOpacity, 0, 1);
+            _effectiveLifeOpacity = _lifeOpacity;
+            _rgbHueShiftDegrees = NormalizeHueDegrees(settings.RgbHueShiftDegrees);
+            _rgbHueShiftSpeedDegreesPerSecond = Math.Clamp(settings.RgbHueShiftSpeedDegreesPerSecond, -MaxRgbHueShiftSpeedDegreesPerSecond, MaxRgbHueShiftSpeedDegreesPerSecond);
+            _invertComposite = settings.InvertComposite;
+            _passthroughEnabled = settings.Passthrough;
+            _blendMode = ParseBlendModeOrDefault(settings.CompositeBlendMode, _blendMode);
+
+            if (Enum.TryParse<GameOfLifeEngine.LifeMode>(settings.LifeMode, true, out var lifeMode))
+            {
+                _lifeMode = lifeMode;
+            }
+            if (Enum.TryParse<GameOfLifeEngine.BinningMode>(settings.BinningMode, true, out var binMode))
+            {
+                _binningMode = binMode;
+            }
+            if (Enum.TryParse<GameOfLifeEngine.InjectionMode>(settings.InjectionMode, true, out var injectionMode))
+            {
+                _injectionMode = injectionMode;
+            }
+
+            foreach (var layer in _simulationLayers)
+            {
+                layer.Engine.SetMode(_lifeMode);
+                layer.Engine.SetBinningMode(_binningMode);
+                layer.InjectionMode = _injectionMode;
+                layer.Engine.SetInjectionMode(layer.InjectionMode);
+            }
+
+            if (dimensionsChanged)
+            {
+                ApplyDimensions(_configuredRows, _configuredDepth, _currentAspectRatio, persist: false);
+            }
+            else
+            {
+                _pulseStep = 0;
+                RenderFrame();
+            }
+
+            UpdateFramerateMenuChecks();
+            UpdateLifeModeMenuChecks();
+            UpdateBinningModeMenuChecks();
+            UpdateInjectionModeMenuChecks();
+            UpdateBlendModeMenuChecks();
+            UpdateEffectInput();
+            SaveConfig();
+        });
+    }
+
     internal void GetSimulationLayerSettingsForEditor(out IReadOnlyList<LayerEditorSimulationLayer> simulationLayers)
     {
         EnsureSimulationLayersInitialized();
@@ -3701,7 +3816,17 @@ public partial class MainWindow : Window
                 return;
             }
 
+            if (_simulationLayers.Count > 0)
+            {
+                var first = _simulationLayers[0];
+                _injectionMode = first.InjectionMode;
+                _captureThresholdMin = first.ThresholdMin;
+                _captureThresholdMax = first.ThresholdMax;
+                _invertThreshold = first.InvertThreshold;
+            }
+
             _pulseStep = 0;
+            UpdateInjectionModeMenuChecks();
             RenderFrame();
             SaveConfig();
         });
@@ -4205,10 +4330,10 @@ public partial class MainWindow : Window
                     composite.Downscaled,
                     composite.DownscaledWidth,
                     composite.DownscaledHeight,
-                    _captureThresholdMin,
-                    _captureThresholdMax,
-                    _invertThreshold,
-                    _injectionMode,
+                    layer.ThresholdMin,
+                    layer.ThresholdMax,
+                    layer.InvertThreshold,
+                    layer.InjectionMode,
                     _injectionNoise,
                     layer.Engine.Depth,
                     _pulseStep,
@@ -4222,10 +4347,10 @@ public partial class MainWindow : Window
                     composite.Downscaled,
                     composite.DownscaledWidth,
                     composite.DownscaledHeight,
-                    _captureThresholdMin,
-                    _captureThresholdMax,
-                    _invertThreshold,
-                    _injectionMode,
+                    layer.ThresholdMin,
+                    layer.ThresholdMax,
+                    layer.InvertThreshold,
+                    layer.InjectionMode,
                     _injectionNoise,
                     layer.Engine.RDepth,
                     layer.Engine.GDepth,
@@ -4842,6 +4967,26 @@ public partial class MainWindow : Window
     {
         _captureThresholdMin = ThresholdMinSlider?.Value ?? _captureThresholdMin;
         _captureThresholdMax = ThresholdMaxSlider?.Value ?? _captureThresholdMax;
+        if (_captureThresholdMin > _captureThresholdMax)
+        {
+            (_captureThresholdMin, _captureThresholdMax) = (_captureThresholdMax, _captureThresholdMin);
+            if (ThresholdMinSlider != null && Math.Abs(ThresholdMinSlider.Value - _captureThresholdMin) > 0.000001)
+            {
+                ThresholdMinSlider.Value = _captureThresholdMin;
+            }
+            if (ThresholdMaxSlider != null && Math.Abs(ThresholdMaxSlider.Value - _captureThresholdMax) > 0.000001)
+            {
+                ThresholdMaxSlider.Value = _captureThresholdMax;
+            }
+        }
+
+        foreach (var layer in _simulationLayers)
+        {
+            layer.ThresholdMin = _captureThresholdMin;
+            layer.ThresholdMax = _captureThresholdMax;
+        }
+
+        RenderFrame();
         SaveConfig();
     }
 
@@ -4874,6 +5019,11 @@ public partial class MainWindow : Window
     private void InvertThresholdCheckBox_OnChecked(object sender, RoutedEventArgs e)
     {
         _invertThreshold = InvertThresholdCheckBox?.IsChecked == true;
+        foreach (var layer in _simulationLayers)
+        {
+            layer.InvertThreshold = _invertThreshold;
+        }
+        RenderFrame();
         SaveConfig();
     }
 
@@ -5014,6 +5164,10 @@ public partial class MainWindow : Window
         public bool Enabled { get; set; } = true;
         public SimulationInputFunction InputFunction { get; set; } = SimulationInputFunction.Direct;
         public BlendMode BlendMode { get; set; } = BlendMode.Subtractive;
+        public GameOfLifeEngine.InjectionMode InjectionMode { get; set; } = GameOfLifeEngine.InjectionMode.Threshold;
+        public double ThresholdMin { get; set; } = 0.35;
+        public double ThresholdMax { get; set; } = 0.75;
+        public bool InvertThreshold { get; set; }
         public GameOfLifeEngine Engine { get; set; } = new();
         public byte[]? ColorBuffer { get; set; }
     }
@@ -5025,6 +5179,10 @@ public partial class MainWindow : Window
         public bool Enabled { get; init; } = true;
         public SimulationInputFunction InputFunction { get; init; } = SimulationInputFunction.Direct;
         public BlendMode BlendMode { get; init; } = BlendMode.Subtractive;
+        public GameOfLifeEngine.InjectionMode InjectionMode { get; init; } = GameOfLifeEngine.InjectionMode.Threshold;
+        public double ThresholdMin { get; init; } = 0.35;
+        public double ThresholdMax { get; init; } = 0.75;
+        public bool InvertThreshold { get; init; }
     }
 
     private static bool TryParseBlendMode(string? value, BlendMode fallback, out BlendMode mode)
@@ -5070,6 +5228,21 @@ public partial class MainWindow : Window
         return fallback;
     }
 
+    private static GameOfLifeEngine.InjectionMode ParseSimulationInjectionModeOrDefault(string? value, GameOfLifeEngine.InjectionMode fallback)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return fallback;
+        }
+
+        if (Enum.TryParse<GameOfLifeEngine.InjectionMode>(value, true, out var parsed))
+        {
+            return parsed;
+        }
+
+        return fallback;
+    }
+
     private LayerEditorSimulationLayer ToEditorSimulationLayer(SimulationLayerState layer)
     {
         return new LayerEditorSimulationLayer
@@ -5078,7 +5251,11 @@ public partial class MainWindow : Window
             Name = layer.Name,
             Enabled = layer.Enabled,
             InputFunction = layer.InputFunction.ToString(),
-            BlendMode = layer.BlendMode.ToString()
+            BlendMode = layer.BlendMode.ToString(),
+            InjectionMode = layer.InjectionMode.ToString(),
+            ThresholdMin = layer.ThresholdMin,
+            ThresholdMax = layer.ThresholdMax,
+            InvertThreshold = layer.InvertThreshold
         };
     }
 
@@ -5097,6 +5274,10 @@ public partial class MainWindow : Window
             Enabled = specs[0].Enabled,
             InputFunction = specs[0].InputFunction,
             BlendMode = specs[0].BlendMode,
+            InjectionMode = specs[0].InjectionMode,
+            ThresholdMin = specs[0].ThresholdMin,
+            ThresholdMax = specs[0].ThresholdMax,
+            InvertThreshold = specs[0].InvertThreshold,
             Engine = _engine
         });
         _simulationLayers.Add(new SimulationLayerState
@@ -5106,6 +5287,10 @@ public partial class MainWindow : Window
             Enabled = specs[1].Enabled,
             InputFunction = specs[1].InputFunction,
             BlendMode = specs[1].BlendMode,
+            InjectionMode = specs[1].InjectionMode,
+            ThresholdMin = specs[1].ThresholdMin,
+            ThresholdMax = specs[1].ThresholdMax,
+            InvertThreshold = specs[1].InvertThreshold,
             Engine = CreateConfiguredSimulationEngine(randomize: true)
         });
         ConfigureSimulationEngine(_engine, _configuredRows, _configuredDepth, _currentAspectRatio, randomize: true);
@@ -5127,6 +5312,7 @@ public partial class MainWindow : Window
         foreach (var layer in _simulationLayers)
         {
             ConfigureSimulationEngine(layer.Engine, rows, depth, aspectRatio, randomize);
+            layer.Engine.SetInjectionMode(layer.InjectionMode);
         }
     }
 
@@ -5143,7 +5329,6 @@ public partial class MainWindow : Window
         engine.Configure(rows, depth, resolvedAspect);
         engine.SetMode(_lifeMode);
         engine.SetBinningMode(_binningMode);
-        engine.SetInjectionMode(_injectionMode);
         if (randomize)
         {
             engine.Randomize();
@@ -5160,7 +5345,11 @@ public partial class MainWindow : Window
                 Name = "Positive",
                 Enabled = true,
                 InputFunction = SimulationInputFunction.Direct,
-                BlendMode = BlendMode.Additive
+                BlendMode = BlendMode.Additive,
+                InjectionMode = GameOfLifeEngine.InjectionMode.Threshold,
+                ThresholdMin = 0.35,
+                ThresholdMax = 0.75,
+                InvertThreshold = false
             },
             new()
             {
@@ -5168,9 +5357,40 @@ public partial class MainWindow : Window
                 Name = "Negative",
                 Enabled = true,
                 InputFunction = SimulationInputFunction.Inverse,
-                BlendMode = BlendMode.Subtractive
+                BlendMode = BlendMode.Subtractive,
+                InjectionMode = GameOfLifeEngine.InjectionMode.Threshold,
+                ThresholdMin = 0.35,
+                ThresholdMax = 0.75,
+                InvertThreshold = false
             }
         };
+    }
+
+    private static (double min, double max, bool invert) NormalizeLayerThresholds(
+        double min,
+        double max,
+        bool invert,
+        double fallbackMin = 0.35,
+        double fallbackMax = 0.75,
+        bool fallbackInvert = false)
+    {
+        if (double.IsNaN(min) || double.IsInfinity(min))
+        {
+            min = fallbackMin;
+        }
+        if (double.IsNaN(max) || double.IsInfinity(max))
+        {
+            max = fallbackMax;
+        }
+
+        min = Math.Clamp(min, 0, 1);
+        max = Math.Clamp(max, 0, 1);
+        if (min > max)
+        {
+            (min, max) = (max, min);
+        }
+
+        return (min, max, invert);
     }
 
     private static string NormalizeSimulationLayerName(string? value, int index)
@@ -5183,7 +5403,7 @@ public partial class MainWindow : Window
         return $"Simulation Layer {index + 1}";
     }
 
-    private static List<SimulationLayerSpec> NormalizeSimulationLayerSpecs(IReadOnlyList<LayerEditorSimulationLayer>? simulationLayers)
+    private List<SimulationLayerSpec> NormalizeSimulationLayerSpecs(IReadOnlyList<LayerEditorSimulationLayer>? simulationLayers)
     {
         var normalized = new List<SimulationLayerSpec>();
         var seenIds = new HashSet<Guid>();
@@ -5205,13 +5425,20 @@ public partial class MainWindow : Window
                 var inputFunction = ParseSimulationInputFunctionOrDefault(layer.InputFunction, SimulationInputFunction.Direct);
                 var defaultBlend = inputFunction == SimulationInputFunction.Inverse ? BlendMode.Subtractive : BlendMode.Additive;
                 var blendMode = ParseBlendModeOrDefault(layer.BlendMode, defaultBlend);
+                var injectionMode = ParseSimulationInjectionModeOrDefault(layer.InjectionMode, _injectionMode);
+                var (thresholdMin, thresholdMax, invertThreshold) =
+                    NormalizeLayerThresholds(layer.ThresholdMin, layer.ThresholdMax, layer.InvertThreshold);
                 normalized.Add(new SimulationLayerSpec
                 {
                     Id = id,
                     Name = NormalizeSimulationLayerName(layer.Name, i),
                     Enabled = layer.Enabled,
                     InputFunction = inputFunction,
-                    BlendMode = blendMode
+                    BlendMode = blendMode,
+                    InjectionMode = injectionMode,
+                    ThresholdMin = thresholdMin,
+                    ThresholdMax = thresholdMax,
+                    InvertThreshold = invertThreshold
                 });
             }
         }
@@ -5224,7 +5451,7 @@ public partial class MainWindow : Window
         return normalized;
     }
 
-    private static List<SimulationLayerSpec> NormalizeSimulationLayerSpecs(IReadOnlyList<AppConfig.SimulationLayerConfig>? simulationLayers)
+    private List<SimulationLayerSpec> NormalizeSimulationLayerSpecs(IReadOnlyList<AppConfig.SimulationLayerConfig>? simulationLayers)
     {
         var normalized = new List<SimulationLayerSpec>();
         var seenIds = new HashSet<Guid>();
@@ -5246,13 +5473,20 @@ public partial class MainWindow : Window
                 var inputFunction = ParseSimulationInputFunctionOrDefault(layer.InputFunction, SimulationInputFunction.Direct);
                 var defaultBlend = inputFunction == SimulationInputFunction.Inverse ? BlendMode.Subtractive : BlendMode.Additive;
                 var blendMode = ParseBlendModeOrDefault(layer.BlendMode, defaultBlend);
+                var injectionMode = ParseSimulationInjectionModeOrDefault(layer.InjectionMode, _injectionMode);
+                var (thresholdMin, thresholdMax, invertThreshold) =
+                    NormalizeLayerThresholds(layer.ThresholdMin, layer.ThresholdMax, layer.InvertThreshold, _captureThresholdMin, _captureThresholdMax, _invertThreshold);
                 normalized.Add(new SimulationLayerSpec
                 {
                     Id = id,
                     Name = NormalizeSimulationLayerName(layer.Name, i),
                     Enabled = layer.Enabled,
                     InputFunction = inputFunction,
-                    BlendMode = blendMode
+                    BlendMode = blendMode,
+                    InjectionMode = injectionMode,
+                    ThresholdMin = thresholdMin,
+                    ThresholdMax = thresholdMax,
+                    InvertThreshold = invertThreshold
                 });
             }
         }
@@ -5270,15 +5504,25 @@ public partial class MainWindow : Window
         string? positiveLayerBlendMode,
         bool negativeLayerEnabled,
         string? negativeLayerBlendMode,
-        IReadOnlyList<string>? simulationLayerOrder)
+        IReadOnlyList<string>? simulationLayerOrder,
+        GameOfLifeEngine.InjectionMode injectionMode,
+        double thresholdMin,
+        double thresholdMax,
+        bool invertThreshold)
     {
+        var (normalizedThresholdMin, normalizedThresholdMax, normalizedInvertThreshold) =
+            NormalizeLayerThresholds(thresholdMin, thresholdMax, invertThreshold);
         var positive = new SimulationLayerSpec
         {
             Id = Guid.NewGuid(),
             Name = "Positive",
             Enabled = positiveLayerEnabled,
             InputFunction = SimulationInputFunction.Direct,
-            BlendMode = ParseBlendModeOrDefault(positiveLayerBlendMode, BlendMode.Additive)
+            BlendMode = ParseBlendModeOrDefault(positiveLayerBlendMode, BlendMode.Additive),
+            InjectionMode = injectionMode,
+            ThresholdMin = normalizedThresholdMin,
+            ThresholdMax = normalizedThresholdMax,
+            InvertThreshold = normalizedInvertThreshold
         };
         var negative = new SimulationLayerSpec
         {
@@ -5286,7 +5530,11 @@ public partial class MainWindow : Window
             Name = "Negative",
             Enabled = negativeLayerEnabled,
             InputFunction = SimulationInputFunction.Inverse,
-            BlendMode = ParseBlendModeOrDefault(negativeLayerBlendMode, BlendMode.Subtractive)
+            BlendMode = ParseBlendModeOrDefault(negativeLayerBlendMode, BlendMode.Subtractive),
+            InjectionMode = injectionMode,
+            ThresholdMin = normalizedThresholdMin,
+            ThresholdMax = normalizedThresholdMax,
+            InvertThreshold = normalizedInvertThreshold
         };
 
         var list = new List<SimulationLayerSpec>(2);
@@ -5380,6 +5628,27 @@ public partial class MainWindow : Window
             if (layer.BlendMode != spec.BlendMode)
             {
                 layer.BlendMode = spec.BlendMode;
+                changed = true;
+            }
+            if (layer.InjectionMode != spec.InjectionMode)
+            {
+                layer.InjectionMode = spec.InjectionMode;
+                layer.Engine.SetInjectionMode(spec.InjectionMode);
+                changed = true;
+            }
+            if (Math.Abs(layer.ThresholdMin - spec.ThresholdMin) > 0.000001)
+            {
+                layer.ThresholdMin = spec.ThresholdMin;
+                changed = true;
+            }
+            if (Math.Abs(layer.ThresholdMax - spec.ThresholdMax) > 0.000001)
+            {
+                layer.ThresholdMax = spec.ThresholdMax;
+                changed = true;
+            }
+            if (layer.InvertThreshold != spec.InvertThreshold)
+            {
+                layer.InvertThreshold = spec.InvertThreshold;
                 changed = true;
             }
 
@@ -6677,7 +6946,7 @@ public partial class MainWindow : Window
         if (_inputBrush != null && _bitmap != null)
         {
             _inputBrush.ImageSource = _bitmap;
-            _inputBrush.Opacity = Math.Clamp(_effectiveLifeOpacity, 0, 1);
+            _inputBrush.Opacity = 1.0;
         }
     }
 
@@ -6815,16 +7084,23 @@ public partial class MainWindow : Window
 
     private void SetInjectionMode(GameOfLifeEngine.InjectionMode mode)
     {
-        if (_injectionMode == mode)
+        EnsureSimulationLayersInitialized();
+        bool changed = _injectionMode != mode;
+        _injectionMode = mode;
+        foreach (var layer in _simulationLayers)
+        {
+            if (layer.InjectionMode != mode)
+            {
+                layer.InjectionMode = mode;
+                changed = true;
+            }
+            layer.Engine.SetInjectionMode(mode);
+        }
+        if (!changed)
         {
             return;
         }
 
-        _injectionMode = mode;
-        foreach (var layer in _simulationLayers)
-        {
-            layer.Engine.SetInjectionMode(mode);
-        }
         _pulseStep = 0;
         UpdateInjectionModeMenuChecks();
         RenderFrame();
@@ -7674,8 +7950,20 @@ public partial class MainWindow : Window
                     config.PositiveLayerBlendMode,
                     config.NegativeLayerEnabled,
                     config.NegativeLayerBlendMode,
-                    config.SimulationLayerOrder);
+                    config.SimulationLayerOrder,
+                    _injectionMode,
+                    _captureThresholdMin,
+                    _captureThresholdMax,
+                    _invertThreshold);
             ApplySimulationLayerSpecs(simulationSpecs);
+            if (_simulationLayers.Count > 0)
+            {
+                var firstLayer = _simulationLayers[0];
+                _injectionMode = firstLayer.InjectionMode;
+                _captureThresholdMin = firstLayer.ThresholdMin;
+                _captureThresholdMax = firstLayer.ThresholdMax;
+                _invertThreshold = firstLayer.InvertThreshold;
+            }
 
             _pendingFullscreen = config.Fullscreen;
             RestoreSources(config.Sources);
@@ -7790,7 +8078,11 @@ public partial class MainWindow : Window
             Name = layer.Name,
             Enabled = layer.Enabled,
             InputFunction = layer.InputFunction.ToString(),
-            BlendMode = layer.BlendMode.ToString()
+            BlendMode = layer.BlendMode.ToString(),
+            InjectionMode = layer.InjectionMode.ToString(),
+            ThresholdMin = layer.ThresholdMin,
+            ThresholdMax = layer.ThresholdMax,
+            InvertThreshold = layer.InvertThreshold
         }).ToList();
     }
 
@@ -8609,6 +8901,10 @@ public partial class MainWindow : Window
             public bool Enabled { get; set; } = true;
             public string InputFunction { get; set; } = SimulationInputFunction.Direct.ToString();
             public string BlendMode { get; set; } = MainWindow.BlendMode.Subtractive.ToString();
+            public string InjectionMode { get; set; } = GameOfLifeEngine.InjectionMode.Threshold.ToString();
+            public double ThresholdMin { get; set; } = 0.35;
+            public double ThresholdMax { get; set; } = 0.75;
+            public bool InvertThreshold { get; set; }
         }
 
         public sealed class SourceConfig

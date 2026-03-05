@@ -6,8 +6,9 @@ namespace lifeviz;
 
 internal sealed class LayerConfigFile
 {
-    public int Version { get; set; } = 3;
+    public int Version { get; set; } = 4;
     public DateTime SavedUtc { get; set; } = DateTime.UtcNow;
+    public LayerConfigProjectSettings ProjectSettings { get; set; } = new();
     public List<LayerConfigSimulationLayer> SimulationLayers { get; set; } = new();
     public bool PositiveLayerEnabled { get; set; } = true;
     public string PositiveLayerBlendMode { get; set; } = "Additive";
@@ -18,17 +19,38 @@ internal sealed class LayerConfigFile
 
     public static LayerConfigFile FromEditorSources(
         IEnumerable<LayerEditorSource> sources,
-        IEnumerable<LayerEditorSimulationLayer> simulationLayers)
+        IEnumerable<LayerEditorSimulationLayer> simulationLayers,
+        LayerEditorProjectSettings projectSettings)
     {
         var file = new LayerConfigFile
         {
+            ProjectSettings = new LayerConfigProjectSettings
+            {
+                Height = Math.Max(1, projectSettings.Height),
+                Depth = Math.Max(1, projectSettings.Depth),
+                Framerate = projectSettings.Framerate,
+                LifeMode = string.IsNullOrWhiteSpace(projectSettings.LifeMode) ? "NaiveGrayscale" : projectSettings.LifeMode,
+                BinningMode = string.IsNullOrWhiteSpace(projectSettings.BinningMode) ? "Fill" : projectSettings.BinningMode,
+                InjectionMode = string.IsNullOrWhiteSpace(projectSettings.InjectionMode) ? "Threshold" : projectSettings.InjectionMode,
+                InjectionNoise = Math.Clamp(projectSettings.InjectionNoise, 0, 1),
+                LifeOpacity = Math.Clamp(projectSettings.LifeOpacity, 0, 1),
+                RgbHueShiftDegrees = projectSettings.RgbHueShiftDegrees,
+                RgbHueShiftSpeedDegreesPerSecond = projectSettings.RgbHueShiftSpeedDegreesPerSecond,
+                InvertComposite = projectSettings.InvertComposite,
+                Passthrough = projectSettings.Passthrough,
+                CompositeBlendMode = string.IsNullOrWhiteSpace(projectSettings.CompositeBlendMode) ? "Additive" : projectSettings.CompositeBlendMode
+            },
             SimulationLayers = simulationLayers.Select(layer => new LayerConfigSimulationLayer
             {
                 Id = layer.Id,
                 Name = string.IsNullOrWhiteSpace(layer.Name) ? "Simulation Layer" : layer.Name,
                 Enabled = layer.Enabled,
                 InputFunction = string.IsNullOrWhiteSpace(layer.InputFunction) ? "Direct" : layer.InputFunction,
-                BlendMode = string.IsNullOrWhiteSpace(layer.BlendMode) ? "Subtractive" : layer.BlendMode
+                BlendMode = string.IsNullOrWhiteSpace(layer.BlendMode) ? "Subtractive" : layer.BlendMode,
+                InjectionMode = string.IsNullOrWhiteSpace(layer.InjectionMode) ? "Threshold" : layer.InjectionMode,
+                ThresholdMin = Math.Clamp(layer.ThresholdMin, 0, 1),
+                ThresholdMax = Math.Clamp(layer.ThresholdMax, 0, 1),
+                InvertThreshold = layer.InvertThreshold
             }).ToList()
         };
         if (file.SimulationLayers.Count == 0)
@@ -41,7 +63,11 @@ internal sealed class LayerConfigFile
                     Name = "Positive",
                     Enabled = true,
                     InputFunction = "Direct",
-                    BlendMode = "Additive"
+                    BlendMode = "Additive",
+                    InjectionMode = "Threshold",
+                    ThresholdMin = 0.35,
+                    ThresholdMax = 0.75,
+                    InvertThreshold = false
                 },
                 new()
                 {
@@ -49,7 +75,11 @@ internal sealed class LayerConfigFile
                     Name = "Negative",
                     Enabled = true,
                     InputFunction = "Inverse",
-                    BlendMode = "Subtractive"
+                    BlendMode = "Subtractive",
+                    InjectionMode = "Threshold",
+                    ThresholdMin = 0.35,
+                    ThresholdMax = 0.75,
+                    InvertThreshold = false
                 }
             };
         }
@@ -80,11 +110,36 @@ internal sealed class LayerConfigFile
                 Name = string.IsNullOrWhiteSpace(layer.Name) ? "Simulation Layer" : layer.Name,
                 Enabled = layer.Enabled,
                 InputFunction = string.IsNullOrWhiteSpace(layer.InputFunction) ? "Direct" : layer.InputFunction,
-                BlendMode = string.IsNullOrWhiteSpace(layer.BlendMode) ? "Subtractive" : layer.BlendMode
+                BlendMode = string.IsNullOrWhiteSpace(layer.BlendMode) ? "Subtractive" : layer.BlendMode,
+                InjectionMode = string.IsNullOrWhiteSpace(layer.InjectionMode) ? "Threshold" : layer.InjectionMode,
+                ThresholdMin = Math.Clamp(layer.ThresholdMin, 0, 1),
+                ThresholdMax = Math.Clamp(layer.ThresholdMax, 0, 1),
+                InvertThreshold = layer.InvertThreshold
             }).ToList();
         }
 
         return BuildLegacyEditorSimulationLayers();
+    }
+
+    public LayerEditorProjectSettings ToEditorProjectSettings()
+    {
+        var settings = ProjectSettings ?? new LayerConfigProjectSettings();
+        return new LayerEditorProjectSettings
+        {
+            Height = Math.Max(1, settings.Height),
+            Depth = Math.Max(1, settings.Depth),
+            Framerate = settings.Framerate,
+            LifeMode = string.IsNullOrWhiteSpace(settings.LifeMode) ? "NaiveGrayscale" : settings.LifeMode,
+            BinningMode = string.IsNullOrWhiteSpace(settings.BinningMode) ? "Fill" : settings.BinningMode,
+            InjectionMode = string.IsNullOrWhiteSpace(settings.InjectionMode) ? "Threshold" : settings.InjectionMode,
+            InjectionNoise = Math.Clamp(settings.InjectionNoise, 0, 1),
+            LifeOpacity = Math.Clamp(settings.LifeOpacity, 0, 1),
+            RgbHueShiftDegrees = settings.RgbHueShiftDegrees,
+            RgbHueShiftSpeedDegreesPerSecond = settings.RgbHueShiftSpeedDegreesPerSecond,
+            InvertComposite = settings.InvertComposite,
+            Passthrough = settings.Passthrough,
+            CompositeBlendMode = string.IsNullOrWhiteSpace(settings.CompositeBlendMode) ? "Additive" : settings.CompositeBlendMode
+        };
     }
 
     private static LayerConfigSource FromEditorSource(LayerEditorSource source)
@@ -232,7 +287,11 @@ internal sealed class LayerConfigFile
                 Name = "Positive",
                 Enabled = PositiveLayerEnabled,
                 InputFunction = "Direct",
-                BlendMode = positiveBlend
+                BlendMode = positiveBlend,
+                InjectionMode = string.IsNullOrWhiteSpace(ProjectSettings?.InjectionMode) ? "Threshold" : ProjectSettings.InjectionMode,
+                ThresholdMin = 0.35,
+                ThresholdMax = 0.75,
+                InvertThreshold = false
             },
             ["Negative"] = new LayerEditorSimulationLayer
             {
@@ -240,7 +299,11 @@ internal sealed class LayerConfigFile
                 Name = "Negative",
                 Enabled = NegativeLayerEnabled,
                 InputFunction = "Inverse",
-                BlendMode = negativeBlend
+                BlendMode = negativeBlend,
+                InjectionMode = string.IsNullOrWhiteSpace(ProjectSettings?.InjectionMode) ? "Threshold" : ProjectSettings.InjectionMode,
+                ThresholdMin = 0.35,
+                ThresholdMax = 0.75,
+                InvertThreshold = false
             }
         };
 
@@ -344,4 +407,25 @@ internal sealed class LayerConfigSimulationLayer
     public bool Enabled { get; set; } = true;
     public string InputFunction { get; set; } = "Direct";
     public string BlendMode { get; set; } = "Subtractive";
+    public string InjectionMode { get; set; } = "Threshold";
+    public double ThresholdMin { get; set; } = 0.35;
+    public double ThresholdMax { get; set; } = 0.75;
+    public bool InvertThreshold { get; set; }
+}
+
+internal sealed class LayerConfigProjectSettings
+{
+    public int Height { get; set; } = 144;
+    public int Depth { get; set; } = 24;
+    public double Framerate { get; set; } = 60;
+    public string LifeMode { get; set; } = "NaiveGrayscale";
+    public string BinningMode { get; set; } = "Fill";
+    public string InjectionMode { get; set; } = "Threshold";
+    public double InjectionNoise { get; set; }
+    public double LifeOpacity { get; set; } = 1.0;
+    public double RgbHueShiftDegrees { get; set; }
+    public double RgbHueShiftSpeedDegreesPerSecond { get; set; }
+    public bool InvertComposite { get; set; }
+    public bool Passthrough { get; set; }
+    public string CompositeBlendMode { get; set; } = "Additive";
 }

@@ -17,6 +17,7 @@ public partial class LayerEditorWindow : Window
 {
     private readonly MainWindow _owner;
     private readonly LayerEditorViewModel _viewModel;
+    private LayerEditorProjectSettings? _pendingProjectSettings;
     private bool _suppressLiveUpdates;
     private bool _updatingSelection;
     private bool _updatingVideoTransportUi;
@@ -77,6 +78,7 @@ public partial class LayerEditorWindow : Window
             RefreshMasterAudioState();
             RefreshSimulationLayerState();
             RefreshSelectedVideoTransportState();
+            _pendingProjectSettings = null;
         }
         finally
         {
@@ -171,7 +173,11 @@ public partial class LayerEditorWindow : Window
             Name = source.Name,
             Enabled = source.Enabled,
             InputFunction = source.InputFunction,
-            BlendMode = source.BlendMode
+            BlendMode = source.BlendMode,
+            InjectionMode = source.InjectionMode,
+            ThresholdMin = source.ThresholdMin,
+            ThresholdMax = source.ThresholdMax,
+            InvertThreshold = source.InvertThreshold
         };
     }
 
@@ -269,6 +275,12 @@ public partial class LayerEditorWindow : Window
             return;
         }
 
+        if (_pendingProjectSettings != null)
+        {
+            _owner.ApplyProjectSettingsFromEditor(_pendingProjectSettings);
+            _pendingProjectSettings = null;
+        }
+
         var selectedId = _viewModel.SelectedSource?.Id;
         _owner.ApplyLayerEditorSources(_viewModel.Sources.ToList());
         _owner.ApplySimulationLayerSettingsFromEditor(_viewModel.SimulationLayers.ToList());
@@ -299,9 +311,11 @@ public partial class LayerEditorWindow : Window
 
         try
         {
+            var projectSettings = _pendingProjectSettings ?? _owner.GetProjectSettingsForEditor();
             var config = LayerConfigFile.FromEditorSources(
                 _viewModel.Sources,
-                _viewModel.SimulationLayers);
+                _viewModel.SimulationLayers,
+                projectSettings);
             string json = JsonSerializer.Serialize(config, LayerConfigJsonOptions);
             File.WriteAllText(dialog.FileName, json);
         }
@@ -340,14 +354,17 @@ public partial class LayerEditorWindow : Window
 
             var sources = config.ToEditorSources();
             var simulationLayers = config.ToEditorSimulationLayers();
+            var projectSettings = config.ToEditorProjectSettings();
             if (_viewModel.LiveMode)
             {
+                _owner.ApplyProjectSettingsFromEditor(projectSettings);
                 _owner.ApplyLayerEditorSources(sources);
                 _owner.ApplySimulationLayerSettingsFromEditor(simulationLayers);
                 RefreshFromSources();
             }
             else
             {
+                _pendingProjectSettings = projectSettings;
                 _viewModel.Sources = new ObservableCollection<LayerEditorSource>(sources);
                 SetSelectedSource(_viewModel.Sources.FirstOrDefault());
                 _viewModel.SimulationLayers = new ObservableCollection<LayerEditorSimulationLayer>(
@@ -532,7 +549,11 @@ public partial class LayerEditorWindow : Window
             Name = nextName,
             Enabled = true,
             InputFunction = string.Equals(inputFunction, "Inverse", StringComparison.OrdinalIgnoreCase) ? "Inverse" : "Direct",
-            BlendMode = string.Equals(inputFunction, "Inverse", StringComparison.OrdinalIgnoreCase) ? "Subtractive" : "Additive"
+            BlendMode = string.Equals(inputFunction, "Inverse", StringComparison.OrdinalIgnoreCase) ? "Subtractive" : "Additive",
+            InjectionMode = _viewModel.SelectedSimulationLayer?.InjectionMode ?? "Threshold",
+            ThresholdMin = _viewModel.SelectedSimulationLayer?.ThresholdMin ?? 0.35,
+            ThresholdMax = _viewModel.SelectedSimulationLayer?.ThresholdMax ?? 0.75,
+            InvertThreshold = _viewModel.SelectedSimulationLayer?.InvertThreshold ?? false
         };
 
         int insertIndex = _viewModel.SelectedSimulationLayer != null
@@ -638,6 +659,30 @@ public partial class LayerEditorWindow : Window
     }
 
     private void SimulationLayerBlendMode_Changed(object sender, SelectionChangedEventArgs e)
+    {
+        if (ShouldApplyLive())
+        {
+            ApplySimulationLayerSettingsLive();
+        }
+    }
+
+    private void SimulationLayerInjectionMode_Changed(object sender, SelectionChangedEventArgs e)
+    {
+        if (ShouldApplyLive())
+        {
+            ApplySimulationLayerSettingsLive();
+        }
+    }
+
+    private void SimulationLayerThreshold_Changed(object sender, RoutedPropertyChangedEventArgs<double> e)
+    {
+        if (ShouldApplyLive())
+        {
+            ApplySimulationLayerSettingsLive();
+        }
+    }
+
+    private void SimulationLayerInvertThreshold_Changed(object sender, RoutedEventArgs e)
     {
         if (ShouldApplyLive())
         {
