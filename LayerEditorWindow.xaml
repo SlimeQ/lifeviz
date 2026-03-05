@@ -76,6 +76,23 @@
             </Border>
         </HierarchicalDataTemplate>
 
+        <DataTemplate x:Key="SimulationLayerTemplate">
+            <Border Margin="0,1,0,1"
+                    Padding="4"
+                    Background="Transparent"
+                    CornerRadius="3">
+                <StackPanel>
+                    <TextBlock Text="{Binding TreeLabel}"
+                               FontWeight="SemiBold" />
+                    <TextBlock Text="{Binding Details}"
+                               Foreground="#8E8E8E"
+                               FontSize="11"
+                               TextTrimming="CharacterEllipsis"
+                               Margin="0,2,0,0" />
+                </StackPanel>
+            </Border>
+        </DataTemplate>
+
         <Style TargetType="TreeViewItem">
             <Setter Property="IsExpanded" Value="{Binding IsExpanded, Mode=TwoWay}" />
             <Setter Property="IsSelected" Value="{Binding IsSelected, Mode=TwoWay}" />
@@ -401,7 +418,11 @@
                     Padding="12"
                     Background="#101010">
                 <Grid>
-                    <StackPanel>
+                    <TabControl Background="#101010"
+                                BorderThickness="0"
+                                Padding="0">
+                        <TabItem Header="Selected Layer">
+                            <StackPanel>
                         <TextBlock Text="Select a layer or group in the tree to edit its settings."
                                    Foreground="#A0A0A0"
                                    FontSize="14"
@@ -650,7 +671,125 @@
                                 </GroupBox>
                             </StackPanel>
                         </ScrollViewer>
-                    </StackPanel>
+                            </StackPanel>
+                        </TabItem>
+                        <TabItem Header="Simulation Layers">
+                            <ScrollViewer VerticalScrollBarVisibility="Auto">
+                                <StackPanel Margin="10">
+                                    <TextBlock Text="Each simulation layer injects from the final composite frame, runs its own Game of Life state, then blends over previous simulation layers."
+                                               Foreground="#A0A0A0"
+                                               Margin="0,0,0,10" />
+                                    <Grid>
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="2*" />
+                                            <ColumnDefinition Width="12" />
+                                            <ColumnDefinition Width="3*" />
+                                        </Grid.ColumnDefinitions>
+
+                                        <StackPanel Grid.Column="0">
+                                            <WrapPanel Margin="0,0,0,8">
+                                                <Button Content="Add Direct Layer"
+                                                        Click="AddSimulationLayerDirect_Click" />
+                                                <Button Content="Add Inverse Layer"
+                                                        Click="AddSimulationLayerInverse_Click" />
+                                            </WrapPanel>
+
+                                            <Border BorderBrush="#2A2A2A"
+                                                    BorderThickness="1"
+                                                    CornerRadius="4"
+                                                    Padding="4"
+                                                    Background="#141414">
+                                                <TreeView x:Name="SimulationLayerTree"
+                                                          ItemsSource="{Binding SimulationLayers}"
+                                                          ItemTemplate="{StaticResource SimulationLayerTemplate}"
+                                                          Background="Transparent"
+                                                          BorderThickness="0"
+                                                          SelectedItemChanged="SimulationLayerTree_SelectedItemChanged" />
+                                            </Border>
+
+                                            <WrapPanel Margin="0,8,0,0">
+                                                <Button Content="Move Up"
+                                                        Click="MoveSimulationLayerUp_Click" />
+                                                <Button Content="Move Down"
+                                                        Click="MoveSimulationLayerDown_Click" />
+                                                <Button Content="Remove"
+                                                        Click="RemoveSimulationLayer_Click" />
+                                            </WrapPanel>
+                                        </StackPanel>
+
+                                        <StackPanel Grid.Column="2"
+                                                    DataContext="{Binding SelectedSimulationLayer}">
+                                            <TextBlock Text="Select a simulation layer to edit settings."
+                                                       Foreground="#A0A0A0"
+                                                       Margin="0,0,0,8">
+                                                <TextBlock.Style>
+                                                    <Style TargetType="TextBlock">
+                                                        <Setter Property="Visibility" Value="Collapsed" />
+                                                        <Style.Triggers>
+                                                            <DataTrigger Binding="{Binding}" Value="{x:Null}">
+                                                                <Setter Property="Visibility" Value="Visible" />
+                                                            </DataTrigger>
+                                                        </Style.Triggers>
+                                                    </Style>
+                                                </TextBlock.Style>
+                                            </TextBlock>
+
+                                            <GroupBox Header="Layer Settings">
+                                                <StackPanel Margin="8">
+                                                    <StackPanel.Style>
+                                                        <Style TargetType="StackPanel">
+                                                            <Setter Property="Visibility" Value="Visible" />
+                                                            <Style.Triggers>
+                                                                <DataTrigger Binding="{Binding}" Value="{x:Null}">
+                                                                    <Setter Property="Visibility" Value="Collapsed" />
+                                                                </DataTrigger>
+                                                            </Style.Triggers>
+                                                        </Style>
+                                                    </StackPanel.Style>
+
+                                                    <TextBlock Text="Name" />
+                                                    <TextBox Text="{Binding Name, UpdateSourceTrigger=PropertyChanged}"
+                                                             Margin="0,4,0,8"
+                                                             TextChanged="SimulationLayerName_Changed" />
+
+                                                    <CheckBox Content="Enabled"
+                                                              IsChecked="{Binding Enabled}"
+                                                              Margin="0,0,0,8"
+                                                              Checked="SimulationLayerEnabled_Changed"
+                                                              Unchecked="SimulationLayerEnabled_Changed" />
+
+                                                    <StackPanel Orientation="Horizontal"
+                                                                Margin="0,0,0,8">
+                                                        <TextBlock Text="Input"
+                                                                   VerticalAlignment="Center" />
+                                                        <ComboBox ItemsSource="{Binding InputFunctionOptions}"
+                                                                  DisplayMemberPath="Label"
+                                                                  SelectedValuePath="Value"
+                                                                  SelectedValue="{Binding InputFunction}"
+                                                                  Margin="8,0,0,0"
+                                                                  Width="180"
+                                                                  SelectionChanged="SimulationLayerInputFunction_Changed" />
+                                                    </StackPanel>
+
+                                                    <StackPanel Orientation="Horizontal">
+                                                        <TextBlock Text="Blend"
+                                                                   VerticalAlignment="Center" />
+                                                        <ComboBox ItemsSource="{Binding BlendModeOptions}"
+                                                                  DisplayMemberPath="Label"
+                                                                  SelectedValuePath="Value"
+                                                                  SelectedValue="{Binding BlendMode}"
+                                                                  Margin="8,0,0,0"
+                                                                  Width="180"
+                                                                  SelectionChanged="SimulationLayerBlendMode_Changed" />
+                                                    </StackPanel>
+                                                </StackPanel>
+                                            </GroupBox>
+                                        </StackPanel>
+                                    </Grid>
+                                </StackPanel>
+                            </ScrollViewer>
+                        </TabItem>
+                    </TabControl>
                 </Grid>
             </Border>
         </Grid>

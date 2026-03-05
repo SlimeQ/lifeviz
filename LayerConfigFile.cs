@@ -1,17 +1,58 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 
 namespace lifeviz;
 
 internal sealed class LayerConfigFile
 {
-    public int Version { get; set; } = 1;
+    public int Version { get; set; } = 3;
     public DateTime SavedUtc { get; set; } = DateTime.UtcNow;
+    public List<LayerConfigSimulationLayer> SimulationLayers { get; set; } = new();
+    public bool PositiveLayerEnabled { get; set; } = true;
+    public string PositiveLayerBlendMode { get; set; } = "Additive";
+    public bool NegativeLayerEnabled { get; set; } = true;
+    public string NegativeLayerBlendMode { get; set; } = "Subtractive";
+    public List<string> SimulationLayerOrder { get; set; } = new() { "Positive", "Negative" };
     public List<LayerConfigSource> Sources { get; set; } = new();
 
-    public static LayerConfigFile FromEditorSources(IEnumerable<LayerEditorSource> sources)
+    public static LayerConfigFile FromEditorSources(
+        IEnumerable<LayerEditorSource> sources,
+        IEnumerable<LayerEditorSimulationLayer> simulationLayers)
     {
-        var file = new LayerConfigFile();
+        var file = new LayerConfigFile
+        {
+            SimulationLayers = simulationLayers.Select(layer => new LayerConfigSimulationLayer
+            {
+                Id = layer.Id,
+                Name = string.IsNullOrWhiteSpace(layer.Name) ? "Simulation Layer" : layer.Name,
+                Enabled = layer.Enabled,
+                InputFunction = string.IsNullOrWhiteSpace(layer.InputFunction) ? "Direct" : layer.InputFunction,
+                BlendMode = string.IsNullOrWhiteSpace(layer.BlendMode) ? "Subtractive" : layer.BlendMode
+            }).ToList()
+        };
+        if (file.SimulationLayers.Count == 0)
+        {
+            file.SimulationLayers = new List<LayerConfigSimulationLayer>
+            {
+                new()
+                {
+                    Id = Guid.NewGuid(),
+                    Name = "Positive",
+                    Enabled = true,
+                    InputFunction = "Direct",
+                    BlendMode = "Additive"
+                },
+                new()
+                {
+                    Id = Guid.NewGuid(),
+                    Name = "Negative",
+                    Enabled = true,
+                    InputFunction = "Inverse",
+                    BlendMode = "Subtractive"
+                }
+            };
+        }
         foreach (var source in sources)
         {
             file.Sources.Add(FromEditorSource(source));
@@ -27,6 +68,23 @@ internal sealed class LayerConfigFile
             list.Add(ToEditorSource(source, null));
         }
         return list;
+    }
+
+    public List<LayerEditorSimulationLayer> ToEditorSimulationLayers()
+    {
+        if (SimulationLayers != null && SimulationLayers.Count > 0)
+        {
+            return SimulationLayers.Select(layer => new LayerEditorSimulationLayer
+            {
+                Id = layer.Id == Guid.Empty ? Guid.NewGuid() : layer.Id,
+                Name = string.IsNullOrWhiteSpace(layer.Name) ? "Simulation Layer" : layer.Name,
+                Enabled = layer.Enabled,
+                InputFunction = string.IsNullOrWhiteSpace(layer.InputFunction) ? "Direct" : layer.InputFunction,
+                BlendMode = string.IsNullOrWhiteSpace(layer.BlendMode) ? "Subtractive" : layer.BlendMode
+            }).ToList();
+        }
+
+        return BuildLegacyEditorSimulationLayers();
     }
 
     private static LayerConfigSource FromEditorSource(LayerEditorSource source)
@@ -160,6 +218,86 @@ internal sealed class LayerConfigFile
 
         return LayerEditorSourceKind.File;
     }
+
+    private List<LayerEditorSimulationLayer> BuildLegacyEditorSimulationLayers()
+    {
+        string positiveBlend = string.IsNullOrWhiteSpace(PositiveLayerBlendMode) ? "Additive" : PositiveLayerBlendMode;
+        string negativeBlend = string.IsNullOrWhiteSpace(NegativeLayerBlendMode) ? "Subtractive" : NegativeLayerBlendMode;
+        var order = BuildLegacyOrder(SimulationLayerOrder);
+        var byKey = new Dictionary<string, LayerEditorSimulationLayer>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["Positive"] = new LayerEditorSimulationLayer
+            {
+                Id = Guid.NewGuid(),
+                Name = "Positive",
+                Enabled = PositiveLayerEnabled,
+                InputFunction = "Direct",
+                BlendMode = positiveBlend
+            },
+            ["Negative"] = new LayerEditorSimulationLayer
+            {
+                Id = Guid.NewGuid(),
+                Name = "Negative",
+                Enabled = NegativeLayerEnabled,
+                InputFunction = "Inverse",
+                BlendMode = negativeBlend
+            }
+        };
+
+        var list = new List<LayerEditorSimulationLayer>(2);
+        foreach (var key in order)
+        {
+            if (byKey.TryGetValue(key, out var layer))
+            {
+                list.Add(layer);
+            }
+        }
+
+        if (list.Count == 0)
+        {
+            list.AddRange(byKey.Values);
+        }
+
+        return list;
+    }
+
+    private static List<string> BuildLegacyOrder(IReadOnlyList<string>? order)
+    {
+        var normalized = new List<string>();
+        if (order != null)
+        {
+            foreach (var value in order)
+            {
+                if (string.IsNullOrWhiteSpace(value))
+                {
+                    continue;
+                }
+
+                if (value.Equals("Positive", StringComparison.OrdinalIgnoreCase) &&
+                    !normalized.Contains("Positive", StringComparer.OrdinalIgnoreCase))
+                {
+                    normalized.Add("Positive");
+                }
+                else if (value.Equals("Negative", StringComparison.OrdinalIgnoreCase) &&
+                         !normalized.Contains("Negative", StringComparer.OrdinalIgnoreCase))
+                {
+                    normalized.Add("Negative");
+                }
+            }
+        }
+
+        if (!normalized.Contains("Positive", StringComparer.OrdinalIgnoreCase))
+        {
+            normalized.Add("Positive");
+        }
+
+        if (!normalized.Contains("Negative", StringComparer.OrdinalIgnoreCase))
+        {
+            normalized.Add("Negative");
+        }
+
+        return normalized;
+    }
 }
 
 internal sealed class LayerConfigSource
@@ -197,4 +335,13 @@ internal sealed class LayerConfigAnimation
     public double AudioGranularMidGain { get; set; } = 1.0;
     public double AudioGranularHighGain { get; set; } = 1.0;
     public double BeatsPerCycle { get; set; } = 1.0;
+}
+
+internal sealed class LayerConfigSimulationLayer
+{
+    public Guid Id { get; set; }
+    public string Name { get; set; } = "Simulation Layer";
+    public bool Enabled { get; set; } = true;
+    public string InputFunction { get; set; } = "Direct";
+    public string BlendMode { get; set; } = "Subtractive";
 }

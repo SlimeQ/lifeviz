@@ -291,6 +291,11 @@
                           Header="Fullscreen"
                           IsCheckable="True"
                           Click="ToggleFullscreen_Click" />
+                <MenuItem Header="Simulation Layers"
+                          x:Name="SimulationLayerMenu">
+                    <MenuItem Header="Manage In Scene Editor..."
+                              Click="OpenLayerEditor_Click" />
+                </MenuItem>
                 <MenuItem Header="Composite Blend"
                           x:Name="BlendModeMenu">
                     <MenuItem Header="Additive" IsCheckable="True" Click="BlendModeItem_Click" />

@@ -8,7 +8,7 @@
 ## Simulation Loop
 
 - `CompositionTarget.Rendering` drives the frame loop in `MainWindow.xaml.cs`; simulation stepping uses a target interval derived from the selected framerate (15 / 30 / 60 / 144 fps), optional FPS oscillation, and optional audio-reactive FPS boost.
-- Each simulation step (unless paused) captures every active source, composites them (per-source blend modes, ordered by the stack, including layer groups), injects the resulting buffer into the simulation, applies optional audio seeding (continuous level-based and/or beat-triggered), advances `_engine.Step()`, then calls `RenderFrame()`.
+- Each simulation step (unless paused) captures every active source, composites them (per-source blend modes, ordered by the stack, including layer groups), injects that final composite into each enabled simulation layer's engine (using each layer's Direct/Inverse input function), applies optional audio seeding (continuous level-based and/or beat-triggered), advances enabled layers, then calls `RenderFrame()`.
 - When target simulation FPS exceeds display refresh, LifeViz runs multiple simulation steps per render callback (bounded catch-up) so high-rate modulation remains visible in evolution speed.
 - The engine maintains a depth stack (`List<bool[,]>`) where index 0 is the newest frame.
 
@@ -17,22 +17,23 @@
 - The depth is partitioned into three slices (R/G/B). If depth = 24, each slice gets 8 layers; remainders are distributed so `Depth % 3` spreads extra layers across R and G first.
 - For each slice, the engine walks the relevant frames and treats alive cells as set bits, forming a binary number. That integer is normalized against the maximum for that bit-length to derive a 0-255 channel value.
 - In *RGB Channel Bins* mode, a post-bin hue rotation can be applied before blitting. The renderer computes a hue-rotation matrix once per frame from the configured `Offset` plus time-based `Speed` term, then remaps each pixel's RGB triplet through that matrix.
-- RGB capture injection uses the inverse of that same hue rotation when building per-channel masks, remapping source colors into the rotated bin basis before threshold/PWM gating. This keeps channel activity aligned to the currently shifted palette.
-- The renderer writes BGRA bytes into `_pixelBuffer`, then blits the buffer via `WriteableBitmap.WritePixels`.
+- RGB capture injection uses the inverse of that same hue rotation when building per-channel masks, remapping source colors into the rotated bin basis before mode-specific gating. This keeps channel activity aligned to the currently shifted palette.
+- The renderer writes BGRA bytes into `_pixelBuffer` by compositing simulation layers in the configured simulation-layer order (editable in Scene Editor), each with its own blend mode; default stack is Positive (Direct/Additive) first, then Negative (Inverse/Subtractive) on top, then blits via `WriteableBitmap.WritePixels`.
+- For simulation-layer `Subtractive` blending, subtraction is performed against the already composited simulation pixel. With passthrough off, subtractive-only stacks use white as the baseline (subtractive identity), while mixed additive/subtractive stacks use black baseline with signed add/sub accumulation. With passthrough underlay precomposited in-buffer, subtractive layers subtract directly from the underlay-backed composite. Add/sub operations accumulate unclamped and clamp once at the end of the pixel, reducing order bias for mixed additive/subtractive stacks.
 
 ## Source Capture Injection
 
 1. `WindowCaptureService` enumerates all visible, non-minimized windows (excluding LifeViz itself), grabs their DWM extended frame bounds to get physical pixel sizes (avoids DPI virtualization cropping), and captures each active window via BitBlt into a `System.Drawing.Bitmap`. `WebcamCaptureService` uses the modern WinRT `MediaCapture` API, which provides a high-performance path to stream frames directly into reusable memory buffers, avoiding the GC pressure associated with frequent allocations during capture. `FileCaptureService` loads static images (including WEBP) and GIFs via WPF bitmap decoders and streams video frames via `ffmpeg`; animated files loop, video sequences advance on end, and frames are converted to BGRA buffers for compositing.
 2. Each capture is downscaled to the grid size and stored as BGRA using the per-source fit mode (Fill default, plus Fit/Stretch/Center/Tile/Span); buffers are reused per window/webcam to avoid per-frame allocations.
 3. Sources are composited CPU-side in stack order using their selected blend modes (Normal, Additive, Multiply, Screen, Overlay, Lighten, Darken, Subtractive) into a shared downscaled buffer. Normal uses the source pixel alpha (plus the layer opacity slider), so transparent PNGs blend cleanly without additive washout; optional keying (Normal-only) applies a per-layer key color + range to attenuate alpha before blending. Layer groups are composited recursively: each group blends its children into a private composite buffer sized to the group's primary aspect (fit within the engine grid), then that group composite is treated as a single layer in its parent stack.
-4. The composited downscaled buffer feeds the injection path: luminance masks for *Naive Grayscale* or per-channel masks for *RGB Channel Bins*. If a source disappears, it is removed automatically; removing the last source restores the default aspect ratio (and webcam capture is released).
+4. The composited downscaled buffer feeds the injection path for every enabled simulation layer. Each layer chooses its own input function: Direct (`y=x`) or Inverse (`y=1-rgb`) before noise/injection-mode logic. All layers share life mode, binning mode, injection mode, and noise settings. In **Threshold** mode, the threshold window (and invert) gates injection; in **Random Pulse** and **Pulse Width Modulation** modes, source intensity directly controls injection probability/duty cycle. If a source disappears, it is removed automatically; removing the last source restores the default aspect ratio (and webcam capture is released).
 
 ## Passthrough Underlay
 
 - When **Passthrough Underlay** is enabled, the composited buffer is preserved for presentation as well as injection.
-- Rendering blends the composited underlay with the simulation output per-pixel. Supported blend modes: Additive (default), Normal, Multiply, Screen, Overlay, Lighten, Darken, Subtractive.
-- Underlay rendering is skipped when no sources are active or the buffer dimensions disagree with the current surface (e.g., immediately after resizing).
-- Final blending happens in a WPF pixel shader (GPU) so passthrough stays responsive; per-source blends occur CPU-side during the composite build.
+- Primary path: when the source composite matches the simulation grid, rendering copies the underlay into `_pixelBuffer` first, then blends simulation layers on top in configured order using each layer's own blend mode. This keeps additive and subtractive simulation behavior consistent while passthrough is on.
+- Fallback path: if dimensions disagree (for example, right after a resize), underlay mixing falls back to the WPF blend shader using the selected **Composite Blend** mode.
+- Underlay rendering is skipped when no sources are active.
 
 ## Layer Animations
 
@@ -60,12 +61,12 @@
 ## Recording
 
 - **Start Recording** captures the final output buffer, then applies a pixel-perfect integer upscale to the nearest HD height (720/1080/1440/2160 when divisible). **Recording Quality** chooses between lossless FFV1 in MKV (compressed, requires `ffmpeg`), crisp H.264 in MP4 (Windows Media Player compatible, requires `ffmpeg`), uncompressed RGB (AVI), or H.264 tiers (High/Balanced/Compact). H.264 uses quality-based VBR with bitrate caps to preserve sharp pixel edges without runaway file sizes.
-- Recording uses the same composite buffers as the renderer (including passthrough blend mode and invert composite), then writes frames at the configured framerate.
+- Recording uses the same final composite logic as the renderer (including passthrough precomposition/fallback behavior and invert composite), then writes frames at the configured framerate.
 
 ## Life Modes
 
-- **Naive Grayscale** (default): one simulation drives all channels, derived from a thresholded luminance mask of the capture.
-- **RGB Channel Bins:** three independent simulations occupy the R/G/B depth bins (same partition used for rendering). Window captures inject per-channel masks into their respective bin zero; propagation stays within each channel's slice (e.g., depth 24 yields bins 0-7, 8-15, 16-23).
+- **Naive Grayscale** (default): each enabled simulation layer uses a single simulation derived from a thresholded luminance mask of the capture, with per-layer Direct/Inverse input function.
+- **RGB Channel Bins:** each enabled simulation layer uses three independent simulations in R/G/B bins. Captures inject per-channel masks into each layer with per-layer Direct/Inverse input function; propagation stays within each channel slice (e.g., depth 24 yields bins 0-7, 8-15, 16-23).
   - Optional `RGB Hue Shift` rotates both output colors and input channel mapping (via inverse transform during mask generation), so the simulation's per-channel behavior changes with hue angle.
 
 ## Binning Modes
@@ -82,4 +83,4 @@ Because every new frame pushes down the history stack, movement leaves chromatic
 - Columns = round(rows * aspectRatio). The primary source replaces the default 16:9 ratio with its current ratio; removing all sources restores 16:9, and the selected height (rows) stays fixed while the width adapts.
 - Capture buffers are pooled (including the raw window/webcam readback), and only the downscaled composite is kept alive, removing GC spikes that caused occasional lurches.
 - Random fill uses 35% seed density to encourage interesting evolution when no source is selected.
-- All rendering is CPU-side; WPF's scaling handles presentation without smoothing (`NearestNeighbor`). Window capture uses GDI BitBlt, so extremely large or numerous sources may require smaller grids or lower tick rates if compositing falls behind.
+- Simulation compositing is CPU-side; passthrough may use either CPU precomposition or shader fallback depending on buffer compatibility. WPF handles presentation scaling without smoothing (`NearestNeighbor`). Window capture uses GDI BitBlt, so extremely large or numerous sources may require smaller grids or lower tick rates if compositing falls behind.

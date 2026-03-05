@@ -75,6 +75,7 @@ public partial class LayerEditorWindow : Window
             selected ??= _viewModel.Sources.FirstOrDefault();
             SetSelectedSource(selected);
             RefreshMasterAudioState();
+            RefreshSimulationLayerState();
             RefreshSelectedVideoTransportState();
         }
         finally
@@ -87,6 +88,14 @@ public partial class LayerEditorWindow : Window
     {
         _viewModel.SourceAudioMasterEnabled = _owner.GetSourceAudioMasterEnabled();
         _viewModel.SourceAudioMasterVolume = _owner.GetSourceAudioMasterVolume();
+    }
+
+    private void RefreshSimulationLayerState()
+    {
+        _owner.GetSimulationLayerSettingsForEditor(out var simulationLayers);
+        _viewModel.SimulationLayers = new ObservableCollection<LayerEditorSimulationLayer>(
+            simulationLayers.Select(CloneSimulationLayer));
+        SetSelectedSimulationLayer(_viewModel.SimulationLayers.FirstOrDefault());
     }
 
     private static HashSet<Guid> CollectExpandedIds(IEnumerable<LayerEditorSource> roots)
@@ -151,6 +160,37 @@ public partial class LayerEditorWindow : Window
         finally
         {
             _updatingSelection = false;
+        }
+    }
+
+    private static LayerEditorSimulationLayer CloneSimulationLayer(LayerEditorSimulationLayer source)
+    {
+        return new LayerEditorSimulationLayer
+        {
+            Id = source.Id,
+            Name = source.Name,
+            Enabled = source.Enabled,
+            InputFunction = source.InputFunction,
+            BlendMode = source.BlendMode
+        };
+    }
+
+    private void SetSelectedSimulationLayer(LayerEditorSimulationLayer? layer)
+    {
+        if (ReferenceEquals(_viewModel.SelectedSimulationLayer, layer))
+        {
+            return;
+        }
+
+        if (_viewModel.SelectedSimulationLayer != null)
+        {
+            _viewModel.SelectedSimulationLayer.IsSelected = false;
+        }
+
+        _viewModel.SelectedSimulationLayer = layer;
+        if (_viewModel.SelectedSimulationLayer != null)
+        {
+            _viewModel.SelectedSimulationLayer.IsSelected = true;
         }
     }
 
@@ -231,6 +271,7 @@ public partial class LayerEditorWindow : Window
 
         var selectedId = _viewModel.SelectedSource?.Id;
         _owner.ApplyLayerEditorSources(_viewModel.Sources.ToList());
+        _owner.ApplySimulationLayerSettingsFromEditor(_viewModel.SimulationLayers.ToList());
         RefreshFromSources(selectedId);
     }
 
@@ -258,7 +299,9 @@ public partial class LayerEditorWindow : Window
 
         try
         {
-            var config = LayerConfigFile.FromEditorSources(_viewModel.Sources);
+            var config = LayerConfigFile.FromEditorSources(
+                _viewModel.Sources,
+                _viewModel.SimulationLayers);
             string json = JsonSerializer.Serialize(config, LayerConfigJsonOptions);
             File.WriteAllText(dialog.FileName, json);
         }
@@ -296,15 +339,20 @@ public partial class LayerEditorWindow : Window
             }
 
             var sources = config.ToEditorSources();
+            var simulationLayers = config.ToEditorSimulationLayers();
             if (_viewModel.LiveMode)
             {
                 _owner.ApplyLayerEditorSources(sources);
+                _owner.ApplySimulationLayerSettingsFromEditor(simulationLayers);
                 RefreshFromSources();
             }
             else
             {
                 _viewModel.Sources = new ObservableCollection<LayerEditorSource>(sources);
                 SetSelectedSource(_viewModel.Sources.FirstOrDefault());
+                _viewModel.SimulationLayers = new ObservableCollection<LayerEditorSimulationLayer>(
+                    simulationLayers.Select(CloneSimulationLayer));
+                SetSelectedSimulationLayer(_viewModel.SimulationLayers.FirstOrDefault());
             }
         }
         catch (Exception ex)
@@ -454,6 +502,152 @@ public partial class LayerEditorWindow : Window
         }
 
         _owner.UpdateMasterSourceAudioVolume(_viewModel.SourceAudioMasterVolume);
+    }
+
+    private void SimulationLayerTree_SelectedItemChanged(object sender, RoutedPropertyChangedEventArgs<object> e)
+    {
+        SetSelectedSimulationLayer(e.NewValue as LayerEditorSimulationLayer);
+    }
+
+    private void AddSimulationLayerDirect_Click(object sender, RoutedEventArgs e) => AddSimulationLayer("Direct");
+
+    private void AddSimulationLayerInverse_Click(object sender, RoutedEventArgs e) => AddSimulationLayer("Inverse");
+
+    private void AddSimulationLayer(string inputFunction)
+    {
+        string baseName = string.Equals(inputFunction, "Inverse", StringComparison.OrdinalIgnoreCase)
+            ? "Inverse Layer"
+            : "Simulation Layer";
+        int suffix = 1;
+        string nextName = baseName;
+        while (_viewModel.SimulationLayers.Any(layer => string.Equals(layer.Name, nextName, StringComparison.OrdinalIgnoreCase)))
+        {
+            suffix++;
+            nextName = $"{baseName} {suffix}";
+        }
+
+        var newLayer = new LayerEditorSimulationLayer
+        {
+            Id = Guid.NewGuid(),
+            Name = nextName,
+            Enabled = true,
+            InputFunction = string.Equals(inputFunction, "Inverse", StringComparison.OrdinalIgnoreCase) ? "Inverse" : "Direct",
+            BlendMode = string.Equals(inputFunction, "Inverse", StringComparison.OrdinalIgnoreCase) ? "Subtractive" : "Additive"
+        };
+
+        int insertIndex = _viewModel.SelectedSimulationLayer != null
+            ? _viewModel.SimulationLayers.IndexOf(_viewModel.SelectedSimulationLayer) + 1
+            : _viewModel.SimulationLayers.Count;
+        insertIndex = Math.Clamp(insertIndex, 0, _viewModel.SimulationLayers.Count);
+        _viewModel.SimulationLayers.Insert(insertIndex, newLayer);
+        SetSelectedSimulationLayer(newLayer);
+
+        if (ShouldApplyLive())
+        {
+            ApplySimulationLayerSettingsLive();
+        }
+    }
+
+    private void RemoveSimulationLayer_Click(object sender, RoutedEventArgs e)
+    {
+        var selected = _viewModel.SelectedSimulationLayer;
+        if (selected == null)
+        {
+            return;
+        }
+
+        if (_viewModel.SimulationLayers.Count <= 1)
+        {
+            MessageBox.Show(this, "At least one simulation layer is required.", "Simulation Layers",
+                MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
+
+        int index = _viewModel.SimulationLayers.IndexOf(selected);
+        if (index < 0)
+        {
+            return;
+        }
+
+        _viewModel.SimulationLayers.RemoveAt(index);
+        var fallback = index < _viewModel.SimulationLayers.Count
+            ? _viewModel.SimulationLayers[index]
+            : _viewModel.SimulationLayers.LastOrDefault();
+        SetSelectedSimulationLayer(fallback);
+
+        if (ShouldApplyLive())
+        {
+            ApplySimulationLayerSettingsLive();
+        }
+    }
+
+    private void MoveSimulationLayerUp_Click(object sender, RoutedEventArgs e) => MoveSimulationLayer(-1);
+
+    private void MoveSimulationLayerDown_Click(object sender, RoutedEventArgs e) => MoveSimulationLayer(1);
+
+    private void MoveSimulationLayer(int delta)
+    {
+        var selected = _viewModel.SelectedSimulationLayer;
+        if (selected == null)
+        {
+            return;
+        }
+
+        int index = _viewModel.SimulationLayers.IndexOf(selected);
+        if (index < 0)
+        {
+            return;
+        }
+
+        int next = Math.Clamp(index + delta, 0, _viewModel.SimulationLayers.Count - 1);
+        if (next == index)
+        {
+            return;
+        }
+
+        _viewModel.SimulationLayers.Move(index, next);
+        SetSelectedSimulationLayer(selected);
+        if (ShouldApplyLive())
+        {
+            ApplySimulationLayerSettingsLive();
+        }
+    }
+
+    private void SimulationLayerName_Changed(object sender, TextChangedEventArgs e)
+    {
+        if (ShouldApplyLive())
+        {
+            ApplySimulationLayerSettingsLive();
+        }
+    }
+
+    private void SimulationLayerEnabled_Changed(object sender, RoutedEventArgs e)
+    {
+        if (ShouldApplyLive())
+        {
+            ApplySimulationLayerSettingsLive();
+        }
+    }
+
+    private void SimulationLayerInputFunction_Changed(object sender, SelectionChangedEventArgs e)
+    {
+        if (ShouldApplyLive())
+        {
+            ApplySimulationLayerSettingsLive();
+        }
+    }
+
+    private void SimulationLayerBlendMode_Changed(object sender, SelectionChangedEventArgs e)
+    {
+        if (ShouldApplyLive())
+        {
+            ApplySimulationLayerSettingsLive();
+        }
+    }
+
+    private void ApplySimulationLayerSettingsLive()
+    {
+        _owner.ApplySimulationLayerSettingsFromEditor(_viewModel.SimulationLayers.ToList());
     }
 
     private void KeyEnabled_Changed(object sender, RoutedEventArgs e)

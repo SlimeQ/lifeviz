@@ -75,6 +75,7 @@ public partial class MainWindow : Window
     };
 
     private readonly GameOfLifeEngine _engine = new();
+    private readonly List<SimulationLayerState> _simulationLayers = new();
     private readonly WindowCaptureService _windowCapture = new();
     private readonly WebcamCaptureService _webcamCapture = new();
     private readonly FileCaptureService _fileCapture = new();
@@ -112,7 +113,6 @@ public partial class MainWindow : Window
     private WriteableBitmap? _underlayBitmap;
     private ImageBrush? _overlayBrush;
     private ImageBrush? _inputBrush;
-    private byte[]? _engineColorBuffer;
     private byte[]? _compositeDownscaledBuffer;
     private byte[]? _invertScratchBuffer;
     private CompositeFrame? _lastCompositeFrame;
@@ -126,6 +126,7 @@ public partial class MainWindow : Window
     private double _lockedAspectRatio = DefaultAspectRatio;
     private IntPtr _windowHandle;
     private bool _passthroughEnabled;
+    private bool _passthroughCompositedInPixelBuffer;
     private BlendMode _blendMode = BlendMode.Additive;
     private double _lifeOpacity = 1.0;
     private double _rgbHueShiftDegrees;
@@ -230,15 +231,13 @@ public partial class MainWindow : Window
 
     private void InitializeVisualizer()
     {
+        EnsureSimulationLayersInitialized();
         _currentAspectRatio = _aspectRatioLocked
             ? _lockedAspectRatio
             : (_sources.Count > 0 ? _sources[0].AspectRatio : DefaultAspectRatio);
-        _engine.Configure(_configuredRows, _configuredDepth, _currentAspectRatio);
+        ConfigureSimulationLayerEngines(_configuredRows, _configuredDepth, _currentAspectRatio, randomize: true);
+        _configuredRows = GetReferenceSimulationEngine().Rows;
         SnapWindowToAspect(preserveHeight: true);
-        _engine.SetMode(_lifeMode);
-        _engine.SetBinningMode(_binningMode);
-        _engine.SetInjectionMode(_injectionMode);
-        _engine.Randomize();
         _effectiveLifeOpacity = _lifeOpacity;
         UpdateDisplaySurface(force: true);
         InitializeEffect();
@@ -355,8 +354,21 @@ public partial class MainWindow : Window
 
                     for (int i = 0; i < stepsToRun; i++)
                     {
-                        _engine.Step();
-                        _simulationFrames++;
+                        bool stepped = false;
+                        foreach (var layer in _simulationLayers)
+                        {
+                            if (!layer.Enabled)
+                            {
+                                continue;
+                            }
+
+                            layer.Engine.Step();
+                            stepped = true;
+                        }
+                        if (stepped)
+                        {
+                            _simulationFrames++;
+                        }
                     }
 
                     _timeSinceLastStep -= stepsToRun * desiredInterval;
@@ -414,16 +426,32 @@ public partial class MainWindow : Window
             _pixelBuffer = new byte[requiredLength];
         }
 
-        int engineRows = _engine.Rows;
-        int engineCols = _engine.Columns;
+        var referenceEngine = GetReferenceSimulationEngine();
+        int engineRows = referenceEngine.Rows;
+        int engineCols = referenceEngine.Columns;
         BuildMappings(width, height, engineCols, engineRows);
 
-        EnsureEngineColorBuffer();
-        var engineColorBuffer = _engineColorBuffer;
-        if (engineColorBuffer == null)
+        var composite = _lastCompositeFrame;
+        byte[]? passthroughBuffer = null;
+        bool compositePassthroughInPixelBuffer = false;
+        if (_passthroughEnabled &&
+            composite != null &&
+            composite.DownscaledWidth == engineCols &&
+            composite.DownscaledHeight == engineRows &&
+            composite.Downscaled.Length >= engineCols * engineRows * 4)
         {
-            return;
+            // Passthrough is composited first so each simulation layer blends on top
+            // using its own blend mode (additive/subtractive/...) against the scene.
+            passthroughBuffer = composite.Downscaled;
+            compositePassthroughInPixelBuffer = true;
         }
+
+        EnsureEngineColorBuffers();
+        var activeLayers = _simulationLayers
+            .Where(layer => layer.Enabled && layer.ColorBuffer != null)
+            .ToArray();
+        bool hasEnabledSubtractiveSimulationLayer = activeLayers.Any(layer => layer.BlendMode == BlendMode.Subtractive);
+        bool hasEnabledNonSubtractiveSimulationLayer = activeLayers.Any(layer => layer.BlendMode != BlendMode.Subtractive);
 
         Parallel.For(0, height, row =>
         {
@@ -432,16 +460,52 @@ public partial class MainWindow : Window
             {
                 int sourceCol = _colMap[col];
                 int sourceIndex = (sourceRow * engineCols + sourceCol) * 4;
-                byte r = engineColorBuffer[sourceIndex];
-                byte g = engineColorBuffer[sourceIndex + 1];
-                byte b = engineColorBuffer[sourceIndex + 2];
                 int index = (row * stride) + (col * 4);
-                _pixelBuffer[index] = b;
-                _pixelBuffer[index + 1] = g;
-                _pixelBuffer[index + 2] = r;
+
+                int baseB;
+                int baseG;
+                int baseR;
+                if (compositePassthroughInPixelBuffer && passthroughBuffer != null)
+                {
+                    baseB = passthroughBuffer[sourceIndex];
+                    baseG = passthroughBuffer[sourceIndex + 1];
+                    baseR = passthroughBuffer[sourceIndex + 2];
+                }
+                else
+                {
+                    // With passthrough off, only subtractive-only stacks use white identity.
+                    // Mixed additive/subtractive stacks stay on black baseline.
+                    int baseline = (hasEnabledSubtractiveSimulationLayer && !hasEnabledNonSubtractiveSimulationLayer) ? 255 : 0;
+                    baseB = baseline;
+                    baseG = baseline;
+                    baseR = baseline;
+                }
+
+                int outB = baseB;
+                int outG = baseG;
+                int outR = baseR;
+
+                foreach (var layer in activeLayers)
+                {
+                    byte[]? colorBuffer = layer.ColorBuffer;
+                    if (colorBuffer == null)
+                    {
+                        continue;
+                    }
+
+                    byte lr = colorBuffer[sourceIndex];
+                    byte lg = colorBuffer[sourceIndex + 1];
+                    byte lb = colorBuffer[sourceIndex + 2];
+                    BlendSimulationLayerInto(ref outB, ref outG, ref outR, lr, lg, lb, layer.BlendMode);
+                }
+
+                _pixelBuffer[index] = ClampToByte(outB);
+                _pixelBuffer[index + 1] = ClampToByte(outG);
+                _pixelBuffer[index + 2] = ClampToByte(outR);
                 _pixelBuffer[index + 3] = 255;
             }
         });
+        _passthroughCompositedInPixelBuffer = compositePassthroughInPixelBuffer;
 
         if (_invertComposite)
         {
@@ -566,7 +630,7 @@ public partial class MainWindow : Window
         }
 
         var composite = _lastCompositeFrame;
-        if (!_passthroughEnabled || composite == null)
+        if (!_passthroughEnabled || composite == null || _passthroughCompositedInPixelBuffer)
         {
             if (_recordingScale > 1)
             {
@@ -613,12 +677,13 @@ public partial class MainWindow : Window
         {
             int destRowOffset = row * sourceStride;
             int overlayRowOffset = row * overlayStride;
+            var passthroughBlendMode = GetEffectivePassthroughBlendMode();
             for (int col = 0; col < sourceWidth; col++)
             {
                 int destIndex = destRowOffset + (col * 4);
                 int overlayIndex = overlayRowOffset + (col * 4);
                 BlendInto(targetBuffer, destIndex, overlayBuffer[overlayIndex], overlayBuffer[overlayIndex + 1], overlayBuffer[overlayIndex + 2],
-                    overlayBuffer[overlayIndex + 3], _blendMode, 1.0);
+                    overlayBuffer[overlayIndex + 3], passthroughBlendMode, 1.0);
             }
         }
 
@@ -703,7 +768,10 @@ public partial class MainWindow : Window
 
     private void Randomize_Click(object sender, RoutedEventArgs e)
     {
-        _engine.Randomize();
+        foreach (var layer in _simulationLayers)
+        {
+            layer.Engine.Randomize();
+        }
         RenderFrame();
     }
 
@@ -1106,7 +1174,7 @@ public partial class MainWindow : Window
 
     private void SetHeight_Click(object sender, RoutedEventArgs e)
     {
-        int? requested = PromptForInteger("Height", _engine.Rows, MinRows, MaxRows);
+        int? requested = PromptForInteger("Height", GetReferenceSimulationEngine().Rows, MinRows, MaxRows);
         if (requested.HasValue)
         {
             ApplyDimensions(requested.Value, null);
@@ -1115,7 +1183,7 @@ public partial class MainWindow : Window
 
     private void SetDepth_Click(object sender, RoutedEventArgs e)
     {
-        int? requested = PromptForInteger("Depth", _engine.Depth, 3, 96);
+        int? requested = PromptForInteger("Depth", GetReferenceSimulationEngine().Depth, 3, 96);
         if (requested.HasValue)
         {
             ApplyDimensions(null, requested.Value);
@@ -1124,8 +1192,9 @@ public partial class MainWindow : Window
 
     private void ApplyDimensions(int? rows, int? depth, double? aspectOverride = null, bool persist = true)
     {
+        var referenceEngine = GetReferenceSimulationEngine();
         int nextRows = rows ?? _configuredRows;
-        int nextDepth = depth ?? _engine.Depth;
+        int nextDepth = depth ?? referenceEngine.Depth;
         double nextAspect = aspectOverride ?? _currentAspectRatio;
         if (_aspectRatioLocked)
         {
@@ -1138,8 +1207,8 @@ public partial class MainWindow : Window
 
         _configuredRows = Math.Clamp(nextRows, MinRows, MaxRows);
         _configuredDepth = Math.Clamp(nextDepth, 3, 96);
-        _engine.Configure(_configuredRows, _configuredDepth, _currentAspectRatio);
-        _configuredRows = _engine.Rows;
+        ConfigureSimulationLayerEngines(_configuredRows, _configuredDepth, _currentAspectRatio, randomize: false);
+        _configuredRows = GetReferenceSimulationEngine().Rows;
         SnapWindowToAspect(preserveHeight: true);
         RebuildSurface();
 
@@ -3613,6 +3682,31 @@ public partial class MainWindow : Window
 
     internal double GetSourceAudioMasterVolume() => _sourceAudioMasterVolume;
 
+    internal void GetSimulationLayerSettingsForEditor(out IReadOnlyList<LayerEditorSimulationLayer> simulationLayers)
+    {
+        EnsureSimulationLayersInitialized();
+        simulationLayers = _simulationLayers
+            .Select(ToEditorSimulationLayer)
+            .ToList();
+    }
+
+    internal void ApplySimulationLayerSettingsFromEditor(IReadOnlyList<LayerEditorSimulationLayer>? simulationLayers)
+    {
+        RunWithoutLayerEditorRefresh(() =>
+        {
+            EnsureSimulationLayersInitialized();
+            var specs = NormalizeSimulationLayerSpecs(simulationLayers);
+            if (!ApplySimulationLayerSpecs(specs))
+            {
+                return;
+            }
+
+            _pulseStep = 0;
+            RenderFrame();
+            SaveConfig();
+        });
+    }
+
     internal void UpdateMasterSourceAudioEnabled(bool enabled)
     {
         RunWithoutLayerEditorRefresh(() =>
@@ -4096,18 +4190,57 @@ public partial class MainWindow : Window
         _lastCompositeFrame = composite;
         UpdateDisplaySurface();
 
-        if (_lifeMode == GameOfLifeEngine.LifeMode.NaiveGrayscale)
+        bool injectedAnyLayer = false;
+        foreach (var layer in _simulationLayers)
         {
-            var grayMask = BuildLuminanceMask(composite.Downscaled, composite.DownscaledWidth, composite.DownscaledHeight, _captureThresholdMin, _captureThresholdMax, _invertThreshold, _injectionMode, _injectionNoise, _engine.Depth, _pulseStep);
-            _engine.InjectFrame(grayMask);
-        }
-        else
-        {
-            var (rMask, gMask, bMask) = BuildChannelMasks(composite.Downscaled, composite.DownscaledWidth, composite.DownscaledHeight, _captureThresholdMin, _captureThresholdMax, _invertThreshold, _injectionMode, _injectionNoise, _engine.RDepth, _engine.GDepth, _engine.BDepth, _pulseStep);
-            _engine.InjectRgbFrame(rMask, gMask, bMask);
+            if (!layer.Enabled)
+            {
+                continue;
+            }
+
+            bool invertInput = layer.InputFunction == SimulationInputFunction.Inverse;
+            if (_lifeMode == GameOfLifeEngine.LifeMode.NaiveGrayscale)
+            {
+                var grayMask = BuildLuminanceMask(
+                    composite.Downscaled,
+                    composite.DownscaledWidth,
+                    composite.DownscaledHeight,
+                    _captureThresholdMin,
+                    _captureThresholdMax,
+                    _invertThreshold,
+                    _injectionMode,
+                    _injectionNoise,
+                    layer.Engine.Depth,
+                    _pulseStep,
+                    invertInput);
+                layer.Engine.InjectFrame(grayMask);
+                injectedAnyLayer = true;
+            }
+            else
+            {
+                var (rMask, gMask, bMask) = BuildChannelMasks(
+                    composite.Downscaled,
+                    composite.DownscaledWidth,
+                    composite.DownscaledHeight,
+                    _captureThresholdMin,
+                    _captureThresholdMax,
+                    _invertThreshold,
+                    _injectionMode,
+                    _injectionNoise,
+                    layer.Engine.RDepth,
+                    layer.Engine.GDepth,
+                    layer.Engine.BDepth,
+                    _pulseStep,
+                    invertInput);
+                layer.Engine.InjectRgbFrame(rMask, gMask, bMask);
+                injectedAnyLayer = true;
+            }
         }
 
-        _pulseStep++;
+        if (injectedAnyLayer)
+        {
+            _pulseStep++;
+        }
     }
 
     private void ApplyAudioReactiveFps()
@@ -4202,8 +4335,9 @@ public partial class MainWindow : Window
 
     private void InjectAudioReactiveSeedBursts(int burstCount)
     {
-        int rows = _engine.Rows;
-        int cols = _engine.Columns;
+        var referenceEngine = GetReferenceSimulationEngine();
+        int rows = referenceEngine.Rows;
+        int cols = referenceEngine.Columns;
         if (rows <= 0 || cols <= 0 || burstCount <= 0)
         {
             return;
@@ -4217,7 +4351,15 @@ public partial class MainWindow : Window
             InjectAudioReactivePattern(mask, centerRow, centerCol);
         }
 
-        _engine.InjectFrame(mask);
+        foreach (var layer in _simulationLayers)
+        {
+            if (!layer.Enabled)
+            {
+                continue;
+            }
+
+            layer.Engine.InjectFrame(mask);
+        }
     }
 
     private void InjectAudioReactivePattern(bool[,] mask, int centerRow, int centerCol)
@@ -4341,7 +4483,8 @@ public partial class MainWindow : Window
             {
                 if (source.Type == CaptureSource.SourceType.Window && source.Window != null)
                 {
-                    var windowFrame = _windowCapture.CaptureFrame(source.Window, _engine.Columns, _engine.Rows, source.FitMode, includeSource: false);
+                    var referenceEngine = GetReferenceSimulationEngine();
+                    var windowFrame = _windowCapture.CaptureFrame(source.Window, referenceEngine.Columns, referenceEngine.Rows, source.FitMode, includeSource: false);
                     if (windowFrame != null)
                     {
                         frame = new SourceFrame(windowFrame.OverlayDownscaled, windowFrame.DownscaledWidth, windowFrame.DownscaledHeight,
@@ -4358,7 +4501,8 @@ public partial class MainWindow : Window
                 }
                 else if (source.Type == CaptureSource.SourceType.Webcam && !string.IsNullOrWhiteSpace(source.WebcamId))
                 {
-                    var webcamFrame = _webcamCapture.CaptureFrame(source.WebcamId, _engine.Columns, _engine.Rows, source.FitMode, includeSource: false);
+                    var referenceEngine = GetReferenceSimulationEngine();
+                    var webcamFrame = _webcamCapture.CaptureFrame(source.WebcamId, referenceEngine.Columns, referenceEngine.Rows, source.FitMode, includeSource: false);
                     if (webcamFrame != null)
                     {
                         frame = new SourceFrame(webcamFrame.OverlayDownscaled, webcamFrame.DownscaledWidth, webcamFrame.DownscaledHeight,
@@ -4374,7 +4518,8 @@ public partial class MainWindow : Window
                 }
                 else if (source.Type == CaptureSource.SourceType.VideoSequence && source.VideoSequence != null)
                 {
-                    var sequenceFrame = source.VideoSequence.CaptureFrame(_engine.Columns, _engine.Rows, source.FitMode, includeSource: false);
+                    var referenceEngine = GetReferenceSimulationEngine();
+                    var sequenceFrame = source.VideoSequence.CaptureFrame(referenceEngine.Columns, referenceEngine.Rows, source.FitMode, includeSource: false);
                     if (sequenceFrame.HasValue)
                     {
                         var value = sequenceFrame.Value;
@@ -4392,7 +4537,8 @@ public partial class MainWindow : Window
                 }
                 else if (source.Type == CaptureSource.SourceType.File && !string.IsNullOrWhiteSpace(source.FilePath))
                 {
-                    var fileFrame = _fileCapture.CaptureFrame(source.FilePath, _engine.Columns, _engine.Rows, source.FitMode, includeSource: false);
+                    var referenceEngine = GetReferenceSimulationEngine();
+                    var fileFrame = _fileCapture.CaptureFrame(source.FilePath, referenceEngine.Columns, referenceEngine.Rows, source.FitMode, includeSource: false);
                     if (fileFrame.HasValue)
                     {
                         var value = fileFrame.Value;
@@ -4731,28 +4877,6 @@ public partial class MainWindow : Window
         SaveConfig();
     }
 
-    private static double ComputePwmSignal(double value, double min, double max, bool invert)
-    {
-        min = Math.Clamp(min, 0, 1);
-        max = Math.Clamp(max, 0, 1);
-        if (min > max)
-        {
-            (min, max) = (max, min);
-        }
-
-        if (value < min || value > max)
-        {
-            return 0;
-        }
-        double norm = (max > min) ? (value - min) / (max - min) : 1.0;
-        norm = Math.Clamp(norm, 0, 1);
-        if (invert)
-        {
-            return norm >= 0.5 ? 1.0 : 0.0;
-        }
-        return norm;
-    }
-
     private static bool PulseWidthAlive(double value, int period, int pulseStep)
     {
         period = Math.Max(1, period);
@@ -4782,14 +4906,8 @@ public partial class MainWindow : Window
             (min, max) = (max, min);
         }
 
-        if (value < min) return false;
-        if (value > max) return true;
-        if (invert)
-        {
-            double mid = (min + max) / 2.0;
-            return value >= mid;
-        }
-        return true;
+        bool insideWindow = value >= min && value <= max;
+        return invert ? !insideWindow : insideWindow;
     }
 
     private void FramerateItem_Click(object sender, RoutedEventArgs e)
@@ -4819,34 +4937,47 @@ public partial class MainWindow : Window
 
     private void BlendModeItem_Click(object sender, RoutedEventArgs e)
     {
-        if (sender is not MenuItem { Header: string header })
+        if (!TryGetBlendModeFromMenuItem(sender, _blendMode, out var mode))
         {
             return;
         }
 
-        if (TryParseBlendMode(header, _blendMode, out var mode))
+        _blendMode = mode;
+        UpdateBlendModeMenuChecks();
+        RenderFrame();
+        SaveConfig();
+    }
+
+    private static bool TryGetBlendModeFromMenuItem(object sender, BlendMode fallback, out BlendMode mode)
+    {
+        if (sender is not MenuItem { Header: string header })
         {
-            _blendMode = mode;
-            UpdateBlendModeMenuChecks();
-            RenderFrame();
-            SaveConfig();
+            mode = fallback;
+            return false;
         }
+
+        return TryParseBlendMode(header, fallback, out mode);
     }
 
     private void UpdateBlendModeMenuChecks()
     {
-        if (BlendModeMenu == null)
+        UpdateBlendModeMenuChecks(BlendModeMenu, _blendMode);
+    }
+
+    private static void UpdateBlendModeMenuChecks(MenuItem? menu, BlendMode selectedMode)
+    {
+        if (menu == null)
         {
             return;
         }
 
-        foreach (var item in BlendModeMenu.Items)
+        foreach (var item in menu.Items)
         {
             if (item is MenuItem menuItem && menuItem.Header is string header &&
-                TryParseBlendMode(header, _blendMode, out var mode))
+                TryParseBlendMode(header, selectedMode, out var mode))
             {
                 menuItem.IsCheckable = true;
-                menuItem.IsChecked = mode == _blendMode;
+                menuItem.IsChecked = mode == selectedMode;
             }
         }
     }
@@ -4863,11 +4994,37 @@ public partial class MainWindow : Window
         Subtractive
     }
 
+    private enum SimulationInputFunction
+    {
+        Direct,
+        Inverse
+    }
+
     private enum AudioReactiveSeedPattern
     {
         Glider,
         RPentomino,
         RandomBurst
+    }
+
+    private sealed class SimulationLayerState
+    {
+        public Guid Id { get; set; }
+        public string Name { get; set; } = "Simulation Layer";
+        public bool Enabled { get; set; } = true;
+        public SimulationInputFunction InputFunction { get; set; } = SimulationInputFunction.Direct;
+        public BlendMode BlendMode { get; set; } = BlendMode.Subtractive;
+        public GameOfLifeEngine Engine { get; set; } = new();
+        public byte[]? ColorBuffer { get; set; }
+    }
+
+    private sealed class SimulationLayerSpec
+    {
+        public Guid Id { get; init; }
+        public string Name { get; init; } = "Simulation Layer";
+        public bool Enabled { get; init; } = true;
+        public SimulationInputFunction InputFunction { get; init; } = SimulationInputFunction.Direct;
+        public BlendMode BlendMode { get; init; } = BlendMode.Subtractive;
     }
 
     private static bool TryParseBlendMode(string? value, BlendMode fallback, out BlendMode mode)
@@ -4896,6 +5053,352 @@ public partial class MainWindow : Window
     private static BlendMode ParseBlendModeOrDefault(string? value, BlendMode fallback)
     {
         return TryParseBlendMode(value, fallback, out var mode) ? mode : fallback;
+    }
+
+    private static SimulationInputFunction ParseSimulationInputFunctionOrDefault(string? value, SimulationInputFunction fallback)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return fallback;
+        }
+
+        if (Enum.TryParse<SimulationInputFunction>(value, true, out var parsed))
+        {
+            return parsed;
+        }
+
+        return fallback;
+    }
+
+    private LayerEditorSimulationLayer ToEditorSimulationLayer(SimulationLayerState layer)
+    {
+        return new LayerEditorSimulationLayer
+        {
+            Id = layer.Id,
+            Name = layer.Name,
+            Enabled = layer.Enabled,
+            InputFunction = layer.InputFunction.ToString(),
+            BlendMode = layer.BlendMode.ToString()
+        };
+    }
+
+    private void EnsureSimulationLayersInitialized()
+    {
+        if (_simulationLayers.Count > 0)
+        {
+            return;
+        }
+
+        var specs = BuildDefaultSimulationLayerSpecs();
+        _simulationLayers.Add(new SimulationLayerState
+        {
+            Id = specs[0].Id,
+            Name = specs[0].Name,
+            Enabled = specs[0].Enabled,
+            InputFunction = specs[0].InputFunction,
+            BlendMode = specs[0].BlendMode,
+            Engine = _engine
+        });
+        _simulationLayers.Add(new SimulationLayerState
+        {
+            Id = specs[1].Id,
+            Name = specs[1].Name,
+            Enabled = specs[1].Enabled,
+            InputFunction = specs[1].InputFunction,
+            BlendMode = specs[1].BlendMode,
+            Engine = CreateConfiguredSimulationEngine(randomize: true)
+        });
+        ConfigureSimulationEngine(_engine, _configuredRows, _configuredDepth, _currentAspectRatio, randomize: true);
+    }
+
+    private GameOfLifeEngine GetReferenceSimulationEngine()
+    {
+        if (_simulationLayers.Count > 0)
+        {
+            return _simulationLayers[0].Engine;
+        }
+
+        return _engine;
+    }
+
+    private void ConfigureSimulationLayerEngines(int rows, int depth, double aspectRatio, bool randomize)
+    {
+        EnsureSimulationLayersInitialized();
+        foreach (var layer in _simulationLayers)
+        {
+            ConfigureSimulationEngine(layer.Engine, rows, depth, aspectRatio, randomize);
+        }
+    }
+
+    private GameOfLifeEngine CreateConfiguredSimulationEngine(bool randomize)
+    {
+        var engine = new GameOfLifeEngine();
+        ConfigureSimulationEngine(engine, _configuredRows, _configuredDepth, _currentAspectRatio, randomize);
+        return engine;
+    }
+
+    private void ConfigureSimulationEngine(GameOfLifeEngine engine, int rows, int depth, double aspectRatio, bool randomize)
+    {
+        double resolvedAspect = aspectRatio > 0.01 ? aspectRatio : DefaultAspectRatio;
+        engine.Configure(rows, depth, resolvedAspect);
+        engine.SetMode(_lifeMode);
+        engine.SetBinningMode(_binningMode);
+        engine.SetInjectionMode(_injectionMode);
+        if (randomize)
+        {
+            engine.Randomize();
+        }
+    }
+
+    private static List<SimulationLayerSpec> BuildDefaultSimulationLayerSpecs()
+    {
+        return new List<SimulationLayerSpec>
+        {
+            new()
+            {
+                Id = Guid.NewGuid(),
+                Name = "Positive",
+                Enabled = true,
+                InputFunction = SimulationInputFunction.Direct,
+                BlendMode = BlendMode.Additive
+            },
+            new()
+            {
+                Id = Guid.NewGuid(),
+                Name = "Negative",
+                Enabled = true,
+                InputFunction = SimulationInputFunction.Inverse,
+                BlendMode = BlendMode.Subtractive
+            }
+        };
+    }
+
+    private static string NormalizeSimulationLayerName(string? value, int index)
+    {
+        if (!string.IsNullOrWhiteSpace(value))
+        {
+            return value.Trim();
+        }
+
+        return $"Simulation Layer {index + 1}";
+    }
+
+    private static List<SimulationLayerSpec> NormalizeSimulationLayerSpecs(IReadOnlyList<LayerEditorSimulationLayer>? simulationLayers)
+    {
+        var normalized = new List<SimulationLayerSpec>();
+        var seenIds = new HashSet<Guid>();
+
+        if (simulationLayers != null)
+        {
+            for (int i = 0; i < simulationLayers.Count; i++)
+            {
+                var layer = simulationLayers[i];
+                Guid id = layer.Id;
+                if (id == Guid.Empty || !seenIds.Add(id))
+                {
+                    do
+                    {
+                        id = Guid.NewGuid();
+                    } while (!seenIds.Add(id));
+                }
+
+                var inputFunction = ParseSimulationInputFunctionOrDefault(layer.InputFunction, SimulationInputFunction.Direct);
+                var defaultBlend = inputFunction == SimulationInputFunction.Inverse ? BlendMode.Subtractive : BlendMode.Additive;
+                var blendMode = ParseBlendModeOrDefault(layer.BlendMode, defaultBlend);
+                normalized.Add(new SimulationLayerSpec
+                {
+                    Id = id,
+                    Name = NormalizeSimulationLayerName(layer.Name, i),
+                    Enabled = layer.Enabled,
+                    InputFunction = inputFunction,
+                    BlendMode = blendMode
+                });
+            }
+        }
+
+        if (normalized.Count == 0)
+        {
+            return BuildDefaultSimulationLayerSpecs();
+        }
+
+        return normalized;
+    }
+
+    private static List<SimulationLayerSpec> NormalizeSimulationLayerSpecs(IReadOnlyList<AppConfig.SimulationLayerConfig>? simulationLayers)
+    {
+        var normalized = new List<SimulationLayerSpec>();
+        var seenIds = new HashSet<Guid>();
+
+        if (simulationLayers != null)
+        {
+            for (int i = 0; i < simulationLayers.Count; i++)
+            {
+                var layer = simulationLayers[i];
+                Guid id = layer.Id;
+                if (id == Guid.Empty || !seenIds.Add(id))
+                {
+                    do
+                    {
+                        id = Guid.NewGuid();
+                    } while (!seenIds.Add(id));
+                }
+
+                var inputFunction = ParseSimulationInputFunctionOrDefault(layer.InputFunction, SimulationInputFunction.Direct);
+                var defaultBlend = inputFunction == SimulationInputFunction.Inverse ? BlendMode.Subtractive : BlendMode.Additive;
+                var blendMode = ParseBlendModeOrDefault(layer.BlendMode, defaultBlend);
+                normalized.Add(new SimulationLayerSpec
+                {
+                    Id = id,
+                    Name = NormalizeSimulationLayerName(layer.Name, i),
+                    Enabled = layer.Enabled,
+                    InputFunction = inputFunction,
+                    BlendMode = blendMode
+                });
+            }
+        }
+
+        if (normalized.Count == 0)
+        {
+            return BuildDefaultSimulationLayerSpecs();
+        }
+
+        return normalized;
+    }
+
+    private static List<SimulationLayerSpec> BuildLegacySimulationLayerSpecs(
+        bool positiveLayerEnabled,
+        string? positiveLayerBlendMode,
+        bool negativeLayerEnabled,
+        string? negativeLayerBlendMode,
+        IReadOnlyList<string>? simulationLayerOrder)
+    {
+        var positive = new SimulationLayerSpec
+        {
+            Id = Guid.NewGuid(),
+            Name = "Positive",
+            Enabled = positiveLayerEnabled,
+            InputFunction = SimulationInputFunction.Direct,
+            BlendMode = ParseBlendModeOrDefault(positiveLayerBlendMode, BlendMode.Additive)
+        };
+        var negative = new SimulationLayerSpec
+        {
+            Id = Guid.NewGuid(),
+            Name = "Negative",
+            Enabled = negativeLayerEnabled,
+            InputFunction = SimulationInputFunction.Inverse,
+            BlendMode = ParseBlendModeOrDefault(negativeLayerBlendMode, BlendMode.Subtractive)
+        };
+
+        var list = new List<SimulationLayerSpec>(2);
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        if (simulationLayerOrder != null)
+        {
+            foreach (var item in simulationLayerOrder)
+            {
+                if (string.IsNullOrWhiteSpace(item))
+                {
+                    continue;
+                }
+
+                if (item.Equals("Positive", StringComparison.OrdinalIgnoreCase) && seen.Add("Positive"))
+                {
+                    list.Add(positive);
+                }
+                else if (item.Equals("Negative", StringComparison.OrdinalIgnoreCase) && seen.Add("Negative"))
+                {
+                    list.Add(negative);
+                }
+            }
+        }
+
+        if (seen.Add("Positive"))
+        {
+            list.Add(positive);
+        }
+        if (seen.Add("Negative"))
+        {
+            list.Add(negative);
+        }
+
+        return list;
+    }
+
+    private bool ApplySimulationLayerSpecs(IReadOnlyList<SimulationLayerSpec> specs)
+    {
+        var existingById = _simulationLayers.ToDictionary(layer => layer.Id);
+        var nextLayers = new List<SimulationLayerState>(specs.Count);
+        bool changed = _simulationLayers.Count != specs.Count;
+
+        for (int index = 0; index < specs.Count; index++)
+        {
+            var spec = specs[index];
+            SimulationLayerState layer;
+            if (!existingById.TryGetValue(spec.Id, out layer!))
+            {
+                GameOfLifeEngine engine;
+                if (_simulationLayers.Count == 0 && index == 0)
+                {
+                    engine = _engine;
+                    ConfigureSimulationEngine(engine, _configuredRows, _configuredDepth, _currentAspectRatio, randomize: true);
+                }
+                else
+                {
+                    engine = CreateConfiguredSimulationEngine(randomize: true);
+                }
+
+                layer = new SimulationLayerState
+                {
+                    Id = spec.Id,
+                    Engine = engine
+                };
+                changed = true;
+            }
+            else
+            {
+                existingById.Remove(spec.Id);
+                if (index >= _simulationLayers.Count || _simulationLayers[index].Id != spec.Id)
+                {
+                    changed = true;
+                }
+            }
+
+            if (!string.Equals(layer.Name, spec.Name, StringComparison.Ordinal))
+            {
+                layer.Name = spec.Name;
+                changed = true;
+            }
+            if (layer.Enabled != spec.Enabled)
+            {
+                layer.Enabled = spec.Enabled;
+                changed = true;
+            }
+            if (layer.InputFunction != spec.InputFunction)
+            {
+                layer.InputFunction = spec.InputFunction;
+                changed = true;
+            }
+            if (layer.BlendMode != spec.BlendMode)
+            {
+                layer.BlendMode = spec.BlendMode;
+                changed = true;
+            }
+
+            nextLayers.Add(layer);
+        }
+
+        if (existingById.Count > 0)
+        {
+            changed = true;
+        }
+
+        if (!changed)
+        {
+            return false;
+        }
+
+        _simulationLayers.Clear();
+        _simulationLayers.AddRange(nextLayers);
+        return true;
     }
 
     private static string FormatHexColor(byte r, byte g, byte b) => $"#{r:X2}{g:X2}{b:X2}";
@@ -5028,13 +5531,14 @@ public partial class MainWindow : Window
 
     private void UpdateDisplaySurface(bool force = false)
     {
-        int targetWidth = _engine.Columns;
-        int targetHeight = _engine.Rows;
+        var referenceEngine = GetReferenceSimulationEngine();
+        int targetWidth = referenceEngine.Columns;
+        int targetHeight = referenceEngine.Rows;
 
         if (targetWidth <= 0 || targetHeight <= 0)
         {
-            targetWidth = _engine.Columns;
-            targetHeight = _engine.Rows;
+            targetWidth = referenceEngine.Columns;
+            targetHeight = referenceEngine.Rows;
         }
 
         bool needsBitmap = _bitmap == null || force || _bitmap.PixelWidth != targetWidth || _bitmap.PixelHeight != targetHeight;
@@ -5146,16 +5650,17 @@ public partial class MainWindow : Window
     {
         width = 0;
         height = 0;
+        var referenceEngine = GetReferenceSimulationEngine();
 
         if (useEngineDimensions || sources.Count == 0)
         {
-            width = _engine.Columns;
-            height = _engine.Rows;
+            width = referenceEngine.Columns;
+            height = referenceEngine.Rows;
             return width > 0 && height > 0;
         }
 
-        int maxWidth = _engine.Columns;
-        int maxHeight = _engine.Rows;
+        int maxWidth = referenceEngine.Columns;
+        int maxHeight = referenceEngine.Rows;
         if (maxWidth <= 0 || maxHeight <= 0)
         {
             return false;
@@ -5933,6 +6438,73 @@ public partial class MainWindow : Window
         destination[destIndex + 3] = 255;
     }
 
+    private static void BlendSimulationLayerInto(
+        ref int destinationB,
+        ref int destinationG,
+        ref int destinationR,
+        byte sr,
+        byte sg,
+        byte sb,
+        BlendMode mode)
+    {
+        int db = destinationB;
+        int dg = destinationG;
+        int dr = destinationR;
+
+        int b;
+        int g;
+        int r;
+
+        switch (mode)
+        {
+            case BlendMode.Additive:
+                b = db + sb;
+                g = dg + sg;
+                r = dr + sr;
+                break;
+            case BlendMode.Multiply:
+                b = db * sb / 255;
+                g = dg * sg / 255;
+                r = dr * sr / 255;
+                break;
+            case BlendMode.Screen:
+                b = 255 - ((255 - db) * (255 - sb) / 255);
+                g = 255 - ((255 - dg) * (255 - sg) / 255);
+                r = 255 - ((255 - dr) * (255 - sr) / 255);
+                break;
+            case BlendMode.Overlay:
+                b = db < 128 ? (2 * db * sb) / 255 : 255 - (2 * (255 - db) * (255 - sb) / 255);
+                g = dg < 128 ? (2 * dg * sg) / 255 : 255 - (2 * (255 - dg) * (255 - sg) / 255);
+                r = dr < 128 ? (2 * dr * sr) / 255 : 255 - (2 * (255 - dr) * (255 - sr) / 255);
+                break;
+            case BlendMode.Lighten:
+                b = Math.Max(db, sb);
+                g = Math.Max(dg, sg);
+                r = Math.Max(dr, sr);
+                break;
+            case BlendMode.Darken:
+                b = Math.Min(db, sb);
+                g = Math.Min(dg, sg);
+                r = Math.Min(dr, sr);
+                break;
+            case BlendMode.Subtractive:
+                b = db - sb;
+                g = dg - sg;
+                r = dr - sr;
+                break;
+            case BlendMode.Normal:
+            default:
+                b = sb;
+                g = sg;
+                r = sr;
+                break;
+        }
+
+        destinationB = b;
+        destinationG = g;
+        destinationR = r;
+    }
+
     private static byte ClampToByte(int value) => (byte)(value < 0 ? 0 : value > 255 ? 255 : value);
 
     private static void BuildHueRotationMatrix(double hueShiftDegrees,
@@ -5957,13 +6529,28 @@ public partial class MainWindow : Window
         bb = 0.114 + (0.886 * cos) - (0.203 * sin);
     }
 
-    private void EnsureEngineColorBuffer()
+    private void EnsureEngineColorBuffers()
     {
-        int size = _engine.Columns * _engine.Rows * 4;
-        if (_engineColorBuffer == null || _engineColorBuffer.Length != size)
+        foreach (var layer in _simulationLayers)
         {
-            _engineColorBuffer = new byte[size];
+            if (!layer.Enabled)
+            {
+                continue;
+            }
+
+            EnsureEngineColorBuffer(layer);
         }
+    }
+
+    private void EnsureEngineColorBuffer(SimulationLayerState layer)
+    {
+        var engine = layer.Engine;
+        int size = engine.Columns * engine.Rows * 4;
+        if (layer.ColorBuffer == null || layer.ColorBuffer.Length != size)
+        {
+            layer.ColorBuffer = new byte[size];
+        }
+        byte[] targetBuffer = layer.ColorBuffer;
 
         double hueShiftDegrees = CurrentRgbHueShiftDegrees();
         bool applyHueShift = _lifeMode == GameOfLifeEngine.LifeMode.RgbChannels && Math.Abs(hueShiftDegrees) > 0.001;
@@ -5973,12 +6560,12 @@ public partial class MainWindow : Window
             BuildHueRotationMatrix(hueShiftDegrees, out rr, out rg, out rb, out gr, out gg, out gb, out br, out bg, out bb);
         }
 
-        Parallel.For(0, _engine.Rows, row =>
+        Parallel.For(0, engine.Rows, row =>
         {
-            int rowOffset = row * _engine.Columns * 4;
-            for (int col = 0; col < _engine.Columns; col++)
+            int rowOffset = row * engine.Columns * 4;
+            for (int col = 0; col < engine.Columns; col++)
             {
-                var (r, g, b) = _engine.GetColor(row, col);
+                var (r, g, b) = engine.GetColor(row, col);
                 if (applyHueShift)
                 {
                     int rotatedR = (int)Math.Round((rr * r) + (rg * g) + (rb * b));
@@ -5990,10 +6577,10 @@ public partial class MainWindow : Window
                 }
 
                 int index = rowOffset + (col * 4);
-                _engineColorBuffer[index] = r;
-                _engineColorBuffer[index + 1] = g;
-                _engineColorBuffer[index + 2] = b;
-                _engineColorBuffer[index + 3] = 255;
+                targetBuffer[index] = r;
+                targetBuffer[index + 1] = g;
+                targetBuffer[index + 2] = b;
+                targetBuffer[index + 3] = 255;
             }
         });
     }
@@ -6028,8 +6615,14 @@ public partial class MainWindow : Window
             return;
         }
 
+        if (_passthroughCompositedInPixelBuffer)
+        {
+            // Underlay is already in _pixelBuffer for this frame.
+            return;
+        }
+
         var composite = _lastCompositeFrame;
-        bool hasOverlay = _passthroughEnabled && composite != null;
+        bool hasOverlay = ShouldUseShaderPassthrough() && composite != null;
         if (!hasOverlay)
         {
             return;
@@ -6067,8 +6660,9 @@ public partial class MainWindow : Window
 
     private void UpdateEffectInput()
     {
-        _blendEffect.UseOverlay = _passthroughEnabled && _lastCompositeFrame != null ? 1.0 : 0.0;
-        _blendEffect.Mode = _blendMode switch
+        _blendEffect.UseOverlay = ShouldUseShaderPassthrough() ? 1.0 : 0.0;
+        var passthroughBlendMode = GetEffectivePassthroughBlendMode();
+        _blendEffect.Mode = passthroughBlendMode switch
         {
             BlendMode.Additive => 0.0,
             BlendMode.Normal => 1.0,
@@ -6085,6 +6679,31 @@ public partial class MainWindow : Window
             _inputBrush.ImageSource = _bitmap;
             _inputBrush.Opacity = Math.Clamp(_effectiveLifeOpacity, 0, 1);
         }
+    }
+
+    private bool ShouldUseShaderPassthrough()
+    {
+        return _passthroughEnabled &&
+               _lastCompositeFrame != null &&
+               !_passthroughCompositedInPixelBuffer;
+    }
+
+    private BlendMode GetEffectivePassthroughBlendMode()
+    {
+        bool hasEnabledSubtractiveSimulationLayer = _simulationLayers.Any(layer =>
+            layer.Enabled &&
+            layer.BlendMode == BlendMode.Subtractive);
+
+        if (_passthroughEnabled &&
+            _blendMode == BlendMode.Additive &&
+            hasEnabledSubtractiveSimulationLayer)
+        {
+            // White passthrough regions clip additive overlays; use Darken so subtractive-layer
+            // detail stays visible inside bright underlay regions.
+            return BlendMode.Darken;
+        }
+
+        return _blendMode;
     }
 
     private void UpdateFpsOverlay()
@@ -6164,7 +6783,10 @@ public partial class MainWindow : Window
         }
 
         _binningMode = mode;
-        _engine.SetBinningMode(mode);
+        foreach (var layer in _simulationLayers)
+        {
+            layer.Engine.SetBinningMode(mode);
+        }
         UpdateBinningModeMenuChecks();
         RenderFrame();
         SaveConfig();
@@ -6199,7 +6821,10 @@ public partial class MainWindow : Window
         }
 
         _injectionMode = mode;
-        _engine.SetInjectionMode(mode);
+        foreach (var layer in _simulationLayers)
+        {
+            layer.Engine.SetInjectionMode(mode);
+        }
         _pulseStep = 0;
         UpdateInjectionModeMenuChecks();
         RenderFrame();
@@ -6386,7 +7011,10 @@ public partial class MainWindow : Window
         }
 
         _lifeMode = mode;
-        _engine.SetMode(mode);
+        foreach (var layer in _simulationLayers)
+        {
+            layer.Engine.SetMode(mode);
+        }
         _pulseStep = 0;
         UpdateRgbHueShiftControls();
         UpdateDisplaySurface(force: true);
@@ -6485,7 +7113,7 @@ public partial class MainWindow : Window
         }
     }
 
-    private bool[,] BuildLuminanceMask(byte[] buffer, int width, int height, double min, double max, bool invert, GameOfLifeEngine.InjectionMode mode, double noiseProbability, int period, int pulseStep)
+    private bool[,] BuildLuminanceMask(byte[] buffer, int width, int height, double min, double max, bool invert, GameOfLifeEngine.InjectionMode mode, double noiseProbability, int period, int pulseStep, bool invertInput = false)
     {
         min = Math.Clamp(min, 0, 1);
         max = Math.Clamp(max, 0, 1);
@@ -6513,16 +7141,20 @@ public partial class MainWindow : Window
 
                 bool noiseFail = noiseProbability > 0 && Random.Shared.NextDouble() < noiseProbability;
                 double luminance = (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255.0;
+                if (invertInput)
+                {
+                    luminance = 1.0 - luminance;
+                }
                 bool alive = false;
                 if (mode == GameOfLifeEngine.InjectionMode.RandomPulse)
                 {
-                    double gate = ComputePwmSignal(luminance, min, max, invert);
-                    alive = gate > 0 && Random.Shared.NextDouble() < luminance;
+                    // Random pulse uses source intensity directly as alive probability.
+                    alive = Random.Shared.NextDouble() < luminance;
                 }
                 else if (mode == GameOfLifeEngine.InjectionMode.PulseWidthModulation)
                 {
-                    double gate = ComputePwmSignal(luminance, min, max, invert);
-                    alive = gate > 0 && PulseWidthAlive(gate, period, pulseStep);
+                    // PWM uses source intensity directly as pulse duty cycle.
+                    alive = PulseWidthAlive(luminance, period, pulseStep);
                 }
                 else
                 {
@@ -6535,7 +7167,7 @@ public partial class MainWindow : Window
         return mask;
     }
 
-    private (bool[,] r, bool[,] g, bool[,] b) BuildChannelMasks(byte[] buffer, int width, int height, double min, double max, bool invert, GameOfLifeEngine.InjectionMode mode, double noiseProbability, int rPeriod, int gPeriod, int bPeriod, int pulseStep)
+    private (bool[,] r, bool[,] g, bool[,] b) BuildChannelMasks(byte[] buffer, int width, int height, double min, double max, bool invert, GameOfLifeEngine.InjectionMode mode, double noiseProbability, int rPeriod, int gPeriod, int bPeriod, int pulseStep, bool invertInput = false)
     {
         min = Math.Clamp(min, 0, 1);
         max = Math.Clamp(max, 0, 1);
@@ -6579,6 +7211,12 @@ public partial class MainWindow : Window
                 double nr = r / 255.0;
                 double ng = g / 255.0;
                 double nb = b / 255.0;
+                if (invertInput)
+                {
+                    nr = 1.0 - nr;
+                    ng = 1.0 - ng;
+                    nb = 1.0 - nb;
+                }
                 if (remapToRotatedBins)
                 {
                     double mappedR = (rr * nr) + (rg * ng) + (rb * nb);
@@ -6589,24 +7227,20 @@ public partial class MainWindow : Window
                     nb = Math.Clamp(mappedB, 0, 1);
                 }
 
-                double rGate = ComputePwmSignal(nr, min, max, invert);
-                double gGate = ComputePwmSignal(ng, min, max, invert);
-                double bGate = ComputePwmSignal(nb, min, max, invert);
-
                 bool rAlive = mode == GameOfLifeEngine.InjectionMode.RandomPulse
-                    ? rGate > 0 && randomGate < nr
+                    ? randomGate < nr
                     : mode == GameOfLifeEngine.InjectionMode.PulseWidthModulation
-                        ? rGate > 0 && PulseWidthAlive(nr, rPeriod, pulseStep)
+                        ? PulseWidthAlive(nr, rPeriod, pulseStep)
                     : EvaluateThresholdValue(nr, min, max, invert);
                 bool gAlive = mode == GameOfLifeEngine.InjectionMode.RandomPulse
-                    ? gGate > 0 && randomGate < ng
+                    ? randomGate < ng
                     : mode == GameOfLifeEngine.InjectionMode.PulseWidthModulation
-                        ? gGate > 0 && PulseWidthAlive(ng, gPeriod, pulseStep)
+                        ? PulseWidthAlive(ng, gPeriod, pulseStep)
                     : EvaluateThresholdValue(ng, min, max, invert);
                 bool bAlive = mode == GameOfLifeEngine.InjectionMode.RandomPulse
-                    ? bGate > 0 && randomGate < nb
+                    ? randomGate < nb
                     : mode == GameOfLifeEngine.InjectionMode.PulseWidthModulation
-                        ? bGate > 0 && PulseWidthAlive(nb, bPeriod, pulseStep)
+                        ? PulseWidthAlive(nb, bPeriod, pulseStep)
                     : EvaluateThresholdValue(nb, min, max, invert);
 
                 rMask[row, col] = !noiseFail && rAlive;
@@ -7033,6 +7667,15 @@ public partial class MainWindow : Window
             _lastAudioReactiveBeatCount = _audioBeatDetector.BeatCount;
 
             _blendMode = ParseBlendModeOrDefault(config.BlendMode, _blendMode);
+            var simulationSpecs = (config.SimulationLayers != null && config.SimulationLayers.Count > 0)
+                ? NormalizeSimulationLayerSpecs(config.SimulationLayers)
+                : BuildLegacySimulationLayerSpecs(
+                    config.PositiveLayerEnabled,
+                    config.PositiveLayerBlendMode,
+                    config.NegativeLayerEnabled,
+                    config.NegativeLayerBlendMode,
+                    config.SimulationLayerOrder);
+            ApplySimulationLayerSpecs(simulationSpecs);
 
             _pendingFullscreen = config.Fullscreen;
             RestoreSources(config.Sources);
@@ -7065,6 +7708,7 @@ public partial class MainWindow : Window
 
         try
         {
+            EnsureSimulationLayersInitialized();
             var config = new AppConfig
             {
                 CaptureThresholdMin = _captureThresholdMin,
@@ -7111,6 +7755,12 @@ public partial class MainWindow : Window
                 SourceAudioMasterEnabled = _sourceAudioMasterEnabled,
                 SourceAudioMasterVolume = _sourceAudioMasterVolume,
                 BlendMode = _blendMode.ToString(),
+                SimulationLayers = BuildSimulationLayerConfigs(),
+                PositiveLayerBlendMode = BuildLegacyPositiveLayerBlendMode(),
+                NegativeLayerBlendMode = BuildLegacyNegativeLayerBlendMode(),
+                PositiveLayerEnabled = BuildLegacyPositiveLayerEnabled(),
+                NegativeLayerEnabled = BuildLegacyNegativeLayerEnabled(),
+                SimulationLayerOrder = BuildLegacySimulationLayerOrder(),
                 Fullscreen = _isFullscreen,
                 AspectRatioLocked = _aspectRatioLocked,
                 LockedAspectRatio = _lockedAspectRatio,
@@ -7130,6 +7780,71 @@ public partial class MainWindow : Window
         {
             // Ignore config save errors.
         }
+    }
+
+    private List<AppConfig.SimulationLayerConfig> BuildSimulationLayerConfigs()
+    {
+        return _simulationLayers.Select(layer => new AppConfig.SimulationLayerConfig
+        {
+            Id = layer.Id,
+            Name = layer.Name,
+            Enabled = layer.Enabled,
+            InputFunction = layer.InputFunction.ToString(),
+            BlendMode = layer.BlendMode.ToString()
+        }).ToList();
+    }
+
+    private bool BuildLegacyPositiveLayerEnabled()
+    {
+        var positive = _simulationLayers.FirstOrDefault(layer => layer.InputFunction == SimulationInputFunction.Direct);
+        return positive?.Enabled ?? true;
+    }
+
+    private bool BuildLegacyNegativeLayerEnabled()
+    {
+        var negative = _simulationLayers.FirstOrDefault(layer => layer.InputFunction == SimulationInputFunction.Inverse);
+        return negative?.Enabled ?? true;
+    }
+
+    private string BuildLegacyPositiveLayerBlendMode()
+    {
+        var positive = _simulationLayers.FirstOrDefault(layer => layer.InputFunction == SimulationInputFunction.Direct);
+        return (positive?.BlendMode ?? BlendMode.Additive).ToString();
+    }
+
+    private string BuildLegacyNegativeLayerBlendMode()
+    {
+        var negative = _simulationLayers.FirstOrDefault(layer => layer.InputFunction == SimulationInputFunction.Inverse);
+        return (negative?.BlendMode ?? BlendMode.Subtractive).ToString();
+    }
+
+    private List<string> BuildLegacySimulationLayerOrder()
+    {
+        var positive = _simulationLayers.FirstOrDefault(layer => layer.InputFunction == SimulationInputFunction.Direct);
+        var negative = _simulationLayers.FirstOrDefault(layer => layer.InputFunction == SimulationInputFunction.Inverse);
+        var order = new List<string>(2);
+        foreach (var layer in _simulationLayers)
+        {
+            if (positive != null && ReferenceEquals(layer, positive) && !order.Contains("Positive", StringComparer.OrdinalIgnoreCase))
+            {
+                order.Add("Positive");
+            }
+            else if (negative != null && ReferenceEquals(layer, negative) && !order.Contains("Negative", StringComparer.OrdinalIgnoreCase))
+            {
+                order.Add("Negative");
+            }
+        }
+
+        if (!order.Contains("Positive", StringComparer.OrdinalIgnoreCase))
+        {
+            order.Add("Positive");
+        }
+        if (!order.Contains("Negative", StringComparer.OrdinalIgnoreCase))
+        {
+            order.Add("Negative");
+        }
+
+        return order;
     }
 
     private List<AppConfig.SourceConfig> BuildSourceConfigs() => BuildSourceConfigs(_sources);
@@ -7876,10 +8591,25 @@ public partial class MainWindow : Window
         public bool SourceAudioMasterEnabled { get; set; } = true;
         public double SourceAudioMasterVolume { get; set; } = 1.0;
         public string BlendMode { get; set; } = MainWindow.BlendMode.Additive.ToString();
+        public List<SimulationLayerConfig> SimulationLayers { get; set; } = new();
+        public string PositiveLayerBlendMode { get; set; } = MainWindow.BlendMode.Additive.ToString();
+        public string NegativeLayerBlendMode { get; set; } = MainWindow.BlendMode.Subtractive.ToString();
+        public bool PositiveLayerEnabled { get; set; } = true;
+        public bool NegativeLayerEnabled { get; set; } = true;
+        public List<string> SimulationLayerOrder { get; set; } = new() { "Positive", "Negative" };
         public bool Fullscreen { get; set; }
         public bool AspectRatioLocked { get; set; }
         public double LockedAspectRatio { get; set; } = DefaultAspectRatio;
         public List<SourceConfig> Sources { get; set; } = new();
+
+        public sealed class SimulationLayerConfig
+        {
+            public Guid Id { get; set; }
+            public string Name { get; set; } = "Simulation Layer";
+            public bool Enabled { get; set; } = true;
+            public string InputFunction { get; set; } = SimulationInputFunction.Direct.ToString();
+            public string BlendMode { get; set; } = MainWindow.BlendMode.Subtractive.ToString();
+        }
 
         public sealed class SourceConfig
         {

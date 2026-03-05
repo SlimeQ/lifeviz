@@ -93,6 +93,12 @@ internal static class LayerEditorOptions
         new LayerEditorOption("Clockwise", "Clockwise"),
         new LayerEditorOption("CounterClockwise", "Counterclockwise")
     };
+
+    public static readonly IReadOnlyList<LayerEditorOption> SimulationInputFunctions = new[]
+    {
+        new LayerEditorOption("Direct", "Direct (y = x)"),
+        new LayerEditorOption("Inverse", "Inverse (y = 1 - x)")
+    };
 }
 
 internal abstract class LayerEditorNotify : INotifyPropertyChanged
@@ -568,6 +574,8 @@ internal sealed class LayerEditorViewModel : LayerEditorNotify
     private bool _liveMode = true;
     private bool _sourceAudioMasterEnabled = true;
     private double _sourceAudioMasterVolume = 1.0;
+    private ObservableCollection<LayerEditorSimulationLayer> _simulationLayers = new();
+    private LayerEditorSimulationLayer? _selectedSimulationLayer;
     private ObservableCollection<LayerEditorSource> _sources = new();
     private LayerEditorSource? _selectedSource;
 
@@ -589,6 +597,18 @@ internal sealed class LayerEditorViewModel : LayerEditorNotify
         set => SetField(ref _sourceAudioMasterVolume, value);
     }
 
+    public ObservableCollection<LayerEditorSimulationLayer> SimulationLayers
+    {
+        get => _simulationLayers;
+        set => SetField(ref _simulationLayers, value);
+    }
+
+    public LayerEditorSimulationLayer? SelectedSimulationLayer
+    {
+        get => _selectedSimulationLayer;
+        set => SetField(ref _selectedSimulationLayer, value);
+    }
+
     public ObservableCollection<LayerEditorSource> Sources
     {
         get => _sources;
@@ -600,4 +620,90 @@ internal sealed class LayerEditorViewModel : LayerEditorNotify
         get => _selectedSource;
         set => SetField(ref _selectedSource, value);
     }
+
+    public IReadOnlyList<LayerEditorOption> BlendModeOptions => LayerEditorOptions.BlendModes;
+}
+
+internal sealed class LayerEditorSimulationLayer : LayerEditorNotify
+{
+    private Guid _id;
+    private string _name = "Simulation Layer";
+    private bool _enabled = true;
+    private string _inputFunction = "Direct";
+    private string _blendMode = "Subtractive";
+    private bool _isExpanded = true;
+    private bool _isSelected;
+
+    public Guid Id
+    {
+        get => _id;
+        set => SetField(ref _id, value);
+    }
+
+    public string Name
+    {
+        get => _name;
+        set
+        {
+            if (SetField(ref _name, value))
+            {
+                OnPropertyChanged(nameof(TreeLabel));
+            }
+        }
+    }
+
+    public bool Enabled
+    {
+        get => _enabled;
+        set
+        {
+            if (SetField(ref _enabled, value))
+            {
+                OnPropertyChanged(nameof(Details));
+            }
+        }
+    }
+
+    public string InputFunction
+    {
+        get => _inputFunction;
+        set
+        {
+            if (SetField(ref _inputFunction, value))
+            {
+                OnPropertyChanged(nameof(Details));
+            }
+        }
+    }
+
+    public string BlendMode
+    {
+        get => _blendMode;
+        set
+        {
+            if (SetField(ref _blendMode, value))
+            {
+                OnPropertyChanged(nameof(Details));
+            }
+        }
+    }
+
+    public bool IsExpanded
+    {
+        get => _isExpanded;
+        set => SetField(ref _isExpanded, value);
+    }
+
+    public bool IsSelected
+    {
+        get => _isSelected;
+        set => SetField(ref _isSelected, value);
+    }
+
+    public string TreeLabel => string.IsNullOrWhiteSpace(Name) ? "Simulation Layer" : Name;
+
+    public string Details => $"{(Enabled ? "Enabled" : "Disabled")} | {InputFunction} | {BlendMode}";
+
+    public IReadOnlyList<LayerEditorOption> BlendModeOptions => LayerEditorOptions.BlendModes;
+    public IReadOnlyList<LayerEditorOption> InputFunctionOptions => LayerEditorOptions.SimulationInputFunctions;
 }
