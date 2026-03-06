@@ -171,12 +171,12 @@ namespace lifeviz;
             return;
         }
 
+        EnsureInitialized();
+
         if (_mode == LifeMode.NaiveGrayscale)
         {
-            var next = CloneTopOrEmpty(_history, Rows, Columns);
-            ApplyMask(next, frame);
-            _history.Insert(0, next);
-            TrimChannel(_history, Depth);
+            var current = EnsureTopFrame(_history, Rows, Columns);
+            ApplyMask(current, frame);
         }
         else
         {
@@ -197,21 +197,15 @@ namespace lifeviz;
             return;
         }
 
-        var nextR = CloneTopOrEmpty(_historyR, Rows, Columns);
-        var nextG = CloneTopOrEmpty(_historyG, Rows, Columns);
-        var nextB = CloneTopOrEmpty(_historyB, Rows, Columns);
+        EnsureInitialized();
 
-        ApplyMask(nextR, red);
-        ApplyMask(nextG, green);
-        ApplyMask(nextB, blue);
+        var currentR = EnsureTopFrame(_historyR, Rows, Columns);
+        var currentG = EnsureTopFrame(_historyG, Rows, Columns);
+        var currentB = EnsureTopFrame(_historyB, Rows, Columns);
 
-        _historyR.Insert(0, nextR);
-        _historyG.Insert(0, nextG);
-        _historyB.Insert(0, nextB);
-
-        TrimChannel(_historyR, _rDepth);
-        TrimChannel(_historyG, _gDepth);
-        TrimChannel(_historyB, _bDepth);
+        ApplyMask(currentR, red);
+        ApplyMask(currentG, green);
+        ApplyMask(currentB, blue);
     }
 
     private void EnsureInitialized()
@@ -321,17 +315,16 @@ namespace lifeviz;
         }
     }
 
-    private static bool[,] CloneTopOrEmpty(List<bool[,]> history, int rows, int cols)
+    private static bool[,] EnsureTopFrame(List<bool[,]> history, int rows, int cols)
     {
         if (history.Count == 0)
         {
-            return new bool[rows, cols];
+            var frame = new bool[rows, cols];
+            history.Add(frame);
+            return frame;
         }
 
-        var source = history[0];
-        var clone = new bool[rows, cols];
-        Array.Copy(source, clone, source.Length);
-        return clone;
+        return history[0];
     }
 
     private void ApplyMask(bool[,] target, bool[,] mask)

@@ -132,6 +132,7 @@ public partial class MainWindow : Window
     private double _rgbHueShiftDegrees;
     private double _rgbHueShiftSpeedDegreesPerSecond;
     private bool _suppressRgbHueShiftControlEvents;
+    private bool _suppressThresholdControlEvents;
     private bool _invertComposite;
     private bool _showFps;
     private readonly Stopwatch _simulationFpsStopwatch = new();
@@ -440,8 +441,7 @@ public partial class MainWindow : Window
             composite.DownscaledHeight == engineRows &&
             composite.Downscaled.Length >= engineCols * engineRows * 4)
         {
-            // Passthrough is composited first so each simulation layer blends on top
-            // using its own blend mode (additive/subtractive/...) against the scene.
+            // Use the CPU path when passthrough matches engine dimensions.
             passthroughBuffer = composite.Downscaled;
             compositePassthroughInPixelBuffer = true;
         }
@@ -453,9 +453,36 @@ public partial class MainWindow : Window
         bool hasEnabledSubtractiveSimulationLayer = activeLayers.Any(layer => layer.BlendMode == BlendMode.Subtractive);
         bool hasEnabledNonSubtractiveSimulationLayer = activeLayers.Any(layer => layer.BlendMode != BlendMode.Subtractive);
         bool hasEnabledAdditiveSimulationLayer = activeLayers.Any(layer => layer.BlendMode == BlendMode.Additive);
+        int additiveLayerCount = activeLayers.Count(layer => layer.BlendMode == BlendMode.Additive);
+        int subtractiveLayerCount = activeLayers.Count(layer => layer.BlendMode == BlendMode.Subtractive);
         bool hasEnabledNonAddSubSimulationLayer = activeLayers.Any(layer =>
             layer.BlendMode != BlendMode.Additive &&
             layer.BlendMode != BlendMode.Subtractive);
+        bool useSignedAddSubPassthrough = compositePassthroughInPixelBuffer &&
+                                          passthroughBuffer != null &&
+                                          activeLayers.Length > 0 &&
+                                          !hasEnabledNonAddSubSimulationLayer;
+        bool useMixedAddSubPassthroughModel = useSignedAddSubPassthrough &&
+                                              additiveLayerCount > 0 &&
+                                              subtractiveLayerCount > 0;
+        int simulationBaseline;
+        if (hasEnabledSubtractiveSimulationLayer && !hasEnabledNonSubtractiveSimulationLayer)
+        {
+            // Subtractive-only stacks use white identity.
+            simulationBaseline = 255;
+        }
+        else if (hasEnabledAdditiveSimulationLayer &&
+                 hasEnabledSubtractiveSimulationLayer &&
+                 !hasEnabledNonAddSubSimulationLayer)
+        {
+            // Mixed additive/subtractive stacks converge around 50%; use a
+            // neutral gray baseline to keep both layer families visible.
+            simulationBaseline = 128;
+        }
+        else
+        {
+            simulationBaseline = 0;
+        }
 
         double lifeOpacity = Math.Clamp(_effectiveLifeOpacity, 0, 1);
         Parallel.For(0, height, row =>
@@ -467,43 +494,93 @@ public partial class MainWindow : Window
                 int sourceIndex = (sourceRow * engineCols + sourceCol) * 4;
                 int index = (row * stride) + (col * 4);
 
-                int baseB;
-                int baseG;
-                int baseR;
+                int underlayB = simulationBaseline;
+                int underlayG = simulationBaseline;
+                int underlayR = simulationBaseline;
                 if (compositePassthroughInPixelBuffer && passthroughBuffer != null)
                 {
-                    baseB = passthroughBuffer[sourceIndex];
-                    baseG = passthroughBuffer[sourceIndex + 1];
-                    baseR = passthroughBuffer[sourceIndex + 2];
+                    underlayB = passthroughBuffer[sourceIndex];
+                    underlayG = passthroughBuffer[sourceIndex + 1];
+                    underlayR = passthroughBuffer[sourceIndex + 2];
                 }
-                else
+
+                if (useSignedAddSubPassthrough)
                 {
-                    int baseline;
-                    if (hasEnabledSubtractiveSimulationLayer && !hasEnabledNonSubtractiveSimulationLayer)
+                    int addB = 0;
+                    int addG = 0;
+                    int addR = 0;
+                    int subB = 0;
+                    int subG = 0;
+                    int subR = 0;
+                    foreach (var layer in activeLayers)
                     {
-                        // Subtractive-only stacks use white identity.
-                        baseline = 255;
+                        byte[]? colorBuffer = layer.ColorBuffer;
+                        if (colorBuffer == null)
+                        {
+                            continue;
+                        }
+
+                        if (layer.BlendMode == BlendMode.Subtractive)
+                        {
+                            subR += colorBuffer[sourceIndex];
+                            subG += colorBuffer[sourceIndex + 1];
+                            subB += colorBuffer[sourceIndex + 2];
+                        }
+                        else
+                        {
+                            addR += colorBuffer[sourceIndex];
+                            addG += colorBuffer[sourceIndex + 1];
+                            addB += colorBuffer[sourceIndex + 2];
+                        }
                     }
-                    else if (hasEnabledAdditiveSimulationLayer &&
-                             hasEnabledSubtractiveSimulationLayer &&
-                             !hasEnabledNonAddSubSimulationLayer)
+
+                    if (useMixedAddSubPassthroughModel)
                     {
-                        // Mixed additive/subtractive stacks converge around 50%; use a
-                        // neutral gray baseline to keep both layer families visible.
-                        baseline = 128;
+                        // Mixed add+sub passthrough model with headroom normalization:
+                        // additive only uses darkness headroom, subtractive only uses brightness headroom.
+                        double underlayB01 = underlayB / 255.0;
+                        double underlayG01 = underlayG / 255.0;
+                        double underlayR01 = underlayR / 255.0;
+
+                        double scaledSubB = Math.Clamp(subB * lifeOpacity * underlayB01, 0, 255);
+                        double scaledSubG = Math.Clamp(subG * lifeOpacity * underlayG01, 0, 255);
+                        double scaledSubR = Math.Clamp(subR * lifeOpacity * underlayR01, 0, 255);
+
+                        double scaledAddB = addB * lifeOpacity * (1.0 - underlayB01);
+                        double scaledAddG = addG * lifeOpacity * (1.0 - underlayG01);
+                        double scaledAddR = addR * lifeOpacity * (1.0 - underlayR01);
+
+                        int mixedOutB = ClampToByte((int)Math.Round(underlayB + scaledAddB - scaledSubB));
+                        int mixedOutG = ClampToByte((int)Math.Round(underlayG + scaledAddG - scaledSubG));
+                        int mixedOutR = ClampToByte((int)Math.Round(underlayR + scaledAddR - scaledSubR));
+
+                        _pixelBuffer[index] = (byte)mixedOutB;
+                        _pixelBuffer[index + 1] = (byte)mixedOutG;
+                        _pixelBuffer[index + 2] = (byte)mixedOutR;
                     }
                     else
                     {
-                        baseline = 0;
+                        int deltaB = addB - subB;
+                        int deltaG = addG - subG;
+                        int deltaR = addR - subR;
+                        if (lifeOpacity < 1.0)
+                        {
+                            deltaB = (int)Math.Round(deltaB * lifeOpacity);
+                            deltaG = (int)Math.Round(deltaG * lifeOpacity);
+                            deltaR = (int)Math.Round(deltaR * lifeOpacity);
+                        }
+
+                        _pixelBuffer[index] = ClampToByte(underlayB + deltaB);
+                        _pixelBuffer[index + 1] = ClampToByte(underlayG + deltaG);
+                        _pixelBuffer[index + 2] = ClampToByte(underlayR + deltaR);
                     }
-                    baseB = baseline;
-                    baseG = baseline;
-                    baseR = baseline;
+                    _pixelBuffer[index + 3] = 255;
+                    continue;
                 }
 
-                int outB = baseB;
-                int outG = baseG;
-                int outR = baseR;
+                int simB = simulationBaseline;
+                int simG = simulationBaseline;
+                int simR = simulationBaseline;
 
                 foreach (var layer in activeLayers)
                 {
@@ -516,14 +593,41 @@ public partial class MainWindow : Window
                     byte lr = colorBuffer[sourceIndex];
                     byte lg = colorBuffer[sourceIndex + 1];
                     byte lb = colorBuffer[sourceIndex + 2];
-                    BlendSimulationLayerInto(ref outB, ref outG, ref outR, lr, lg, lb, layer.BlendMode);
+                    BlendSimulationLayerInto(ref simB, ref simG, ref simR, lr, lg, lb, layer.BlendMode);
                 }
 
-                if (lifeOpacity < 1.0)
+                int outB;
+                int outG;
+                int outR;
+                if (compositePassthroughInPixelBuffer && passthroughBuffer != null)
                 {
-                    outB = (int)Math.Round(baseB + ((outB - baseB) * lifeOpacity));
-                    outG = (int)Math.Round(baseG + ((outG - baseG) * lifeOpacity));
-                    outR = (int)Math.Round(baseR + ((outR - baseR) * lifeOpacity));
+                    // Apply simulation as delta over passthrough so passthrough doesn't
+                    // compress/attenuate simulation contrast.
+                    int deltaB = simB - simulationBaseline;
+                    int deltaG = simG - simulationBaseline;
+                    int deltaR = simR - simulationBaseline;
+                    if (lifeOpacity < 1.0)
+                    {
+                        deltaB = (int)Math.Round(deltaB * lifeOpacity);
+                        deltaG = (int)Math.Round(deltaG * lifeOpacity);
+                        deltaR = (int)Math.Round(deltaR * lifeOpacity);
+                    }
+
+                    outB = underlayB + deltaB;
+                    outG = underlayG + deltaG;
+                    outR = underlayR + deltaR;
+                }
+                else
+                {
+                    outB = simB;
+                    outG = simG;
+                    outR = simR;
+                    if (lifeOpacity < 1.0)
+                    {
+                        outB = (int)Math.Round(simulationBaseline + ((simB - simulationBaseline) * lifeOpacity));
+                        outG = (int)Math.Round(simulationBaseline + ((simG - simulationBaseline) * lifeOpacity));
+                        outR = (int)Math.Round(simulationBaseline + ((simR - simulationBaseline) * lifeOpacity));
+                    }
                 }
 
                 _pixelBuffer[index] = ClampToByte(outB);
@@ -1472,18 +1576,26 @@ public partial class MainWindow : Window
         UpdateLifeModeMenuChecks();
         UpdateBinningModeMenuChecks();
         UpdateInjectionModeMenuChecks();
-        if (ThresholdMinSlider != null && ThresholdMaxSlider != null)
+        _suppressThresholdControlEvents = true;
+        try
         {
-            ThresholdMinSlider.Value = _captureThresholdMin;
-            ThresholdMaxSlider.Value = _captureThresholdMax;
+            if (ThresholdMinSlider != null && ThresholdMaxSlider != null)
+            {
+                ThresholdMinSlider.Value = _captureThresholdMin;
+                ThresholdMaxSlider.Value = _captureThresholdMax;
+            }
+            if (NoiseSlider != null)
+            {
+                NoiseSlider.Value = _injectionNoise;
+            }
+            if (InvertThresholdCheckBox != null)
+            {
+                InvertThresholdCheckBox.IsChecked = _invertThreshold;
+            }
         }
-        if (NoiseSlider != null)
+        finally
         {
-            NoiseSlider.Value = _injectionNoise;
-        }
-        if (InvertThresholdCheckBox != null)
-        {
-            InvertThresholdCheckBox.IsChecked = _invertThreshold;
+            _suppressThresholdControlEvents = false;
         }
         if (AnimationBpmSlider != null && AnimationBpmValueText != null)
         {
@@ -4965,6 +5077,11 @@ public partial class MainWindow : Window
 
     private void ThresholdSlider_OnValueChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
     {
+        if (_suppressThresholdControlEvents)
+        {
+            return;
+        }
+
         _captureThresholdMin = ThresholdMinSlider?.Value ?? _captureThresholdMin;
         _captureThresholdMax = ThresholdMaxSlider?.Value ?? _captureThresholdMax;
         if (_captureThresholdMin > _captureThresholdMax)
@@ -4992,6 +5109,11 @@ public partial class MainWindow : Window
 
     private void NoiseSlider_OnValueChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
     {
+        if (_suppressThresholdControlEvents)
+        {
+            return;
+        }
+
         _injectionNoise = Math.Clamp(e.NewValue, 0, 1);
         SaveConfig();
     }
@@ -5018,6 +5140,11 @@ public partial class MainWindow : Window
 
     private void InvertThresholdCheckBox_OnChecked(object sender, RoutedEventArgs e)
     {
+        if (_suppressThresholdControlEvents)
+        {
+            return;
+        }
+
         _invertThreshold = InvertThresholdCheckBox?.IsChecked == true;
         foreach (var layer in _simulationLayers)
         {
@@ -5058,6 +5185,37 @@ public partial class MainWindow : Window
 
         bool insideWindow = value >= min && value <= max;
         return invert ? !insideWindow : insideWindow;
+    }
+
+    private static double MapIntensityThroughThresholdWindow(double value, double min, double max, bool invert)
+    {
+        value = Math.Clamp(value, 0, 1);
+        min = Math.Clamp(min, 0, 1);
+        max = Math.Clamp(max, 0, 1);
+        if (min > max)
+        {
+            (min, max) = (max, min);
+        }
+
+        const double Epsilon = 1e-6;
+        if (!invert)
+        {
+            if (max - min <= Epsilon)
+            {
+                return value >= max ? 1.0 : 0.0;
+            }
+
+            return Math.Clamp((value - min) / (max - min), 0, 1);
+        }
+
+        if (max - min <= Epsilon)
+        {
+            return value < min || value > max ? 1.0 : 0.0;
+        }
+
+        double lower = min <= Epsilon ? 0.0 : Math.Clamp((min - value) / min, 0, 1);
+        double upper = (1.0 - max) <= Epsilon ? 0.0 : Math.Clamp((value - max) / (1.0 - max), 0, 1);
+        return Math.Max(lower, upper);
     }
 
     private void FramerateItem_Click(object sender, RoutedEventArgs e)
@@ -7421,16 +7579,18 @@ public partial class MainWindow : Window
                 {
                     luminance = 1.0 - luminance;
                 }
+
+                double injectionDrive = MapIntensityThroughThresholdWindow(luminance, min, max, invert);
                 bool alive = false;
                 if (mode == GameOfLifeEngine.InjectionMode.RandomPulse)
                 {
-                    // Random pulse uses source intensity directly as alive probability.
-                    alive = Random.Shared.NextDouble() < luminance;
+                    // Random pulse uses threshold-window-shaped intensity as alive probability.
+                    alive = Random.Shared.NextDouble() < injectionDrive;
                 }
                 else if (mode == GameOfLifeEngine.InjectionMode.PulseWidthModulation)
                 {
-                    // PWM uses source intensity directly as pulse duty cycle.
-                    alive = PulseWidthAlive(luminance, period, pulseStep);
+                    // PWM uses threshold-window-shaped intensity as pulse duty cycle.
+                    alive = PulseWidthAlive(injectionDrive, period, pulseStep);
                 }
                 else
                 {
@@ -7503,20 +7663,24 @@ public partial class MainWindow : Window
                     nb = Math.Clamp(mappedB, 0, 1);
                 }
 
+                double rDrive = MapIntensityThroughThresholdWindow(nr, min, max, invert);
+                double gDrive = MapIntensityThroughThresholdWindow(ng, min, max, invert);
+                double bDrive = MapIntensityThroughThresholdWindow(nb, min, max, invert);
+
                 bool rAlive = mode == GameOfLifeEngine.InjectionMode.RandomPulse
-                    ? randomGate < nr
+                    ? randomGate < rDrive
                     : mode == GameOfLifeEngine.InjectionMode.PulseWidthModulation
-                        ? PulseWidthAlive(nr, rPeriod, pulseStep)
+                        ? PulseWidthAlive(rDrive, rPeriod, pulseStep)
                     : EvaluateThresholdValue(nr, min, max, invert);
                 bool gAlive = mode == GameOfLifeEngine.InjectionMode.RandomPulse
-                    ? randomGate < ng
+                    ? randomGate < gDrive
                     : mode == GameOfLifeEngine.InjectionMode.PulseWidthModulation
-                        ? PulseWidthAlive(ng, gPeriod, pulseStep)
+                        ? PulseWidthAlive(gDrive, gPeriod, pulseStep)
                     : EvaluateThresholdValue(ng, min, max, invert);
                 bool bAlive = mode == GameOfLifeEngine.InjectionMode.RandomPulse
-                    ? randomGate < nb
+                    ? randomGate < bDrive
                     : mode == GameOfLifeEngine.InjectionMode.PulseWidthModulation
-                        ? PulseWidthAlive(nb, bPeriod, pulseStep)
+                        ? PulseWidthAlive(bDrive, bPeriod, pulseStep)
                     : EvaluateThresholdValue(nb, min, max, invert);
 
                 rMask[row, col] = !noiseFail && rAlive;
