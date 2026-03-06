@@ -6,10 +6,16 @@ namespace lifeviz;
 public static class Program
 {
     [STAThread]
-    public static void Main()
+    public static void Main(string[] args)
     {
         // Enable Per-Monitor V2 DPI Awareness before any WPF code runs
         NativeMethods.SetProcessDpiAwarenessContext(NativeMethods.DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+
+        if (SmokeTestRunner.TryRun(args, out int exitCode))
+        {
+            Environment.ExitCode = exitCode;
+            return;
+        }
 
         var app = new App();
         app.InitializeComponent();

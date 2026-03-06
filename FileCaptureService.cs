@@ -2280,13 +2280,13 @@ internal sealed class FileCaptureService : IDisposable
                         for (int col = 0; col < targetWidth; col++)
                         {
                             int destIndex = destRowOffset + (col * 4);
-                            if (ImageFit.TryMapPixel(mapping, col, row, out int srcX, out int srcY))
+                            if (ImageFit.TrySampleMappedBgraSupersampled(source, sourceWidth, sourceHeight, mapping,
+                                col + 0.5, row + 0.5, mirror: false,
+                                out destination[destIndex],
+                                out destination[destIndex + 1],
+                                out destination[destIndex + 2],
+                                out destination[destIndex + 3]))
                             {
-                                int srcIndex = (srcY * sourceStride) + (srcX * 4);
-                                destination[destIndex] = source[srcIndex];
-                                destination[destIndex + 1] = source[srcIndex + 1];
-                                destination[destIndex + 2] = source[srcIndex + 2];
-                                destination[destIndex + 3] = source[srcIndex + 3];
                             }
                             else
                             {

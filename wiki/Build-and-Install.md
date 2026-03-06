@@ -18,6 +18,33 @@ Rider users can open `lifeviz.sln` and choose the built-in **lifeviz: Run App** 
 For ClickOnce packages inside Rider, use the shared **lifeviz: Publish Installer (MSBuild.exe)** run configuration (in `.run/`); it shells out to `Publish-Installer.ps1` so full MSBuild is used. The auto-generated Rider publish config uses `dotnet msbuild` and will trip `MSB4803`.
 If you still publish via Rider's generated config, the project automatically disables the ClickOnce bootstrapper under `dotnet msbuild` so the build completes (no `setup.exe`); use the MSBuild.exe-backed script/config when you need the bootstrapper.
 
+## Runtime Smoke Tests
+
+After building the sandbox output, you can validate the GPU sim path and startup path directly:
+
+```powershell
+dotnet build /p:UseAppHost=false /p:OutputPath=bin\Debug\net9.0-windows-sbx\
+dotnet bin\Debug\net9.0-windows-sbx\lifeviz.dll --smoke-test gpu-benchmark
+dotnet bin\Debug\net9.0-windows-sbx\lifeviz.dll --smoke-test gpu-handoff
+dotnet bin\Debug\net9.0-windows-sbx\lifeviz.dll --smoke-test gpu-sim
+dotnet bin\Debug\net9.0-windows-sbx\lifeviz.dll --smoke-test gpu-source
+dotnet bin\Debug\net9.0-windows-sbx\lifeviz.dll --smoke-test gpu-render
+dotnet bin\Debug\net9.0-windows-sbx\lifeviz.dll --smoke-test dimensions
+dotnet bin\Debug\net9.0-windows-sbx\lifeviz.dll --smoke-test shutdown
+dotnet bin\Debug\net9.0-windows-sbx\lifeviz.dll --smoke-test startup
+dotnet bin\Debug\net9.0-windows-sbx\lifeviz.dll --smoke-test all
+```
+
+- `gpu-benchmark` logs average GPU sim inject/step/fill timings plus GPU source-composite upload/draw/readback timings using synthetic workloads, and is intended to report the direct GPU composite-to-simulation handoff timings as that path evolves.
+- `gpu-handoff` instantiates `MainWindow` without showing it and verifies that a GPU-built composite can inject directly into the grayscale GPU simulation backend with zero CPU composite readback bytes.
+- `gpu-sim` verifies the D3D11 grayscale simulation backend end to end and checks CPU fallback for unsupported life modes.
+- `gpu-source` instantiates `MainWindow` without showing it and verifies that the GPU source compositor actually executes through the normal `BuildCompositeFrame` path.
+- `gpu-render` launches a hidden `MainWindow` and verifies that the real GPU composite pipeline initializes through the normal render backend path.
+- `dimensions` applies a live height/depth change through `MainWindow` and verifies that both the simulation backend and presentation surface resize together.
+- `shutdown` opens the real `MainWindow`, opens the Scene Editor, then closes the main window and fails if close-time teardown captures any exception or if the owned editor-close path throws.
+- `startup` launches `MainWindow` in a dedicated smoke-test mode that skips loading the persisted project plus file/video/audio capture pipelines, so WPF/render startup can be validated in isolation and should exit quickly.
+- `all` runs `gpu-sim` plus the combined GPU handoff/source/render UI smoke suite.
+
 ## Local Smoke Test Install
 
 `install.ps1` publishes a ClickOnce payload and, by default, runs the local `Install-ClickOnce.ps1` flow against that fresh output:

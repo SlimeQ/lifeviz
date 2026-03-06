@@ -30,6 +30,23 @@ internal sealed class LayerEditorOption
 
 internal static class LayerEditorOptions
 {
+    public static readonly IReadOnlyList<int> SimulationHeightPresets = new[]
+    {
+        144, 240, 480, 720, 1080, 1440, 2160
+    };
+
+    public static readonly IReadOnlyList<LayerEditorOption> SimulationLifeModes = new[]
+    {
+        new LayerEditorOption("NaiveGrayscale", "Naive Grayscale"),
+        new LayerEditorOption("RgbChannels", "RGB Channel Bins")
+    };
+
+    public static readonly IReadOnlyList<LayerEditorOption> SimulationBinningModes = new[]
+    {
+        new LayerEditorOption("Fill", "Fill"),
+        new LayerEditorOption("Binary", "Binary")
+    };
+
     public static readonly IReadOnlyList<LayerEditorOption> BlendModes = new[]
     {
         new LayerEditorOption("Additive", "Additive"),
@@ -581,6 +598,10 @@ internal sealed class LayerEditorViewModel : LayerEditorNotify
     private bool _liveMode = true;
     private bool _sourceAudioMasterEnabled = true;
     private double _sourceAudioMasterVolume = 1.0;
+    private int _simulationHeight = 144;
+    private int _simulationDepth = 24;
+    private double _simulationFramerate = 60.0;
+    private double _globalSimulationLifeOpacity = 1.0;
     private ObservableCollection<LayerEditorSimulationLayer> _simulationLayers = new();
     private LayerEditorSimulationLayer? _selectedSimulationLayer;
     private ObservableCollection<LayerEditorSource> _sources = new();
@@ -602,6 +623,30 @@ internal sealed class LayerEditorViewModel : LayerEditorNotify
     {
         get => _sourceAudioMasterVolume;
         set => SetField(ref _sourceAudioMasterVolume, value);
+    }
+
+    public int SimulationHeight
+    {
+        get => _simulationHeight;
+        set => SetField(ref _simulationHeight, value);
+    }
+
+    public int SimulationDepth
+    {
+        get => _simulationDepth;
+        set => SetField(ref _simulationDepth, value);
+    }
+
+    public double SimulationFramerate
+    {
+        get => _simulationFramerate;
+        set => SetField(ref _simulationFramerate, value);
+    }
+
+    public double GlobalSimulationLifeOpacity
+    {
+        get => _globalSimulationLifeOpacity;
+        set => SetField(ref _globalSimulationLifeOpacity, value);
     }
 
     public ObservableCollection<LayerEditorSimulationLayer> SimulationLayers
@@ -628,6 +673,7 @@ internal sealed class LayerEditorViewModel : LayerEditorNotify
         set => SetField(ref _selectedSource, value);
     }
 
+    public IReadOnlyList<int> SimulationHeightOptions => LayerEditorOptions.SimulationHeightPresets;
     public IReadOnlyList<LayerEditorOption> BlendModeOptions => LayerEditorOptions.BlendModes;
 }
 
@@ -636,10 +682,6 @@ internal sealed class LayerEditorProjectSettings
     public int Height { get; set; } = 144;
     public int Depth { get; set; } = 24;
     public double Framerate { get; set; } = 60;
-    public string LifeMode { get; set; } = "NaiveGrayscale";
-    public string BinningMode { get; set; } = "Fill";
-    public string InjectionMode { get; set; } = "Threshold";
-    public double InjectionNoise { get; set; }
     public double LifeOpacity { get; set; } = 1.0;
     public double RgbHueShiftDegrees { get; set; }
     public double RgbHueShiftSpeedDegreesPerSecond { get; set; }
@@ -656,6 +698,10 @@ internal sealed class LayerEditorSimulationLayer : LayerEditorNotify
     private string _inputFunction = "Direct";
     private string _blendMode = "Subtractive";
     private string _injectionMode = "Threshold";
+    private string _lifeMode = "NaiveGrayscale";
+    private string _binningMode = "Fill";
+    private double _injectionNoise;
+    private double _lifeOpacity = 1.0;
     private double _thresholdMin = 0.35;
     private double _thresholdMax = 0.75;
     private bool _invertThreshold;
@@ -728,6 +774,54 @@ internal sealed class LayerEditorSimulationLayer : LayerEditorNotify
         }
     }
 
+    public string LifeMode
+    {
+        get => _lifeMode;
+        set
+        {
+            if (SetField(ref _lifeMode, value))
+            {
+                OnPropertyChanged(nameof(Details));
+            }
+        }
+    }
+
+    public string BinningMode
+    {
+        get => _binningMode;
+        set
+        {
+            if (SetField(ref _binningMode, value))
+            {
+                OnPropertyChanged(nameof(Details));
+            }
+        }
+    }
+
+    public double InjectionNoise
+    {
+        get => _injectionNoise;
+        set
+        {
+            if (SetField(ref _injectionNoise, value))
+            {
+                OnPropertyChanged(nameof(Details));
+            }
+        }
+    }
+
+    public double LifeOpacity
+    {
+        get => _lifeOpacity;
+        set
+        {
+            if (SetField(ref _lifeOpacity, value))
+            {
+                OnPropertyChanged(nameof(Details));
+            }
+        }
+    }
+
     public double ThresholdMin
     {
         get => _thresholdMin;
@@ -778,9 +872,11 @@ internal sealed class LayerEditorSimulationLayer : LayerEditorNotify
 
     public string TreeLabel => string.IsNullOrWhiteSpace(Name) ? "Simulation Layer" : Name;
 
-    public string Details => $"{(Enabled ? "Enabled" : "Disabled")} | {InputFunction} | {BlendMode} | {InjectionMode} | Th {ThresholdMin:P0}-{ThresholdMax:P0}{(InvertThreshold ? " inv" : string.Empty)}";
+    public string Details => $"{(Enabled ? "Enabled" : "Disabled")} | {InputFunction} | {BlendMode} | {LifeMode} | {BinningMode} | Noise {InjectionNoise:P0} | Opacity {LifeOpacity:P0} | {InjectionMode} | Th {ThresholdMin:P0}-{ThresholdMax:P0}{(InvertThreshold ? " inv" : string.Empty)}";
 
     public IReadOnlyList<LayerEditorOption> BlendModeOptions => LayerEditorOptions.BlendModes;
     public IReadOnlyList<LayerEditorOption> InputFunctionOptions => LayerEditorOptions.SimulationInputFunctions;
     public IReadOnlyList<LayerEditorOption> InjectionModeOptions => LayerEditorOptions.SimulationInjectionModes;
+    public IReadOnlyList<LayerEditorOption> LifeModeOptions => LayerEditorOptions.SimulationLifeModes;
+    public IReadOnlyList<LayerEditorOption> BinningModeOptions => LayerEditorOptions.SimulationBinningModes;
 }

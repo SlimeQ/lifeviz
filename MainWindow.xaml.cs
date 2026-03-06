@@ -60,6 +60,11 @@ public partial class MainWindow : Window
     private const int MaxSimulationStepsPerRender = 8;
     private const double MaxRgbHueShiftSpeedDegreesPerSecond = 180.0;
     private const double MaxColorDistance = 441.6729559300637;
+    private const double UiInteractionThrottleFps = 20.0;
+    private const int WmEnterMenuLoop = 0x0211;
+    private const int WmExitMenuLoop = 0x0212;
+    private const int WmEnterSizeMove = 0x0231;
+    private const int WmExitSizeMove = 0x0232;
     private const string GitHubRepoOwner = "SlimeQ";
     private const string GitHubRepoName = "lifeviz";
     private const string GitHubReleaseAssetName = "lifeviz_installer.exe";
@@ -74,13 +79,13 @@ public partial class MainWindow : Window
         (0, 1), (0, 2), (1, 0), (1, 1), (2, 1)
     };
 
-    private readonly GameOfLifeEngine _engine = new();
+    private readonly ISimulationBackend _engine = new GpuSimulationBackend();
     private readonly List<SimulationLayerState> _simulationLayers = new();
     private readonly WindowCaptureService _windowCapture = new();
     private readonly WebcamCaptureService _webcamCapture = new();
     private readonly FileCaptureService _fileCapture = new();
     private readonly AudioBeatDetector _audioBeatDetector = new();
-    private readonly BlendEffect _blendEffect = new();
+    private IRenderBackend _renderBackend = new NullRenderBackend();
     private LayerEditorWindow? _layerEditorWindow;
     private bool _suppressLayerEditorRefresh;
     private int _configuredRows = DefaultRows;
@@ -108,11 +113,7 @@ public partial class MainWindow : Window
     private IReadOnlyList<WebcamCaptureService.CameraInfo> _cachedCameras = Array.Empty<WebcamCaptureService.CameraInfo>();
     private IReadOnlyList<AudioBeatDetector.AudioDeviceInfo> _cachedAudioDevices = Array.Empty<AudioBeatDetector.AudioDeviceInfo>();
     private readonly List<CaptureSource> _sources = new();
-    private WriteableBitmap? _bitmap;
     private byte[]? _pixelBuffer;
-    private WriteableBitmap? _underlayBitmap;
-    private ImageBrush? _overlayBrush;
-    private ImageBrush? _inputBrush;
     private byte[]? _compositeDownscaledBuffer;
     private byte[]? _invertScratchBuffer;
     private CompositeFrame? _lastCompositeFrame;
@@ -120,6 +121,10 @@ public partial class MainWindow : Window
     private int _displayHeight;
     private int[] _rowMap = Array.Empty<int>();
     private int[] _colMap = Array.Empty<int>();
+    private bool _isShuttingDown;
+    private Exception? _shutdownException;
+    private bool _renderLoopAttached;
+    private int _uiInteractionSuspendCount;
     private bool _isPaused;
     private double _currentAspectRatio = DefaultAspectRatio;
     private bool _aspectRatioLocked;
@@ -159,7 +164,9 @@ public partial class MainWindow : Window
     private Rect _previousBounds;
     private readonly Stopwatch _stepStopwatch = new();
     private readonly Stopwatch _lifetimeStopwatch = new();
+    private readonly DispatcherTimer _frameTimer;
     private double _timeSinceLastStep;
+    private double _lastUiInteractionRenderTime;
     private bool _fpsOscillationEnabled;
     private bool _audioSyncEnabled;
     private bool _animationAudioSyncEnabled;
@@ -200,34 +207,107 @@ public partial class MainWindow : Window
     public MainWindow()
     {
         Logger.Initialize();
+        _frameTimer = new DispatcherTimer(DispatcherPriority.Background)
+        {
+            Interval = TimeSpan.FromMilliseconds(1)
+        };
+        _frameTimer.Tick += FrameTimer_Tick;
         InitializeComponent();
-        ApplyAudioInputGainForSelection();
+        _renderBackend = CreateRenderBackend(this, RenderSurfaceHost, GameImage);
+        if (!App.IsSmokeTestMode)
+        {
+            ApplyAudioInputGainForSelection();
+        }
 
         Loaded += (_, _) =>
         {
-            LoadConfig();
-            InitializeVisualizer();
-            if (_pendingFullscreen)
+            if (!App.IsSmokeTestMode)
             {
-                EnterFullscreen(applyConfig: true);
+                LoadConfig();
+                InitializeVisualizer();
+                if (_pendingFullscreen)
+                {
+                    EnterFullscreen(applyConfig: true);
+                }
             }
             _lastWindowSize = new Size(ActualWidth, ActualHeight);
             _lastClientSize = new Size(Root.ActualWidth, Root.ActualHeight);
-            Logger.Info("Main window loaded and visualizer initialized.");
+            Logger.Info(App.IsSmokeTestMode
+                ? "Main window loaded in smoke test mode."
+                : "Main window loaded and visualizer initialized.");
         };
         SourceInitialized += (_, _) =>
         {
             var helper = new WindowInteropHelper(this);
             _windowHandle = helper.Handle;
+            if (HwndSource.FromHwnd(_windowHandle) is { } source)
+            {
+                source.AddHook(MainWindow_WndProc);
+            }
         };
         Closed += (_, _) =>
         {
-            StopRecording(showMessage: false);
-            _webcamCapture.Reset();
-            _fileCapture.Dispose();
-            _audioBeatDetector.Dispose();
+            if (_isShuttingDown)
+            {
+                return;
+            }
+
+            _isShuttingDown = true;
+            DetachRenderLoop();
+
+            if (_layerEditorWindow != null)
+            {
+                _layerEditorWindow.PrepareForOwnerShutdown();
+                _layerEditorWindow.Close();
+                _layerEditorWindow = null;
+            }
+
+            try
+            {
+                StopRecording(showMessage: false);
+                var renderBackend = _renderBackend;
+                _renderBackend = new NullRenderBackend();
+                _pixelBuffer = null;
+                renderBackend.Dispose();
+                foreach (var backend in _simulationLayers.Select(layer => layer.Engine).Distinct())
+                {
+                    backend.Dispose();
+                }
+                _webcamCapture.Reset();
+                _fileCapture.Dispose();
+                _audioBeatDetector.Dispose();
+            }
+            catch (Exception ex)
+            {
+                _shutdownException = ex;
+                Logger.Error("Main window shutdown failed.", ex);
+            }
+
             Logger.Shutdown();
         };
+    }
+
+    internal string? GetShutdownErrorMessage() => _shutdownException?.ToString();
+
+    internal (int configuredRows, int engineRows, int engineColumns, int surfaceWidth, int surfaceHeight, int layerCount, bool allLayerRowsMatch, bool allLayerColumnsMatch) RunDimensionChangeSmoke(int rows, int depth)
+    {
+        ApplyProjectSettingsFromEditor(new LayerEditorProjectSettings
+        {
+            Height = rows,
+            Depth = depth,
+            Framerate = _currentFpsFromConfig,
+            LifeOpacity = _lifeOpacity,
+            RgbHueShiftDegrees = _rgbHueShiftDegrees,
+            RgbHueShiftSpeedDegreesPerSecond = _rgbHueShiftSpeedDegreesPerSecond,
+            InvertComposite = _invertComposite,
+            Passthrough = _passthroughEnabled,
+            CompositeBlendMode = _blendMode.ToString()
+        });
+
+        var engine = GetReferenceSimulationEngine();
+        bool allLayerRowsMatch = _simulationLayers.All(layer => layer.Engine.Rows == engine.Rows);
+        bool allLayerColumnsMatch = _simulationLayers.All(layer => layer.Engine.Columns == engine.Columns);
+        return (_configuredRows, engine.Rows, engine.Columns, _renderBackend.PixelWidth, _renderBackend.PixelHeight, _simulationLayers.Count, allLayerRowsMatch, allLayerColumnsMatch);
     }
 
     private void InitializeVisualizer()
@@ -241,20 +321,116 @@ public partial class MainWindow : Window
         SnapWindowToAspect(preserveHeight: true);
         _effectiveLifeOpacity = _lifeOpacity;
         UpdateDisplaySurface(force: true);
-        InitializeEffect();
         UpdateFpsOverlay();
-        CompositionTarget.Rendering += CompositionTarget_Rendering;
-        _stepStopwatch.Start();
-        _lifetimeStopwatch.Start();
+        AttachRenderLoop();
+    }
+
+    private void AttachRenderLoop()
+    {
+        if (_renderLoopAttached || _isShuttingDown)
+        {
+            return;
+        }
+
+        _frameTimer.Start();
+        _renderLoopAttached = true;
+        _stepStopwatch.Restart();
+        if (!_lifetimeStopwatch.IsRunning)
+        {
+            _lifetimeStopwatch.Start();
+        }
+        if (!_simulationFpsStopwatch.IsRunning)
+        {
+            _simulationFpsStopwatch.Start();
+        }
+        _lastRenderTime = _lifetimeStopwatch.Elapsed.TotalSeconds;
+    }
+
+    private void DetachRenderLoop()
+    {
+        if (_renderLoopAttached)
+        {
+            _frameTimer.Stop();
+            _renderLoopAttached = false;
+        }
+
+        _stepStopwatch.Stop();
+        _lifetimeStopwatch.Stop();
+        _simulationFpsStopwatch.Stop();
+    }
+
+    private void SuspendRenderLoopForUiInteraction()
+    {
+        if (_isShuttingDown)
+        {
+            return;
+        }
+
+        _uiInteractionSuspendCount++;
+    }
+
+    private void ResumeRenderLoopAfterUiInteraction()
+    {
+        if (_uiInteractionSuspendCount <= 0)
+        {
+            _uiInteractionSuspendCount = 0;
+            return;
+        }
+
+        _uiInteractionSuspendCount--;
+        if (_uiInteractionSuspendCount > 0 || _isShuttingDown)
+        {
+            return;
+        }
+    }
+
+    private IntPtr MainWindow_WndProc(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam, ref bool handled)
+    {
+        switch (msg)
+        {
+            case WmEnterSizeMove:
+            case WmEnterMenuLoop:
+                SuspendRenderLoopForUiInteraction();
+                break;
+            case WmExitSizeMove:
+            case WmExitMenuLoop:
+                ResumeRenderLoopAfterUiInteraction();
+                break;
+        }
+
+        return IntPtr.Zero;
     }
 
     private double _oscillationPhase;
     // We need to track previous time to calculate delta time for phase.
     private double _lastRenderTime;
 
-    private void CompositionTarget_Rendering(object? sender, EventArgs e)
+    private bool IsUiInteractionThrottled()
     {
+        return _uiInteractionSuspendCount > 0 ||
+               (_layerEditorWindow?.IsActive ?? false);
+    }
+
+    private void FrameTimer_Tick(object? sender, EventArgs e)
+    {
+        if (_isShuttingDown)
+        {
+            return;
+        }
+
         double now = _lifetimeStopwatch.Elapsed.TotalSeconds;
+        bool interactionThrottled = IsUiInteractionThrottled();
+        if (interactionThrottled)
+        {
+            double minInterval = 1.0 / UiInteractionThrottleFps;
+            if (now - _lastUiInteractionRenderTime < minInterval)
+            {
+                return;
+            }
+
+            _lastUiInteractionRenderTime = now;
+        }
+
         double dt = now - _lastRenderTime;
         _lastRenderTime = now;
 
@@ -332,6 +508,10 @@ public partial class MainWindow : Window
         _audioReactiveBeatSeedBurstsLastStep = 0;
 
         double effectiveStepFps = Math.Max(_currentFps, 0);
+        if (interactionThrottled)
+        {
+            effectiveStepFps = Math.Min(effectiveStepFps, UiInteractionThrottleFps);
+        }
         if (effectiveStepFps < 0.01)
         {
             if (!_isPaused)
@@ -412,13 +592,18 @@ public partial class MainWindow : Window
 
     private void RenderFrame()
     {
-        if (_bitmap == null || _pixelBuffer == null)
+        if (_isShuttingDown)
         {
             return;
         }
 
-        int width = _bitmap.PixelWidth;
-        int height = _bitmap.PixelHeight;
+        if (_renderBackend.PixelWidth <= 0 || _renderBackend.PixelHeight <= 0 || _pixelBuffer == null)
+        {
+            return;
+        }
+
+        int width = _renderBackend.PixelWidth;
+        int height = _renderBackend.PixelHeight;
         int stride = width * 4;
         int requiredLength = stride * height;
 
@@ -484,7 +669,7 @@ public partial class MainWindow : Window
             simulationBaseline = 0;
         }
 
-        double lifeOpacity = Math.Clamp(_effectiveLifeOpacity, 0, 1);
+        double globalLifeOpacity = Math.Clamp(_effectiveLifeOpacity, 0, 1);
         Parallel.For(0, height, row =>
         {
             int sourceRow = _rowMap[row];
@@ -520,17 +705,23 @@ public partial class MainWindow : Window
                             continue;
                         }
 
+                        double layerOpacity = Math.Clamp(globalLifeOpacity * layer.LifeOpacity, 0, 1);
+                        if (layerOpacity <= 0.0001)
+                        {
+                            continue;
+                        }
+
                         if (layer.BlendMode == BlendMode.Subtractive)
                         {
-                            subR += colorBuffer[sourceIndex];
-                            subG += colorBuffer[sourceIndex + 1];
-                            subB += colorBuffer[sourceIndex + 2];
+                            subR += (int)Math.Round((255 - colorBuffer[sourceIndex]) * layerOpacity);
+                            subG += (int)Math.Round((255 - colorBuffer[sourceIndex + 1]) * layerOpacity);
+                            subB += (int)Math.Round((255 - colorBuffer[sourceIndex + 2]) * layerOpacity);
                         }
                         else
                         {
-                            addR += colorBuffer[sourceIndex];
-                            addG += colorBuffer[sourceIndex + 1];
-                            addB += colorBuffer[sourceIndex + 2];
+                            addR += (int)Math.Round(colorBuffer[sourceIndex] * layerOpacity);
+                            addG += (int)Math.Round(colorBuffer[sourceIndex + 1] * layerOpacity);
+                            addB += (int)Math.Round(colorBuffer[sourceIndex + 2] * layerOpacity);
                         }
                     }
 
@@ -542,13 +733,13 @@ public partial class MainWindow : Window
                         double underlayG01 = underlayG / 255.0;
                         double underlayR01 = underlayR / 255.0;
 
-                        double scaledSubB = Math.Clamp(subB * lifeOpacity * underlayB01, 0, 255);
-                        double scaledSubG = Math.Clamp(subG * lifeOpacity * underlayG01, 0, 255);
-                        double scaledSubR = Math.Clamp(subR * lifeOpacity * underlayR01, 0, 255);
+                        double scaledSubB = Math.Clamp(subB * underlayB01, 0, 255);
+                        double scaledSubG = Math.Clamp(subG * underlayG01, 0, 255);
+                        double scaledSubR = Math.Clamp(subR * underlayR01, 0, 255);
 
-                        double scaledAddB = addB * lifeOpacity * (1.0 - underlayB01);
-                        double scaledAddG = addG * lifeOpacity * (1.0 - underlayG01);
-                        double scaledAddR = addR * lifeOpacity * (1.0 - underlayR01);
+                        double scaledAddB = addB * (1.0 - underlayB01);
+                        double scaledAddG = addG * (1.0 - underlayG01);
+                        double scaledAddR = addR * (1.0 - underlayR01);
 
                         int mixedOutB = ClampToByte((int)Math.Round(underlayB + scaledAddB - scaledSubB));
                         int mixedOutG = ClampToByte((int)Math.Round(underlayG + scaledAddG - scaledSubG));
@@ -563,12 +754,6 @@ public partial class MainWindow : Window
                         int deltaB = addB - subB;
                         int deltaG = addG - subG;
                         int deltaR = addR - subR;
-                        if (lifeOpacity < 1.0)
-                        {
-                            deltaB = (int)Math.Round(deltaB * lifeOpacity);
-                            deltaG = (int)Math.Round(deltaG * lifeOpacity);
-                            deltaR = (int)Math.Round(deltaR * lifeOpacity);
-                        }
 
                         _pixelBuffer[index] = ClampToByte(underlayB + deltaB);
                         _pixelBuffer[index + 1] = ClampToByte(underlayG + deltaG);
@@ -590,10 +775,16 @@ public partial class MainWindow : Window
                         continue;
                     }
 
+                    double layerOpacity = Math.Clamp(globalLifeOpacity * layer.LifeOpacity, 0, 1);
+                    if (layerOpacity <= 0.0001)
+                    {
+                        continue;
+                    }
+
                     byte lr = colorBuffer[sourceIndex];
                     byte lg = colorBuffer[sourceIndex + 1];
                     byte lb = colorBuffer[sourceIndex + 2];
-                    BlendSimulationLayerInto(ref simB, ref simG, ref simR, lr, lg, lb, layer.BlendMode);
+                    BlendSimulationLayerInto(ref simB, ref simG, ref simR, lr, lg, lb, layer.BlendMode, layerOpacity);
                 }
 
                 int outB;
@@ -606,12 +797,6 @@ public partial class MainWindow : Window
                     int deltaB = simB - simulationBaseline;
                     int deltaG = simG - simulationBaseline;
                     int deltaR = simR - simulationBaseline;
-                    if (lifeOpacity < 1.0)
-                    {
-                        deltaB = (int)Math.Round(deltaB * lifeOpacity);
-                        deltaG = (int)Math.Round(deltaG * lifeOpacity);
-                        deltaR = (int)Math.Round(deltaR * lifeOpacity);
-                    }
 
                     outB = underlayB + deltaB;
                     outG = underlayG + deltaG;
@@ -622,12 +807,6 @@ public partial class MainWindow : Window
                     outB = simB;
                     outG = simG;
                     outR = simR;
-                    if (lifeOpacity < 1.0)
-                    {
-                        outB = (int)Math.Round(simulationBaseline + ((simB - simulationBaseline) * lifeOpacity));
-                        outG = (int)Math.Round(simulationBaseline + ((simG - simulationBaseline) * lifeOpacity));
-                        outR = (int)Math.Round(simulationBaseline + ((simR - simulationBaseline) * lifeOpacity));
-                    }
                 }
 
                 _pixelBuffer[index] = ClampToByte(outB);
@@ -643,7 +822,7 @@ public partial class MainWindow : Window
             InvertBuffer(_pixelBuffer);
         }
 
-        _bitmap.WritePixels(new Int32Rect(0, 0, width, height), _pixelBuffer, stride, 0);
+        _renderBackend.PresentFrame(_pixelBuffer, stride);
         UpdateUnderlayBitmap(requiredLength);
         UpdateEffectInput();
         TryRecordFrame(requiredLength);
@@ -1039,6 +1218,11 @@ public partial class MainWindow : Window
 
     private void OpenLayerEditor_Click(object sender, RoutedEventArgs e)
     {
+        OpenLayerEditor();
+    }
+
+    internal void OpenLayerEditor()
+    {
         try
         {
             if (_layerEditorWindow == null)
@@ -1340,7 +1524,11 @@ public partial class MainWindow : Window
         ConfigureSimulationLayerEngines(_configuredRows, _configuredDepth, _currentAspectRatio, randomize: false);
         _configuredRows = GetReferenceSimulationEngine().Rows;
         SnapWindowToAspect(preserveHeight: true);
+        _lastCompositeFrame = null;
         RebuildSurface();
+        RenderFrame();
+        var resizedEngine = GetReferenceSimulationEngine();
+        Logger.Info($"Applied simulation dimensions: {resizedEngine.Columns}x{resizedEngine.Rows} depth {_configuredDepth}.");
 
         _isPaused = wasPaused;
         PauseMenuItem.Header = _isPaused ? "Resume Simulation" : "Pause Simulation";
@@ -1534,6 +1722,8 @@ public partial class MainWindow : Window
 
     private void RootContextMenu_OnOpened(object sender, RoutedEventArgs e)
     {
+        SuspendRenderLoopForUiInteraction();
+
         if (PassthroughMenuItem != null)
         {
             PassthroughMenuItem.IsChecked = _passthroughEnabled;
@@ -1697,6 +1887,11 @@ public partial class MainWindow : Window
         UpdateAudioReactiveMenuState();
 
         UpdateUpdateMenuItem();
+    }
+
+    private void RootContextMenu_OnClosed(object sender, RoutedEventArgs e)
+    {
+        ResumeRenderLoopAfterUiInteraction();
     }
 
     private async void SourcesMenu_OnSubmenuOpened(object sender, RoutedEventArgs e)
@@ -3827,10 +4022,6 @@ public partial class MainWindow : Window
             Height = _configuredRows,
             Depth = _configuredDepth,
             Framerate = _currentFpsFromConfig,
-            LifeMode = _lifeMode.ToString(),
-            BinningMode = _binningMode.ToString(),
-            InjectionMode = _injectionMode.ToString(),
-            InjectionNoise = _injectionNoise,
             LifeOpacity = _lifeOpacity,
             RgbHueShiftDegrees = _rgbHueShiftDegrees,
             RgbHueShiftSpeedDegreesPerSecond = _rgbHueShiftSpeedDegreesPerSecond,
@@ -3859,7 +4050,6 @@ public partial class MainWindow : Window
             _configuredDepth = nextDepth;
             _currentFpsFromConfig = Math.Clamp(settings.Framerate, 5, 144);
             _currentFps = _currentFpsFromConfig;
-            _injectionNoise = Math.Clamp(settings.InjectionNoise, 0, 1);
             _lifeOpacity = Math.Clamp(settings.LifeOpacity, 0, 1);
             _effectiveLifeOpacity = _lifeOpacity;
             _rgbHueShiftDegrees = NormalizeHueDegrees(settings.RgbHueShiftDegrees);
@@ -3867,27 +4057,6 @@ public partial class MainWindow : Window
             _invertComposite = settings.InvertComposite;
             _passthroughEnabled = settings.Passthrough;
             _blendMode = ParseBlendModeOrDefault(settings.CompositeBlendMode, _blendMode);
-
-            if (Enum.TryParse<GameOfLifeEngine.LifeMode>(settings.LifeMode, true, out var lifeMode))
-            {
-                _lifeMode = lifeMode;
-            }
-            if (Enum.TryParse<GameOfLifeEngine.BinningMode>(settings.BinningMode, true, out var binMode))
-            {
-                _binningMode = binMode;
-            }
-            if (Enum.TryParse<GameOfLifeEngine.InjectionMode>(settings.InjectionMode, true, out var injectionMode))
-            {
-                _injectionMode = injectionMode;
-            }
-
-            foreach (var layer in _simulationLayers)
-            {
-                layer.Engine.SetMode(_lifeMode);
-                layer.Engine.SetBinningMode(_binningMode);
-                layer.InjectionMode = _injectionMode;
-                layer.Engine.SetInjectionMode(layer.InjectionMode);
-            }
 
             if (dimensionsChanged)
             {
@@ -3900,9 +4069,6 @@ public partial class MainWindow : Window
             }
 
             UpdateFramerateMenuChecks();
-            UpdateLifeModeMenuChecks();
-            UpdateBinningModeMenuChecks();
-            UpdateInjectionModeMenuChecks();
             UpdateBlendModeMenuChecks();
             UpdateEffectInput();
             SaveConfig();
@@ -3932,6 +4098,9 @@ public partial class MainWindow : Window
             {
                 var first = _simulationLayers[0];
                 _injectionMode = first.InjectionMode;
+                _lifeMode = first.LifeMode;
+                _binningMode = first.BinningMode;
+                _injectionNoise = first.InjectionNoise;
                 _captureThresholdMin = first.ThresholdMin;
                 _captureThresholdMax = first.ThresholdMax;
                 _invertThreshold = first.InvertThreshold;
@@ -4417,7 +4586,9 @@ public partial class MainWindow : Window
             return;
         }
 
-        var composite = BuildCompositeFrame(_sources, ref _compositeDownscaledBuffer, useEngineDimensions: true, animationTime);
+        bool requireCompositeCpuReadback = _passthroughEnabled || _isRecording;
+        var composite = BuildCompositeFrame(_sources, ref _compositeDownscaledBuffer, useEngineDimensions: true, animationTime,
+            includeCpuReadback: requireCompositeCpuReadback);
         if (composite == null)
         {
             _lastCompositeFrame = null;
@@ -4436,8 +4607,25 @@ public partial class MainWindow : Window
             }
 
             bool invertInput = layer.InputFunction == SimulationInputFunction.Inverse;
-            if (_lifeMode == GameOfLifeEngine.LifeMode.NaiveGrayscale)
+            if (layer.LifeMode == GameOfLifeEngine.LifeMode.NaiveGrayscale)
             {
+                if (layer.Engine is GpuSimulationBackend gpuEngine &&
+                    composite.GpuSurface != null &&
+                    gpuEngine.TryInjectCompositeSurface(
+                        composite.GpuSurface,
+                        layer.ThresholdMin,
+                        layer.ThresholdMax,
+                        layer.InvertThreshold,
+                        layer.InjectionMode,
+                        layer.InjectionNoise,
+                        layer.Engine.Depth,
+                        _pulseStep,
+                        invertInput))
+                {
+                    injectedAnyLayer = true;
+                    continue;
+                }
+
                 var grayMask = BuildLuminanceMask(
                     composite.Downscaled,
                     composite.DownscaledWidth,
@@ -4446,7 +4634,7 @@ public partial class MainWindow : Window
                     layer.ThresholdMax,
                     layer.InvertThreshold,
                     layer.InjectionMode,
-                    _injectionNoise,
+                    layer.InjectionNoise,
                     layer.Engine.Depth,
                     _pulseStep,
                     invertInput);
@@ -4463,7 +4651,7 @@ public partial class MainWindow : Window
                     layer.ThresholdMax,
                     layer.InvertThreshold,
                     layer.InjectionMode,
-                    _injectionNoise,
+                    layer.InjectionNoise,
                     layer.Engine.RDepth,
                     layer.Engine.GDepth,
                     layer.Engine.BDepth,
@@ -5323,10 +5511,14 @@ public partial class MainWindow : Window
         public SimulationInputFunction InputFunction { get; set; } = SimulationInputFunction.Direct;
         public BlendMode BlendMode { get; set; } = BlendMode.Subtractive;
         public GameOfLifeEngine.InjectionMode InjectionMode { get; set; } = GameOfLifeEngine.InjectionMode.Threshold;
+        public GameOfLifeEngine.LifeMode LifeMode { get; set; } = GameOfLifeEngine.LifeMode.NaiveGrayscale;
+        public GameOfLifeEngine.BinningMode BinningMode { get; set; } = GameOfLifeEngine.BinningMode.Fill;
+        public double InjectionNoise { get; set; }
+        public double LifeOpacity { get; set; } = 1.0;
         public double ThresholdMin { get; set; } = 0.35;
         public double ThresholdMax { get; set; } = 0.75;
         public bool InvertThreshold { get; set; }
-        public GameOfLifeEngine Engine { get; set; } = new();
+        public ISimulationBackend Engine { get; set; } = new GpuSimulationBackend();
         public byte[]? ColorBuffer { get; set; }
     }
 
@@ -5338,6 +5530,10 @@ public partial class MainWindow : Window
         public SimulationInputFunction InputFunction { get; init; } = SimulationInputFunction.Direct;
         public BlendMode BlendMode { get; init; } = BlendMode.Subtractive;
         public GameOfLifeEngine.InjectionMode InjectionMode { get; init; } = GameOfLifeEngine.InjectionMode.Threshold;
+        public GameOfLifeEngine.LifeMode LifeMode { get; init; } = GameOfLifeEngine.LifeMode.NaiveGrayscale;
+        public GameOfLifeEngine.BinningMode BinningMode { get; init; } = GameOfLifeEngine.BinningMode.Fill;
+        public double InjectionNoise { get; init; }
+        public double LifeOpacity { get; init; } = 1.0;
         public double ThresholdMin { get; init; } = 0.35;
         public double ThresholdMax { get; init; } = 0.75;
         public bool InvertThreshold { get; init; }
@@ -5401,6 +5597,36 @@ public partial class MainWindow : Window
         return fallback;
     }
 
+    private static GameOfLifeEngine.LifeMode ParseSimulationLifeModeOrDefault(string? value, GameOfLifeEngine.LifeMode fallback)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return fallback;
+        }
+
+        if (Enum.TryParse<GameOfLifeEngine.LifeMode>(value, true, out var parsed))
+        {
+            return parsed;
+        }
+
+        return fallback;
+    }
+
+    private static GameOfLifeEngine.BinningMode ParseSimulationBinningModeOrDefault(string? value, GameOfLifeEngine.BinningMode fallback)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return fallback;
+        }
+
+        if (Enum.TryParse<GameOfLifeEngine.BinningMode>(value, true, out var parsed))
+        {
+            return parsed;
+        }
+
+        return fallback;
+    }
+
     private LayerEditorSimulationLayer ToEditorSimulationLayer(SimulationLayerState layer)
     {
         return new LayerEditorSimulationLayer
@@ -5411,6 +5637,10 @@ public partial class MainWindow : Window
             InputFunction = layer.InputFunction.ToString(),
             BlendMode = layer.BlendMode.ToString(),
             InjectionMode = layer.InjectionMode.ToString(),
+            LifeMode = layer.LifeMode.ToString(),
+            BinningMode = layer.BinningMode.ToString(),
+            InjectionNoise = layer.InjectionNoise,
+            LifeOpacity = layer.LifeOpacity,
             ThresholdMin = layer.ThresholdMin,
             ThresholdMax = layer.ThresholdMax,
             InvertThreshold = layer.InvertThreshold
@@ -5433,6 +5663,10 @@ public partial class MainWindow : Window
             InputFunction = specs[0].InputFunction,
             BlendMode = specs[0].BlendMode,
             InjectionMode = specs[0].InjectionMode,
+            LifeMode = specs[0].LifeMode,
+            BinningMode = specs[0].BinningMode,
+            InjectionNoise = specs[0].InjectionNoise,
+            LifeOpacity = specs[0].LifeOpacity,
             ThresholdMin = specs[0].ThresholdMin,
             ThresholdMax = specs[0].ThresholdMax,
             InvertThreshold = specs[0].InvertThreshold,
@@ -5446,15 +5680,23 @@ public partial class MainWindow : Window
             InputFunction = specs[1].InputFunction,
             BlendMode = specs[1].BlendMode,
             InjectionMode = specs[1].InjectionMode,
+            LifeMode = specs[1].LifeMode,
+            BinningMode = specs[1].BinningMode,
+            InjectionNoise = specs[1].InjectionNoise,
+            LifeOpacity = specs[1].LifeOpacity,
             ThresholdMin = specs[1].ThresholdMin,
             ThresholdMax = specs[1].ThresholdMax,
             InvertThreshold = specs[1].InvertThreshold,
             Engine = CreateConfiguredSimulationEngine(randomize: true)
         });
         ConfigureSimulationEngine(_engine, _configuredRows, _configuredDepth, _currentAspectRatio, randomize: true);
+        foreach (var layer in _simulationLayers)
+        {
+            ApplySimulationLayerEngineSettings(layer);
+        }
     }
 
-    private GameOfLifeEngine GetReferenceSimulationEngine()
+    private ISimulationBackend GetReferenceSimulationEngine()
     {
         if (_simulationLayers.Count > 0)
         {
@@ -5470,27 +5712,32 @@ public partial class MainWindow : Window
         foreach (var layer in _simulationLayers)
         {
             ConfigureSimulationEngine(layer.Engine, rows, depth, aspectRatio, randomize);
-            layer.Engine.SetInjectionMode(layer.InjectionMode);
+            ApplySimulationLayerEngineSettings(layer);
         }
     }
 
-    private GameOfLifeEngine CreateConfiguredSimulationEngine(bool randomize)
+    private ISimulationBackend CreateConfiguredSimulationEngine(bool randomize)
     {
-        var engine = new GameOfLifeEngine();
+        ISimulationBackend engine = new GpuSimulationBackend();
         ConfigureSimulationEngine(engine, _configuredRows, _configuredDepth, _currentAspectRatio, randomize);
         return engine;
     }
 
-    private void ConfigureSimulationEngine(GameOfLifeEngine engine, int rows, int depth, double aspectRatio, bool randomize)
+    private void ConfigureSimulationEngine(ISimulationBackend engine, int rows, int depth, double aspectRatio, bool randomize)
     {
         double resolvedAspect = aspectRatio > 0.01 ? aspectRatio : DefaultAspectRatio;
         engine.Configure(rows, depth, resolvedAspect);
-        engine.SetMode(_lifeMode);
-        engine.SetBinningMode(_binningMode);
         if (randomize)
         {
             engine.Randomize();
         }
+    }
+
+    private static void ApplySimulationLayerEngineSettings(SimulationLayerState layer)
+    {
+        layer.Engine.SetMode(layer.LifeMode);
+        layer.Engine.SetBinningMode(layer.BinningMode);
+        layer.Engine.SetInjectionMode(layer.InjectionMode);
     }
 
     private static List<SimulationLayerSpec> BuildDefaultSimulationLayerSpecs()
@@ -5584,6 +5831,8 @@ public partial class MainWindow : Window
                 var defaultBlend = inputFunction == SimulationInputFunction.Inverse ? BlendMode.Subtractive : BlendMode.Additive;
                 var blendMode = ParseBlendModeOrDefault(layer.BlendMode, defaultBlend);
                 var injectionMode = ParseSimulationInjectionModeOrDefault(layer.InjectionMode, _injectionMode);
+                var lifeMode = ParseSimulationLifeModeOrDefault(layer.LifeMode, _lifeMode);
+                var binningMode = ParseSimulationBinningModeOrDefault(layer.BinningMode, _binningMode);
                 var (thresholdMin, thresholdMax, invertThreshold) =
                     NormalizeLayerThresholds(layer.ThresholdMin, layer.ThresholdMax, layer.InvertThreshold);
                 normalized.Add(new SimulationLayerSpec
@@ -5594,6 +5843,10 @@ public partial class MainWindow : Window
                     InputFunction = inputFunction,
                     BlendMode = blendMode,
                     InjectionMode = injectionMode,
+                    LifeMode = lifeMode,
+                    BinningMode = binningMode,
+                    InjectionNoise = Math.Clamp(layer.InjectionNoise, 0, 1),
+                    LifeOpacity = Math.Clamp(layer.LifeOpacity, 0, 1),
                     ThresholdMin = thresholdMin,
                     ThresholdMax = thresholdMax,
                     InvertThreshold = invertThreshold
@@ -5632,6 +5885,8 @@ public partial class MainWindow : Window
                 var defaultBlend = inputFunction == SimulationInputFunction.Inverse ? BlendMode.Subtractive : BlendMode.Additive;
                 var blendMode = ParseBlendModeOrDefault(layer.BlendMode, defaultBlend);
                 var injectionMode = ParseSimulationInjectionModeOrDefault(layer.InjectionMode, _injectionMode);
+                var lifeMode = ParseSimulationLifeModeOrDefault(layer.LifeMode, _lifeMode);
+                var binningMode = ParseSimulationBinningModeOrDefault(layer.BinningMode, _binningMode);
                 var (thresholdMin, thresholdMax, invertThreshold) =
                     NormalizeLayerThresholds(layer.ThresholdMin, layer.ThresholdMax, layer.InvertThreshold, _captureThresholdMin, _captureThresholdMax, _invertThreshold);
                 normalized.Add(new SimulationLayerSpec
@@ -5642,6 +5897,10 @@ public partial class MainWindow : Window
                     InputFunction = inputFunction,
                     BlendMode = blendMode,
                     InjectionMode = injectionMode,
+                    LifeMode = lifeMode,
+                    BinningMode = binningMode,
+                    InjectionNoise = Math.Clamp(layer.InjectionNoise, 0, 1),
+                    LifeOpacity = Math.Clamp(layer.LifeOpacity, 0, 1),
                     ThresholdMin = thresholdMin,
                     ThresholdMax = thresholdMax,
                     InvertThreshold = invertThreshold
@@ -5664,6 +5923,9 @@ public partial class MainWindow : Window
         string? negativeLayerBlendMode,
         IReadOnlyList<string>? simulationLayerOrder,
         GameOfLifeEngine.InjectionMode injectionMode,
+        GameOfLifeEngine.LifeMode lifeMode,
+        GameOfLifeEngine.BinningMode binningMode,
+        double injectionNoise,
         double thresholdMin,
         double thresholdMax,
         bool invertThreshold)
@@ -5678,6 +5940,10 @@ public partial class MainWindow : Window
             InputFunction = SimulationInputFunction.Direct,
             BlendMode = ParseBlendModeOrDefault(positiveLayerBlendMode, BlendMode.Additive),
             InjectionMode = injectionMode,
+            LifeMode = lifeMode,
+            BinningMode = binningMode,
+            InjectionNoise = injectionNoise,
+            LifeOpacity = 1.0,
             ThresholdMin = normalizedThresholdMin,
             ThresholdMax = normalizedThresholdMax,
             InvertThreshold = normalizedInvertThreshold
@@ -5690,6 +5956,10 @@ public partial class MainWindow : Window
             InputFunction = SimulationInputFunction.Inverse,
             BlendMode = ParseBlendModeOrDefault(negativeLayerBlendMode, BlendMode.Subtractive),
             InjectionMode = injectionMode,
+            LifeMode = lifeMode,
+            BinningMode = binningMode,
+            InjectionNoise = injectionNoise,
+            LifeOpacity = 1.0,
             ThresholdMin = normalizedThresholdMin,
             ThresholdMax = normalizedThresholdMax,
             InvertThreshold = normalizedInvertThreshold
@@ -5741,7 +6011,7 @@ public partial class MainWindow : Window
             SimulationLayerState layer;
             if (!existingById.TryGetValue(spec.Id, out layer!))
             {
-                GameOfLifeEngine engine;
+                ISimulationBackend engine;
                 if (_simulationLayers.Count == 0 && index == 0)
                 {
                     engine = _engine;
@@ -5791,7 +6061,26 @@ public partial class MainWindow : Window
             if (layer.InjectionMode != spec.InjectionMode)
             {
                 layer.InjectionMode = spec.InjectionMode;
-                layer.Engine.SetInjectionMode(spec.InjectionMode);
+                changed = true;
+            }
+            if (layer.LifeMode != spec.LifeMode)
+            {
+                layer.LifeMode = spec.LifeMode;
+                changed = true;
+            }
+            if (layer.BinningMode != spec.BinningMode)
+            {
+                layer.BinningMode = spec.BinningMode;
+                changed = true;
+            }
+            if (Math.Abs(layer.InjectionNoise - spec.InjectionNoise) > 0.000001)
+            {
+                layer.InjectionNoise = spec.InjectionNoise;
+                changed = true;
+            }
+            if (Math.Abs(layer.LifeOpacity - spec.LifeOpacity) > 0.000001)
+            {
+                layer.LifeOpacity = spec.LifeOpacity;
                 changed = true;
             }
             if (Math.Abs(layer.ThresholdMin - spec.ThresholdMin) > 0.000001)
@@ -5810,11 +6099,19 @@ public partial class MainWindow : Window
                 changed = true;
             }
 
+            ApplySimulationLayerEngineSettings(layer);
             nextLayers.Add(layer);
         }
 
         if (existingById.Count > 0)
         {
+            foreach (var orphan in existingById.Values)
+            {
+                if (!ReferenceEquals(orphan.Engine, _engine))
+                {
+                    orphan.Engine.Dispose();
+                }
+            }
             changed = true;
         }
 
@@ -5958,6 +6255,11 @@ public partial class MainWindow : Window
 
     private void UpdateDisplaySurface(bool force = false)
     {
+        if (_isShuttingDown)
+        {
+            return;
+        }
+
         var referenceEngine = GetReferenceSimulationEngine();
         int targetWidth = referenceEngine.Columns;
         int targetHeight = referenceEngine.Rows;
@@ -5968,32 +6270,10 @@ public partial class MainWindow : Window
             targetHeight = referenceEngine.Rows;
         }
 
-        bool needsBitmap = _bitmap == null || force || _bitmap.PixelWidth != targetWidth || _bitmap.PixelHeight != targetHeight;
-        if (needsBitmap)
-        {
-            _bitmap = new WriteableBitmap(targetWidth, targetHeight, 96, 96, PixelFormats.Bgra32, null);
-            _pixelBuffer = new byte[targetWidth * targetHeight * 4];
-            GameImage.Source = _bitmap;
-        }
-        else if (_pixelBuffer != null && _pixelBuffer.Length != targetWidth * targetHeight * 4)
-        {
-            _pixelBuffer = new byte[targetWidth * targetHeight * 4];
-        }
+        _pixelBuffer = _renderBackend.EnsureSurface(targetWidth, targetHeight, force);
 
         _displayWidth = targetWidth;
         _displayHeight = targetHeight;
-
-        GameImage.Width = targetWidth;
-        GameImage.Height = targetHeight;
-
-        if (_underlayBitmap == null || _underlayBitmap.PixelWidth != targetWidth || _underlayBitmap.PixelHeight != targetHeight || force)
-        {
-            _underlayBitmap = new WriteableBitmap(targetWidth, targetHeight, 96, 96, PixelFormats.Bgra32, null);
-            if (_overlayBrush != null)
-            {
-                _overlayBrush.ImageSource = _underlayBitmap;
-            }
-        }
 
         _rowMap = _displayHeight == _rowMap.Length ? _rowMap : new int[_displayHeight];
         _colMap = _displayWidth == _colMap.Length ? _colMap : new int[_displayWidth];
@@ -6206,94 +6486,257 @@ public partial class MainWindow : Window
         public double Tolerance { get; }
     }
 
-    private static double ComputeKeyAlpha(byte sb, byte sg, byte sr, in KeyingSettings keying)
+    private CompositeFrame? BuildCompositeFrame(List<CaptureSource> sources, ref byte[]? downscaledBuffer, bool useEngineDimensions, double animationTime, bool includeCpuReadback = true)
+        => _renderBackend.BuildCompositeFrame(sources, ref downscaledBuffer, useEngineDimensions, animationTime, includeCpuReadback);
+
+    internal static void ResetGpuSourceCompositeSmokeCounters() => GpuSourceCompositor.ResetSmokeCounters();
+
+    internal static int GetGpuSourceCompositePassCount() => GpuSourceCompositor.CompositePassCount;
+
+    internal static (int passCount, long buildCount, double uploadMs, double drawMs, double readbackMs) GetGpuSourceCompositeSmokeStats()
+        => GpuSourceCompositor.GetSmokeStats();
+
+    internal bool RunGpuSourceCompositeSmoke()
     {
-        if (!keying.Enabled)
+        ResetGpuSourceCompositeSmokeCounters();
+
+        const int width = 64;
+        const int height = 36;
+        var first = CaptureSource.CreateFile("smoke-source-a", "Smoke A", width, height);
+        first.LastFrame = new SourceFrame(BuildSmokeSolidBgra(width, height, 24, 48, 180), width, height, null, width, height);
+        first.BlendMode = BlendMode.Additive;
+        first.Opacity = 1.0;
+
+        var second = CaptureSource.CreateFile("smoke-source-b", "Smoke B", width, height);
+        second.LastFrame = new SourceFrame(BuildSmokeSolidBgra(width, height, 180, 24, 32), width, height, null, width, height);
+        second.BlendMode = BlendMode.Additive;
+        second.Opacity = 0.5;
+
+        byte[]? compositeBuffer = null;
+        var composite = BuildCompositeFrame(new List<CaptureSource> { first, second }, ref compositeBuffer, useEngineDimensions: true, animationTime: 0.0);
+        if (composite == null || composite.Downscaled.Length != composite.DownscaledWidth * composite.DownscaledHeight * 4)
         {
-            return 1.0;
+            Logger.Warn("GPU source composite smoke: composite frame was null or wrong size.");
+            return false;
         }
 
-        int dr = sr - keying.R;
-        int dg = sg - keying.G;
-        int db = sb - keying.B;
-        double distance = Math.Sqrt((dr * dr) + (dg * dg) + (db * db)) / MaxColorDistance;
-        double tolerance = Math.Clamp(keying.Tolerance, 0.0, 1.0);
-        if (tolerance <= 0.0)
-        {
-            return distance <= 0.0 ? 0.0 : 1.0;
-        }
-
-        return Math.Clamp(distance / tolerance, 0.0, 1.0);
+        int centerIndex = ((composite.DownscaledHeight / 2) * composite.DownscaledWidth + (composite.DownscaledWidth / 2)) * 4;
+        byte b = composite.Downscaled[centerIndex];
+        byte g = composite.Downscaled[centerIndex + 1];
+        byte r = composite.Downscaled[centerIndex + 2];
+        int passCount = GetGpuSourceCompositePassCount();
+        Logger.Info($"GPU source composite smoke: passes={passCount}, center=({b},{g},{r}).");
+        return passCount > 0 &&
+               (b != 24 || g != 48 || r != 180) &&
+               (b != 0 || g != 0 || r != 0);
     }
 
-    private CompositeFrame? BuildCompositeFrame(List<CaptureSource> sources, ref byte[]? downscaledBuffer, bool useEngineDimensions, double animationTime)
+    internal (bool ok, int passCount, long buildCount, double uploadMs, double drawMs, double readbackMs, int width, int height) RunGpuSourceCompositeBenchmark(int iterations)
     {
-        if (sources.Count == 0)
+        ResetGpuSourceCompositeSmokeCounters();
+
+        const int sourceWidth = 64;
+        const int sourceHeight = 36;
+        var first = CaptureSource.CreateFile("bench-source-a", "Bench A", sourceWidth, sourceHeight);
+        first.LastFrame = new SourceFrame(BuildSmokeSolidBgra(sourceWidth, sourceHeight, 24, 48, 180), sourceWidth, sourceHeight, null, sourceWidth, sourceHeight);
+        first.BlendMode = BlendMode.Additive;
+        first.Opacity = 1.0;
+
+        var second = CaptureSource.CreateFile("bench-source-b", "Bench B", sourceWidth, sourceHeight);
+        second.LastFrame = new SourceFrame(BuildSmokeSolidBgra(sourceWidth, sourceHeight, 180, 24, 32), sourceWidth, sourceHeight, null, sourceWidth, sourceHeight);
+        second.BlendMode = BlendMode.Screen;
+        second.Opacity = 0.75;
+
+        var third = CaptureSource.CreateFile("bench-source-c", "Bench C", sourceWidth, sourceHeight);
+        third.LastFrame = new SourceFrame(BuildSmokeSolidBgra(sourceWidth, sourceHeight, 32, 160, 96), sourceWidth, sourceHeight, null, sourceWidth, sourceHeight);
+        third.BlendMode = BlendMode.Overlay;
+        third.Opacity = 0.6;
+
+        byte[]? compositeBuffer = null;
+        CompositeFrame? composite = null;
+        for (int i = 0; i < Math.Max(1, iterations); i++)
         {
-            return null;
+            composite = BuildCompositeFrame(new List<CaptureSource> { first, second, third }, ref compositeBuffer, useEngineDimensions: true, animationTime: 0.0);
+            if (composite == null)
+            {
+                break;
+            }
         }
 
-        if (!TryGetDownscaledDimensions(sources, useEngineDimensions, out int downscaledWidth, out int downscaledHeight))
-        {
-            return null;
-        }
-        int downscaledLength = downscaledWidth * downscaledHeight * 4;
+        var stats = GetGpuSourceCompositeSmokeStats();
+        return (
+            composite != null,
+            stats.passCount,
+            stats.buildCount,
+            stats.uploadMs,
+            stats.drawMs,
+            stats.readbackMs,
+            composite?.DownscaledWidth ?? 0,
+            composite?.DownscaledHeight ?? 0);
+    }
 
-        if (downscaledBuffer == null || downscaledBuffer.Length != downscaledLength)
-        {
-            downscaledBuffer = new byte[downscaledLength];
-        }
+    internal (bool ok, int passCount, long buildCount, double uploadMs, double drawMs, double readbackMs,
+        double injectMs, double stepMs, double fillMs, int width, int height) RunGpuCompositeToSimulationBenchmark(int iterations)
+    {
+        ResetGpuSourceCompositeSmokeCounters();
 
-        bool wroteDownscaled = false;
-        bool primedDownscaled = false;
+        const int sourceWidth = 64;
+        const int sourceHeight = 36;
+        var source = CaptureSource.CreateFile("handoff-bench-source", "Handoff Bench", sourceWidth, sourceHeight);
+        source.LastFrame = new SourceFrame(BuildSmokeSolidBgra(sourceWidth, sourceHeight, 128, 128, 128), sourceWidth, sourceHeight, null, sourceWidth, sourceHeight);
+        source.BlendMode = BlendMode.Additive;
+        source.Opacity = 1.0;
 
-        foreach (var source in sources)
+        using var backend = new GpuSimulationBackend();
+        bool anyOk = false;
+        long injectTicks = 0;
+        long stepTicks = 0;
+        long fillTicks = 0;
+        int width = 0;
+        int height = 0;
+        byte[]? compositeBuffer = null;
+
+        for (int i = 0; i < Math.Max(1, iterations); i++)
         {
-            var frame = source.LastFrame;
-            if (frame == null)
+            var composite = BuildCompositeFrame(new List<CaptureSource> { source }, ref compositeBuffer, useEngineDimensions: true, animationTime: 0.0,
+                includeCpuReadback: false);
+            if (composite?.GpuSurface == null)
             {
                 continue;
             }
 
-            if (source.Type == CaptureSource.SourceType.Window && source.Window != null)
+            if (!backend.IsGpuAvailable)
             {
-                source.Window = source.Window.WithDimensions(frame.SourceWidth, frame.SourceHeight);
+                break;
             }
 
-            var downscaledTransform = BuildAnimationTransform(source, downscaledWidth, downscaledHeight, animationTime);
-            double animationOpacity = BuildAnimationOpacity(source, animationTime);
-            double effectiveOpacity = Math.Clamp(source.Opacity * animationOpacity, 0.0, 1.0);
-            var keying = new KeyingSettings(
-                source.KeyEnabled && source.BlendMode == BlendMode.Normal,
-                source.BlendMode == BlendMode.Normal,
-                source.KeyColorR,
-                source.KeyColorG,
-                source.KeyColorB,
-                source.KeyTolerance);
-            if (!primedDownscaled)
+            width = composite.DownscaledWidth;
+            height = composite.DownscaledHeight;
+            backend.Configure(height, 24, (double)width / height);
+            backend.SetBinningMode(GameOfLifeEngine.BinningMode.Fill);
+            backend.SetInjectionMode(GameOfLifeEngine.InjectionMode.Threshold);
+            backend.SetMode(GameOfLifeEngine.LifeMode.NaiveGrayscale);
+
+            long start = Stopwatch.GetTimestamp();
+            bool injected = backend.TryInjectCompositeSurface(
+                composite.GpuSurface,
+                0.45,
+                0.55,
+                invertThreshold: false,
+                GameOfLifeEngine.InjectionMode.Threshold,
+                noiseProbability: 0.0,
+                period: backend.Depth,
+                pulseStep: i,
+                invertInput: false);
+            injectTicks += Stopwatch.GetTimestamp() - start;
+            if (!injected)
             {
-                CopyIntoBuffer(downscaledBuffer, downscaledWidth, downscaledHeight,
-                    frame.Downscaled, frame.DownscaledWidth, frame.DownscaledHeight, effectiveOpacity,
-                    source.Mirror && source.Type == CaptureSource.SourceType.Webcam, source.FitMode, downscaledTransform, keying);
-                primedDownscaled = true;
-                wroteDownscaled = true;
-            }
-            else
-            {
-                CompositeIntoBuffer(downscaledBuffer, downscaledWidth, downscaledHeight,
-                    frame.Downscaled, frame.DownscaledWidth, frame.DownscaledHeight, source.BlendMode, effectiveOpacity,
-                    source.Mirror && source.Type == CaptureSource.SourceType.Webcam, source.FitMode, downscaledTransform, keying);
-                wroteDownscaled = true;
+                continue;
             }
 
+            start = Stopwatch.GetTimestamp();
+            backend.Step();
+            stepTicks += Stopwatch.GetTimestamp() - start;
+
+            byte[] colorBuffer = new byte[backend.Columns * backend.Rows * 4];
+            start = Stopwatch.GetTimestamp();
+            backend.FillColorBuffer(colorBuffer);
+            fillTicks += Stopwatch.GetTimestamp() - start;
+
+            anyOk = true;
         }
 
-        if (!wroteDownscaled)
+        var stats = GetGpuSourceCompositeSmokeStats();
+        double tickScale = 1000.0 / Stopwatch.Frequency;
+        double divisor = Math.Max(1, stats.buildCount);
+        return (
+            anyOk,
+            stats.passCount,
+            stats.buildCount,
+            stats.uploadMs,
+            stats.drawMs,
+            stats.readbackMs,
+            injectTicks * tickScale / divisor,
+            stepTicks * tickScale / divisor,
+            fillTicks * tickScale / divisor,
+            width,
+            height);
+    }
+
+    internal bool RunGpuCompositeToSimulationSmoke()
+    {
+        const int width = 128;
+        const int height = 72;
+
+        var source = CaptureSource.CreateFile("handoff-source", "Handoff", width, height);
+        source.LastFrame = new SourceFrame(BuildSmokeSolidBgra(width, height, 128, 128, 128), width, height, null, width, height);
+        source.BlendMode = BlendMode.Additive;
+        source.Opacity = 1.0;
+
+        byte[]? compositeBuffer = null;
+        var composite = BuildCompositeFrame(new List<CaptureSource> { source }, ref compositeBuffer, useEngineDimensions: true, animationTime: 0.0,
+            includeCpuReadback: false);
+        if (composite?.GpuSurface == null)
         {
-            return null;
+            Logger.Warn("GPU handoff smoke: composite surface was unavailable.");
+            return false;
         }
 
-        return new CompositeFrame(downscaledBuffer, downscaledWidth, downscaledHeight);
+        using var backend = new GpuSimulationBackend();
+        backend.Configure(composite.DownscaledHeight, 24, (double)composite.DownscaledWidth / composite.DownscaledHeight);
+        backend.SetBinningMode(GameOfLifeEngine.BinningMode.Fill);
+        backend.SetInjectionMode(GameOfLifeEngine.InjectionMode.Threshold);
+        backend.SetMode(GameOfLifeEngine.LifeMode.NaiveGrayscale);
+        if (!backend.IsGpuActive)
+        {
+            Logger.Warn("GPU handoff smoke: simulation backend was not active.");
+            return false;
+        }
+
+        bool injected = backend.TryInjectCompositeSurface(
+            composite.GpuSurface,
+            0.45,
+            0.55,
+            invertThreshold: false,
+            GameOfLifeEngine.InjectionMode.Threshold,
+            noiseProbability: 0.0,
+            period: backend.Depth,
+            pulseStep: 0,
+            invertInput: false);
+        if (!injected)
+        {
+            Logger.Warn("GPU handoff smoke: direct composite injection was rejected.");
+            return false;
+        }
+
+        byte[] colorBuffer = new byte[backend.Columns * backend.Rows * 4];
+        backend.FillColorBuffer(colorBuffer);
+        bool hasAnyLife = false;
+        for (int i = 0; i < colorBuffer.Length; i += 4)
+        {
+            if (colorBuffer[i] != 0 || colorBuffer[i + 1] != 0 || colorBuffer[i + 2] != 0)
+            {
+                hasAnyLife = true;
+                break;
+            }
+        }
+
+        Logger.Info($"GPU handoff smoke: cpuReadbackBytes={composite.Downscaled.Length}, hasAnyLife={hasAnyLife}.");
+        return composite.Downscaled.Length == 0 && hasAnyLife;
+    }
+
+    private static byte[] BuildSmokeSolidBgra(int width, int height, byte b, byte g, byte r)
+    {
+        var buffer = new byte[width * height * 4];
+        for (int i = 0; i < buffer.Length; i += 4)
+        {
+            buffer[i] = b;
+            buffer[i + 1] = g;
+            buffer[i + 2] = r;
+            buffer[i + 3] = 255;
+        }
+
+        return buffer;
     }
 
     private Transform2D BuildAnimationTransform(CaptureSource source, int destWidth, int destHeight, double timeSeconds)
@@ -6644,154 +7087,72 @@ public partial class MainWindow : Window
 
     private static double DegreesToRadians(double degrees) => degrees * (Math.PI / 180.0);
 
-    private void CopyIntoBuffer(byte[] destination, int destWidth, int destHeight, byte[] source, int sourceWidth, int sourceHeight,
-        double opacity, bool mirror, FitMode fitMode, Transform2D transform, in KeyingSettings keying)
+    private static void BlendSimulationLayerInto(
+        ref int destinationB,
+        ref int destinationG,
+        ref int destinationR,
+        byte sr,
+        byte sg,
+        byte sb,
+        BlendMode mode,
+        double opacity)
     {
-        opacity = Math.Clamp(opacity, 0.0, 1.0);
-        int destStride = destWidth * 4;
-        int sourceStride = sourceWidth * 4;
-        var mapping = ImageFit.GetMapping(fitMode, sourceWidth, sourceHeight, destWidth, destHeight);
-        bool useTransform = !transform.IsIdentity;
-        var keyingLocal = keying;
+        int db = destinationB;
+        int dg = destinationG;
+        int dr = destinationR;
 
-        Parallel.For(0, destHeight, row =>
+        int b;
+        int g;
+        int r;
+
+        switch (mode)
         {
-            int destRowOffset = row * destStride;
-            for (int col = 0; col < destWidth; col++)
-            {
-                int destIndex = destRowOffset + (col * 4);
-                byte sb = 0;
-                byte sg = 0;
-                byte sr = 0;
-                byte sa = 255;
-                bool mapped;
-                int srcX;
-                int srcY;
-                if (useTransform)
-                {
-                    transform.TransformPoint(col, row, out double tx, out double ty);
-                    mapped = ImageFit.TryMapPixel(mapping, tx, ty, out srcX, out srcY);
-                }
-                else
-                {
-                    mapped = ImageFit.TryMapPixel(mapping, col, row, out srcX, out srcY);
-                }
-
-                if (mapped)
-                {
-                    if (mirror)
-                    {
-                        srcX = sourceWidth - 1 - srcX;
-                    }
-                    int srcIndex = (srcY * sourceStride) + (srcX * 4);
-                    sb = source[srcIndex];
-                    sg = source[srcIndex + 1];
-                    sr = source[srcIndex + 2];
-                    sa = source[srcIndex + 3];
-                }
-
-                double keyAlpha = ComputeKeyAlpha(sb, sg, sr, keyingLocal);
-                double alpha = keyingLocal.UseAlpha ? (sa / 255.0) : 1.0;
-                double effectiveOpacity = opacity * keyAlpha * alpha;
-                destination[destIndex] = ClampToByte((int)(sb * effectiveOpacity));
-                destination[destIndex + 1] = ClampToByte((int)(sg * effectiveOpacity));
-                destination[destIndex + 2] = ClampToByte((int)(sr * effectiveOpacity));
-                destination[destIndex + 3] = 255;
-            }
-        });
-    }
-
-    private void CompositeIntoBuffer(byte[] destination, int destWidth, int destHeight, byte[] source, int sourceWidth, int sourceHeight,
-        BlendMode mode, double opacity, bool mirror, FitMode fitMode, Transform2D transform, in KeyingSettings keying)
-    {
-        if (destination == null || source == null || destWidth <= 0 || destHeight <= 0 || sourceWidth <= 0 || sourceHeight <= 0)
-        {
-            return;
+            case BlendMode.Additive:
+                b = db + sb;
+                g = dg + sg;
+                r = dr + sr;
+                break;
+            case BlendMode.Multiply:
+                b = db * sb / 255;
+                g = dg * sg / 255;
+                r = dr * sr / 255;
+                break;
+            case BlendMode.Screen:
+                b = 255 - ((255 - db) * (255 - sb) / 255);
+                g = 255 - ((255 - dg) * (255 - sg) / 255);
+                r = 255 - ((255 - dr) * (255 - sr) / 255);
+                break;
+            case BlendMode.Overlay:
+                b = db < 128 ? (2 * db * sb) / 255 : 255 - (2 * (255 - db) * (255 - sb) / 255);
+                g = dg < 128 ? (2 * dg * sg) / 255 : 255 - (2 * (255 - dg) * (255 - sg) / 255);
+                r = dr < 128 ? (2 * dr * sr) / 255 : 255 - (2 * (255 - dr) * (255 - sr) / 255);
+                break;
+            case BlendMode.Lighten:
+                b = Math.Max(db, sb);
+                g = Math.Max(dg, sg);
+                r = Math.Max(dr, sr);
+                break;
+            case BlendMode.Darken:
+                b = Math.Min(db, sb);
+                g = Math.Min(dg, sg);
+                r = Math.Min(dr, sr);
+                break;
+            case BlendMode.Subtractive:
+                b = db - sb;
+                g = dg - sg;
+                r = dr - sr;
+                break;
+            case BlendMode.Normal:
+            default:
+                b = sb;
+                g = sg;
+                r = sr;
+                break;
         }
 
-        int destLength = destWidth * destHeight * 4;
-        int sourceLength = sourceWidth * sourceHeight * 4;
-        if (destination.Length < destLength || source.Length < sourceLength)
-        {
-            return;
-        }
-
-        int destStride = destWidth * 4;
-        int sourceStride = sourceWidth * 4;
-
-        var keyingLocal = keying;
-        bool applyKeying = keyingLocal.Enabled && mode == BlendMode.Normal;
-        if (destWidth == sourceWidth && destHeight == sourceHeight && transform.IsIdentity)
-        {
-            Parallel.For(0, destHeight, row =>
-            {
-                int destRowOffset = row * destStride;
-                int srcRowOffset = row * sourceStride;
-                for (int col = 0; col < destWidth; col++)
-                {
-                    int destIndex = destRowOffset + (col * 4);
-                    int sampleX = mirror ? (sourceWidth - 1 - col) : col;
-                    int srcIndex = srcRowOffset + (sampleX * 4);
-                    byte sb = source[srcIndex];
-                    byte sg = source[srcIndex + 1];
-                    byte sr = source[srcIndex + 2];
-                    byte sa = source[srcIndex + 3];
-                    if (applyKeying)
-                    {
-                        double keyAlpha = ComputeKeyAlpha(sb, sg, sr, keyingLocal);
-                        sa = ClampToByte((int)Math.Round(sa * keyAlpha));
-                    }
-                    BlendInto(destination, destIndex, sb, sg, sr, sa, mode, opacity);
-                }
-            });
-            return;
-        }
-
-        var mapping = ImageFit.GetMapping(fitMode, sourceWidth, sourceHeight, destWidth, destHeight);
-        bool useTransform = !transform.IsIdentity;
-        Parallel.For(0, destHeight, row =>
-        {
-            int destRowOffset = row * destStride;
-            for (int col = 0; col < destWidth; col++)
-            {
-                int destIndex = destRowOffset + (col * 4);
-                byte sb = 0;
-                byte sg = 0;
-                byte sr = 0;
-                byte sa = 0;
-                bool mapped;
-                int srcX;
-                int srcY;
-                if (useTransform)
-                {
-                    transform.TransformPoint(col, row, out double tx, out double ty);
-                    mapped = ImageFit.TryMapPixel(mapping, tx, ty, out srcX, out srcY);
-                }
-                else
-                {
-                    mapped = ImageFit.TryMapPixel(mapping, col, row, out srcX, out srcY);
-                }
-
-                if (mapped)
-                {
-                    if (mirror)
-                    {
-                        srcX = sourceWidth - 1 - srcX;
-                    }
-                    int srcIndex = (srcY * sourceStride) + (srcX * 4);
-                    sb = source[srcIndex];
-                    sg = source[srcIndex + 1];
-                    sr = source[srcIndex + 2];
-                    sa = source[srcIndex + 3];
-                }
-                if (applyKeying)
-                {
-                    double keyAlpha = ComputeKeyAlpha(sb, sg, sr, keyingLocal);
-                    sa = ClampToByte((int)Math.Round(sa * keyAlpha));
-                }
-                BlendInto(destination, destIndex, sb, sg, sr, sa, mode, opacity);
-            }
-        });
+        destinationB = (int)Math.Round(db + ((b - db) * opacity));
+        destinationG = (int)Math.Round(dg + ((g - dg) * opacity));
+        destinationR = (int)Math.Round(dr + ((r - dr) * opacity));
     }
 
     private static void BlendInto(byte[] destination, int destIndex, byte sb, byte sg, byte sr, byte sa, BlendMode mode, double opacity)
@@ -6858,78 +7219,10 @@ public partial class MainWindow : Window
                 break;
         }
 
-        // Apply opacity as a lerp between destination and blended result.
         destination[destIndex] = ClampToByte((int)(db + (b - db) * opacity));
         destination[destIndex + 1] = ClampToByte((int)(dg + (g - dg) * opacity));
         destination[destIndex + 2] = ClampToByte((int)(dr + (r - dr) * opacity));
         destination[destIndex + 3] = 255;
-    }
-
-    private static void BlendSimulationLayerInto(
-        ref int destinationB,
-        ref int destinationG,
-        ref int destinationR,
-        byte sr,
-        byte sg,
-        byte sb,
-        BlendMode mode)
-    {
-        int db = destinationB;
-        int dg = destinationG;
-        int dr = destinationR;
-
-        int b;
-        int g;
-        int r;
-
-        switch (mode)
-        {
-            case BlendMode.Additive:
-                b = db + sb;
-                g = dg + sg;
-                r = dr + sr;
-                break;
-            case BlendMode.Multiply:
-                b = db * sb / 255;
-                g = dg * sg / 255;
-                r = dr * sr / 255;
-                break;
-            case BlendMode.Screen:
-                b = 255 - ((255 - db) * (255 - sb) / 255);
-                g = 255 - ((255 - dg) * (255 - sg) / 255);
-                r = 255 - ((255 - dr) * (255 - sr) / 255);
-                break;
-            case BlendMode.Overlay:
-                b = db < 128 ? (2 * db * sb) / 255 : 255 - (2 * (255 - db) * (255 - sb) / 255);
-                g = dg < 128 ? (2 * dg * sg) / 255 : 255 - (2 * (255 - dg) * (255 - sg) / 255);
-                r = dr < 128 ? (2 * dr * sr) / 255 : 255 - (2 * (255 - dr) * (255 - sr) / 255);
-                break;
-            case BlendMode.Lighten:
-                b = Math.Max(db, sb);
-                g = Math.Max(dg, sg);
-                r = Math.Max(dr, sr);
-                break;
-            case BlendMode.Darken:
-                b = Math.Min(db, sb);
-                g = Math.Min(dg, sg);
-                r = Math.Min(dr, sr);
-                break;
-            case BlendMode.Subtractive:
-                b = db - sb;
-                g = dg - sg;
-                r = dr - sr;
-                break;
-            case BlendMode.Normal:
-            default:
-                b = sb;
-                g = sg;
-                r = sr;
-                break;
-        }
-
-        destinationB = b;
-        destinationG = g;
-        destinationR = r;
     }
 
     private static byte ClampToByte(int value) => (byte)(value < 0 ? 0 : value > 255 ? 255 : value);
@@ -6978,70 +7271,41 @@ public partial class MainWindow : Window
             layer.ColorBuffer = new byte[size];
         }
         byte[] targetBuffer = layer.ColorBuffer;
+        engine.FillColorBuffer(targetBuffer);
 
         double hueShiftDegrees = CurrentRgbHueShiftDegrees();
-        bool applyHueShift = _lifeMode == GameOfLifeEngine.LifeMode.RgbChannels && Math.Abs(hueShiftDegrees) > 0.001;
-        double rr = 0, rg = 0, rb = 0, gr = 0, gg = 0, gb = 0, br = 0, bg = 0, bb = 0;
+        bool applyHueShift = layer.LifeMode == GameOfLifeEngine.LifeMode.RgbChannels && Math.Abs(hueShiftDegrees) > 0.001;
         if (applyHueShift)
         {
-            BuildHueRotationMatrix(hueShiftDegrees, out rr, out rg, out rb, out gr, out gg, out gb, out br, out bg, out bb);
+            ApplyHueShiftToColorBuffer(targetBuffer, engine.Columns, engine.Rows, hueShiftDegrees);
         }
+    }
 
-        Parallel.For(0, engine.Rows, row =>
+    private static void ApplyHueShiftToColorBuffer(byte[] targetBuffer, int width, int height, double hueShiftDegrees)
+    {
+        BuildHueRotationMatrix(hueShiftDegrees, out double rr, out double rg, out double rb,
+            out double gr, out double gg, out double gb,
+            out double br, out double bg, out double bb);
+
+        Parallel.For(0, height, row =>
         {
-            int rowOffset = row * engine.Columns * 4;
-            for (int col = 0; col < engine.Columns; col++)
+            int rowOffset = row * width * 4;
+            for (int col = 0; col < width; col++)
             {
-                var (r, g, b) = engine.GetColor(row, col);
-                if (applyHueShift)
-                {
-                    int rotatedR = (int)Math.Round((rr * r) + (rg * g) + (rb * b));
-                    int rotatedG = (int)Math.Round((gr * r) + (gg * g) + (gb * b));
-                    int rotatedB = (int)Math.Round((br * r) + (bg * g) + (bb * b));
-                    r = ClampToByte(rotatedR);
-                    g = ClampToByte(rotatedG);
-                    b = ClampToByte(rotatedB);
-                }
-
                 int index = rowOffset + (col * 4);
-                targetBuffer[index] = r;
-                targetBuffer[index + 1] = g;
-                targetBuffer[index + 2] = b;
+                byte r = targetBuffer[index];
+                byte g = targetBuffer[index + 1];
+                byte b = targetBuffer[index + 2];
+                targetBuffer[index] = ClampToByte((int)Math.Round((rr * r) + (rg * g) + (rb * b)));
+                targetBuffer[index + 1] = ClampToByte((int)Math.Round((gr * r) + (gg * g) + (gb * b)));
+                targetBuffer[index + 2] = ClampToByte((int)Math.Round((br * r) + (bg * g) + (bb * b)));
                 targetBuffer[index + 3] = 255;
             }
         });
     }
 
-    private void InitializeEffect()
-    {
-        _overlayBrush = new ImageBrush
-        {
-            Stretch = Stretch.Fill,
-            AlignmentX = AlignmentX.Center,
-            AlignmentY = AlignmentY.Center
-        };
-        if (_underlayBitmap != null)
-        {
-            _overlayBrush.ImageSource = _underlayBitmap;
-        }
-        _blendEffect.Overlay = _overlayBrush;
-        _inputBrush = new ImageBrush(_bitmap)
-        {
-            Stretch = Stretch.Fill,
-            Opacity = _lifeOpacity
-        };
-        _blendEffect.Input = _inputBrush;
-        GameImage.Effect = _blendEffect;
-        UpdateEffectInput();
-    }
-
     private void UpdateUnderlayBitmap(int requiredLength)
     {
-        if (_underlayBitmap == null)
-        {
-            return;
-        }
-
         if (_passthroughCompositedInPixelBuffer)
         {
             // Underlay is already in _pixelBuffer for this frame.
@@ -7055,8 +7319,8 @@ public partial class MainWindow : Window
             return;
         }
 
-        int width = _underlayBitmap.PixelWidth;
-        int height = _underlayBitmap.PixelHeight;
+        int width = _renderBackend.PixelWidth;
+        int height = _renderBackend.PixelHeight;
         byte[]? buffer = null;
         int stride = width * 4;
 
@@ -7082,31 +7346,34 @@ public partial class MainWindow : Window
             InvertBuffer(buffer);
         }
 
-        _underlayBitmap.WritePixels(new Int32Rect(0, 0, width, height), buffer, stride, 0);
+        _renderBackend.PresentUnderlay(buffer, stride);
     }
 
     private void UpdateEffectInput()
     {
-        _blendEffect.UseOverlay = ShouldUseShaderPassthrough() ? 1.0 : 0.0;
-        var passthroughBlendMode = GetEffectivePassthroughBlendMode();
-        _blendEffect.Mode = passthroughBlendMode switch
+        if (_renderBackend == null)
         {
-            BlendMode.Additive => 0.0,
-            BlendMode.Normal => 1.0,
-            BlendMode.Multiply => 2.0,
-            BlendMode.Screen => 3.0,
-            BlendMode.Overlay => 4.0,
-            BlendMode.Lighten => 5.0,
-            BlendMode.Darken => 6.0,
-            BlendMode.Subtractive => 7.0,
-            _ => 0.0
-        };
-        if (_inputBrush != null && _bitmap != null)
-        {
-            _inputBrush.ImageSource = _bitmap;
-            _inputBrush.Opacity = 1.0;
+            return;
         }
+
+        bool useOverlay = ShouldUseShaderPassthrough();
+        var passthroughBlendMode = GetEffectivePassthroughBlendMode();
+        double blendModeValue = ToBlendEffectModeValue(passthroughBlendMode);
+        _renderBackend.UpdateEffectState(useOverlay, blendModeValue);
     }
+
+    private static double ToBlendEffectModeValue(BlendMode passthroughBlendMode) => passthroughBlendMode switch
+    {
+        BlendMode.Additive => 0.0,
+        BlendMode.Normal => 1.0,
+        BlendMode.Multiply => 2.0,
+        BlendMode.Screen => 3.0,
+        BlendMode.Overlay => 4.0,
+        BlendMode.Lighten => 5.0,
+        BlendMode.Darken => 6.0,
+        BlendMode.Subtractive => 7.0,
+        _ => 0.0
+    };
 
     private bool ShouldUseShaderPassthrough()
     {
@@ -8116,6 +8383,9 @@ public partial class MainWindow : Window
                     config.NegativeLayerBlendMode,
                     config.SimulationLayerOrder,
                     _injectionMode,
+                    _lifeMode,
+                    _binningMode,
+                    _injectionNoise,
                     _captureThresholdMin,
                     _captureThresholdMax,
                     _invertThreshold);
@@ -8124,6 +8394,9 @@ public partial class MainWindow : Window
             {
                 var firstLayer = _simulationLayers[0];
                 _injectionMode = firstLayer.InjectionMode;
+                _lifeMode = firstLayer.LifeMode;
+                _binningMode = firstLayer.BinningMode;
+                _injectionNoise = firstLayer.InjectionNoise;
                 _captureThresholdMin = firstLayer.ThresholdMin;
                 _captureThresholdMax = firstLayer.ThresholdMax;
                 _invertThreshold = firstLayer.InvertThreshold;
@@ -8244,6 +8517,10 @@ public partial class MainWindow : Window
             InputFunction = layer.InputFunction.ToString(),
             BlendMode = layer.BlendMode.ToString(),
             InjectionMode = layer.InjectionMode.ToString(),
+            LifeMode = layer.LifeMode.ToString(),
+            BinningMode = layer.BinningMode.ToString(),
+            InjectionNoise = layer.InjectionNoise,
+            LifeOpacity = layer.LifeOpacity,
             ThresholdMin = layer.ThresholdMin,
             ThresholdMax = layer.ThresholdMax,
             InvertThreshold = layer.InvertThreshold
@@ -9066,6 +9343,10 @@ public partial class MainWindow : Window
             public string InputFunction { get; set; } = SimulationInputFunction.Direct.ToString();
             public string BlendMode { get; set; } = MainWindow.BlendMode.Subtractive.ToString();
             public string InjectionMode { get; set; } = GameOfLifeEngine.InjectionMode.Threshold.ToString();
+            public string LifeMode { get; set; } = GameOfLifeEngine.LifeMode.NaiveGrayscale.ToString();
+            public string BinningMode { get; set; } = GameOfLifeEngine.BinningMode.Fill.ToString();
+            public double InjectionNoise { get; set; }
+            public double LifeOpacity { get; set; } = 1.0;
             public double ThresholdMin { get; set; } = 0.35;
             public double ThresholdMax { get; set; } = 0.75;
             public bool InvertThreshold { get; set; }
@@ -9346,15 +9627,17 @@ public partial class MainWindow : Window
 
     private sealed class CompositeFrame
     {
-        public CompositeFrame(byte[] downscaled, int downscaledWidth, int downscaledHeight)
+        public CompositeFrame(byte[] downscaled, int downscaledWidth, int downscaledHeight, GpuCompositeSurface? gpuSurface = null)
         {
             Downscaled = downscaled;
             DownscaledWidth = downscaledWidth;
             DownscaledHeight = downscaledHeight;
+            GpuSurface = gpuSurface;
         }
 
         public byte[] Downscaled { get; }
         public int DownscaledWidth { get; }
         public int DownscaledHeight { get; }
+        public GpuCompositeSurface? GpuSurface { get; }
     }
 }

@@ -29,10 +29,6 @@ internal sealed class LayerConfigFile
                 Height = Math.Max(1, projectSettings.Height),
                 Depth = Math.Max(1, projectSettings.Depth),
                 Framerate = projectSettings.Framerate,
-                LifeMode = string.IsNullOrWhiteSpace(projectSettings.LifeMode) ? "NaiveGrayscale" : projectSettings.LifeMode,
-                BinningMode = string.IsNullOrWhiteSpace(projectSettings.BinningMode) ? "Fill" : projectSettings.BinningMode,
-                InjectionMode = string.IsNullOrWhiteSpace(projectSettings.InjectionMode) ? "Threshold" : projectSettings.InjectionMode,
-                InjectionNoise = Math.Clamp(projectSettings.InjectionNoise, 0, 1),
                 LifeOpacity = Math.Clamp(projectSettings.LifeOpacity, 0, 1),
                 RgbHueShiftDegrees = projectSettings.RgbHueShiftDegrees,
                 RgbHueShiftSpeedDegreesPerSecond = projectSettings.RgbHueShiftSpeedDegreesPerSecond,
@@ -48,6 +44,10 @@ internal sealed class LayerConfigFile
                 InputFunction = string.IsNullOrWhiteSpace(layer.InputFunction) ? "Direct" : layer.InputFunction,
                 BlendMode = string.IsNullOrWhiteSpace(layer.BlendMode) ? "Subtractive" : layer.BlendMode,
                 InjectionMode = string.IsNullOrWhiteSpace(layer.InjectionMode) ? "Threshold" : layer.InjectionMode,
+                LifeMode = string.IsNullOrWhiteSpace(layer.LifeMode) ? "NaiveGrayscale" : layer.LifeMode,
+                BinningMode = string.IsNullOrWhiteSpace(layer.BinningMode) ? "Fill" : layer.BinningMode,
+                InjectionNoise = Math.Clamp(layer.InjectionNoise, 0, 1),
+                LifeOpacity = Math.Clamp(layer.LifeOpacity, 0, 1),
                 ThresholdMin = Math.Clamp(layer.ThresholdMin, 0, 1),
                 ThresholdMax = Math.Clamp(layer.ThresholdMax, 0, 1),
                 InvertThreshold = layer.InvertThreshold
@@ -65,6 +65,10 @@ internal sealed class LayerConfigFile
                     InputFunction = "Direct",
                     BlendMode = "Additive",
                     InjectionMode = "Threshold",
+                    LifeMode = "NaiveGrayscale",
+                    BinningMode = "Fill",
+                    InjectionNoise = 0,
+                    LifeOpacity = 1.0,
                     ThresholdMin = 0.35,
                     ThresholdMax = 0.75,
                     InvertThreshold = false
@@ -77,6 +81,10 @@ internal sealed class LayerConfigFile
                     InputFunction = "Inverse",
                     BlendMode = "Subtractive",
                     InjectionMode = "Threshold",
+                    LifeMode = "NaiveGrayscale",
+                    BinningMode = "Fill",
+                    InjectionNoise = 0,
+                    LifeOpacity = 1.0,
                     ThresholdMin = 0.35,
                     ThresholdMax = 0.75,
                     InvertThreshold = false
@@ -112,6 +120,10 @@ internal sealed class LayerConfigFile
                 InputFunction = string.IsNullOrWhiteSpace(layer.InputFunction) ? "Direct" : layer.InputFunction,
                 BlendMode = string.IsNullOrWhiteSpace(layer.BlendMode) ? "Subtractive" : layer.BlendMode,
                 InjectionMode = string.IsNullOrWhiteSpace(layer.InjectionMode) ? "Threshold" : layer.InjectionMode,
+                LifeMode = string.IsNullOrWhiteSpace(layer.LifeMode) ? "NaiveGrayscale" : layer.LifeMode,
+                BinningMode = string.IsNullOrWhiteSpace(layer.BinningMode) ? "Fill" : layer.BinningMode,
+                InjectionNoise = Math.Clamp(layer.InjectionNoise, 0, 1),
+                LifeOpacity = Math.Clamp(layer.LifeOpacity, 0, 1),
                 ThresholdMin = Math.Clamp(layer.ThresholdMin, 0, 1),
                 ThresholdMax = Math.Clamp(layer.ThresholdMax, 0, 1),
                 InvertThreshold = layer.InvertThreshold
@@ -129,10 +141,6 @@ internal sealed class LayerConfigFile
             Height = Math.Max(1, settings.Height),
             Depth = Math.Max(1, settings.Depth),
             Framerate = settings.Framerate,
-            LifeMode = string.IsNullOrWhiteSpace(settings.LifeMode) ? "NaiveGrayscale" : settings.LifeMode,
-            BinningMode = string.IsNullOrWhiteSpace(settings.BinningMode) ? "Fill" : settings.BinningMode,
-            InjectionMode = string.IsNullOrWhiteSpace(settings.InjectionMode) ? "Threshold" : settings.InjectionMode,
-            InjectionNoise = Math.Clamp(settings.InjectionNoise, 0, 1),
             LifeOpacity = Math.Clamp(settings.LifeOpacity, 0, 1),
             RgbHueShiftDegrees = settings.RgbHueShiftDegrees,
             RgbHueShiftSpeedDegreesPerSecond = settings.RgbHueShiftSpeedDegreesPerSecond,
@@ -289,6 +297,10 @@ internal sealed class LayerConfigFile
                 InputFunction = "Direct",
                 BlendMode = positiveBlend,
                 InjectionMode = string.IsNullOrWhiteSpace(ProjectSettings?.InjectionMode) ? "Threshold" : ProjectSettings.InjectionMode,
+                LifeMode = string.IsNullOrWhiteSpace(ProjectSettings?.LifeMode) ? "NaiveGrayscale" : ProjectSettings.LifeMode,
+                BinningMode = string.IsNullOrWhiteSpace(ProjectSettings?.BinningMode) ? "Fill" : ProjectSettings.BinningMode,
+                InjectionNoise = Math.Clamp(ProjectSettings?.InjectionNoise ?? 0, 0, 1),
+                LifeOpacity = 1.0,
                 ThresholdMin = 0.35,
                 ThresholdMax = 0.75,
                 InvertThreshold = false
@@ -301,6 +313,10 @@ internal sealed class LayerConfigFile
                 InputFunction = "Inverse",
                 BlendMode = negativeBlend,
                 InjectionMode = string.IsNullOrWhiteSpace(ProjectSettings?.InjectionMode) ? "Threshold" : ProjectSettings.InjectionMode,
+                LifeMode = string.IsNullOrWhiteSpace(ProjectSettings?.LifeMode) ? "NaiveGrayscale" : ProjectSettings.LifeMode,
+                BinningMode = string.IsNullOrWhiteSpace(ProjectSettings?.BinningMode) ? "Fill" : ProjectSettings.BinningMode,
+                InjectionNoise = Math.Clamp(ProjectSettings?.InjectionNoise ?? 0, 0, 1),
+                LifeOpacity = 1.0,
                 ThresholdMin = 0.35,
                 ThresholdMax = 0.75,
                 InvertThreshold = false
@@ -408,6 +424,10 @@ internal sealed class LayerConfigSimulationLayer
     public string InputFunction { get; set; } = "Direct";
     public string BlendMode { get; set; } = "Subtractive";
     public string InjectionMode { get; set; } = "Threshold";
+    public string LifeMode { get; set; } = "NaiveGrayscale";
+    public string BinningMode { get; set; } = "Fill";
+    public double InjectionNoise { get; set; }
+    public double LifeOpacity { get; set; } = 1.0;
     public double ThresholdMin { get; set; } = 0.35;
     public double ThresholdMax { get; set; } = 0.75;
     public bool InvertThreshold { get; set; }

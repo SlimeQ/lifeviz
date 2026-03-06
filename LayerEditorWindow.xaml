@@ -717,8 +717,67 @@
                                             </WrapPanel>
                                         </StackPanel>
 
-                                        <StackPanel Grid.Column="2"
-                                                    DataContext="{Binding SelectedSimulationLayer}">
+                                        <StackPanel Grid.Column="2">
+                                            <GroupBox Header="Global Simulation Controls"
+                                                      Margin="0,0,0,10">
+                                                <StackPanel Margin="8">
+                                                    <StackPanel Orientation="Horizontal">
+                                                        <TextBlock Text="Height"
+                                                                   Width="110"
+                                                                   VerticalAlignment="Center" />
+                                                        <ComboBox ItemsSource="{Binding SimulationHeightOptions}"
+                                                                  SelectedItem="{Binding SimulationHeight}"
+                                                                  Width="90"
+                                                                  Margin="8,0,0,0"
+                                                                  SelectionChanged="SimulationHeight_Changed"
+                                                                  LostFocus="SimulationDimensions_LostFocus"
+                                                                  KeyDown="SimulationDimensions_KeyDown" />
+                                                    </StackPanel>
+
+                                                    <StackPanel Orientation="Horizontal"
+                                                                Margin="0,8,0,0">
+                                                        <TextBlock Text="Depth"
+                                                                   Width="110"
+                                                                   VerticalAlignment="Center" />
+                                                        <TextBox Text="{Binding SimulationDepth}"
+                                                                 Width="90"
+                                                                 Margin="8,0,0,0"
+                                                                 LostFocus="SimulationDimensions_LostFocus"
+                                                                 KeyDown="SimulationDimensions_KeyDown" />
+                                                    </StackPanel>
+
+                                                    <StackPanel Orientation="Horizontal"
+                                                                Margin="0,8,0,0">
+                                                        <TextBlock Text="Framerate"
+                                                                   Width="110"
+                                                                   VerticalAlignment="Center" />
+                                                        <TextBox Text="{Binding SimulationFramerate, StringFormat={}{0:0.##}}"
+                                                                 Width="90"
+                                                                 Margin="8,0,0,0"
+                                                                 LostFocus="SimulationDimensions_LostFocus"
+                                                                 KeyDown="SimulationDimensions_KeyDown" />
+                                                    </StackPanel>
+
+                                                    <StackPanel Orientation="Horizontal">
+                                                        <TextBlock Text="Global Life Opacity"
+                                                                   Width="110"
+                                                                   VerticalAlignment="Center" />
+                                                        <Slider Minimum="0"
+                                                                Maximum="1"
+                                                                Value="{Binding GlobalSimulationLifeOpacity}"
+                                                                Width="160"
+                                                                SmallChange="0.05"
+                                                                LargeChange="0.1"
+                                                                Margin="8,0,0,0"
+                                                                ValueChanged="GlobalSimulationLifeOpacity_Changed" />
+                                                        <TextBlock Text="{Binding GlobalSimulationLifeOpacity, StringFormat={}{0:P0}}"
+                                                                   Margin="8,0,0,0"
+                                                                   VerticalAlignment="Center" />
+                                                    </StackPanel>
+                                                </StackPanel>
+                                            </GroupBox>
+
+                                            <StackPanel DataContext="{Binding SelectedSimulationLayer}">
                                             <TextBlock Text="Select a simulation layer to edit settings."
                                                        Foreground="#A0A0A0"
                                                        Margin="0,0,0,8">
@@ -798,6 +857,66 @@
 
                                                     <StackPanel Orientation="Horizontal"
                                                                 Margin="0,8,0,0">
+                                                        <TextBlock Text="Life Opacity"
+                                                                   VerticalAlignment="Center" />
+                                                        <Slider Minimum="0"
+                                                                Maximum="1"
+                                                                Value="{Binding LifeOpacity}"
+                                                                Width="160"
+                                                                SmallChange="0.05"
+                                                                LargeChange="0.1"
+                                                                Margin="8,0,0,0"
+                                                                ValueChanged="SimulationLayerLifeOpacity_Changed" />
+                                                        <TextBlock Text="{Binding LifeOpacity, StringFormat={}{0:P0}}"
+                                                                   Margin="8,0,0,0"
+                                                                   VerticalAlignment="Center" />
+                                                    </StackPanel>
+
+                                                    <StackPanel Orientation="Horizontal"
+                                                                Margin="0,8,0,0">
+                                                        <TextBlock Text="Life Mode"
+                                                                   VerticalAlignment="Center" />
+                                                        <ComboBox ItemsSource="{Binding LifeModeOptions}"
+                                                                  DisplayMemberPath="Label"
+                                                                  SelectedValuePath="Value"
+                                                                  SelectedValue="{Binding LifeMode}"
+                                                                  Margin="8,0,0,0"
+                                                                  Width="180"
+                                                                  SelectionChanged="SimulationLayerLifeMode_Changed" />
+                                                    </StackPanel>
+
+                                                    <StackPanel Orientation="Horizontal"
+                                                                Margin="0,8,0,0">
+                                                        <TextBlock Text="Binning"
+                                                                   VerticalAlignment="Center" />
+                                                        <ComboBox ItemsSource="{Binding BinningModeOptions}"
+                                                                  DisplayMemberPath="Label"
+                                                                  SelectedValuePath="Value"
+                                                                  SelectedValue="{Binding BinningMode}"
+                                                                  Margin="8,0,0,0"
+                                                                  Width="180"
+                                                                  SelectionChanged="SimulationLayerBinningMode_Changed" />
+                                                    </StackPanel>
+
+                                                    <StackPanel Orientation="Horizontal"
+                                                                Margin="0,8,0,0">
+                                                        <TextBlock Text="Noise"
+                                                                   VerticalAlignment="Center" />
+                                                        <Slider Minimum="0"
+                                                                Maximum="1"
+                                                                Value="{Binding InjectionNoise}"
+                                                                Width="160"
+                                                                SmallChange="0.01"
+                                                                LargeChange="0.1"
+                                                                Margin="8,0,0,0"
+                                                                ValueChanged="SimulationLayerInjectionNoise_Changed" />
+                                                        <TextBlock Text="{Binding InjectionNoise, StringFormat={}{0:P0}}"
+                                                                   Margin="8,0,0,0"
+                                                                   VerticalAlignment="Center" />
+                                                    </StackPanel>
+
+                                                    <StackPanel Orientation="Horizontal"
+                                                                Margin="0,8,0,0">
                                                         <TextBlock Text="Threshold Min"
                                                                    VerticalAlignment="Center" />
                                                         <Slider Minimum="0"
@@ -837,6 +956,7 @@
                                                               Unchecked="SimulationLayerInvertThreshold_Changed" />
                                                 </StackPanel>
                                             </GroupBox>
+                                            </StackPanel>
                                         </StackPanel>
                                     </Grid>
                                 </StackPanel>

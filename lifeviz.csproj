@@ -28,17 +28,47 @@
     <PackageReference Include="NAudio" Version="2.2.1" />
     <PackageReference Include="System.Drawing.Common" Version="8.0.7" />
     <PackageReference Include="Microsoft.Windows.SDK.NET" Version="10.0.18362.6-preview" />
+    <PackageReference Include="Vortice.Wpf" Version="3.8.2" />
     <PackageReference Include="YoutubeExplode" Version="6.5.6" />
   </ItemGroup>
   
   <ItemGroup>
     <None Include="Assets\Blend.fx" />
+    <None Include="Assets\GpuComposite.hlsl" />
+    <None Include="Assets\GpuSourceComposite.hlsl" />
+    <None Include="Assets\GpuSimulation.hlsl" />
     <Resource Include="Assets\Blend.ps" />
+    <Resource Include="Assets\GpuCompositeVS.cso" />
+    <Resource Include="Assets\GpuCompositePS.cso" />
+    <Resource Include="Assets\GpuSourceCompositeVS.cso" />
+    <Resource Include="Assets\GpuSourceCompositePS.cso" />
+    <Resource Include="Assets\GpuSimulationInjectCS.cso" />
+    <Resource Include="Assets\GpuSimulationInjectCompositeCS.cso" />
+    <Resource Include="Assets\GpuSimulationStepCS.cso" />
+    <Resource Include="Assets\GpuSimulationRenderCS.cso" />
   </ItemGroup>
 
-  <Target Name="CompileShader" BeforeTargets="CoreBuild" Inputs="Assets\Blend.fx" Outputs="Assets\Blend.ps">
+  <Target Name="CompileShader" BeforeTargets="CoreBuild">
     <Message Text="Compiling shader Assets\Blend.fx -&gt; Assets\Blend.ps..." Importance="high" />
     <Exec Command="&quot;$(FxcExePath)&quot; /T ps_3_0 /E main /nologo /Fo &quot;Assets\Blend.ps&quot; &quot;Assets\Blend.fx&quot;" Condition="Exists('$(FxcExePath)')" />
+    <Error Text="Shader compiler (fxc.exe) not found at '$(FxcExePath)'. Please update the FxcExePath property in lifeviz.csproj." Condition="!Exists('$(FxcExePath)')" />
+  </Target>
+
+  <Target Name="CompileGpuShaders" BeforeTargets="CoreBuild">
+    <Message Text="Compiling GPU shaders Assets\GpuComposite.hlsl..." Importance="high" />
+    <Exec Command="&quot;$(FxcExePath)&quot; /T vs_4_0 /E VSMain /nologo /Fo &quot;Assets\GpuCompositeVS.cso&quot; &quot;Assets\GpuComposite.hlsl&quot;" Condition="Exists('$(FxcExePath)')" />
+    <Exec Command="&quot;$(FxcExePath)&quot; /T ps_4_0 /E PSMain /nologo /Fo &quot;Assets\GpuCompositePS.cso&quot; &quot;Assets\GpuComposite.hlsl&quot;" Condition="Exists('$(FxcExePath)')" />
+    <Exec Command="&quot;$(FxcExePath)&quot; /T vs_4_0 /E VSMain /nologo /Fo &quot;Assets\GpuSourceCompositeVS.cso&quot; &quot;Assets\GpuSourceComposite.hlsl&quot;" Condition="Exists('$(FxcExePath)')" />
+    <Exec Command="&quot;$(FxcExePath)&quot; /T ps_4_0 /E PSMain /nologo /Fo &quot;Assets\GpuSourceCompositePS.cso&quot; &quot;Assets\GpuSourceComposite.hlsl&quot;" Condition="Exists('$(FxcExePath)')" />
+    <Error Text="Shader compiler (fxc.exe) not found at '$(FxcExePath)'. Please update the FxcExePath property in lifeviz.csproj." Condition="!Exists('$(FxcExePath)')" />
+  </Target>
+
+  <Target Name="CompileGpuSimulationShaders" BeforeTargets="CoreBuild">
+    <Message Text="Compiling GPU simulation shaders Assets\GpuSimulation.hlsl..." Importance="high" />
+    <Exec Command="&quot;$(FxcExePath)&quot; /T cs_5_0 /E InjectCS /nologo /Fo &quot;Assets\GpuSimulationInjectCS.cso&quot; &quot;Assets\GpuSimulation.hlsl&quot;" Condition="Exists('$(FxcExePath)')" />
+    <Exec Command="&quot;$(FxcExePath)&quot; /T cs_5_0 /E InjectCompositeCS /nologo /Fo &quot;Assets\GpuSimulationInjectCompositeCS.cso&quot; &quot;Assets\GpuSimulation.hlsl&quot;" Condition="Exists('$(FxcExePath)')" />
+    <Exec Command="&quot;$(FxcExePath)&quot; /T cs_5_0 /E StepCS /nologo /Fo &quot;Assets\GpuSimulationStepCS.cso&quot; &quot;Assets\GpuSimulation.hlsl&quot;" Condition="Exists('$(FxcExePath)')" />
+    <Exec Command="&quot;$(FxcExePath)&quot; /T cs_5_0 /E RenderCS /nologo /Fo &quot;Assets\GpuSimulationRenderCS.cso&quot; &quot;Assets\GpuSimulation.hlsl&quot;" Condition="Exists('$(FxcExePath)')" />
     <Error Text="Shader compiler (fxc.exe) not found at '$(FxcExePath)'. Please update the FxcExePath property in lifeviz.csproj." Condition="!Exists('$(FxcExePath)')" />
   </Target>
 

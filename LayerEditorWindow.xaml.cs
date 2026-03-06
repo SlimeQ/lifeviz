@@ -6,6 +6,7 @@ using System.Linq;
 using System.Text.Json;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Data;
 using System.Windows.Input;
 using System.Windows.Media;
 using System.Windows.Threading;
@@ -18,6 +19,7 @@ public partial class LayerEditorWindow : Window
     private readonly MainWindow _owner;
     private readonly LayerEditorViewModel _viewModel;
     private LayerEditorProjectSettings? _pendingProjectSettings;
+    private bool _ownerIsShuttingDown;
     private bool _suppressLiveUpdates;
     private bool _updatingSelection;
     private bool _updatingVideoTransportUi;
@@ -45,9 +47,17 @@ public partial class LayerEditorWindow : Window
         Closed += (_, _) => _videoTransportTimer.Stop();
     }
 
+    public void PrepareForOwnerShutdown()
+    {
+        _ownerIsShuttingDown = true;
+        _suppressLiveUpdates = true;
+        _pendingProjectSettings = null;
+        _videoTransportTimer.Stop();
+    }
+
     public void RefreshFromSourcesIfLive()
     {
-        if (!_viewModel.LiveMode)
+        if (_ownerIsShuttingDown || !_viewModel.LiveMode)
         {
             return;
         }
@@ -76,6 +86,7 @@ public partial class LayerEditorWindow : Window
             selected ??= _viewModel.Sources.FirstOrDefault();
             SetSelectedSource(selected);
             RefreshMasterAudioState();
+            RefreshProjectSettingsState();
             RefreshSimulationLayerState();
             RefreshSelectedVideoTransportState();
             _pendingProjectSettings = null;
@@ -90,6 +101,15 @@ public partial class LayerEditorWindow : Window
     {
         _viewModel.SourceAudioMasterEnabled = _owner.GetSourceAudioMasterEnabled();
         _viewModel.SourceAudioMasterVolume = _owner.GetSourceAudioMasterVolume();
+    }
+
+    private void RefreshProjectSettingsState()
+    {
+        var projectSettings = _pendingProjectSettings ?? _owner.GetProjectSettingsForEditor();
+        _viewModel.SimulationHeight = projectSettings.Height;
+        _viewModel.SimulationDepth = projectSettings.Depth;
+        _viewModel.SimulationFramerate = projectSettings.Framerate;
+        _viewModel.GlobalSimulationLifeOpacity = projectSettings.LifeOpacity;
     }
 
     private void RefreshSimulationLayerState()
@@ -175,6 +195,10 @@ public partial class LayerEditorWindow : Window
             InputFunction = source.InputFunction,
             BlendMode = source.BlendMode,
             InjectionMode = source.InjectionMode,
+            LifeMode = source.LifeMode,
+            BinningMode = source.BinningMode,
+            InjectionNoise = source.InjectionNoise,
+            LifeOpacity = source.LifeOpacity,
             ThresholdMin = source.ThresholdMin,
             ThresholdMax = source.ThresholdMax,
             InvertThreshold = source.InvertThreshold
@@ -208,7 +232,7 @@ public partial class LayerEditorWindow : Window
         }
     }
 
-    private bool ShouldApplyLive() => _viewModel.LiveMode && !_suppressLiveUpdates;
+    private bool ShouldApplyLive() => !_ownerIsShuttingDown && _viewModel.LiveMode && !_suppressLiveUpdates;
 
     private bool EnsureLiveModeForVideoTransport()
     {
@@ -222,9 +246,46 @@ public partial class LayerEditorWindow : Window
         return false;
     }
 
+    private LayerEditorProjectSettings BuildProjectSettingsFromViewModel()
+    {
+        if (_ownerIsShuttingDown)
+        {
+            return _pendingProjectSettings ?? new LayerEditorProjectSettings();
+        }
+
+        var settings = _pendingProjectSettings ?? _owner.GetProjectSettingsForEditor();
+        settings.Height = NormalizeSimulationHeight(_viewModel.SimulationHeight);
+        settings.Depth = Math.Clamp(_viewModel.SimulationDepth, 3, 96);
+        settings.Framerate = Math.Clamp(_viewModel.SimulationFramerate, 5, 144);
+        settings.LifeOpacity = Math.Clamp(_viewModel.GlobalSimulationLifeOpacity, 0, 1);
+        return settings;
+    }
+
+    private void ApplyProjectSettingsLiveIfNeeded()
+    {
+        var settings = BuildProjectSettingsFromViewModel();
+        if (ShouldApplyLive())
+        {
+            _owner.ApplyProjectSettingsFromEditor(settings);
+            _pendingProjectSettings = null;
+        }
+        else
+        {
+            _pendingProjectSettings = settings;
+        }
+    }
+
+    private void CommitSimulationDimensions()
+    {
+        _viewModel.SimulationHeight = NormalizeSimulationHeight(_viewModel.SimulationHeight);
+        _viewModel.SimulationDepth = Math.Clamp(_viewModel.SimulationDepth, 3, 96);
+        _viewModel.SimulationFramerate = Math.Clamp(_viewModel.SimulationFramerate, 5, 144);
+        ApplyProjectSettingsLiveIfNeeded();
+    }
+
     private void RefreshSelectedVideoTransportState()
     {
-        if (_suppressLiveUpdates)
+        if (_ownerIsShuttingDown || _suppressLiveUpdates)
         {
             return;
         }
@@ -270,7 +331,7 @@ public partial class LayerEditorWindow : Window
 
     private void ApplyButton_Click(object sender, RoutedEventArgs e)
     {
-        if (_viewModel.LiveMode)
+        if (_ownerIsShuttingDown || _viewModel.LiveMode)
         {
             return;
         }
@@ -289,6 +350,11 @@ public partial class LayerEditorWindow : Window
 
     private void OpenAppControls_Click(object sender, RoutedEventArgs e)
     {
+        if (_ownerIsShuttingDown)
+        {
+            return;
+        }
+
         Point anchor = AppControlsButton.PointToScreen(new Point(0, AppControlsButton.ActualHeight + 2));
         _owner.OpenRootContextMenuAtScreenPoint(anchor.X, anchor.Y);
     }
@@ -367,6 +433,7 @@ public partial class LayerEditorWindow : Window
                 _pendingProjectSettings = projectSettings;
                 _viewModel.Sources = new ObservableCollection<LayerEditorSource>(sources);
                 SetSelectedSource(_viewModel.Sources.FirstOrDefault());
+                RefreshProjectSettingsState();
                 _viewModel.SimulationLayers = new ObservableCollection<LayerEditorSimulationLayer>(
                     simulationLayers.Select(CloneSimulationLayer));
                 SetSelectedSimulationLayer(_viewModel.SimulationLayers.FirstOrDefault());
@@ -551,6 +618,10 @@ public partial class LayerEditorWindow : Window
             InputFunction = string.Equals(inputFunction, "Inverse", StringComparison.OrdinalIgnoreCase) ? "Inverse" : "Direct",
             BlendMode = string.Equals(inputFunction, "Inverse", StringComparison.OrdinalIgnoreCase) ? "Subtractive" : "Additive",
             InjectionMode = _viewModel.SelectedSimulationLayer?.InjectionMode ?? "Threshold",
+            LifeMode = _viewModel.SelectedSimulationLayer?.LifeMode ?? "NaiveGrayscale",
+            BinningMode = _viewModel.SelectedSimulationLayer?.BinningMode ?? "Fill",
+            InjectionNoise = _viewModel.SelectedSimulationLayer?.InjectionNoise ?? 0.0,
+            LifeOpacity = _viewModel.SelectedSimulationLayer?.LifeOpacity ?? 1.0,
             ThresholdMin = _viewModel.SelectedSimulationLayer?.ThresholdMin ?? 0.35,
             ThresholdMax = _viewModel.SelectedSimulationLayer?.ThresholdMax ?? 0.75,
             InvertThreshold = _viewModel.SelectedSimulationLayer?.InvertThreshold ?? false
@@ -683,6 +754,113 @@ public partial class LayerEditorWindow : Window
     }
 
     private void SimulationLayerInvertThreshold_Changed(object sender, RoutedEventArgs e)
+    {
+        if (ShouldApplyLive())
+        {
+            ApplySimulationLayerSettingsLive();
+        }
+    }
+
+    private void GlobalSimulationLifeOpacity_Changed(object sender, RoutedPropertyChangedEventArgs<double> e)
+    {
+        if (_suppressLiveUpdates)
+        {
+            return;
+        }
+
+        ApplyProjectSettingsLiveIfNeeded();
+    }
+
+    private void SimulationHeight_Changed(object sender, SelectionChangedEventArgs e)
+    {
+        if (_suppressLiveUpdates)
+        {
+            return;
+        }
+
+        CommitSimulationDimensionBinding(sender);
+        CommitSimulationDimensions();
+    }
+
+    private void SimulationDimensions_LostFocus(object sender, RoutedEventArgs e)
+    {
+        if (_suppressLiveUpdates)
+        {
+            return;
+        }
+
+        CommitSimulationDimensionBinding(sender);
+        CommitSimulationDimensions();
+    }
+
+    private void SimulationDimensions_KeyDown(object sender, KeyEventArgs e)
+    {
+        if (e.Key != Key.Enter)
+        {
+            return;
+        }
+
+        e.Handled = true;
+        CommitSimulationDimensionBinding(sender);
+        CommitSimulationDimensions();
+    }
+
+    private static void CommitSimulationDimensionBinding(object sender)
+    {
+        if (sender is TextBox textBox)
+        {
+            BindingOperations.GetBindingExpression(textBox, TextBox.TextProperty)?.UpdateSource();
+        }
+        else if (sender is ComboBox comboBox)
+        {
+            BindingOperations.GetBindingExpression(comboBox, ComboBox.SelectedItemProperty)?.UpdateSource();
+        }
+    }
+
+    private static int NormalizeSimulationHeight(int height)
+    {
+        int clamped = Math.Clamp(height, 72, 2160);
+        int closest = LayerEditorOptions.SimulationHeightPresets[0];
+        int bestDistance = Math.Abs(clamped - closest);
+        for (int i = 1; i < LayerEditorOptions.SimulationHeightPresets.Count; i++)
+        {
+            int candidate = LayerEditorOptions.SimulationHeightPresets[i];
+            int distance = Math.Abs(clamped - candidate);
+            if (distance < bestDistance)
+            {
+                closest = candidate;
+                bestDistance = distance;
+            }
+        }
+
+        return closest;
+    }
+
+    private void SimulationLayerLifeMode_Changed(object sender, SelectionChangedEventArgs e)
+    {
+        if (ShouldApplyLive())
+        {
+            ApplySimulationLayerSettingsLive();
+        }
+    }
+
+    private void SimulationLayerBinningMode_Changed(object sender, SelectionChangedEventArgs e)
+    {
+        if (ShouldApplyLive())
+        {
+            ApplySimulationLayerSettingsLive();
+        }
+    }
+
+    private void SimulationLayerInjectionNoise_Changed(object sender, RoutedPropertyChangedEventArgs<double> e)
+    {
+        if (ShouldApplyLive())
+        {
+            ApplySimulationLayerSettingsLive();
+        }
+    }
+
+    private void SimulationLayerLifeOpacity_Changed(object sender, RoutedPropertyChangedEventArgs<double> e)
     {
         if (ShouldApplyLive())
         {

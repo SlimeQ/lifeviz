@@ -9,13 +9,19 @@ namespace lifeviz;
 /// </summary>
 public partial class App : Application
 {
+    public static bool SuppressErrorDialogs { get; set; }
+    public static bool IsSmokeTestMode { get; set; }
+
     public App()
     {
         DispatcherUnhandledException += (_, args) =>
         {
             Logger.Error("Unhandled UI exception.", args.Exception);
-            MessageBox.Show($"Unexpected error:\n{args.Exception.Message}", "LifeViz Error",
-                MessageBoxButton.OK, MessageBoxImage.Error);
+            if (!SuppressErrorDialogs)
+            {
+                MessageBox.Show($"Unexpected error:\n{args.Exception.Message}", "LifeViz Error",
+                    MessageBoxButton.OK, MessageBoxImage.Error);
+            }
             args.Handled = true;
         };
     }

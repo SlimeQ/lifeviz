@@ -19,7 +19,8 @@
     <Grid x:Name="Root" Background="#0B0B0B">
         <Grid.ContextMenu>
             <ContextMenu x:Name="RootContextMenu"
-                         Opened="RootContextMenu_OnOpened">
+                         Opened="RootContextMenu_OnOpened"
+                         Closed="RootContextMenu_OnClosed">
                 <MenuItem x:Name="PauseMenuItem"
                           Header="Pause Simulation"
                           Click="TogglePause_Click" />
@@ -64,8 +65,6 @@
                     <MenuItem Header="1080" Click="PresetHeight_Click" />
                     <MenuItem Header="1440" Click="PresetHeight_Click" />
                     <MenuItem Header="2160" Click="PresetHeight_Click" />
-                    <Separator />
-                    <MenuItem Header="Custom..." Click="SetHeight_Click" />
                 </MenuItem>
                 <MenuItem Header="Depth">
                     <MenuItem Header="12" Click="PresetDepth_Click" />
@@ -295,6 +294,41 @@
                           x:Name="SimulationLayerMenu">
                     <MenuItem Header="Manage In Scene Editor..."
                               Click="OpenLayerEditor_Click" />
+                    <Separator />
+                    <MenuItem Header="Global Life Opacity" StaysOpenOnClick="True">
+                        <Slider x:Name="LifeOpacitySlider"
+                                Minimum="0"
+                                Maximum="1"
+                                Value="1"
+                                SmallChange="0.05"
+                                LargeChange="0.1"
+                                Width="160"
+                                ValueChanged="LifeOpacitySlider_OnValueChanged" />
+                    </MenuItem>
+                    <MenuItem Header="Life Modes"
+                              x:Name="LifeModeMenu"
+                              Visibility="Collapsed">
+                        <MenuItem Header="Naive Grayscale" IsCheckable="True" Click="LifeModeItem_Click" />
+                        <MenuItem Header="RGB Channel Bins" IsCheckable="True" Click="LifeModeItem_Click" />
+                    </MenuItem>
+                    <MenuItem Header="Binning Mode"
+                              x:Name="BinningModeMenu"
+                              Visibility="Collapsed">
+                        <MenuItem Header="Fill" IsCheckable="True" Click="BinningModeItem_Click" />
+                        <MenuItem Header="Binary" IsCheckable="True" Click="BinningModeItem_Click" />
+                    </MenuItem>
+                    <MenuItem Header="Injection Noise"
+                              StaysOpenOnClick="True"
+                              Visibility="Collapsed">
+                        <Slider x:Name="NoiseSlider"
+                                Minimum="0"
+                                Maximum="1"
+                                Value="0"
+                                SmallChange="0.01"
+                                LargeChange="0.1"
+                                Width="160"
+                                ValueChanged="NoiseSlider_OnValueChanged" />
+                    </MenuItem>
                 </MenuItem>
                 <MenuItem Header="Composite Blend"
                           x:Name="BlendModeMenu">
@@ -311,21 +345,6 @@
                           Header="Invert Composite"
                           IsCheckable="True"
                           Click="InvertComposite_Click" />
-                <MenuItem Header="Life Opacity" StaysOpenOnClick="True">
-                    <Slider x:Name="LifeOpacitySlider"
-                            Minimum="0"
-                            Maximum="1"
-                            Value="1"
-                            SmallChange="0.05"
-                            LargeChange="0.1"
-                            Width="160"
-                            ValueChanged="LifeOpacitySlider_OnValueChanged" />
-                </MenuItem>
-                <MenuItem Header="Life Modes"
-                          x:Name="LifeModeMenu">
-                    <MenuItem Header="Naive Grayscale" IsCheckable="True" Click="LifeModeItem_Click" />
-                    <MenuItem Header="RGB Channel Bins" IsCheckable="True" Click="LifeModeItem_Click" />
-                </MenuItem>
                 <MenuItem x:Name="RgbHueShiftMenu"
                           Header="RGB Hue Shift"
                           StaysOpenOnClick="True">
@@ -363,11 +382,6 @@
                         </DockPanel>
                     </StackPanel>
                 </MenuItem>
-                <MenuItem Header="Binning Mode"
-                          x:Name="BinningModeMenu">
-                    <MenuItem Header="Fill" IsCheckable="True" Click="BinningModeItem_Click" />
-                    <MenuItem Header="Binary" IsCheckable="True" Click="BinningModeItem_Click" />
-                </MenuItem>
                 <MenuItem Header="Injection Mode"
                           x:Name="InjectionModeMenu">
                     <MenuItem Header="Threshold" IsCheckable="True" Click="InjectionModeItem_Click" />
@@ -400,16 +414,6 @@
                                   Checked="InvertThresholdCheckBox_OnChecked"
                                   Unchecked="InvertThresholdCheckBox_OnChecked"/>
                     </StackPanel>
-                </MenuItem>
-                <MenuItem Header="Injection Noise" StaysOpenOnClick="True">
-                    <Slider x:Name="NoiseSlider"
-                            Minimum="0"
-                            Maximum="1"
-                            Value="0"
-                            SmallChange="0.01"
-                            LargeChange="0.1"
-                            Width="160"
-                            ValueChanged="NoiseSlider_OnValueChanged" />
                 </MenuItem>
                 <Separator />
                 <MenuItem Header="Framerate"
@@ -504,15 +508,21 @@
         </Grid.ContextMenu>
 
         <Viewbox Stretch="Uniform"
+                 IsHitTestVisible="False"
                  HorizontalAlignment="Center"
                  VerticalAlignment="Center">
             <Border Background="Black"
+                    IsHitTestVisible="False"
                     Padding="0"
                     SnapsToDevicePixels="True">
-                <Image x:Name="GameImage"
-                       RenderOptions.BitmapScalingMode="NearestNeighbor"
-                       RenderOptions.EdgeMode="Aliased"
-                       SnapsToDevicePixels="True" />
+                <Grid x:Name="RenderSurfaceHost"
+                      IsHitTestVisible="False">
+                    <Image x:Name="GameImage"
+                           IsHitTestVisible="False"
+                           RenderOptions.BitmapScalingMode="NearestNeighbor"
+                           RenderOptions.EdgeMode="Aliased"
+                           SnapsToDevicePixels="True" />
+                </Grid>
             </Border>
         </Viewbox>
 

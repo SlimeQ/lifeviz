@@ -433,7 +433,6 @@ internal sealed class WindowCaptureService : IDisposable
             
             Parallel.For(0, rows, row =>
             {
-                int sourceRowOffset = 0;
                 int overlayRowOffset = row * columns * 4;
 
                 for (int col = 0; col < columns; col++)
@@ -441,13 +440,9 @@ internal sealed class WindowCaptureService : IDisposable
                     byte b = 0;
                     byte g = 0;
                     byte r = 0;
-                    if (ImageFit.TryMapPixel(mapping, col, row, out int srcX, out int srcY))
+                    if (ImageFit.TrySampleMappedBgraSupersampled(sourceBuffer, sourceWidth, sourceHeight, mapping,
+                        col + 0.5, row + 0.5, mirror: false, out b, out g, out r, out _))
                     {
-                        sourceRowOffset = srcY * sourceWidth * 4;
-                        int index = sourceRowOffset + (srcX * 4);
-                        b = sourceBuffer[index];
-                        g = sourceBuffer[index + 1];
-                        r = sourceBuffer[index + 2];
                     }
                     
                     int overlayIndex = overlayRowOffset + (col * 4);
