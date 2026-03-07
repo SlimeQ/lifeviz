@@ -892,6 +892,8 @@ internal sealed class FileCaptureService : IDisposable
         private byte[]? _downscaledOutput;  // Downscaler writes here
         private byte[]? _readyDownscaled;   // Ready for UI
         private byte[]? _readyRaw;          // Ready for UI (Source)
+        private long _readyFrameToken;
+        private long _readyFramePublishTimestamp;
         private readonly Queue<byte[]> _pendingRawFrames = new();
         private readonly Stack<byte[]> _rawFramePool = new();
         private readonly AutoResetEvent _downscaleSignal = new(false);
@@ -1163,6 +1165,8 @@ internal sealed class FileCaptureService : IDisposable
             lock (_lock)
             {
                 if (_readyDownscaled == null) return null;
+                long readyFrameToken = _readyFrameToken;
+                long readyFramePublishTimestamp = _readyFramePublishTimestamp;
 
                 int dsLen = targetWidth * targetHeight * 4;
                 if (_readyDownscaled.Length != dsLen)
@@ -1183,7 +1187,9 @@ internal sealed class FileCaptureService : IDisposable
                     targetHeight,
                     includeSource ? _readyRaw : null,
                     includeSource ? _readyWidth : _nativeWidth,
-                    includeSource ? _readyHeight : _nativeHeight);
+                    includeSource ? _readyHeight : _nativeHeight,
+                    readyFrameToken,
+                    readyFramePublishTimestamp);
             }
         }
 
@@ -1663,6 +1669,8 @@ internal sealed class FileCaptureService : IDisposable
                         var temp = _readyDownscaled;
                         _readyDownscaled = output;
                         _downscaledOutput = temp;
+                        _readyFrameToken++;
+                        _readyFramePublishTimestamp = Stopwatch.GetTimestamp();
 
                         if (_readyRaw != null && _readyRaw.Length == input.Length)
                         {
@@ -2476,7 +2484,7 @@ internal sealed class FileCaptureService : IDisposable
             
                 internal readonly struct FileCaptureFrame
                 {
-                    public FileCaptureFrame(byte[] overlayDownscaled, int downscaledWidth, int downscaledHeight, byte[]? overlaySource, int sourceWidth, int sourceHeight)
+                    public FileCaptureFrame(byte[] overlayDownscaled, int downscaledWidth, int downscaledHeight, byte[]? overlaySource, int sourceWidth, int sourceHeight, long frameToken = 0, long framePublishTimestamp = 0)
                     {
                         OverlayDownscaled = overlayDownscaled;
                         DownscaledWidth = downscaledWidth;
@@ -2484,6 +2492,8 @@ internal sealed class FileCaptureService : IDisposable
                         OverlaySource = overlaySource;
                         SourceWidth = sourceWidth;
                         SourceHeight = sourceHeight;
+                        FrameToken = frameToken;
+                        FramePublishTimestamp = framePublishTimestamp;
                     }
             
                     public byte[] OverlayDownscaled { get; }
@@ -2492,6 +2502,8 @@ internal sealed class FileCaptureService : IDisposable
                     public byte[]? OverlaySource { get; }
                     public int SourceWidth { get; }
                     public int SourceHeight { get; }
+                    public long FrameToken { get; }
+                    public long FramePublishTimestamp { get; }
                 }
             
             internal enum FileSourceKind
@@ -2525,8 +2537,60 @@ internal sealed class FileCaptureService : IDisposable
                 private static void Downscale(byte[] source, int sourceWidth, int sourceHeight, byte[] destination, int targetWidth, int targetHeight, FitMode fitMode)
                 {
                     const int parallelDownscalePixelThreshold = 640 * 360;
-                    var mapping = ImageFit.GetMapping(fitMode, sourceWidth, sourceHeight, targetWidth, targetHeight);
+
+                    if (sourceWidth == targetWidth && sourceHeight == targetHeight)
+                    {
+                        Buffer.BlockCopy(source, 0, destination, 0, Math.Min(source.Length, destination.Length));
+                        return;
+                    }
+
+                    int sourceStride = sourceWidth * 4;
                     int destStride = targetWidth * 4;
+                    FitMode normalizedFitMode = ImageFit.Normalize(fitMode);
+
+                    if (sourceWidth == targetWidth)
+                    {
+                        if ((normalizedFitMode == FitMode.Fill || normalizedFitMode == FitMode.Center) && sourceHeight > targetHeight)
+                        {
+                            int cropTop = Math.Max(0, (sourceHeight - targetHeight) / 2);
+                            Buffer.BlockCopy(source, cropTop * sourceStride, destination, 0, Math.Min(destination.Length, targetHeight * destStride));
+                            return;
+                        }
+
+                        if ((normalizedFitMode == FitMode.Fit || normalizedFitMode == FitMode.Center) && sourceHeight < targetHeight)
+                        {
+                            Array.Clear(destination, 0, destination.Length);
+                            int padTop = Math.Max(0, (targetHeight - sourceHeight) / 2);
+                            Buffer.BlockCopy(source, 0, destination, padTop * destStride, Math.Min(source.Length, sourceHeight * sourceStride));
+                            return;
+                        }
+                    }
+
+                    if (sourceHeight == targetHeight)
+                    {
+                        if ((normalizedFitMode == FitMode.Fill || normalizedFitMode == FitMode.Center) && sourceWidth > targetWidth)
+                        {
+                            int cropLeftBytes = Math.Max(0, (sourceWidth - targetWidth) / 2) * 4;
+                            for (int row = 0; row < targetHeight; row++)
+                            {
+                                Buffer.BlockCopy(source, row * sourceStride + cropLeftBytes, destination, row * destStride, destStride);
+                            }
+                            return;
+                        }
+
+                        if ((normalizedFitMode == FitMode.Fit || normalizedFitMode == FitMode.Center) && sourceWidth < targetWidth)
+                        {
+                            Array.Clear(destination, 0, destination.Length);
+                            int padLeftBytes = Math.Max(0, (targetWidth - sourceWidth) / 2) * 4;
+                            for (int row = 0; row < targetHeight; row++)
+                            {
+                                Buffer.BlockCopy(source, row * sourceStride, destination, row * destStride + padLeftBytes, sourceStride);
+                            }
+                            return;
+                        }
+                    }
+
+                    var mapping = ImageFit.GetMapping(fitMode, sourceWidth, sourceHeight, targetWidth, targetHeight);
 
                     void DownscaleRow(int row)
                     {

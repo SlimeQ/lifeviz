@@ -46,6 +46,7 @@ dotnet bin\Debug\net9.0-windows-sbx\lifeviz.dll --smoke-test profile-file-rgb-48
 dotnet bin\Debug\net9.0-windows-sbx\lifeviz.dll --smoke-test profile-current-scene
 dotnet bin\Debug\net9.0-windows-sbx\lifeviz.dll --smoke-test profile-current-scene-visible
 dotnet bin\Debug\net9.0-windows-sbx\lifeviz.dll --smoke-test profile-current-scene-interaction
+dotnet bin\Debug\net9.0-windows-sbx\lifeviz.dll --smoke-test frame-pump-thread-safety
 dotnet bin\Debug\net9.0-windows-sbx\lifeviz.dll --smoke-test dimensions
 dotnet bin\Debug\net9.0-windows-sbx\lifeviz.dll --smoke-test shutdown
 dotnet bin\Debug\net9.0-windows-sbx\lifeviz.dll --smoke-test startup
@@ -68,8 +69,9 @@ dotnet bin\Debug\net9.0-windows-sbx\lifeviz.dll --smoke-test all
 - `profile-file-240` / `profile-file-480` run that same profiler against a real file source instead of synthetic buffers.
 - `profile-file-rgb-240` / `profile-file-rgb-480` do the same with the reference simulation layer pinned to `RGB Channel Bins`, which is the right target when file-video playback performance only collapses once RGB layers are enabled.
 - `profile-current-scene` loads the persisted user config/scene and profiles it headlessly, which is the fastest way to capture real-stage timings from the current setup without manually reading the on-screen overlay.
-- `profile-current-scene-visible` does the same in a visible window so display/presentation pacing regressions can be measured against the actual desktop composition path.
+- `profile-current-scene-visible` does the same in a visible window so display/presentation pacing regressions can be measured against the actual desktop composition path. It now also logs file-video freshness/age metrics (`capture_file_fresh_frame_ratio`, `capture_file_frame_age_ms`) so "smooth life, slideshow underlay" regressions can be diagnosed directly.
 - `profile-current-scene-interaction` performs that same real-scene visible run but opens and closes the root context menu mid-test, then fails unless post-interaction frame pacing recovers to the pre-interaction baseline.
+- `frame-pump-thread-safety` opens the real Scene Editor and then evaluates the frame-pump interaction state from a worker thread, which catches cross-thread WPF access regressions in the timer-driven frame scheduler.
 - Pass the file path as the third argument or set `LIFEVIZ_SMOKE_VIDEO` before launching the smoke test.
 - `dimensions` applies a live height/depth change through `MainWindow`, forces the reference simulation layer into `RGB Channel Bins`, then drives the real Scene Editor height dropdown in both Live Mode and deferred Apply mode, and verifies that every simulation layer plus the presentation surface resize together.
 - `shutdown` opens the real `MainWindow`, opens the Scene Editor, then closes the main window and fails if close-time teardown captures any exception or if the owned editor-close path throws.

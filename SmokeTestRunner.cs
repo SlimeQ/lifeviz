@@ -38,6 +38,7 @@ internal static class SmokeTestRunner
                 "profile-current-scene" => RunCurrentSceneProfileSmokeTest(visibleWindow: false),
                 "profile-current-scene-visible" => RunCurrentSceneProfileSmokeTest(visibleWindow: true),
                 "profile-current-scene-interaction" => RunCurrentSceneInteractionProfileSmokeTest(),
+                "frame-pump-thread-safety" => RunFramePumpThreadSafetySmokeTest(),
                 "gpu-benchmark" => RunGpuBenchmark(),
                 "gpu-handoff" => RunGpuCompositeToSimulationSmokeTest(),
                 "gpu-rgb-threshold" => RunGpuCompositeRgbThresholdSmokeTest(),
@@ -53,7 +54,7 @@ internal static class SmokeTestRunner
                 "shutdown" => RunShutdownSmokeTest(),
                 "startup" => RunStartupSmokeTest(),
                 "all" => RunAllSmokeTests(),
-                _ => throw new ArgumentException($"Unknown smoke test target '{target}'. Expected profile-240, profile-480, profile-rgb-240, profile-rgb-480, profile-file-240, profile-file-480, profile-file-rgb-240, profile-file-rgb-480, profile-current-scene, profile-current-scene-visible, profile-current-scene-interaction, gpu-benchmark, gpu-handoff, gpu-rgb-threshold, gpu-frequency-hue, gpu-injection-mode, gpu-file-injection-mode, gpu-sim, gpu-source, source-reset, gpu-render, profile-mainloop, dimensions, shutdown, startup, or all.")
+                _ => throw new ArgumentException($"Unknown smoke test target '{target}'. Expected profile-240, profile-480, profile-rgb-240, profile-rgb-480, profile-file-240, profile-file-480, profile-file-rgb-240, profile-file-rgb-480, profile-current-scene, profile-current-scene-visible, profile-current-scene-interaction, frame-pump-thread-safety, gpu-benchmark, gpu-handoff, gpu-rgb-threshold, gpu-frequency-hue, gpu-injection-mode, gpu-file-injection-mode, gpu-sim, gpu-source, source-reset, gpu-render, profile-mainloop, dimensions, shutdown, startup, or all.")
             };
         }
         catch (Exception ex)
@@ -82,6 +83,52 @@ internal static class SmokeTestRunner
         }
 
         return RunGpuUiSmokeSuite();
+    }
+
+    private static int RunFramePumpThreadSafetySmokeTest()
+    {
+        Logger.Info("Running frame pump thread-safety smoke test.");
+        var app = new App();
+        bool ok = false;
+        Exception? capturedException = null;
+
+        app.Startup += (_, _) =>
+        {
+            var window = new MainWindow();
+            try
+            {
+                window.Show();
+                ok = window.RunFramePumpThreadSafetySmoke();
+            }
+            catch (Exception ex)
+            {
+                capturedException = ex;
+            }
+            finally
+            {
+                if (window.IsVisible)
+                {
+                    window.Close();
+                }
+
+                app.Shutdown();
+            }
+        };
+
+        app.Run();
+
+        if (capturedException != null)
+        {
+            throw capturedException;
+        }
+
+        if (!ok)
+        {
+            throw new InvalidOperationException("Frame pump thread-safety smoke test failed.");
+        }
+
+        Logger.Info("Frame pump thread-safety smoke test passed.");
+        return 0;
     }
 
     private static int RunGpuSimulationSmokeTest()

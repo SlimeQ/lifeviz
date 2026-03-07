@@ -13,6 +13,7 @@ using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
 using System.Windows.Interop;
+using System.Windows.Input;
 using System.Windows.Media;
 using System.Windows.Media.Effects;
 using System.Windows.Media.Imaging;
@@ -27,6 +28,16 @@ namespace lifeviz;
 
 public partial class MainWindow : Window
 {
+    private enum ChromeResizeDirection
+    {
+        None,
+        Left,
+        Right,
+        Bottom,
+        BottomLeft,
+        BottomRight
+    }
+
     private const int DefaultRows = 144;
     private const int MinRows = 72;
     private const int MaxRows = 2160;
@@ -97,6 +108,7 @@ public partial class MainWindow : Window
     private readonly AudioBeatDetector _audioBeatDetector = new();
     private IRenderBackend _renderBackend = new NullRenderBackend();
     private LayerEditorWindow? _layerEditorWindow;
+    private int _layerEditorWindowActive;
     private bool _suppressLayerEditorRefresh;
     private int _configuredRows = DefaultRows;
     private int _configuredDepth = DefaultDepth;
@@ -169,8 +181,8 @@ public partial class MainWindow : Window
     private bool _isFullscreen;
     private bool _pendingFullscreen;
     private WindowState _previousWindowState = WindowState.Normal;
-    private WindowStyle _previousWindowStyle = WindowStyle.SingleBorderWindow;
-    private ResizeMode _previousResizeMode = ResizeMode.CanResize;
+    private WindowStyle _previousWindowStyle = WindowStyle.None;
+    private ResizeMode _previousResizeMode = ResizeMode.NoResize;
     private bool _previousTopmost;
     private Rect _previousBounds;
     private readonly Stopwatch _stepStopwatch = new();
@@ -233,6 +245,13 @@ public partial class MainWindow : Window
     private double _effectiveLifeOpacity = 1.0;
     private long _lastProfileFrameTimestamp;
     private bool _highResolutionTimerEnabled;
+    private bool _isChromeDragging;
+    private Point _chromeDragStartScreen;
+    private Point _chromeDragStartWindow;
+    private bool _isChromeResizing;
+    private ChromeResizeDirection _chromeResizeDirection;
+    private Point _chromeResizeStartScreen;
+    private Rect _chromeResizeStartBounds;
 
     public MainWindow()
     {
@@ -261,6 +280,7 @@ public partial class MainWindow : Window
             }
             _lastWindowSize = new Size(ActualWidth, ActualHeight);
             _lastClientSize = new Size(Root.ActualWidth, Root.ActualHeight);
+            UpdateChromeUi();
             Logger.Info(App.IsSmokeTestMode
                 ? "Main window loaded in smoke test mode."
                 : "Main window loaded and visualizer initialized.");
@@ -273,6 +293,8 @@ public partial class MainWindow : Window
             {
                 source.AddHook(MainWindow_WndProc);
             }
+
+            UpdateChromeUi();
         };
         Closed += (_, _) =>
         {
@@ -322,6 +344,269 @@ public partial class MainWindow : Window
     }
 
     internal string? GetShutdownErrorMessage() => _shutdownException?.ToString();
+
+    private void UpdateChromeUi()
+    {
+        bool showChrome = !_isFullscreen;
+        if (ChromeBar != null)
+        {
+            ChromeBar.Visibility = showChrome ? Visibility.Visible : Visibility.Collapsed;
+        }
+
+        if (LeftResizeGrip != null)
+        {
+            LeftResizeGrip.Visibility = showChrome ? Visibility.Visible : Visibility.Collapsed;
+        }
+        if (RightResizeGrip != null)
+        {
+            RightResizeGrip.Visibility = showChrome ? Visibility.Visible : Visibility.Collapsed;
+        }
+        if (BottomResizeGrip != null)
+        {
+            BottomResizeGrip.Visibility = showChrome ? Visibility.Visible : Visibility.Collapsed;
+        }
+        if (BottomLeftResizeGrip != null)
+        {
+            BottomLeftResizeGrip.Visibility = showChrome ? Visibility.Visible : Visibility.Collapsed;
+        }
+        if (BottomRightResizeGrip != null)
+        {
+            BottomRightResizeGrip.Visibility = showChrome ? Visibility.Visible : Visibility.Collapsed;
+        }
+    }
+
+    private void ChromeBar_OnPreviewMouseLeftButtonDown(object sender, MouseButtonEventArgs e)
+    {
+        if (!TryBeginWindowDragOrToggleFullscreen(e))
+        {
+            return;
+        }
+    }
+
+    private void BackgroundDragSurface_OnPreviewMouseLeftButtonDown(object sender, MouseButtonEventArgs e)
+    {
+        if (!TryBeginWindowDragOrToggleFullscreen(e))
+        {
+            return;
+        }
+    }
+
+    private bool TryBeginWindowDragOrToggleFullscreen(MouseButtonEventArgs e)
+    {
+        if (_isFullscreen || e.ChangedButton != MouseButton.Left)
+        {
+            return false;
+        }
+
+        DependencyObject? source = e.OriginalSource as DependencyObject;
+        if (FindAncestor<Button>(source) != null ||
+            IsResizeGripSource(source))
+        {
+            return false;
+        }
+
+        if (e.ClickCount >= 2)
+        {
+            ToggleFullscreen_Click(this, new RoutedEventArgs());
+            e.Handled = true;
+            return true;
+        }
+
+        _isChromeDragging = true;
+        _chromeDragStartScreen = GetScreenDipPosition(e);
+        _chromeDragStartWindow = new Point(Left, Top);
+        Mouse.Capture(this);
+        e.Handled = true;
+        return true;
+    }
+
+    private static bool IsResizeGripSource(DependencyObject? source)
+    {
+        var element = FindAncestor<FrameworkElement>(source);
+        if (element == null)
+        {
+            return false;
+        }
+
+        if (!string.IsNullOrWhiteSpace(element.Name) && element.Name.EndsWith("ResizeGrip", StringComparison.Ordinal))
+        {
+            return true;
+        }
+
+        return TryParseResizeDirection(element.Tag as string, out var direction) &&
+               direction != ChromeResizeDirection.None;
+    }
+
+    private void ChromeBar_OnPreviewMouseRightButtonUp(object sender, MouseButtonEventArgs e)
+    {
+        var screen = GetScreenDipPosition(e);
+        OpenRootContextMenuAtScreenPoint(screen.X, screen.Y);
+        e.Handled = true;
+    }
+
+    private void ResizeGrip_OnPreviewMouseLeftButtonDown(object sender, MouseButtonEventArgs e)
+    {
+        if (_isFullscreen || e.ChangedButton != MouseButton.Left || sender is not FrameworkElement grip)
+        {
+            return;
+        }
+
+        if (!TryParseResizeDirection(grip.Tag as string, out var direction) || direction == ChromeResizeDirection.None)
+        {
+            return;
+        }
+
+        _isChromeResizing = true;
+        _chromeResizeDirection = direction;
+        _chromeResizeStartScreen = GetScreenDipPosition(e);
+        _chromeResizeStartBounds = new Rect(Left, Top, Width, Height);
+        Mouse.Capture(this);
+        e.Handled = true;
+    }
+
+    private void WindowChrome_OnPreviewMouseMove(object sender, MouseEventArgs e)
+    {
+        if (_isChromeDragging)
+        {
+            Point screen = GetScreenDipPosition(e);
+            Vector delta = screen - _chromeDragStartScreen;
+            Left = _chromeDragStartWindow.X + delta.X;
+            Top = _chromeDragStartWindow.Y + delta.Y;
+            e.Handled = true;
+            return;
+        }
+
+        if (_isChromeResizing)
+        {
+            Point screen = GetScreenDipPosition(e);
+            ApplyChromeResize(screen);
+            e.Handled = true;
+        }
+    }
+
+    private void WindowChrome_OnPreviewMouseLeftButtonUp(object sender, MouseButtonEventArgs e)
+    {
+        if (!_isChromeDragging && !_isChromeResizing)
+        {
+            return;
+        }
+
+        _isChromeDragging = false;
+        _isChromeResizing = false;
+        _chromeResizeDirection = ChromeResizeDirection.None;
+        if (Mouse.Captured == this)
+        {
+            Mouse.Capture(null);
+        }
+
+        e.Handled = true;
+    }
+
+    private void ChromeMenuButton_OnClick(object sender, RoutedEventArgs e)
+    {
+        if (ChromeMenuButton == null)
+        {
+            return;
+        }
+
+        var anchor = ChromeMenuButton.PointToScreen(new Point(0, ChromeMenuButton.ActualHeight));
+        OpenRootContextMenuAtScreenPoint(anchor.X, anchor.Y);
+    }
+
+    private void ChromeMinimizeButton_OnClick(object sender, RoutedEventArgs e)
+    {
+        WindowState = WindowState.Minimized;
+    }
+
+    private void ChromeCloseButton_OnClick(object sender, RoutedEventArgs e)
+    {
+        Close();
+    }
+
+    private void ApplyChromeResize(Point screenDip)
+    {
+        const double MinWindowWidth = 360.0;
+        const double MinWindowHeight = 220.0;
+
+        Vector delta = screenDip - _chromeResizeStartScreen;
+        double left = _chromeResizeStartBounds.Left;
+        double top = _chromeResizeStartBounds.Top;
+        double width = _chromeResizeStartBounds.Width;
+        double height = _chromeResizeStartBounds.Height;
+
+        switch (_chromeResizeDirection)
+        {
+            case ChromeResizeDirection.Left:
+                left = _chromeResizeStartBounds.Left + delta.X;
+                width = _chromeResizeStartBounds.Width - delta.X;
+                break;
+            case ChromeResizeDirection.Right:
+                width = _chromeResizeStartBounds.Width + delta.X;
+                break;
+            case ChromeResizeDirection.Bottom:
+                height = _chromeResizeStartBounds.Height + delta.Y;
+                break;
+            case ChromeResizeDirection.BottomLeft:
+                left = _chromeResizeStartBounds.Left + delta.X;
+                width = _chromeResizeStartBounds.Width - delta.X;
+                height = _chromeResizeStartBounds.Height + delta.Y;
+                break;
+            case ChromeResizeDirection.BottomRight:
+                width = _chromeResizeStartBounds.Width + delta.X;
+                height = _chromeResizeStartBounds.Height + delta.Y;
+                break;
+        }
+
+        if (width < MinWindowWidth)
+        {
+            if (_chromeResizeDirection == ChromeResizeDirection.Left || _chromeResizeDirection == ChromeResizeDirection.BottomLeft)
+            {
+                left -= MinWindowWidth - width;
+            }
+            width = MinWindowWidth;
+        }
+
+        if (height < MinWindowHeight)
+        {
+            height = MinWindowHeight;
+        }
+
+        Left = left;
+        Top = top;
+        Width = width;
+        Height = height;
+    }
+
+    private Point GetScreenDipPosition(MouseEventArgs e)
+    {
+        Point screen = PointToScreen(e.GetPosition(this));
+        if (PresentationSource.FromVisual(this) is HwndSource source && source.CompositionTarget != null)
+        {
+            return source.CompositionTarget.TransformFromDevice.Transform(screen);
+        }
+
+        return screen;
+    }
+
+    private static bool TryParseResizeDirection(string? value, out ChromeResizeDirection direction)
+    {
+        return Enum.TryParse(value, true, out direction);
+    }
+
+    private static T? FindAncestor<T>(DependencyObject? current) where T : DependencyObject
+    {
+        while (current != null)
+        {
+            if (current is T match)
+            {
+                return match;
+            }
+
+            current = VisualTreeHelper.GetParent(current);
+        }
+
+        return null;
+    }
 
     private long BeginProfileStamp() => Stopwatch.GetTimestamp();
 
@@ -564,8 +849,31 @@ public partial class MainWindow : Window
 
     private bool IsUiInteractionThrottled()
     {
-        return _uiInteractionSuspendCount > 0 ||
-               (_layerEditorWindow?.IsActive ?? false);
+        bool layerEditorActive = Dispatcher.CheckAccess()
+            ? (_layerEditorWindow?.IsActive ?? false)
+            : Volatile.Read(ref _layerEditorWindowActive) != 0;
+        return Volatile.Read(ref _uiInteractionSuspendCount) > 0 || layerEditorActive;
+    }
+
+    private void SetLayerEditorActiveState(bool isActive)
+    {
+        Volatile.Write(ref _layerEditorWindowActive, isActive ? 1 : 0);
+    }
+
+    private void LayerEditorWindow_OnActivated(object? sender, EventArgs e)
+    {
+        SetLayerEditorActiveState(true);
+    }
+
+    private void LayerEditorWindow_OnDeactivated(object? sender, EventArgs e)
+    {
+        SetLayerEditorActiveState(false);
+    }
+
+    private void LayerEditorWindow_OnClosed(object? sender, EventArgs e)
+    {
+        SetLayerEditorActiveState(false);
+        _layerEditorWindow = null;
     }
 
     private void FramePumpTimerTick(object? state)
@@ -1589,8 +1897,11 @@ public partial class MainWindow : Window
             if (_layerEditorWindow == null)
             {
                 _layerEditorWindow = new LayerEditorWindow(this);
-                _layerEditorWindow.Closed += (_, _) => _layerEditorWindow = null;
+                _layerEditorWindow.Activated += LayerEditorWindow_OnActivated;
+                _layerEditorWindow.Deactivated += LayerEditorWindow_OnDeactivated;
+                _layerEditorWindow.Closed += LayerEditorWindow_OnClosed;
                 _layerEditorWindow.Show();
+                SetLayerEditorActiveState(_layerEditorWindow.IsActive);
                 return;
             }
 
@@ -1601,17 +1912,67 @@ public partial class MainWindow : Window
 
             _layerEditorWindow.Activate();
             _layerEditorWindow.RefreshFromSourcesIfLive();
+            SetLayerEditorActiveState(_layerEditorWindow.IsActive);
         }
         catch (Exception ex)
         {
             Logger.Error("Failed to open Scene Editor window.", ex);
             MessageBox.Show(this, $"Failed to open Scene Editor:\n{ex.Message}", "Scene Editor Error",
                 MessageBoxButton.OK, MessageBoxImage.Error);
+            SetLayerEditorActiveState(false);
             _layerEditorWindow = null;
         }
     }
 
     internal LayerEditorWindow? GetOpenLayerEditorForSmoke() => _layerEditorWindow;
+
+    internal bool RunFramePumpThreadSafetySmoke()
+    {
+        OpenLayerEditor();
+        var editor = _layerEditorWindow;
+        if (editor == null)
+        {
+            return false;
+        }
+
+        editor.Activate();
+        SetLayerEditorActiveState(editor.IsActive);
+
+        Exception? workerException = null;
+        using var done = new ManualResetEventSlim(false);
+        ThreadPool.QueueUserWorkItem(_ =>
+        {
+            try
+            {
+                for (int i = 0; i < 16; i++)
+                {
+                    _ = IsUiInteractionThrottled();
+                }
+            }
+            catch (Exception ex)
+            {
+                workerException = ex;
+            }
+            finally
+            {
+                done.Set();
+            }
+        });
+
+        if (!done.Wait(TimeSpan.FromSeconds(5)))
+        {
+            return false;
+        }
+
+        editor.Close();
+        if (workerException != null)
+        {
+            Logger.Error("Frame pump thread-safety smoke failed.", workerException);
+            return false;
+        }
+
+        return true;
+    }
 
     internal void OpenRootContextMenuAtScreenPoint(double screenX, double screenY)
     {
@@ -5588,7 +5949,7 @@ public partial class MainWindow : Window
                     {
                         var value = sequenceFrame.Value;
                         frame = new SourceFrame(value.OverlayDownscaled, value.DownscaledWidth, value.DownscaledHeight,
-                            value.OverlaySource, value.SourceWidth, value.SourceHeight);
+                            value.OverlaySource, value.SourceWidth, value.SourceHeight, value.FrameToken, value.FramePublishTimestamp);
                         source.UpdateFileDimensions(value.SourceWidth, value.SourceHeight);
                         source.HasError = false;
                         source.MissedFrames = 0;
@@ -5609,7 +5970,7 @@ public partial class MainWindow : Window
                     {
                         var value = fileFrame.Value;
                         frame = new SourceFrame(value.OverlayDownscaled, value.DownscaledWidth, value.DownscaledHeight,
-                            value.OverlaySource, value.SourceWidth, value.SourceHeight);
+                            value.OverlaySource, value.SourceWidth, value.SourceHeight, value.FrameToken, value.FramePublishTimestamp);
                         source.UpdateFileDimensions(value.SourceWidth, value.SourceHeight);
                         source.HasError = false;
                         source.MissedFrames = 0;
@@ -5722,6 +6083,7 @@ public partial class MainWindow : Window
             }
 
             source.HasError = false;
+            RecordSourceFreshnessMetrics(source, frame);
             source.LastFrame = frame;
         }
 
@@ -5834,6 +6196,7 @@ public partial class MainWindow : Window
         {
             SaveConfig();
         }
+        UpdateChromeUi();
         UpdateFullscreenMenuItem();
     }
 
@@ -5859,6 +6222,7 @@ public partial class MainWindow : Window
         var targetState = _previousWindowState == WindowState.Minimized ? WindowState.Normal : _previousWindowState;
         WindowState = targetState;
         _isFullscreen = false;
+        UpdateChromeUi();
         SnapWindowToAspect(preserveHeight: true);
         SaveConfig();
         UpdateFullscreenMenuItem();
@@ -6238,6 +6602,42 @@ public partial class MainWindow : Window
         }
 
         return false;
+    }
+
+    private void RecordSourceFreshnessMetrics(CaptureSource source, SourceFrame frame)
+    {
+        if (frame.FrameToken == 0)
+        {
+            return;
+        }
+
+        bool isFreshFrame = frame.FrameToken != source.LastObservedFrameToken;
+        source.LastObservedFrameToken = frame.FrameToken;
+
+        string ratioMetricName = source.Type switch
+        {
+            CaptureSource.SourceType.File => "capture_file_fresh_frame_ratio",
+            CaptureSource.SourceType.VideoSequence => "capture_sequence_fresh_frame_ratio",
+            _ => string.Empty
+        };
+
+        string ageMetricName = source.Type switch
+        {
+            CaptureSource.SourceType.File => "capture_file_frame_age_ms",
+            CaptureSource.SourceType.VideoSequence => "capture_sequence_frame_age_ms",
+            _ => string.Empty
+        };
+
+        if (!string.IsNullOrEmpty(ratioMetricName))
+        {
+            _frameProfiler.RecordSample(ratioMetricName, isFreshFrame ? 1.0 : 0.0);
+        }
+
+        if (!string.IsNullOrEmpty(ageMetricName) && frame.FramePublishTimestamp > 0)
+        {
+            double ageMs = FrameProfiler.ElapsedMilliseconds(frame.FramePublishTimestamp, Stopwatch.GetTimestamp());
+            _frameProfiler.RecordSample(ageMetricName, Math.Max(0.0, ageMs));
+        }
     }
 
     private static BlendMode ParseBlendModeOrDefault(string? value, BlendMode fallback)
@@ -11262,6 +11662,7 @@ public partial class MainWindow : Window
         public byte KeyColorG { get; set; }
         public byte KeyColorB { get; set; }
         public bool RetryInitializationAttempted { get; set; }
+        public long LastObservedFrameToken { get; set; }
 
         public bool IsInitialized { get; set; }
         public int? FileWidth { get; private set; }
@@ -11372,7 +11773,7 @@ public partial class MainWindow : Window
 
     private sealed class SourceFrame
     {
-        public SourceFrame(byte[] downscaled, int downscaledWidth, int downscaledHeight, byte[]? source, int sourceWidth, int sourceHeight)
+        public SourceFrame(byte[] downscaled, int downscaledWidth, int downscaledHeight, byte[]? source, int sourceWidth, int sourceHeight, long frameToken = 0, long framePublishTimestamp = 0)
         {
             Downscaled = downscaled;
             DownscaledWidth = downscaledWidth;
@@ -11380,6 +11781,8 @@ public partial class MainWindow : Window
             Source = source;
             SourceWidth = sourceWidth;
             SourceHeight = sourceHeight;
+            FrameToken = frameToken;
+            FramePublishTimestamp = framePublishTimestamp;
         }
 
         public byte[] Downscaled { get; }
@@ -11388,6 +11791,8 @@ public partial class MainWindow : Window
         public byte[]? Source { get; }
         public int SourceWidth { get; }
         public int SourceHeight { get; }
+        public long FrameToken { get; }
+        public long FramePublishTimestamp { get; }
     }
 
     private sealed class CompositeFrame

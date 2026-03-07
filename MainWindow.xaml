@@ -9,14 +9,18 @@
         Width="1200"
         Height="675"
         Background="#0B0B0B"
-        ResizeMode="CanResizeWithGrip"
-        WindowStyle="SingleBorderWindow"
+        ResizeMode="NoResize"
+        WindowStyle="None"
         SizeChanged="MainWindow_OnSizeChanged"
+        PreviewMouseMove="WindowChrome_OnPreviewMouseMove"
+        PreviewMouseLeftButtonUp="WindowChrome_OnPreviewMouseLeftButtonUp"
         WindowStartupLocation="CenterScreen">
     <Window.TaskbarItemInfo>
         <shell:TaskbarItemInfo x:Name="TaskbarInfo" />
     </Window.TaskbarItemInfo>
-    <Grid x:Name="Root" Background="#0B0B0B">
+    <Grid x:Name="Root"
+          Background="#0B0B0B"
+          PreviewMouseLeftButtonDown="BackgroundDragSurface_OnPreviewMouseLeftButtonDown">
         <Grid.ContextMenu>
             <ContextMenu x:Name="RootContextMenu"
                          Opened="RootContextMenu_OnOpened"
@@ -509,6 +513,131 @@
                           Click="UpdateToLatestRelease_Click" />
             </ContextMenu>
         </Grid.ContextMenu>
+
+        <Border x:Name="ChromeBar"
+                Height="30"
+                HorizontalAlignment="Stretch"
+                VerticalAlignment="Top"
+                Background="#CC101010"
+                BorderBrush="#33181818"
+                BorderThickness="0,0,0,1"
+                Panel.ZIndex="20">
+            <Grid PreviewMouseLeftButtonDown="ChromeBar_OnPreviewMouseLeftButtonDown"
+                  PreviewMouseRightButtonUp="ChromeBar_OnPreviewMouseRightButtonUp">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+                <TextBlock Margin="10,0,0,0"
+                           VerticalAlignment="Center"
+                           Foreground="#FFF0F0F0"
+                           FontSize="13"
+                           FontWeight="SemiBold"
+                           Text="LifeViz" />
+                <StackPanel Grid.Column="1"
+                            Orientation="Horizontal"
+                            Margin="0,0,6,0">
+                    <Button x:Name="ChromeMenuButton"
+                            Width="34"
+                            Height="24"
+                            Margin="0,3,6,3"
+                            Padding="0"
+                            Background="#22111111"
+                            BorderBrush="#44444444"
+                            Foreground="White"
+                            Click="ChromeMenuButton_OnClick"
+                            Content="..." />
+                    <Button x:Name="ChromeSceneEditorButton"
+                            Width="34"
+                            Height="24"
+                            Margin="0,3,6,3"
+                            Padding="0"
+                            Background="#22111111"
+                            BorderBrush="#44444444"
+                            Foreground="White"
+                            Click="OpenLayerEditor_Click"
+                            Content="SE" />
+                    <Button x:Name="ChromeMinimizeButton"
+                            Width="34"
+                            Height="24"
+                            Margin="0,3,6,3"
+                            Padding="0"
+                            Background="#22111111"
+                            BorderBrush="#44444444"
+                            Foreground="White"
+                            Click="ChromeMinimizeButton_OnClick"
+                            Content="_" />
+                    <Button x:Name="ChromeFullscreenButton"
+                            Width="34"
+                            Height="24"
+                            Margin="0,3,6,3"
+                            Padding="0"
+                            Background="#22111111"
+                            BorderBrush="#44444444"
+                            Foreground="White"
+                            Click="ToggleFullscreen_Click"
+                            Content="[ ]" />
+                    <Button x:Name="ChromeCloseButton"
+                            Width="34"
+                            Height="24"
+                            Margin="0,3,0,3"
+                            Padding="0"
+                            Background="#55333333"
+                            BorderBrush="#66444444"
+                            Foreground="White"
+                            Click="ChromeCloseButton_OnClick"
+                            Content="X" />
+                </StackPanel>
+            </Grid>
+        </Border>
+
+        <Border x:Name="LeftResizeGrip"
+                Width="6"
+                HorizontalAlignment="Left"
+                VerticalAlignment="Stretch"
+                Background="Transparent"
+                Cursor="SizeWE"
+                Panel.ZIndex="19"
+                PreviewMouseLeftButtonDown="ResizeGrip_OnPreviewMouseLeftButtonDown"
+                Tag="Left" />
+        <Border x:Name="RightResizeGrip"
+                Width="6"
+                HorizontalAlignment="Right"
+                VerticalAlignment="Stretch"
+                Background="Transparent"
+                Cursor="SizeWE"
+                Panel.ZIndex="19"
+                PreviewMouseLeftButtonDown="ResizeGrip_OnPreviewMouseLeftButtonDown"
+                Tag="Right" />
+        <Border x:Name="BottomResizeGrip"
+                Height="6"
+                HorizontalAlignment="Stretch"
+                VerticalAlignment="Bottom"
+                Background="Transparent"
+                Cursor="SizeNS"
+                Panel.ZIndex="19"
+                PreviewMouseLeftButtonDown="ResizeGrip_OnPreviewMouseLeftButtonDown"
+                Tag="Bottom" />
+        <Border x:Name="BottomLeftResizeGrip"
+                Width="10"
+                Height="10"
+                HorizontalAlignment="Left"
+                VerticalAlignment="Bottom"
+                Background="Transparent"
+                Cursor="SizeNESW"
+                Panel.ZIndex="19"
+                PreviewMouseLeftButtonDown="ResizeGrip_OnPreviewMouseLeftButtonDown"
+                Tag="BottomLeft" />
+        <Border x:Name="BottomRightResizeGrip"
+                Width="10"
+                Height="10"
+                HorizontalAlignment="Right"
+                VerticalAlignment="Bottom"
+                Background="Transparent"
+                Cursor="SizeNWSE"
+                Panel.ZIndex="19"
+                PreviewMouseLeftButtonDown="ResizeGrip_OnPreviewMouseLeftButtonDown"
+                Tag="BottomRight" />
 
         <Viewbox Stretch="Uniform"
                  IsHitTestVisible="False"

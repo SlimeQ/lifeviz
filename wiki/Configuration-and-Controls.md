@@ -2,6 +2,8 @@
 
 The UI stays invisible until you right-click anywhere on the canvas, revealing the context menu.
 
+- The main output window now uses a custom chrome strip instead of the native title bar. The strip includes buttons for the root app menu (`...`), Scene Editor (`SE`), minimize, fullscreen, and close. Dragging anywhere on the output background moves the window, double-clicking that background toggles fullscreen, and resizing from the left/right/bottom edges stays inside LifeViz's own pointer handling instead of entering the OS non-client drag loop.
+
 ## Menu Actions
 
 - **Pause Simulation / Resume Simulation** - toggles the dispatcher tick loop.
