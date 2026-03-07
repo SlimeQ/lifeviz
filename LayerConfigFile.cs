@@ -30,8 +30,9 @@ internal sealed class LayerConfigFile
                 Depth = Math.Max(1, projectSettings.Depth),
                 Framerate = projectSettings.Framerate,
                 LifeOpacity = Math.Clamp(projectSettings.LifeOpacity, 0, 1),
-                RgbHueShiftDegrees = projectSettings.RgbHueShiftDegrees,
-                RgbHueShiftSpeedDegreesPerSecond = projectSettings.RgbHueShiftSpeedDegreesPerSecond,
+                // Legacy global hue lives on project settings for backward compatibility only.
+                RgbHueShiftDegrees = 0,
+                RgbHueShiftSpeedDegreesPerSecond = 0,
                 InvertComposite = projectSettings.InvertComposite,
                 Passthrough = projectSettings.Passthrough,
                 CompositeBlendMode = string.IsNullOrWhiteSpace(projectSettings.CompositeBlendMode) ? "Additive" : projectSettings.CompositeBlendMode
@@ -48,6 +49,9 @@ internal sealed class LayerConfigFile
                 BinningMode = string.IsNullOrWhiteSpace(layer.BinningMode) ? "Fill" : layer.BinningMode,
                 InjectionNoise = Math.Clamp(layer.InjectionNoise, 0, 1),
                 LifeOpacity = Math.Clamp(layer.LifeOpacity, 0, 1),
+                RgbHueShiftDegrees = layer.RgbHueShiftDegrees,
+                RgbHueShiftSpeedDegreesPerSecond = layer.RgbHueShiftSpeedDegreesPerSecond,
+                AudioFrequencyHueShiftDegrees = layer.AudioFrequencyHueShiftDegrees,
                 ThresholdMin = Math.Clamp(layer.ThresholdMin, 0, 1),
                 ThresholdMax = Math.Clamp(layer.ThresholdMax, 0, 1),
                 InvertThreshold = layer.InvertThreshold
@@ -69,6 +73,9 @@ internal sealed class LayerConfigFile
                     BinningMode = "Fill",
                     InjectionNoise = 0,
                     LifeOpacity = 1.0,
+                    RgbHueShiftDegrees = 0,
+                    RgbHueShiftSpeedDegreesPerSecond = 0,
+                    AudioFrequencyHueShiftDegrees = 0,
                     ThresholdMin = 0.35,
                     ThresholdMax = 0.75,
                     InvertThreshold = false
@@ -85,6 +92,9 @@ internal sealed class LayerConfigFile
                     BinningMode = "Fill",
                     InjectionNoise = 0,
                     LifeOpacity = 1.0,
+                    RgbHueShiftDegrees = 0,
+                    RgbHueShiftSpeedDegreesPerSecond = 0,
+                    AudioFrequencyHueShiftDegrees = 0,
                     ThresholdMin = 0.35,
                     ThresholdMax = 0.75,
                     InvertThreshold = false
@@ -124,6 +134,9 @@ internal sealed class LayerConfigFile
                 BinningMode = string.IsNullOrWhiteSpace(layer.BinningMode) ? "Fill" : layer.BinningMode,
                 InjectionNoise = Math.Clamp(layer.InjectionNoise, 0, 1),
                 LifeOpacity = Math.Clamp(layer.LifeOpacity, 0, 1),
+                RgbHueShiftDegrees = layer.RgbHueShiftDegrees,
+                RgbHueShiftSpeedDegreesPerSecond = layer.RgbHueShiftSpeedDegreesPerSecond,
+                AudioFrequencyHueShiftDegrees = layer.AudioFrequencyHueShiftDegrees,
                 ThresholdMin = Math.Clamp(layer.ThresholdMin, 0, 1),
                 ThresholdMax = Math.Clamp(layer.ThresholdMax, 0, 1),
                 InvertThreshold = layer.InvertThreshold
@@ -301,6 +314,9 @@ internal sealed class LayerConfigFile
                 BinningMode = string.IsNullOrWhiteSpace(ProjectSettings?.BinningMode) ? "Fill" : ProjectSettings.BinningMode,
                 InjectionNoise = Math.Clamp(ProjectSettings?.InjectionNoise ?? 0, 0, 1),
                 LifeOpacity = 1.0,
+                RgbHueShiftDegrees = ProjectSettings?.RgbHueShiftDegrees ?? 0,
+                RgbHueShiftSpeedDegreesPerSecond = ProjectSettings?.RgbHueShiftSpeedDegreesPerSecond ?? 0,
+                AudioFrequencyHueShiftDegrees = 0,
                 ThresholdMin = 0.35,
                 ThresholdMax = 0.75,
                 InvertThreshold = false
@@ -317,6 +333,9 @@ internal sealed class LayerConfigFile
                 BinningMode = string.IsNullOrWhiteSpace(ProjectSettings?.BinningMode) ? "Fill" : ProjectSettings.BinningMode,
                 InjectionNoise = Math.Clamp(ProjectSettings?.InjectionNoise ?? 0, 0, 1),
                 LifeOpacity = 1.0,
+                RgbHueShiftDegrees = ProjectSettings?.RgbHueShiftDegrees ?? 0,
+                RgbHueShiftSpeedDegreesPerSecond = ProjectSettings?.RgbHueShiftSpeedDegreesPerSecond ?? 0,
+                AudioFrequencyHueShiftDegrees = 0,
                 ThresholdMin = 0.35,
                 ThresholdMax = 0.75,
                 InvertThreshold = false
@@ -428,6 +447,9 @@ internal sealed class LayerConfigSimulationLayer
     public string BinningMode { get; set; } = "Fill";
     public double InjectionNoise { get; set; }
     public double LifeOpacity { get; set; } = 1.0;
+    public double RgbHueShiftDegrees { get; set; }
+    public double RgbHueShiftSpeedDegreesPerSecond { get; set; }
+    public double AudioFrequencyHueShiftDegrees { get; set; }
     public double ThresholdMin { get; set; } = 0.35;
     public double ThresholdMax { get; set; } = 0.75;
     public bool InvertThreshold { get; set; }

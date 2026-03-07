@@ -65,6 +65,23 @@ public partial class LayerEditorWindow : Window
         RefreshFromSources();
     }
 
+    internal void SetLiveModeForSmoke(bool enabled)
+    {
+        LiveModeCheckBox.IsChecked = enabled;
+    }
+
+    internal void ApplySimulationHeightForSmoke(int height, bool applyImmediately)
+    {
+        int normalizedHeight = NormalizeSimulationHeight(height);
+        SimulationHeightComboBox.SelectedItem = normalizedHeight;
+        SimulationHeight_DropDownClosed(SimulationHeightComboBox, EventArgs.Empty);
+
+        if (applyImmediately)
+        {
+            ApplyButton_Click(ApplyButton, new RoutedEventArgs(Button.ClickEvent, ApplyButton));
+        }
+    }
+
     private void RefreshFromSources(Guid? preferredSelectionId = null)
     {
         var expandedIds = CollectExpandedIds(_viewModel.Sources);
@@ -199,6 +216,9 @@ public partial class LayerEditorWindow : Window
             BinningMode = source.BinningMode,
             InjectionNoise = source.InjectionNoise,
             LifeOpacity = source.LifeOpacity,
+            RgbHueShiftDegrees = source.RgbHueShiftDegrees,
+            RgbHueShiftSpeedDegreesPerSecond = source.RgbHueShiftSpeedDegreesPerSecond,
+            AudioFrequencyHueShiftDegrees = source.AudioFrequencyHueShiftDegrees,
             ThresholdMin = source.ThresholdMin,
             ThresholdMax = source.ThresholdMax,
             InvertThreshold = source.InvertThreshold
@@ -622,6 +642,9 @@ public partial class LayerEditorWindow : Window
             BinningMode = _viewModel.SelectedSimulationLayer?.BinningMode ?? "Fill",
             InjectionNoise = _viewModel.SelectedSimulationLayer?.InjectionNoise ?? 0.0,
             LifeOpacity = _viewModel.SelectedSimulationLayer?.LifeOpacity ?? 1.0,
+            RgbHueShiftDegrees = _viewModel.SelectedSimulationLayer?.RgbHueShiftDegrees ?? 0.0,
+            RgbHueShiftSpeedDegreesPerSecond = _viewModel.SelectedSimulationLayer?.RgbHueShiftSpeedDegreesPerSecond ?? 0.0,
+            AudioFrequencyHueShiftDegrees = _viewModel.SelectedSimulationLayer?.AudioFrequencyHueShiftDegrees ?? 0.0,
             ThresholdMin = _viewModel.SelectedSimulationLayer?.ThresholdMin ?? 0.35,
             ThresholdMax = _viewModel.SelectedSimulationLayer?.ThresholdMax ?? 0.75,
             InvertThreshold = _viewModel.SelectedSimulationLayer?.InvertThreshold ?? false
@@ -782,6 +805,17 @@ public partial class LayerEditorWindow : Window
         CommitSimulationDimensions();
     }
 
+    private void SimulationHeight_DropDownClosed(object sender, EventArgs e)
+    {
+        if (_suppressLiveUpdates)
+        {
+            return;
+        }
+
+        CommitSimulationDimensionBinding(sender);
+        CommitSimulationDimensions();
+    }
+
     private void SimulationDimensions_LostFocus(object sender, RoutedEventArgs e)
     {
         if (_suppressLiveUpdates)
@@ -861,6 +895,14 @@ public partial class LayerEditorWindow : Window
     }
 
     private void SimulationLayerLifeOpacity_Changed(object sender, RoutedPropertyChangedEventArgs<double> e)
+    {
+        if (ShouldApplyLive())
+        {
+            ApplySimulationLayerSettingsLive();
+        }
+    }
+
+    private void SimulationLayerHue_Changed(object sender, RoutedPropertyChangedEventArgs<double> e)
     {
         if (ShouldApplyLive())
         {

@@ -21,6 +21,12 @@ namespace lifeviz;
 
 internal sealed class AudioBeatDetector : IDisposable
 {
+    private const double MinInputGain = 0.0;
+    private const double MaxInputGain = 2.0;
+    private const int AudioDebugHistorySeconds = 30;
+    private const int AudioDebugHistorySampleRate = 120;
+    private const int WaveformHistorySize = AudioDebugHistorySeconds * AudioDebugHistorySampleRate;
+    private const double SpectrumAnalysisRateHz = 60.0;
     private AudioGraph? _graph;
     private AudioDeviceInputNode? _inputNode;
     private AudioFrameOutputNode? _frameOutputNode;
@@ -28,6 +34,7 @@ internal sealed class AudioBeatDetector : IDisposable
     private MMDevice? _wasapiRenderDevice;
     private WasapiLoopbackCapture? _wasapiLoopbackCapture;
     private readonly SemaphoreSlim _lock = new(1, 1);
+    private readonly object _waveformLock = new();
     private string? _currentDeviceId;
     private double _inputGain = 1.0;
     
@@ -43,10 +50,28 @@ internal sealed class AudioBeatDetector : IDisposable
     private const int BeatHistorySize = 10;
     private double _detectedBpm = 120;
     private const double SignalFloorRms = 0.0025;
-    private const double NormalizationFloorDb = -45.0;
+    private const double NormalizationFloorDb = -54.0;
+    private const double NormalizationCeilingDb = -18.0;
+    private const double EnvelopeNormalizationFloorDb = -42.0;
+    private const double EnvelopeNormalizationCeilingDb = -6.0;
+    private const double PeakNormalizationFloorDb = -42.0;
+    private const double PeakNormalizationCeilingDb = -6.0;
     private const string RenderSelectionPrefix = "render:";
     private const string DefaultRenderSelectionId = "render:default";
+    private const double EnergyBaselineFollow = 0.22;
+    private const double TransientBaselineScale = 1.00;
+    private const double TransientFloor = 0.015;
+    private const double TransientBoost = 9.0;
     private double _energyBaseline;
+    private readonly float[] _waveformHistory = new float[WaveformHistorySize];
+    private readonly float[] _envelopeHistory = new float[WaveformHistorySize];
+    private int _waveformHistoryWriteIndex;
+    private int _waveformHistoryCount;
+    private double _waveformHistoryAccumulator;
+    private double _waveformBucketAbsMax;
+    private double _spectrumAnalysisAccumulator;
+    private volatile bool _enableSpectrumAnalysis;
+    private volatile bool _enableDebugHistory;
     
     public DateTime LastBeatTime { get; private set; } = DateTime.MinValue;
     public long BeatCount { get; private set; }
@@ -55,15 +80,20 @@ internal sealed class AudioBeatDetector : IDisposable
     public bool IsBeat { get; private set; }
     public double CurrentEnergy { get; private set; }
     public double NormalizedEnergy { get; private set; }
+    public double EnvelopeEnergy { get; private set; }
+    public double PeakNormalizedEnergy { get; private set; }
     public double TransientEnergy { get; private set; }
     public double MainFrequency { get; private set; }
+    public double BassFrequency { get; private set; }
+    public double MidFrequency { get; private set; }
+    public double HighFrequency { get; private set; }
     public double BassEnergy { get; private set; }
     public bool IsRunning => (_graph != null && _inputNode != null) || _wasapiLoopbackCapture != null;
 
     public double InputGain
     {
         get => _inputGain;
-        set => _inputGain = Math.Clamp(value, 0.25, 64.0);
+        set => _inputGain = Math.Clamp(value, MinInputGain, MaxInputGain);
     }
 
     private uint _sampleRate = 48000;
@@ -110,6 +140,46 @@ internal sealed class AudioBeatDetector : IDisposable
         {
             Logger.Error("Failed to enumerate audio devices", ex);
             return Array.Empty<AudioDeviceInfo>();
+        }
+    }
+
+    public float[] GetWaveformHistory()
+    {
+        lock (_waveformLock)
+        {
+            var history = new float[_waveformHistoryCount];
+            if (_waveformHistoryCount == 0)
+            {
+                return history;
+            }
+
+            int start = (_waveformHistoryWriteIndex - _waveformHistoryCount + WaveformHistorySize) % WaveformHistorySize;
+            for (int i = 0; i < _waveformHistoryCount; i++)
+            {
+                history[i] = _waveformHistory[(start + i) % WaveformHistorySize];
+            }
+
+            return history;
+        }
+    }
+
+    public float[] GetEnvelopeHistory()
+    {
+        lock (_waveformLock)
+        {
+            var history = new float[_waveformHistoryCount];
+            if (_waveformHistoryCount == 0)
+            {
+                return history;
+            }
+
+            int start = (_waveformHistoryWriteIndex - _waveformHistoryCount + WaveformHistorySize) % WaveformHistorySize;
+            for (int i = 0; i < _waveformHistoryCount; i++)
+            {
+                history[i] = _envelopeHistory[(start + i) % WaveformHistorySize];
+            }
+
+            return history;
         }
     }
 
@@ -275,9 +345,25 @@ internal sealed class AudioBeatDetector : IDisposable
         IsBeat = false;
         CurrentEnergy = 0;
         NormalizedEnergy = 0;
+        EnvelopeEnergy = 0;
+        PeakNormalizedEnergy = 0;
         TransientEnergy = 0;
+        MainFrequency = 0;
+        BassFrequency = 0;
+        MidFrequency = 0;
+        HighFrequency = 0;
         _energyBaseline = 0;
         BeatCount = 0;
+        lock (_waveformLock)
+        {
+            Array.Clear(_waveformHistory);
+            Array.Clear(_envelopeHistory);
+            _waveformHistoryWriteIndex = 0;
+            _waveformHistoryCount = 0;
+            _waveformHistoryAccumulator = 0;
+            _waveformBucketAbsMax = 0;
+            _spectrumAnalysisAccumulator = 0;
+        }
     }
 
     private unsafe void Graph_QuantumStarted(AudioGraph sender, object args)
@@ -329,19 +415,46 @@ internal sealed class AudioBeatDetector : IDisposable
             return;
         }
 
+        bool enableSpectrumAnalysis = _enableSpectrumAnalysis;
+        bool enableDebugHistory = _enableDebugHistory;
         double inputGain = _inputGain;
         double totalEnergy = 0;
+        double totalAbsolute = 0;
+        double peakAmplitude = 0;
         for (int i = 0; i < samples.Length; i++)
         {
             double scaledSample = Math.Clamp(samples[i] * inputGain, -1.0, 1.0);
             totalEnergy += scaledSample * scaledSample;
+            totalAbsolute += Math.Abs(scaledSample);
+            peakAmplitude = Math.Max(peakAmplitude, Math.Abs(scaledSample));
         }
 
         double rms = Math.Sqrt(totalEnergy / samples.Length);
+        double meanAbsolute = totalAbsolute / samples.Length;
         bool hasSignal = rms >= SignalFloorRms;
-
-        if (hasSignal && samples.Length >= 256)
+        if (enableDebugHistory)
         {
+            AppendWaveformHistory(samples, inputGain);
+        }
+        else
+        {
+            _waveformHistoryAccumulator = 0;
+            _waveformBucketAbsMax = 0;
+        }
+
+        if (enableSpectrumAnalysis)
+        {
+            _spectrumAnalysisAccumulator += samples.Length;
+        }
+        else
+        {
+            _spectrumAnalysisAccumulator = 0;
+        }
+
+        double requiredSpectrumSamples = Math.Max(1.0, _sampleRate / SpectrumAnalysisRateHz);
+        if (enableSpectrumAnalysis && hasSignal && samples.Length >= 256 && _spectrumAnalysisAccumulator >= requiredSpectrumSamples)
+        {
+            _spectrumAnalysisAccumulator -= requiredSpectrumSamples;
             int fftSize = 1024;
             while (fftSize > samples.Length) fftSize /= 2;
 
@@ -360,13 +473,60 @@ internal sealed class AudioBeatDetector : IDisposable
                 AnalyzeSpectrum(fftBuffer, fftSize);
             }
         }
-        else
+        else if (!enableSpectrumAnalysis || !hasSignal)
         {
             MainFrequency = 0;
+            BassFrequency = 0;
+            MidFrequency = 0;
+            HighFrequency = 0;
             BassEnergy = 0;
         }
 
-        ProcessEnergy(rms);
+        ProcessEnergy(meanAbsolute, rms, peakAmplitude);
+    }
+
+    private void AppendWaveformHistory(ReadOnlySpan<float> samples, double inputGain)
+    {
+        if (samples.Length == 0)
+        {
+            return;
+        }
+
+        var appendedWaveform = new List<float>(Math.Max(4, samples.Length / 256));
+        var appendedEnvelope = new List<float>(Math.Max(4, samples.Length / 256));
+        for (int i = 0; i < samples.Length; i++)
+        {
+            double scaledSample = Math.Clamp(samples[i] * inputGain, -1.0, 1.0);
+            _waveformBucketAbsMax = Math.Max(_waveformBucketAbsMax, Math.Abs(scaledSample));
+            _waveformHistoryAccumulator += AudioDebugHistorySampleRate;
+            if (_waveformHistoryAccumulator >= _sampleRate)
+            {
+                appendedWaveform.Add((float)scaledSample);
+                float envelope = (float)_waveformBucketAbsMax;
+                appendedEnvelope.Add(envelope);
+                _waveformHistoryAccumulator -= _sampleRate;
+                _waveformBucketAbsMax = 0;
+            }
+        }
+
+        if (appendedWaveform.Count == 0)
+        {
+            return;
+        }
+
+        lock (_waveformLock)
+        {
+            for (int i = 0; i < appendedWaveform.Count; i++)
+            {
+                _waveformHistory[_waveformHistoryWriteIndex] = appendedWaveform[i];
+                _envelopeHistory[_waveformHistoryWriteIndex] = appendedEnvelope[i];
+                _waveformHistoryWriteIndex = (_waveformHistoryWriteIndex + 1) % WaveformHistorySize;
+                if (_waveformHistoryCount < WaveformHistorySize)
+                {
+                    _waveformHistoryCount++;
+                }
+            }
+        }
     }
     
     private void AnalyzeSpectrum(Complex[] fftBuffer, int fftSize)
@@ -374,14 +534,24 @@ internal sealed class AudioBeatDetector : IDisposable
         double maxMagnitude = 0;
         int maxIndex = 0;
         double bassSum = 0;
+        double bassMaxMagnitude = 0;
+        int bassMaxIndex = 0;
+        double midMaxMagnitude = 0;
+        int midMaxIndex = 0;
+        double highMaxMagnitude = 0;
+        int highMaxIndex = 0;
         
         // Frequencies up to Nyquist (SampleRate / 2)
         // Bin resolution = SampleRate / fftSize
         double binRes = (double)_sampleRate / fftSize;
         
-        // Define bass range: ~20Hz to ~150Hz
+        // Define frequency bands for overlay/debug traces.
         int bassStartBin = (int)(20 / binRes);
-        int bassEndBin = (int)(150 / binRes);
+        int bassEndBin = (int)(250 / binRes);
+        int midStartBin = Math.Max(bassEndBin + 1, (int)(250 / binRes));
+        int midEndBin = (int)(2000 / binRes);
+        int highStartBin = Math.Max(midEndBin + 1, (int)(2000 / binRes));
+        int highEndBin = (int)(8000 / binRes);
         
         // Only need to check first half (positive frequencies)
         int halfSize = fftSize / 2;
@@ -399,9 +569,30 @@ internal sealed class AudioBeatDetector : IDisposable
             {
                 bassSum += magnitude;
             }
+
+            if (i >= bassStartBin && i <= bassEndBin && magnitude > bassMaxMagnitude)
+            {
+                bassMaxMagnitude = magnitude;
+                bassMaxIndex = i;
+            }
+
+            if (i >= midStartBin && i <= midEndBin && magnitude > midMaxMagnitude)
+            {
+                midMaxMagnitude = magnitude;
+                midMaxIndex = i;
+            }
+
+            if (i >= highStartBin && i <= highEndBin && magnitude > highMaxMagnitude)
+            {
+                highMaxMagnitude = magnitude;
+                highMaxIndex = i;
+            }
         }
         
         MainFrequency = maxIndex * binRes;
+        BassFrequency = bassMaxIndex > 0 ? bassMaxIndex * binRes : 0;
+        MidFrequency = midMaxIndex > 0 ? midMaxIndex * binRes : 0;
+        HighFrequency = highMaxIndex > 0 ? highMaxIndex * binRes : 0;
         
         int bassBins = bassEndBin - bassStartBin + 1;
         if (bassBins > 0)
@@ -470,21 +661,22 @@ internal sealed class AudioBeatDetector : IDisposable
         void GetBuffer(out IntPtr buffer, out uint capacity);
     }
 
-    private void ProcessEnergy(double rms)
+    private void ProcessEnergy(double meanAbsolute, double rms, double peakAmplitude)
     {
         CurrentEnergy = rms;
-        double clampedRms = Math.Max(rms, 0.000001);
-        double db = 20.0 * Math.Log10(clampedRms);
-        NormalizedEnergy = Math.Clamp((db - NormalizationFloorDb) / -NormalizationFloorDb, 0, 1);
+        NormalizedEnergy = NormalizeAmplitude(rms, NormalizationFloorDb, NormalizationCeilingDb);
+        EnvelopeEnergy = NormalizeAmplitude(meanAbsolute, EnvelopeNormalizationFloorDb, EnvelopeNormalizationCeilingDb);
+        PeakNormalizedEnergy = NormalizeAmplitude(peakAmplitude, PeakNormalizationFloorDb, PeakNormalizationCeilingDb);
 
-        // Build a transient-focused envelope: how far we are above recent baseline.
-        _energyBaseline += (NormalizedEnergy - _energyBaseline) * 0.03;
-        double transient = NormalizedEnergy - (_energyBaseline * 0.92);
-        if (NormalizedEnergy < 0.03)
+        // Build a transient-focused envelope relative to a short local baseline so
+        // sustained music settles close to zero while drum hits still spike clearly.
+        _energyBaseline += (NormalizedEnergy - _energyBaseline) * EnergyBaselineFollow;
+        double transient = NormalizedEnergy - (_energyBaseline * TransientBaselineScale) - TransientFloor;
+        if (NormalizedEnergy < 0.025)
         {
             transient = 0;
         }
-        TransientEnergy = Math.Clamp(transient * 3.2, 0, 1);
+        TransientEnergy = Math.Clamp(transient * TransientBoost, 0, 1);
 
         // Maintain moving average of energy
         _energyHistory.Add(rms);
@@ -538,6 +730,19 @@ internal sealed class AudioBeatDetector : IDisposable
         }
     }
 
+    private static double NormalizeAmplitude(double amplitude, double floorDb, double ceilingDb)
+    {
+        double clampedAmplitude = Math.Max(amplitude, 0.000001);
+        double db = 20.0 * Math.Log10(clampedAmplitude);
+        double normalizationRange = ceilingDb - floorDb;
+        if (normalizationRange <= 0.000001)
+        {
+            return 0;
+        }
+
+        return Math.Clamp((db - floorDb) / normalizationRange, 0, 1);
+    }
+
     public void Stop()
     {
         _lock.Wait();
@@ -586,6 +791,37 @@ internal sealed class AudioBeatDetector : IDisposable
         public string Name { get; }
         public AudioDeviceKind Kind { get; }
         public bool IsSystemDefault { get; }
+    }
+
+    public void SetAnalysisRequirements(bool enableSpectrumAnalysis, bool enableDebugHistory)
+    {
+        bool normalizedSpectrum = enableSpectrumAnalysis || enableDebugHistory;
+        bool clearDebugHistory = _enableDebugHistory && !enableDebugHistory;
+
+        _enableSpectrumAnalysis = normalizedSpectrum;
+        _enableDebugHistory = enableDebugHistory;
+
+        if (!normalizedSpectrum)
+        {
+            MainFrequency = 0;
+            BassFrequency = 0;
+            MidFrequency = 0;
+            HighFrequency = 0;
+            BassEnergy = 0;
+        }
+
+        if (clearDebugHistory)
+        {
+            lock (_waveformLock)
+            {
+                Array.Clear(_waveformHistory);
+                Array.Clear(_envelopeHistory);
+                _waveformHistoryWriteIndex = 0;
+                _waveformHistoryCount = 0;
+                _waveformHistoryAccumulator = 0;
+                _waveformBucketAbsMax = 0;
+            }
+        }
     }
 
     private static string BuildRenderSelectionId(string deviceId) => $"{RenderSelectionPrefix}{deviceId}";

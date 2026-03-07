@@ -119,11 +119,13 @@
                                        DockPanel.Dock="Right"
                                        FontWeight="Bold"/>
                             <Slider x:Name="AudioInputGainSlider"
-                                    Minimum="0.25"
-                                    Maximum="64"
+                                    Minimum="0"
+                                    Maximum="2"
                                     Value="1"
-                                    SmallChange="0.25"
-                                    LargeChange="2"
+                                    TickFrequency="0.05"
+                                    IsSnapToTickEnabled="True"
+                                    SmallChange="0.05"
+                                    LargeChange="0.25"
                                     Margin="8,0"
                                     ValueChanged="AudioInputGainSlider_OnValueChanged"/>
                         </DockPanel>
@@ -347,7 +349,8 @@
                           Click="InvertComposite_Click" />
                 <MenuItem x:Name="RgbHueShiftMenu"
                           Header="RGB Hue Shift"
-                          StaysOpenOnClick="True">
+                          StaysOpenOnClick="True"
+                          Visibility="Collapsed">
                     <StackPanel Margin="8,4" Width="220">
                         <DockPanel Margin="0,0,0,4">
                             <TextBlock Text="Offset:" DockPanel.Dock="Left"/>
@@ -533,8 +536,98 @@
                    FontSize="14"
                    FontWeight="Bold"
                    Foreground="White"
+                   IsHitTestVisible="False"
                    Visibility="Collapsed"
                    TextWrapping="Wrap"
                    Text="FPS" />
+
+        <StackPanel Margin="8"
+                    HorizontalAlignment="Stretch"
+                    VerticalAlignment="Bottom"
+                    IsHitTestVisible="False">
+            <Border x:Name="FrameDebugOverlay"
+                    Margin="0,0,0,6"
+                    Padding="6"
+                    Height="48"
+                    HorizontalAlignment="Stretch"
+                    Background="#66000000"
+                    BorderBrush="#66FFFFFF"
+                    BorderThickness="1"
+                    CornerRadius="4"
+                    Visibility="Collapsed"
+                    IsHitTestVisible="False">
+                <Canvas x:Name="FrameDebugCanvas">
+                    <Polyline x:Name="FrameBudgetLine"
+                              Stroke="#AAFF5555"
+                              StrokeThickness="1.25"
+                              StrokeDashArray="4 3"
+                              StrokeLineJoin="Round"
+                              StrokeStartLineCap="Round"
+                              StrokeEndLineCap="Round" />
+                    <Polyline x:Name="FrameTimingLine"
+                              Stroke="#FF9A2E"
+                              StrokeThickness="2"
+                              StrokeLineJoin="Round"
+                              StrokeStartLineCap="Round"
+                              StrokeEndLineCap="Round" />
+                </Canvas>
+            </Border>
+
+            <Border x:Name="AudioDebugOverlay"
+                    Padding="6"
+                    Height="92"
+                    HorizontalAlignment="Stretch"
+                    Background="#66000000"
+                    BorderBrush="#66FFFFFF"
+                    BorderThickness="1"
+                    CornerRadius="4"
+                    Visibility="Collapsed"
+                    IsHitTestVisible="False">
+                <Canvas x:Name="AudioDebugCanvas">
+                    <Polyline x:Name="AudioWaveformLine"
+                              Stroke="White"
+                              StrokeThickness="1.5"
+                              StrokeLineJoin="Round"
+                              StrokeStartLineCap="Round"
+                              StrokeEndLineCap="Round" />
+                    <Polyline x:Name="AudioLevelLine"
+                              Stroke="#FFD84A"
+                              StrokeThickness="2"
+                              StrokeLineJoin="Round"
+                              StrokeStartLineCap="Round"
+                              StrokeEndLineCap="Round" />
+                    <Polyline x:Name="AudioBassLine"
+                              Stroke="#38E7FF"
+                              StrokeThickness="1.75"
+                              StrokeLineJoin="Round"
+                              StrokeStartLineCap="Round"
+                              StrokeEndLineCap="Round" />
+                    <Polyline x:Name="AudioFrequencyLine"
+                              Stroke="#FF4DFF"
+                              StrokeThickness="1.5"
+                              StrokeLineJoin="Round"
+                              StrokeStartLineCap="Round"
+                              StrokeEndLineCap="Round" />
+                    <Polyline x:Name="AudioBassFrequencyLine"
+                              Stroke="#3E6BFF"
+                              StrokeThickness="1.5"
+                              StrokeLineJoin="Round"
+                              StrokeStartLineCap="Round"
+                              StrokeEndLineCap="Round" />
+                    <Polyline x:Name="AudioMidFrequencyLine"
+                              Stroke="#39D353"
+                              StrokeThickness="1.5"
+                              StrokeLineJoin="Round"
+                              StrokeStartLineCap="Round"
+                              StrokeEndLineCap="Round" />
+                    <Polyline x:Name="AudioHighFrequencyLine"
+                              Stroke="#FF4A4A"
+                              StrokeThickness="1.5"
+                              StrokeLineJoin="Round"
+                              StrokeStartLineCap="Round"
+                              StrokeEndLineCap="Round" />
+                </Canvas>
+            </Border>
+        </StackPanel>
     </Grid>
 </Window>

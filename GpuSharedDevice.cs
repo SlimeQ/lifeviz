@@ -82,16 +82,18 @@ internal sealed class GpuSharedDevice
 
 internal sealed class GpuCompositeSurface
 {
-    public GpuCompositeSurface(ID3D11Texture2D texture, ID3D11ShaderResourceView shaderResourceView, int width, int height)
+    public GpuCompositeSurface(ID3D11Texture2D texture, ID3D11ShaderResourceView shaderResourceView, IntPtr sharedTextureHandle, int width, int height)
     {
         Texture = texture;
         ShaderResourceView = shaderResourceView;
+        SharedTextureHandle = sharedTextureHandle;
         Width = width;
         Height = height;
     }
 
     public ID3D11Texture2D Texture { get; }
     public ID3D11ShaderResourceView ShaderResourceView { get; }
+    public IntPtr SharedTextureHandle { get; }
     public int Width { get; }
     public int Height { get; }
 }

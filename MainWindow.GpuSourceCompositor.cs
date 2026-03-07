@@ -14,6 +14,9 @@ public partial class MainWindow
 {
     private sealed class GpuSourceCompositor : IDisposable
     {
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool CloseHandle(IntPtr hObject);
+
         [StructLayout(LayoutKind.Sequential)]
         private struct SourceCompositeParameters
         {
@@ -76,6 +79,8 @@ public partial class MainWindow
         private ID3D11ShaderResourceView? _compositeSrvB;
         private ID3D11RenderTargetView? _compositeRtvA;
         private ID3D11RenderTargetView? _compositeRtvB;
+        private IntPtr _compositeSharedHandleA;
+        private IntPtr _compositeSharedHandleB;
         private ID3D11Texture2D? _stagingTexture;
         private int _destWidth;
         private int _destHeight;
@@ -185,20 +190,23 @@ public partial class MainWindow
                         source.KeyColorB,
                         source.KeyTolerance);
 
-                    EnsureSourceResource(frame.DownscaledWidth, frame.DownscaledHeight);
+                    int sourceWidth = frame.Source != null ? frame.SourceWidth : frame.DownscaledWidth;
+                    int sourceHeight = frame.Source != null ? frame.SourceHeight : frame.DownscaledHeight;
+                    EnsureSourceResource(sourceWidth, sourceHeight);
                     if (_sourceTexture == null || _sourceSrv == null)
                     {
                         continue;
                     }
+                    byte[] sourcePixels = frame.Source ?? frame.Downscaled;
 
                     long uploadStart = Stopwatch.GetTimestamp();
-                    UploadTexture(_context, _sourceTexture, frame.Downscaled, frame.DownscaledWidth, frame.DownscaledHeight);
+                    UploadTexture(_context, _sourceTexture, sourcePixels, sourceWidth, sourceHeight);
                     Interlocked.Add(ref _uploadTicks, Stopwatch.GetTimestamp() - uploadStart);
 
                     long drawStart = Stopwatch.GetTimestamp();
                     DrawSourceIntoComposite(
-                        frame.DownscaledWidth,
-                        frame.DownscaledHeight,
+                        sourceWidth,
+                        sourceHeight,
                         downscaledWidth,
                         downscaledHeight,
                         source.BlendMode,
@@ -223,6 +231,7 @@ public partial class MainWindow
 
                 ID3D11Texture2D currentTexture = currentIsA ? _compositeTextureA : _compositeTextureB;
                 ID3D11ShaderResourceView currentSrv = currentIsA ? _compositeSrvA : _compositeSrvB;
+                _context.OMSetRenderTargets(new ID3D11RenderTargetView[] { null! }, null);
                 if (includeCpuReadback && downscaledBuffer != null)
                 {
                     long readbackStart = Stopwatch.GetTimestamp();
@@ -245,11 +254,13 @@ public partial class MainWindow
                 }
                 Interlocked.Increment(ref _buildCount);
 
+                IntPtr currentSharedHandle = currentIsA ? _compositeSharedHandleA : _compositeSharedHandleB;
+                _context.Flush();
                 return new CompositeFrame(
                     includeCpuReadback && downscaledBuffer != null ? downscaledBuffer : Array.Empty<byte>(),
                     downscaledWidth,
                     downscaledHeight,
-                    new GpuCompositeSurface(currentTexture, currentSrv, downscaledWidth, downscaledHeight));
+                    new GpuCompositeSurface(currentTexture, currentSrv, currentSharedHandle, downscaledWidth, downscaledHeight));
             }
         }
 
@@ -381,13 +392,21 @@ public partial class MainWindow
                 CpuAccessFlags.None,
                 1,
                 0,
-                ResourceOptionFlags.None);
+                ResourceOptionFlags.Shared | ResourceOptionFlags.SharedNTHandle);
             _compositeTextureA = _device.CreateTexture2D(compositeDescription);
             _compositeTextureB = _device.CreateTexture2D(compositeDescription);
             _compositeSrvA = _device.CreateShaderResourceView(_compositeTextureA);
             _compositeSrvB = _device.CreateShaderResourceView(_compositeTextureB);
             _compositeRtvA = _device.CreateRenderTargetView(_compositeTextureA);
             _compositeRtvB = _device.CreateRenderTargetView(_compositeTextureB);
+            using (var compositeResourceA = _compositeTextureA.QueryInterface<IDXGIResource1>())
+            {
+                _compositeSharedHandleA = compositeResourceA.CreateSharedHandle(null, Vortice.DXGI.SharedResourceFlags.Read, null);
+            }
+            using (var compositeResourceB = _compositeTextureB.QueryInterface<IDXGIResource1>())
+            {
+                _compositeSharedHandleB = compositeResourceB.CreateSharedHandle(null, Vortice.DXGI.SharedResourceFlags.Read, null);
+            }
 
             var stagingDescription = new Texture2DDescription(
                 Format.B8G8R8A8_UNorm,
@@ -500,6 +519,7 @@ public partial class MainWindow
             _context.PSSetShaderResources(0, new ID3D11ShaderResourceView[] { null!, null! });
             _context.PSSetShader(null);
             _context.VSSetShader(null);
+            _context.OMSetRenderTargets(new ID3D11RenderTargetView[] { null! }, null);
         }
 
         private static void UploadTexture(ID3D11DeviceContext1 context, ID3D11Texture2D texture, byte[] data, int width, int height)
@@ -556,6 +576,16 @@ public partial class MainWindow
 
         private void DisposeCompositeResources()
         {
+            if (_compositeSharedHandleA != IntPtr.Zero)
+            {
+                CloseHandle(_compositeSharedHandleA);
+                _compositeSharedHandleA = IntPtr.Zero;
+            }
+            if (_compositeSharedHandleB != IntPtr.Zero)
+            {
+                CloseHandle(_compositeSharedHandleB);
+                _compositeSharedHandleB = IntPtr.Zero;
+            }
             _compositeSrvA?.Dispose();
             _compositeSrvA = null;
             _compositeSrvB?.Dispose();

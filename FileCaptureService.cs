@@ -685,6 +685,10 @@ internal sealed class FileCaptureService : IDisposable
         private readonly double _totalDurationMs;
         private readonly Stopwatch _clock = Stopwatch.StartNew();
         private byte[]? _downscaledBuffer;
+        private int _cachedTargetWidth = -1;
+        private int _cachedTargetHeight = -1;
+        private FitMode _cachedFitMode = FitMode.Fill;
+        private int _cachedFrameIndex = -1;
 
         public ImageSequenceSession(string path, IReadOnlyList<BitmapFrame> frames, bool useDelays)
             : base(path, System.IO.Path.GetFileName(path), 0, 0)
@@ -731,15 +735,28 @@ internal sealed class FileCaptureService : IDisposable
                 return null;
             }
 
-            var frame = _frames.Length == 1 ? _frames[0] : GetCurrentFrame();
+            int frameIndex = _frames.Length == 1 ? 0 : GetCurrentFrameIndex();
+            var frame = _frames[frameIndex];
 
             int downscaledLength = targetWidth * targetHeight * 4;
             if (_downscaledBuffer == null || _downscaledBuffer.Length != downscaledLength)
             {
                 _downscaledBuffer = new byte[downscaledLength];
+                _cachedTargetWidth = -1;
             }
 
-            Downscale(frame.Buffer, frame.Width, frame.Height, _downscaledBuffer, targetWidth, targetHeight, fitMode);
+            bool canReuseDownscaled = _cachedTargetWidth == targetWidth &&
+                                      _cachedTargetHeight == targetHeight &&
+                                      _cachedFitMode == fitMode &&
+                                      _cachedFrameIndex == frameIndex;
+            if (!canReuseDownscaled)
+            {
+                Downscale(frame.Buffer, frame.Width, frame.Height, _downscaledBuffer, targetWidth, targetHeight, fitMode);
+                _cachedTargetWidth = targetWidth;
+                _cachedTargetHeight = targetHeight;
+                _cachedFitMode = fitMode;
+                _cachedFrameIndex = frameIndex;
+            }
 
             return new FileCaptureFrame(_downscaledBuffer, targetWidth, targetHeight,
                 includeSource ? frame.Buffer : null,
@@ -752,11 +769,11 @@ internal sealed class FileCaptureService : IDisposable
             // No unmanaged resources to clean up.
         }
 
-        private FrameData GetCurrentFrame()
+        private int GetCurrentFrameIndex()
         {
             if (_frames.Length == 1)
             {
-                return _frames[0];
+                return 0;
             }
 
             double mod = _totalDurationMs <= 0 ? 0 : _clock.Elapsed.TotalMilliseconds % _totalDurationMs;
@@ -764,11 +781,11 @@ internal sealed class FileCaptureService : IDisposable
             {
                 if (mod <= _frameEndTimesMs[i])
                 {
-                    return _frames[i];
+                    return i;
                 }
             }
 
-            return _frames[^1];
+            return _frames.Length - 1;
         }
 
         private static FrameData BuildFrameData(BitmapSource source)
@@ -868,19 +885,25 @@ internal sealed class FileCaptureService : IDisposable
         private string? _audioPlaybackUrl;
         
         // Buffers
+        private const int MaxQueuedRawFrames = 16;
+        private const int ParallelDownscalePixelThreshold = 640 * 360;
         private byte[]? _readerBuffer;      // Worker writes here
-        private byte[]? _latestRawFrame;    // Latest complete frame from worker
         private byte[]? _downscaleInput;    // Snapshot for downscaler
         private byte[]? _downscaledOutput;  // Downscaler writes here
         private byte[]? _readyDownscaled;   // Ready for UI
         private byte[]? _readyRaw;          // Ready for UI (Source)
+        private readonly Queue<byte[]> _pendingRawFrames = new();
+        private readonly Stack<byte[]> _rawFramePool = new();
+        private readonly AutoResetEvent _downscaleSignal = new(false);
+        private readonly CancellationTokenSource _downscaleWorkerCts = new();
+        private readonly Task _downscaleWorkerTask;
 
         private readonly object _lock = new();
-        private volatile bool _hasNewFrame;
         private volatile bool _isDownscaling;
         private bool _hasError;
         private volatile bool _ended;
         private string? _errorMessage;
+        private bool _preferNativeProcessFrames;
 
         private int _nativeWidth;
         private int _nativeHeight;
@@ -890,12 +913,18 @@ internal sealed class FileCaptureService : IDisposable
         // Capture State tracking
         private int _readyWidth;
         private int _readyHeight;
+        private int _downscaleInputWidth;
+        private int _downscaleInputHeight;
+        private int _downscaleTargetWidth;
+        private int _downscaleTargetHeight;
+        private FitMode _downscaleFitMode;
 
         public VideoSession(string path, string displayName, bool loopPlayback, Func<Task<ResolvedPlayback>>? urlResolver = null)
             : base(path, displayName, 0, 0)
         {
             _loopPlayback = loopPlayback;
             _urlResolver = urlResolver;
+            _downscaleWorkerTask = Task.Run(() => DownscaleWorker(_downscaleWorkerCts.Token));
 
             if (_urlResolver == null)
             {
@@ -1040,28 +1069,9 @@ internal sealed class FileCaptureService : IDisposable
             Width = _nativeWidth;
             Height = _nativeHeight;
 
-            _processWidth = _nativeWidth;
-            _processHeight = _nativeHeight;
-            
-            if (_nativeWidth > 1920 || _nativeHeight > 1080)
-            {
-                double aspect = (double)_nativeWidth / _nativeHeight;
-                if (_nativeWidth > 1920)
-                {
-                    _processWidth = 1920;
-                    _processHeight = (int)(1920 / aspect);
-                }
-                else
-                {
-                    _processHeight = 1080;
-                    _processWidth = (int)(1080 * aspect);
-                }
-            }
-            
-            // Ensure even dimensions for ffmpeg compatibility
-            _processWidth &= ~1;
-            _processHeight &= ~1;
-            
+            (_processWidth, _processHeight) = GetNativeProcessDimensions();
+            _preferNativeProcessFrames = true;
+
             Logger.Info($"Video configured: Native={_nativeWidth}x{_nativeHeight}, Process={_processWidth}x{_processHeight}");
         }
 
@@ -1072,84 +1082,82 @@ internal sealed class FileCaptureService : IDisposable
         {
             if (_hasError) return null;
 
-            // Check if we have a new raw frame to process
-            bool launchDownscale = false;
+            EnsureProcessDimensionsForRequest(targetWidth, targetHeight, includeSource);
+
+            bool seedDownscaledSynchronously = false;
+            bool signalDownscaleWorker = false;
             lock (_lock)
             {
-                if (_hasNewFrame && !_isDownscaling && _latestRawFrame != null)
+                if (_pendingRawFrames.Count > 0)
                 {
-                    // Swap latest raw to downscale input
-                    int requiredSize = _processWidth * _processHeight * 4;
-                    if (_downscaleInput == null || _downscaleInput.Length != requiredSize)
+                    if (includeSource)
                     {
-                        _downscaleInput = new byte[requiredSize];
+                        int requiredSize = _processWidth * _processHeight * 4;
+                        if (_readyRaw != null && _readyRaw.Length == requiredSize)
+                        {
+                            RecycleRawFrameBufferNoLock(_readyRaw, requiredSize);
+                        }
+
+                        _readyRaw = _pendingRawFrames.Dequeue();
+                        _readyWidth = _processWidth;
+                        _readyHeight = _processHeight;
+
+                        int requiredDownscaledLength = targetWidth * targetHeight * 4;
+                        seedDownscaledSynchronously = _readyDownscaled == null || _readyDownscaled.Length != requiredDownscaledLength;
                     }
-                    
-                    var temp = _latestRawFrame;
-                    _latestRawFrame = _downscaleInput;
-                    _downscaleInput = temp;
-                    
-                    _hasNewFrame = false;
-                    _isDownscaling = true;
-                    launchDownscale = true;
+                    else
+                    {
+                        int requiredSize = _processWidth * _processHeight * 4;
+                        byte[] nextInput = _pendingRawFrames.Dequeue();
+                        while (_pendingRawFrames.Count > 0)
+                        {
+                            RecycleRawFrameBufferNoLock(nextInput, requiredSize);
+                            nextInput = _pendingRawFrames.Dequeue();
+                        }
+
+                        if (_downscaleInput != null && _downscaleInput.Length == requiredSize)
+                        {
+                            RecycleRawFrameBufferNoLock(_downscaleInput, requiredSize);
+                        }
+
+                        _downscaleInput = nextInput;
+                        _downscaleInputWidth = _processWidth;
+                        _downscaleInputHeight = _processHeight;
+                        _downscaleTargetWidth = targetWidth;
+                        _downscaleTargetHeight = targetHeight;
+                        _downscaleFitMode = fitMode;
+                        if (!_isDownscaling)
+                        {
+                            _isDownscaling = true;
+                        }
+                        signalDownscaleWorker = true;
+                    }
                 }
             }
 
-            if (launchDownscale)
+            if (includeSource && seedDownscaledSynchronously)
             {
-                // Capture params
-                int pWidth = _processWidth;
-                int pHeight = _processHeight;
-                int tWidth = targetWidth;
-                int tHeight = targetHeight;
-                FitMode mode = fitMode;
-
-                // Ensure output buffer
-                int reqOut = tWidth * tHeight * 4;
-                if (_downscaledOutput == null || _downscaledOutput.Length != reqOut)
+                byte[]? sourceBuffer;
+                lock (_lock)
                 {
-                    _downscaledOutput = new byte[reqOut];
+                    sourceBuffer = _readyRaw;
                 }
 
-                Task.Run(() =>
+                if (sourceBuffer != null)
                 {
-                    try
+                    int requiredDownscaledLength = targetWidth * targetHeight * 4;
+                    byte[] downscaled = new byte[requiredDownscaledLength];
+                    Downscale(sourceBuffer, _readyWidth, _readyHeight, downscaled, targetWidth, targetHeight, fitMode);
+                    lock (_lock)
                     {
-                        if (_downscaleInput != null)
-                        {
-                            Downscale(_downscaleInput, pWidth, pHeight, _downscaledOutput!, tWidth, tHeight, mode);
-                            
-                            lock (_lock)
-                            {
-                                // Swap Output -> Ready
-                                var temp = _readyDownscaled;
-                                _readyDownscaled = _downscaledOutput;
-                                _downscaledOutput = temp; // Recycle
-                                
-                                // Swap Input (Raw) -> Ready Raw
-                                if (_readyRaw == null || _readyRaw.Length != _downscaleInput.Length)
-                                {
-                                    _readyRaw = new byte[_downscaleInput.Length];
-                                }
-                                
-                                var tempRaw = _readyRaw;
-                                _readyRaw = _downscaleInput;
-                                _downscaleInput = tempRaw;
-                                
-                                _readyWidth = pWidth;
-                                _readyHeight = pHeight;
-                            }
-                        }
+                        _readyDownscaled = downscaled;
                     }
-                    catch (Exception ex)
-                    {
-                        Logger.Error($"Downscale error: {ex.Message}");
-                    }
-                    finally
-                    {
-                        _isDownscaling = false;
-                    }
-                });
+                }
+            }
+
+            if (signalDownscaleWorker)
+            {
+                _downscaleSignal.Set();
             }
 
             lock (_lock)
@@ -1159,21 +1167,116 @@ internal sealed class FileCaptureService : IDisposable
                 int dsLen = targetWidth * targetHeight * 4;
                 if (_readyDownscaled.Length != dsLen)
                 {
-                    _readyDownscaled = null;
-                    return null;
-                }
-                var safeDs = new byte[dsLen];
-                Buffer.BlockCopy(_readyDownscaled, 0, safeDs, 0, dsLen);
+                    if (!includeSource || _readyRaw == null)
+                    {
+                        _readyDownscaled = null;
+                        return null;
+                    }
 
-                byte[]? safeRaw = null;
-                if (includeSource && _readyRaw != null)
-                {
-                    safeRaw = new byte[_readyRaw.Length];
-                    Buffer.BlockCopy(_readyRaw, 0, safeRaw, 0, safeRaw.Length);
+                    var rebuiltDownscaled = new byte[dsLen];
+                    Downscale(_readyRaw, _readyWidth, _readyHeight, rebuiltDownscaled, targetWidth, targetHeight, fitMode);
+                    _readyDownscaled = rebuiltDownscaled;
                 }
-
-                return new FileCaptureFrame(safeDs, targetWidth, targetHeight, safeRaw, _readyWidth, _readyHeight);
+                return new FileCaptureFrame(
+                    _readyDownscaled,
+                    targetWidth,
+                    targetHeight,
+                    includeSource ? _readyRaw : null,
+                    includeSource ? _readyWidth : _nativeWidth,
+                    includeSource ? _readyHeight : _nativeHeight);
             }
+        }
+
+        private (int width, int height) GetNativeProcessDimensions()
+        {
+            int width = _nativeWidth;
+            int height = _nativeHeight;
+
+            if (_nativeWidth > 1920 || _nativeHeight > 1080)
+            {
+                double aspect = (double)_nativeWidth / _nativeHeight;
+                if (_nativeWidth > 1920)
+                {
+                    width = 1920;
+                    height = (int)Math.Round(1920 / aspect);
+                }
+                else
+                {
+                    height = 1080;
+                    width = (int)Math.Round(1080 * aspect);
+                }
+            }
+
+            width = Math.Max(2, width) & ~1;
+            height = Math.Max(2, height) & ~1;
+            return (width, height);
+        }
+
+        private (int width, int height) GetAdaptiveProcessDimensions(int targetWidth, int targetHeight)
+        {
+            if (targetWidth <= 0 || targetHeight <= 0 || _nativeWidth <= 0 || _nativeHeight <= 0)
+            {
+                return GetNativeProcessDimensions();
+            }
+
+            double widthScale = targetWidth / (double)_nativeWidth;
+            double heightScale = targetHeight / (double)_nativeHeight;
+            double coverScale = Math.Max(widthScale, heightScale);
+            if (double.IsNaN(coverScale) || double.IsInfinity(coverScale) || coverScale <= 0)
+            {
+                coverScale = 1.0;
+            }
+
+            int width = Math.Max(2, (int)Math.Ceiling(_nativeWidth * coverScale));
+            int height = Math.Max(2, (int)Math.Ceiling(_nativeHeight * coverScale));
+            width &= ~1;
+            height &= ~1;
+
+            width = Math.Min(width, _nativeWidth);
+            height = Math.Min(height, _nativeHeight);
+
+            if (width <= 0 || height <= 0)
+            {
+                return GetNativeProcessDimensions();
+            }
+
+            return (width, height);
+        }
+
+        private void EnsureProcessDimensionsForRequest(int targetWidth, int targetHeight, bool includeSource)
+        {
+            if (_nativeWidth <= 0 || _nativeHeight <= 0 || _isDisposed)
+            {
+                return;
+            }
+
+            bool preferNative = includeSource;
+            var desired = preferNative
+                ? GetNativeProcessDimensions()
+                : GetAdaptiveProcessDimensions(targetWidth, targetHeight);
+
+            if (_processWidth == desired.width &&
+                _processHeight == desired.height &&
+                _preferNativeProcessFrames == preferNative)
+            {
+                return;
+            }
+
+            _processWidth = desired.width;
+            _processHeight = desired.height;
+            _preferNativeProcessFrames = preferNative;
+
+            Logger.Info($"Adjusted video decode resolution for {DisplayName}: Native={_nativeWidth}x{_nativeHeight}, Process={_processWidth}x{_processHeight}, Target={targetWidth}x{targetHeight}, NativeSource={preferNative}.");
+
+            bool paused;
+            double offset;
+            lock (_audioLock)
+            {
+                paused = _playbackPaused;
+                offset = paused ? _pausedOffsetSeconds : GetEstimatedPlaybackOffsetSecondsNoLock();
+            }
+
+            RestartVideoPipeline(offset, shouldPause: paused, forceReResolve: false);
         }
 
         public override void Dispose()
@@ -1186,12 +1289,19 @@ internal sealed class FileCaptureService : IDisposable
 
             StopVideoPipeline();
             StopAudioPlayback();
+            try { _downscaleWorkerCts.Cancel(); } catch { }
+            _downscaleSignal.Set();
+            try { _downscaleWorkerTask.Wait(TimeSpan.FromSeconds(1)); } catch { }
+            _downscaleSignal.Dispose();
+            _downscaleWorkerCts.Dispose();
         }
 
         private void FfmpegWorker(string url, CancellationToken token, double startOffsetSeconds)
         {
             try
             {
+                int processWidth = _processWidth;
+                int processHeight = _processHeight;
                 string args = $"-hide_banner -loglevel warning"; // increased verbosity for debug
                 if (startOffsetSeconds > 0.05)
                 {
@@ -1200,7 +1310,7 @@ internal sealed class FileCaptureService : IDisposable
                 if (_loopPlayback) args += " -stream_loop -1";
                 args += " -re"; // Realtime reading
                 args += $" -i \"{url}\"";
-                args += $" -f rawvideo -pix_fmt bgra -s {_processWidth}x{_processHeight} -";
+                args += $" -f rawvideo -pix_fmt bgra -s {processWidth}x{processHeight} -";
 
                 Logger.Info($"Starting ffmpeg: {args}");
 
@@ -1214,64 +1324,61 @@ internal sealed class FileCaptureService : IDisposable
                     CreateNoWindow = true
                 };
 
-                _process = Process.Start(psi);
-                if (_process == null) throw new InvalidOperationException("Failed to start ffmpeg.");
+                var process = Process.Start(psi);
+                if (process == null) throw new InvalidOperationException("Failed to start ffmpeg.");
+                _process = process;
 
-                _process.ErrorDataReceived += (s, e) => 
+                process.ErrorDataReceived += (s, e) => 
                 {
                     if (!string.IsNullOrWhiteSpace(e.Data)) Logger.Warn($"[ffmpeg] {e.Data}");
                 };
-                _process.BeginErrorReadLine();
+                process.BeginErrorReadLine();
 
-                using var stream = _process.StandardOutput.BaseStream;
-                int frameSize = _processWidth * _processHeight * 4;
+                using var stream = process.StandardOutput.BaseStream;
+                int frameSize = processWidth * processHeight * 4;
                 _readerBuffer = new byte[frameSize];
                 
                 int framesRead = 0;
 
-                while (!token.IsCancellationRequested && !_process.HasExited)
+                while (!token.IsCancellationRequested && IsProcessAlive(process))
                 {
+                    byte[]? readBuffer = _readerBuffer;
+                    if (readBuffer == null)
+                    {
+                        break;
+                    }
+
                     int totalRead = 0;
                     while (totalRead < frameSize)
                     {
-                        int read = stream.Read(_readerBuffer, totalRead, frameSize - totalRead);
+                        int read = stream.Read(readBuffer, totalRead, frameSize - totalRead);
                         if (read == 0) break; // EOF
                         totalRead += read;
                     }
 
                     if (totalRead < frameSize) 
                     {
-                        Logger.Warn($"ffmpeg stream ended (read {totalRead}/{frameSize} bytes). Exited: {_process.HasExited}");
-                        if (!token.IsCancellationRequested && _process.HasExited && _process.ExitCode == 0)
+                        bool exited = !IsProcessAlive(process);
+                        Logger.Warn($"ffmpeg stream ended (read {totalRead}/{frameSize} bytes). Exited: {exited}");
+                        if (!token.IsCancellationRequested && exited && TryGetProcessExitCode(process, out int exitCode) && exitCode == 0)
                         {
                             _ended = true;
                         }
                         break; 
                     }
 
-                    if (framesRead++ % 60 == 0)
-                    {
-                        // Sample center pixel
-                        int centerIdx = ((_processHeight / 2) * _processWidth * 4) + ((_processWidth / 2) * 4);
-                        if (centerIdx + 3 < _readerBuffer.Length)
-                        {
-                            Logger.Info($"ffmpeg frame {framesRead} acquired. Center px: B={_readerBuffer[centerIdx]} G={_readerBuffer[centerIdx+1]} R={_readerBuffer[centerIdx+2]} A={_readerBuffer[centerIdx+3]}");
-                        }
-                    }
+                    framesRead++;
 
                     // We have a full frame. Publish it.
                     lock (_lock)
                     {
-                        if (_latestRawFrame == null || _latestRawFrame.Length != frameSize)
+                        if (_pendingRawFrames.Count >= MaxQueuedRawFrames)
                         {
-                            _latestRawFrame = new byte[frameSize];
+                            RecycleRawFrameBufferNoLock(_pendingRawFrames.Dequeue(), frameSize);
                         }
-                        // Swap
-                        var temp = _latestRawFrame;
-                        _latestRawFrame = _readerBuffer;
-                        _readerBuffer = temp;
-                        
-                        _hasNewFrame = true;
+
+                        _pendingRawFrames.Enqueue(readBuffer);
+                        _readerBuffer = AcquireRawFrameBufferNoLock(frameSize);
                     }
                 }
             }
@@ -1279,6 +1386,32 @@ internal sealed class FileCaptureService : IDisposable
             {
                 Logger.Error($"FFmpeg worker error: {ex.Message}", ex);
                 _hasError = true;
+            }
+        }
+
+        private static bool IsProcessAlive(Process process)
+        {
+            try
+            {
+                return !process.HasExited;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private static bool TryGetProcessExitCode(Process process, out int exitCode)
+        {
+            try
+            {
+                exitCode = process.ExitCode;
+                return true;
+            }
+            catch
+            {
+                exitCode = -1;
+                return false;
             }
         }
 
@@ -1442,11 +1575,133 @@ internal sealed class FileCaptureService : IDisposable
         {
             var cts = _cts;
             _cts = null;
+            var workerTask = _workerTask;
+            _workerTask = null;
             try { cts?.Cancel(); } catch { }
             try { _process?.Kill(); } catch { }
+            try { workerTask?.Wait(TimeSpan.FromMilliseconds(250)); } catch { }
             _process?.Dispose();
             _process = null;
             try { cts?.Dispose(); } catch { }
+
+            lock (_lock)
+            {
+                _pendingRawFrames.Clear();
+                _rawFramePool.Clear();
+                _readerBuffer = null;
+                _downscaleInput = null;
+                _downscaledOutput = null;
+                _readyDownscaled = null;
+                _readyRaw = null;
+                _readyWidth = 0;
+                _readyHeight = 0;
+                _isDownscaling = false;
+            }
+        }
+
+        private void DownscaleWorker(CancellationToken token)
+        {
+            while (!token.IsCancellationRequested)
+            {
+                _downscaleSignal.WaitOne(100);
+                if (token.IsCancellationRequested)
+                {
+                    break;
+                }
+
+                while (true)
+                {
+                    byte[]? input;
+                    byte[]? output;
+                    int inputWidth;
+                    int inputHeight;
+                    int targetWidth;
+                    int targetHeight;
+                    FitMode fitMode;
+
+                    lock (_lock)
+                    {
+                        input = _downscaleInput;
+                        if (input == null)
+                        {
+                            _isDownscaling = false;
+                            break;
+                        }
+
+                        inputWidth = _downscaleInputWidth;
+                        inputHeight = _downscaleInputHeight;
+                        targetWidth = _downscaleTargetWidth;
+                        targetHeight = _downscaleTargetHeight;
+                        fitMode = _downscaleFitMode;
+                        _downscaleInput = null;
+
+                        int requiredOutputLength = targetWidth * targetHeight * 4;
+                        if (_downscaledOutput == null || _downscaledOutput.Length != requiredOutputLength)
+                        {
+                            _downscaledOutput = new byte[requiredOutputLength];
+                        }
+
+                        output = _downscaledOutput;
+                    }
+
+                    try
+                    {
+                        Downscale(input, inputWidth, inputHeight, output!, targetWidth, targetHeight, fitMode);
+                    }
+                    catch (Exception ex)
+                    {
+                        Logger.Error($"Downscale error: {ex.Message}");
+                        lock (_lock)
+                        {
+                            _isDownscaling = false;
+                        }
+                        break;
+                    }
+
+                    lock (_lock)
+                    {
+                        var temp = _readyDownscaled;
+                        _readyDownscaled = output;
+                        _downscaledOutput = temp;
+
+                        if (_readyRaw != null && _readyRaw.Length == input.Length)
+                        {
+                            RecycleRawFrameBufferNoLock(_readyRaw, input.Length);
+                        }
+
+                        _readyRaw = input;
+                        _readyWidth = inputWidth;
+                        _readyHeight = inputHeight;
+
+                        if (_downscaleInput == null)
+                        {
+                            _isDownscaling = false;
+                        }
+                    }
+                }
+            }
+        }
+
+        private byte[] AcquireRawFrameBufferNoLock(int requiredSize)
+        {
+            while (_rawFramePool.Count > 0)
+            {
+                byte[] buffer = _rawFramePool.Pop();
+                if (buffer.Length == requiredSize)
+                {
+                    return buffer;
+                }
+            }
+
+            return new byte[requiredSize];
+        }
+
+        private void RecycleRawFrameBufferNoLock(byte[] buffer, int requiredSize)
+        {
+            if (buffer.Length == requiredSize && _rawFramePool.Count < MaxQueuedRawFrames * 2)
+            {
+                _rawFramePool.Push(buffer);
+            }
         }
 
         public void SetAudioEnabled(bool enabled)
@@ -2269,14 +2524,14 @@ internal sealed class FileCaptureService : IDisposable
             
                 private static void Downscale(byte[] source, int sourceWidth, int sourceHeight, byte[] destination, int targetWidth, int targetHeight, FitMode fitMode)
                 {
+                    const int parallelDownscalePixelThreshold = 640 * 360;
                     var mapping = ImageFit.GetMapping(fitMode, sourceWidth, sourceHeight, targetWidth, targetHeight);
                     int destStride = targetWidth * 4;
-                    int sourceStride = sourceWidth * 4;
-            
-                    Parallel.For(0, targetHeight, row =>
+
+                    void DownscaleRow(int row)
                     {
                         int destRowOffset = row * destStride;
-            
+
                         for (int col = 0; col < targetWidth; col++)
                         {
                             int destIndex = destRowOffset + (col * 4);
@@ -2296,7 +2551,19 @@ internal sealed class FileCaptureService : IDisposable
                                 destination[destIndex + 3] = 0;
                             }
                         }
-                    });
+                    }
+
+                    int totalPixels = targetWidth * targetHeight;
+                    if (totalPixels < parallelDownscalePixelThreshold)
+                    {
+                        for (int row = 0; row < targetHeight; row++)
+                        {
+                            DownscaleRow(row);
+                        }
+                        return;
+                    }
+
+                    Parallel.For(0, targetHeight, DownscaleRow);
                 }
             }
             

@@ -42,14 +42,151 @@
             <Setter Property="Foreground" Value="#F2F2F2" />
         </Style>
         <Style TargetType="ComboBox">
-            <Setter Property="Background" Value="#F2F2F2" />
-            <Setter Property="BorderBrush" Value="#BFBFBF" />
+            <Setter Property="Background" Value="#1A1A1A" />
+            <Setter Property="BorderBrush" Value="#3A3A3A" />
             <Setter Property="BorderThickness" Value="1" />
-            <Setter Property="Foreground" Value="#000000" />
+            <Setter Property="Foreground" Value="#F2F2F2" />
+            <Setter Property="Padding" Value="4,2" />
+            <Setter Property="TextElement.Foreground" Value="#F2F2F2" />
+            <Setter Property="ItemContainerStyle">
+                <Setter.Value>
+                    <Style TargetType="ComboBoxItem">
+                        <Setter Property="Background" Value="#1A1A1A" />
+                        <Setter Property="Foreground" Value="#F2F2F2" />
+                        <Setter Property="Padding" Value="6,3" />
+                        <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+                        <Setter Property="Template">
+                            <Setter.Value>
+                                <ControlTemplate TargetType="ComboBoxItem">
+                                    <Border x:Name="ItemBorder"
+                                            Background="{TemplateBinding Background}"
+                                            Padding="{TemplateBinding Padding}"
+                                            SnapsToDevicePixels="True"
+                                            TextElement.Foreground="{TemplateBinding Foreground}">
+                                        <ContentPresenter HorizontalAlignment="Stretch"
+                                                          VerticalAlignment="Center"
+                                                          TextElement.Foreground="{TemplateBinding Foreground}" />
+                                    </Border>
+
+                                    <ControlTemplate.Triggers>
+                                        <Trigger Property="IsHighlighted" Value="True">
+                                            <Setter TargetName="ItemBorder" Property="Background" Value="#2A2A2A" />
+                                            <Setter Property="Foreground" Value="#F5F5F5" />
+                                        </Trigger>
+                                        <Trigger Property="IsSelected" Value="True">
+                                            <Setter TargetName="ItemBorder" Property="Background" Value="#343434" />
+                                            <Setter Property="Foreground" Value="#FFFFFF" />
+                                        </Trigger>
+                                        <MultiTrigger>
+                                            <MultiTrigger.Conditions>
+                                                <Condition Property="IsSelected" Value="True" />
+                                                <Condition Property="IsHighlighted" Value="True" />
+                                            </MultiTrigger.Conditions>
+                                            <Setter TargetName="ItemBorder" Property="Background" Value="#404040" />
+                                            <Setter Property="Foreground" Value="#FFFFFF" />
+                                        </MultiTrigger>
+                                    </ControlTemplate.Triggers>
+                                </ControlTemplate>
+                            </Setter.Value>
+                        </Setter>
+                    </Style>
+                </Setter.Value>
+            </Setter>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="ComboBox">
+                        <Grid>
+                            <Border x:Name="ComboBorder"
+                                    Background="{TemplateBinding Background}"
+                                    BorderBrush="{TemplateBinding BorderBrush}"
+                                    BorderThickness="{TemplateBinding BorderThickness}"
+                                    CornerRadius="2">
+                                <Grid>
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="26" />
+                                    </Grid.ColumnDefinitions>
+
+                                    <ContentPresenter Grid.Column="0"
+                                                      Margin="8,2,4,2"
+                                                    VerticalAlignment="Center"
+                                                    HorizontalAlignment="Left"
+                                                    RecognizesAccessKey="True"
+                                                    Content="{TemplateBinding SelectionBoxItem}"
+                                                    ContentTemplate="{TemplateBinding SelectionBoxItemTemplate}"
+                                                    ContentStringFormat="{TemplateBinding SelectionBoxItemStringFormat}"
+                                                    SnapsToDevicePixels="True"
+                                                    TextElement.Foreground="{TemplateBinding Foreground}" />
+
+                                    <ToggleButton Grid.Column="1"
+                                                  Focusable="False"
+                                                  Background="Transparent"
+                                                  BorderBrush="{x:Null}"
+                                                  ClickMode="Press"
+                                                  IsChecked="{Binding IsDropDownOpen, Mode=TwoWay, RelativeSource={RelativeSource TemplatedParent}}">
+                                        <Path HorizontalAlignment="Center"
+                                              VerticalAlignment="Center"
+                                              Data="M 0 0 L 4 4 L 8 0 Z"
+                                              Fill="{TemplateBinding Foreground}" />
+                                    </ToggleButton>
+                                </Grid>
+                            </Border>
+
+                            <Popup x:Name="PART_Popup"
+                                   AllowsTransparency="True"
+                                   Focusable="False"
+                                   IsOpen="{TemplateBinding IsDropDownOpen}"
+                                   Placement="Bottom"
+                                   PopupAnimation="Slide">
+                                <Border Margin="0,2,0,0"
+                                        MinWidth="{Binding ActualWidth, RelativeSource={RelativeSource TemplatedParent}}"
+                                        MaxHeight="{TemplateBinding MaxDropDownHeight}"
+                                        Background="#141414"
+                                        BorderBrush="#3A3A3A"
+                                        BorderThickness="1"
+                                        CornerRadius="2">
+                                    <ScrollViewer CanContentScroll="True">
+                                        <ItemsPresenter KeyboardNavigation.DirectionalNavigation="Contained" />
+                                    </ScrollViewer>
+                                </Border>
+                            </Popup>
+                        </Grid>
+
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsEnabled" Value="False">
+                                <Setter TargetName="ComboBorder" Property="Opacity" Value="0.55" />
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
         </Style>
         <Style TargetType="ComboBoxItem">
-            <Setter Property="Background" Value="#FFFFFF" />
-            <Setter Property="Foreground" Value="#000000" />
+            <Setter Property="Background" Value="#1A1A1A" />
+            <Setter Property="Foreground" Value="#F2F2F2" />
+            <Setter Property="Padding" Value="4,2" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="ComboBoxItem">
+                        <Border x:Name="ItemBorder"
+                                Background="{TemplateBinding Background}"
+                                Padding="{TemplateBinding Padding}">
+                            <ContentPresenter TextElement.Foreground="{TemplateBinding Foreground}" />
+                        </Border>
+
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsHighlighted" Value="True">
+                                <Setter TargetName="ItemBorder" Property="Background" Value="#2A2A2A" />
+                                <Setter Property="Foreground" Value="#F5F5F5" />
+                            </Trigger>
+                            <Trigger Property="IsSelected" Value="True">
+                                <Setter TargetName="ItemBorder" Property="Background" Value="#343434" />
+                                <Setter Property="Foreground" Value="#FFFFFF" />
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
         </Style>
 
         <HierarchicalDataTemplate x:Key="SourceTreeTemplate" ItemsSource="{Binding Children}">
@@ -725,11 +862,13 @@
                                                         <TextBlock Text="Height"
                                                                    Width="110"
                                                                    VerticalAlignment="Center" />
-                                                        <ComboBox ItemsSource="{Binding SimulationHeightOptions}"
-                                                                  SelectedItem="{Binding SimulationHeight}"
+                                                        <ComboBox x:Name="SimulationHeightComboBox"
+                                                                  ItemsSource="{Binding SimulationHeightOptions}"
+                                                                  SelectedItem="{Binding SimulationHeight, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
                                                                   Width="90"
                                                                   Margin="8,0,0,0"
                                                                   SelectionChanged="SimulationHeight_Changed"
+                                                                  DropDownClosed="SimulationHeight_DropDownClosed"
                                                                   LostFocus="SimulationDimensions_LostFocus"
                                                                   KeyDown="SimulationDimensions_KeyDown" />
                                                     </StackPanel>
@@ -911,6 +1050,57 @@
                                                                 Margin="8,0,0,0"
                                                                 ValueChanged="SimulationLayerInjectionNoise_Changed" />
                                                         <TextBlock Text="{Binding InjectionNoise, StringFormat={}{0:P0}}"
+                                                                   Margin="8,0,0,0"
+                                                                   VerticalAlignment="Center" />
+                                                    </StackPanel>
+
+                                                    <StackPanel Orientation="Horizontal"
+                                                                Margin="0,8,0,0">
+                                                        <TextBlock Text="Hue Offset"
+                                                                   VerticalAlignment="Center" />
+                                                        <Slider Minimum="0"
+                                                                Maximum="360"
+                                                                Value="{Binding RgbHueShiftDegrees}"
+                                                                Width="160"
+                                                                SmallChange="1"
+                                                                LargeChange="15"
+                                                                Margin="8,0,0,0"
+                                                                ValueChanged="SimulationLayerHue_Changed" />
+                                                        <TextBlock Text="{Binding RgbHueShiftDegrees, StringFormat={}{0:0.#}deg}"
+                                                                   Margin="8,0,0,0"
+                                                                   VerticalAlignment="Center" />
+                                                    </StackPanel>
+
+                                                    <StackPanel Orientation="Horizontal"
+                                                                Margin="0,8,0,0">
+                                                        <TextBlock Text="Hue Speed"
+                                                                   VerticalAlignment="Center" />
+                                                        <Slider Minimum="-180"
+                                                                Maximum="180"
+                                                                Value="{Binding RgbHueShiftSpeedDegreesPerSecond}"
+                                                                Width="160"
+                                                                SmallChange="1"
+                                                                LargeChange="10"
+                                                                Margin="8,0,0,0"
+                                                                ValueChanged="SimulationLayerHue_Changed" />
+                                                        <TextBlock Text="{Binding RgbHueShiftSpeedDegreesPerSecond, StringFormat={}{0:+0.#;-0.#;0}deg/s}"
+                                                                   Margin="8,0,0,0"
+                                                                   VerticalAlignment="Center" />
+                                                    </StackPanel>
+
+                                                    <StackPanel Orientation="Horizontal"
+                                                                Margin="0,8,0,0">
+                                                        <TextBlock Text="Freq -> Hue"
+                                                                   VerticalAlignment="Center" />
+                                                        <Slider Minimum="0"
+                                                                Maximum="360"
+                                                                Value="{Binding AudioFrequencyHueShiftDegrees}"
+                                                                Width="160"
+                                                                SmallChange="1"
+                                                                LargeChange="15"
+                                                                Margin="8,0,0,0"
+                                                                ValueChanged="SimulationLayerHue_Changed" />
+                                                        <TextBlock Text="{Binding AudioFrequencyHueShiftDegrees, StringFormat={}{0:0.#}deg}"
                                                                    Margin="8,0,0,0"
                                                                    VerticalAlignment="Center" />
                                                     </StackPanel>

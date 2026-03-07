@@ -26,24 +26,55 @@ After building the sandbox output, you can validate the GPU sim path and startup
 dotnet build /p:UseAppHost=false /p:OutputPath=bin\Debug\net9.0-windows-sbx\
 dotnet bin\Debug\net9.0-windows-sbx\lifeviz.dll --smoke-test gpu-benchmark
 dotnet bin\Debug\net9.0-windows-sbx\lifeviz.dll --smoke-test gpu-handoff
+dotnet bin\Debug\net9.0-windows-sbx\lifeviz.dll --smoke-test gpu-rgb-threshold
+dotnet bin\Debug\net9.0-windows-sbx\lifeviz.dll --smoke-test gpu-frequency-hue
+dotnet bin\Debug\net9.0-windows-sbx\lifeviz.dll --smoke-test gpu-injection-mode
+dotnet bin\Debug\net9.0-windows-sbx\lifeviz.dll --smoke-test gpu-file-injection-mode C:\path\to\video.mp4
 dotnet bin\Debug\net9.0-windows-sbx\lifeviz.dll --smoke-test gpu-sim
 dotnet bin\Debug\net9.0-windows-sbx\lifeviz.dll --smoke-test gpu-source
+dotnet bin\Debug\net9.0-windows-sbx\lifeviz.dll --smoke-test source-reset
 dotnet bin\Debug\net9.0-windows-sbx\lifeviz.dll --smoke-test gpu-render
+dotnet bin\Debug\net9.0-windows-sbx\lifeviz.dll --smoke-test profile-mainloop
+dotnet bin\Debug\net9.0-windows-sbx\lifeviz.dll --smoke-test profile-240
+dotnet bin\Debug\net9.0-windows-sbx\lifeviz.dll --smoke-test profile-480
+dotnet bin\Debug\net9.0-windows-sbx\lifeviz.dll --smoke-test profile-rgb-240
+dotnet bin\Debug\net9.0-windows-sbx\lifeviz.dll --smoke-test profile-rgb-480
+dotnet bin\Debug\net9.0-windows-sbx\lifeviz.dll --smoke-test profile-file-240 C:\path\to\video.mp4
+dotnet bin\Debug\net9.0-windows-sbx\lifeviz.dll --smoke-test profile-file-480 C:\path\to\video.mp4
+dotnet bin\Debug\net9.0-windows-sbx\lifeviz.dll --smoke-test profile-file-rgb-240 C:\path\to\video.mp4
+dotnet bin\Debug\net9.0-windows-sbx\lifeviz.dll --smoke-test profile-file-rgb-480 C:\path\to\video.mp4
+dotnet bin\Debug\net9.0-windows-sbx\lifeviz.dll --smoke-test profile-current-scene
+dotnet bin\Debug\net9.0-windows-sbx\lifeviz.dll --smoke-test profile-current-scene-visible
+dotnet bin\Debug\net9.0-windows-sbx\lifeviz.dll --smoke-test profile-current-scene-interaction
 dotnet bin\Debug\net9.0-windows-sbx\lifeviz.dll --smoke-test dimensions
 dotnet bin\Debug\net9.0-windows-sbx\lifeviz.dll --smoke-test shutdown
 dotnet bin\Debug\net9.0-windows-sbx\lifeviz.dll --smoke-test startup
 dotnet bin\Debug\net9.0-windows-sbx\lifeviz.dll --smoke-test all
 ```
 
-- `gpu-benchmark` logs average GPU sim inject/step/fill timings plus GPU source-composite upload/draw/readback timings using synthetic workloads, and is intended to report the direct GPU composite-to-simulation handoff timings as that path evolves.
-- `gpu-handoff` instantiates `MainWindow` without showing it and verifies that a GPU-built composite can inject directly into the grayscale GPU simulation backend with zero CPU composite readback bytes.
-- `gpu-sim` verifies the D3D11 grayscale simulation backend end to end and checks CPU fallback for unsupported life modes.
+- `gpu-benchmark` logs average GPU sim inject/step/fill timings plus GPU source-composite upload/draw/readback timings using synthetic workloads so you can see whether readback is still dominating.
+- `gpu-handoff` instantiates `MainWindow` without showing it and verifies that a GPU-built composite can inject directly into the GPU simulation backend with zero CPU composite readback bytes.
+- `gpu-rgb-threshold` drives the RGB composite-injection threshold path with a pure-white source and fails if white pixels stop injecting into all three channels.
+- `gpu-frequency-hue` verifies that a simulation layer's per-layer `Freq -> Hue` setting changes the resolved presentation hue numerically while the underlying RGB simulation buffer remains unchanged in the live GPU path.
+- `gpu-injection-mode` drives the GPU composite-injection path with a mid-gray source and fails unless `Threshold`, `Random Pulse`, and `Pulse Width Modulation` still produce distinct output densities.
+- `gpu-file-injection-mode <video>` runs that same density comparison against a real decoded file frame, which is the right tool when a report reproduces only on actual media.
+- `gpu-sim` verifies the D3D11 simulation backend end to end in both `Naive Grayscale` and `RGB Channel Bins`.
 - `gpu-source` instantiates `MainWindow` without showing it and verifies that the GPU source compositor actually executes through the normal `BuildCompositeFrame` path.
+- `source-reset` clears the scene source stack, preserves passthrough state, re-adds a synthetic source, and fails unless the source composite becomes visible again.
 - `gpu-render` launches a hidden `MainWindow` and verifies that the real GPU composite pipeline initializes through the normal render backend path.
-- `dimensions` applies a live height/depth change through `MainWindow` and verifies that both the simulation backend and presentation surface resize together.
+- `profile-mainloop` runs the real frame loop against a hidden synthetic scene, writes a JSON timing report to `%LOCALAPPDATA%\lifeviz\profiles` in normal app runs, and writes to `bin\Debug\net9.0-windows-sbx\profiles\` in smoke-test mode so local test runs stay self-contained. The exported report also includes frame-gap spike counters (`>25ms`, `>33ms`, `>50ms`) so pacing regressions can be diagnosed separately from average stage cost.
+- `profile-240` / `profile-480` run the same hidden-scene profiler at fixed grayscale resolutions.
+- `profile-rgb-240` / `profile-rgb-480` run the profiler with the reference simulation layer forced to `RGB Channel Bins`, which is the right target when performance work touches RGB injection or Conway stepping.
+- `profile-file-240` / `profile-file-480` run that same profiler against a real file source instead of synthetic buffers.
+- `profile-file-rgb-240` / `profile-file-rgb-480` do the same with the reference simulation layer pinned to `RGB Channel Bins`, which is the right target when file-video playback performance only collapses once RGB layers are enabled.
+- `profile-current-scene` loads the persisted user config/scene and profiles it headlessly, which is the fastest way to capture real-stage timings from the current setup without manually reading the on-screen overlay.
+- `profile-current-scene-visible` does the same in a visible window so display/presentation pacing regressions can be measured against the actual desktop composition path.
+- `profile-current-scene-interaction` performs that same real-scene visible run but opens and closes the root context menu mid-test, then fails unless post-interaction frame pacing recovers to the pre-interaction baseline.
+- Pass the file path as the third argument or set `LIFEVIZ_SMOKE_VIDEO` before launching the smoke test.
+- `dimensions` applies a live height/depth change through `MainWindow`, forces the reference simulation layer into `RGB Channel Bins`, then drives the real Scene Editor height dropdown in both Live Mode and deferred Apply mode, and verifies that every simulation layer plus the presentation surface resize together.
 - `shutdown` opens the real `MainWindow`, opens the Scene Editor, then closes the main window and fails if close-time teardown captures any exception or if the owned editor-close path throws.
 - `startup` launches `MainWindow` in a dedicated smoke-test mode that skips loading the persisted project plus file/video/audio capture pipelines, so WPF/render startup can be validated in isolation and should exit quickly.
-- `all` runs `gpu-sim` plus the combined GPU handoff/source/render UI smoke suite.
+- `all` runs `gpu-sim` plus the combined GPU handoff/passthrough-render/source/render UI smoke suite.
 
 ## Local Smoke Test Install
 

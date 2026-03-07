@@ -4,6 +4,17 @@ using System.Windows.Controls;
 
 namespace lifeviz;
 
+internal sealed class SimulationPresentationLayerData
+{
+    public byte[]? Buffer { get; init; }
+    public IntPtr SharedTextureHandle { get; init; }
+    public int Width { get; init; }
+    public int Height { get; init; }
+    public required int BlendMode { get; init; }
+    public required float Opacity { get; init; }
+    public float HueShiftDegrees { get; init; }
+}
+
 public partial class MainWindow
 {
     private interface IRenderBackend : IDisposable
@@ -21,6 +32,19 @@ public partial class MainWindow
         void PresentUnderlay(byte[]? underlayBuffer, int stride);
 
         void UpdateEffectState(bool useOverlay, double blendModeValue);
+
+        bool PrefersNativeSourceFrames { get; }
+
+        bool SupportsGpuSimulationComposition { get; }
+
+        bool PresentSimulationComposition(
+            IReadOnlyList<SimulationPresentationLayerData> layers,
+            byte[]? underlayBuffer,
+            GpuCompositeSurface? underlaySurface,
+            int simulationBaseline,
+            bool useSignedAddSubPassthrough,
+            bool useMixedAddSubPassthroughModel,
+            bool invertComposite);
     }
 
     private sealed class NullRenderBackend : IRenderBackend
@@ -45,6 +69,19 @@ public partial class MainWindow
         public void UpdateEffectState(bool useOverlay, double blendModeValue)
         {
         }
+
+        public bool PrefersNativeSourceFrames => false;
+
+        public bool SupportsGpuSimulationComposition => false;
+
+        public bool PresentSimulationComposition(
+            IReadOnlyList<SimulationPresentationLayerData> layers,
+            byte[]? underlayBuffer,
+            GpuCompositeSurface? underlaySurface,
+            int simulationBaseline,
+            bool useSignedAddSubPassthrough,
+            bool useMixedAddSubPassthroughModel,
+            bool invertComposite) => false;
 
         public void Dispose()
         {
@@ -76,6 +113,19 @@ public partial class MainWindow
         public void PresentUnderlay(byte[]? underlayBuffer, int stride) => _presentationBackend.PresentUnderlay(underlayBuffer, stride);
 
         public void UpdateEffectState(bool useOverlay, double blendModeValue) => _presentationBackend.UpdateEffectState(useOverlay, blendModeValue);
+
+        public bool PrefersNativeSourceFrames => false;
+
+        public bool SupportsGpuSimulationComposition => false;
+
+        public bool PresentSimulationComposition(
+            IReadOnlyList<SimulationPresentationLayerData> layers,
+            byte[]? underlayBuffer,
+            GpuCompositeSurface? underlaySurface,
+            int simulationBaseline,
+            bool useSignedAddSubPassthrough,
+            bool useMixedAddSubPassthroughModel,
+            bool invertComposite) => false;
 
         public void Dispose() => _presentationBackend.Dispose();
     }
@@ -128,6 +178,27 @@ public partial class MainWindow
         public void PresentUnderlay(byte[]? underlayBuffer, int stride) => _presentationBackend.PresentUnderlay(underlayBuffer, stride);
 
         public void UpdateEffectState(bool useOverlay, double blendModeValue) => _presentationBackend.UpdateEffectState(useOverlay, blendModeValue);
+
+        public bool PrefersNativeSourceFrames => _useGpuSourceCompositor;
+
+        public bool SupportsGpuSimulationComposition => _presentationBackend.SupportsGpuSimulationComposition;
+
+        public bool PresentSimulationComposition(
+            IReadOnlyList<SimulationPresentationLayerData> layers,
+            byte[]? underlayBuffer,
+            GpuCompositeSurface? underlaySurface,
+            int simulationBaseline,
+            bool useSignedAddSubPassthrough,
+            bool useMixedAddSubPassthroughModel,
+            bool invertComposite)
+            => _presentationBackend.PresentSimulationComposition(
+                layers,
+                underlayBuffer,
+                underlaySurface,
+                simulationBaseline,
+                useSignedAddSubPassthrough,
+                useMixedAddSubPassthroughModel,
+                invertComposite);
 
         public void Dispose()
         {

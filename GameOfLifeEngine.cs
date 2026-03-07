@@ -100,7 +100,6 @@ namespace lifeviz;
 
         _mode = mode;
         ResetHistories();
-        Randomize();
     }
 
     public void Randomize()
@@ -162,6 +161,61 @@ namespace lifeviz;
         byte gChannel = EvaluateChannel(row, col, _historyG, _gDepth);
         byte bChannel = EvaluateChannel(row, col, _historyB, _bDepth);
         return (rChannel, gChannel, bChannel);
+    }
+
+    public void FillColorBuffer(byte[] targetBuffer)
+    {
+        EnsureInitialized();
+
+        int expectedLength = Columns * Rows * 4;
+        if (targetBuffer.Length < expectedLength)
+        {
+            throw new ArgumentException("Target buffer is smaller than simulation output.", nameof(targetBuffer));
+        }
+
+        if (_mode == LifeMode.NaiveGrayscale)
+        {
+            var (rSlice, gSlice, bSlice) = CalculateSlices();
+            int rFrames = Math.Min(rSlice.length, _history.Count - rSlice.start);
+            int gFrames = Math.Min(gSlice.length, _history.Count - gSlice.start);
+            int bFrames = Math.Min(bSlice.length, _history.Count - bSlice.start);
+
+            Parallel.For(0, Rows, row =>
+            {
+                int rowOffset = row * Columns * 4;
+                for (int col = 0; col < Columns; col++)
+                {
+                    byte r = EvaluateSliceFast(row, col, _history, rSlice.start, rFrames);
+                    byte g = EvaluateSliceFast(row, col, _history, gSlice.start, gFrames);
+                    byte b = EvaluateSliceFast(row, col, _history, bSlice.start, bFrames);
+                    int index = rowOffset + (col * 4);
+                    targetBuffer[index] = r;
+                    targetBuffer[index + 1] = g;
+                    targetBuffer[index + 2] = b;
+                    targetBuffer[index + 3] = 255;
+                }
+            });
+            return;
+        }
+
+        int rFramesRgb = Math.Min(_rDepth, _historyR.Count);
+        int gFramesRgb = Math.Min(_gDepth, _historyG.Count);
+        int bFramesRgb = Math.Min(_bDepth, _historyB.Count);
+        Parallel.For(0, Rows, row =>
+        {
+            int rowOffset = row * Columns * 4;
+            for (int col = 0; col < Columns; col++)
+            {
+                byte r = EvaluateChannelFast(row, col, _historyR, rFramesRgb);
+                byte g = EvaluateChannelFast(row, col, _historyG, gFramesRgb);
+                byte b = EvaluateChannelFast(row, col, _historyB, bFramesRgb);
+                int index = rowOffset + (col * 4);
+                targetBuffer[index] = r;
+                targetBuffer[index + 1] = g;
+                targetBuffer[index + 2] = b;
+                targetBuffer[index + 3] = 255;
+            }
+        });
     }
 
     public void InjectFrame(bool[,] frame)
@@ -236,21 +290,18 @@ namespace lifeviz;
         }
     }
 
-    private int CountNeighbors(bool[,] frame, int row, int col)
+    private int CountNeighborsEdge(bool[,] frame, int row, int col)
     {
         int count = 0;
-        for (int dr = -1; dr <= 1; dr++)
+        int rowStart = Math.Max(0, row - 1);
+        int rowEnd = Math.Min(Rows - 1, row + 1);
+        int colStart = Math.Max(0, col - 1);
+        int colEnd = Math.Min(Columns - 1, col + 1);
+        for (int nr = rowStart; nr <= rowEnd; nr++)
         {
-            for (int dc = -1; dc <= 1; dc++)
+            for (int nc = colStart; nc <= colEnd; nc++)
             {
-                if (dr == 0 && dc == 0)
-                {
-                    continue;
-                }
-
-                int nr = row + dr;
-                int nc = col + dc;
-                if (nr >= 0 && nr < Rows && nc >= 0 && nc < Columns && frame[nr, nc])
+                if ((nr != row || nc != col) && frame[nr, nc])
                 {
                     count++;
                 }
@@ -361,20 +412,76 @@ namespace lifeviz;
         }
 
         var current = history[0];
-        var next = CreateFrame();
+        bool[,] next;
+        if (history.Count >= depth && history[^1].GetLength(0) == Rows && history[^1].GetLength(1) == Columns)
+        {
+            next = history[^1];
+            Array.Clear(next);
+        }
+        else
+        {
+            next = CreateFrame();
+        }
 
         Parallel.For(0, Rows, row =>
         {
-            for (int col = 0; col < Columns; col++)
+            if (Columns == 1 || row == 0 || row == Rows - 1)
             {
-                int neighbors = CountNeighbors(current, row, col);
+                for (int col = 0; col < Columns; col++)
+                {
+                    int neighbors = CountNeighborsEdge(current, row, col);
+                    bool alive = current[row, col];
+                    next[row, col] = neighbors == 3 || (alive && neighbors == 2);
+                }
+                return;
+            }
+
+            int lastCol = Columns - 1;
+            int prev = row - 1;
+            int nextRow = row + 1;
+
+            {
+                int neighbors = CountNeighborsEdge(current, row, 0);
+                bool alive = current[row, 0];
+                next[row, 0] = neighbors == 3 || (alive && neighbors == 2);
+            }
+
+            for (int col = 1; col < lastCol; col++)
+            {
+                int left = col - 1;
+                int right = col + 1;
+                int neighbors =
+                    (current[prev, left] ? 1 : 0) +
+                    (current[prev, col] ? 1 : 0) +
+                    (current[prev, right] ? 1 : 0) +
+                    (current[row, left] ? 1 : 0) +
+                    (current[row, right] ? 1 : 0) +
+                    (current[nextRow, left] ? 1 : 0) +
+                    (current[nextRow, col] ? 1 : 0) +
+                    (current[nextRow, right] ? 1 : 0);
+
                 bool alive = current[row, col];
                 next[row, col] = neighbors == 3 || (alive && neighbors == 2);
             }
+
+            if (lastCol > 0)
+            {
+                int neighbors = CountNeighborsEdge(current, row, lastCol);
+                bool alive = current[row, lastCol];
+                next[row, lastCol] = neighbors == 3 || (alive && neighbors == 2);
+            }
         });
 
-        history.Insert(0, next);
-        TrimChannel(history, depth);
+        if (history.Count >= depth && ReferenceEquals(history[^1], next))
+        {
+            history.RemoveAt(history.Count - 1);
+            history.Insert(0, next);
+        }
+        else
+        {
+            history.Insert(0, next);
+            TrimChannel(history, depth);
+        }
     }
 
     private void TrimChannel(List<bool[,]> history, int depth)
@@ -454,6 +561,54 @@ namespace lifeviz;
         }
     }
 
+    private byte EvaluateSliceFast(int row, int col, List<bool[,]> history, int sliceStart, int frames)
+    {
+        if (frames <= 0)
+        {
+            return 0;
+        }
+
+        if (_binningMode == BinningMode.Binary)
+        {
+            long value = 0;
+            for (int i = 0; i < frames; i++)
+            {
+                int historyIndex = sliceStart + i;
+                if (historyIndex >= history.Count)
+                {
+                    break;
+                }
+
+                if (history[historyIndex][row, col])
+                {
+                    value |= 1L << (frames - 1 - i);
+                }
+            }
+
+            long max = (1L << frames) - 1;
+            return max <= 0 ? (byte)0 : (byte)Math.Round((value / (double)max) * 255);
+        }
+
+        int alive = 0;
+        int considered = 0;
+        for (int i = 0; i < frames; i++)
+        {
+            int historyIndex = sliceStart + i;
+            if (historyIndex >= history.Count)
+            {
+                break;
+            }
+
+            considered++;
+            if (history[historyIndex][row, col])
+            {
+                alive++;
+            }
+        }
+
+        return considered <= 0 ? (byte)0 : (byte)Math.Round((alive / (double)considered) * 255);
+    }
+
     private byte EvaluateChannel(int row, int col, List<bool[,]> history, int channelDepth)
     {
         if (channelDepth <= 0 || history.Count == 0)
@@ -502,6 +657,40 @@ namespace lifeviz;
             double normalized = alive / (double)frames;
             return (byte)Math.Round(normalized * 255);
         }
+    }
+
+    private byte EvaluateChannelFast(int row, int col, List<bool[,]> history, int frames)
+    {
+        if (frames <= 0)
+        {
+            return 0;
+        }
+
+        if (_binningMode == BinningMode.Binary)
+        {
+            long value = 0;
+            for (int i = 0; i < frames; i++)
+            {
+                if (history[i][row, col])
+                {
+                    value |= 1L << (frames - 1 - i);
+                }
+            }
+
+            long max = (1L << frames) - 1;
+            return max <= 0 ? (byte)0 : (byte)Math.Round((value / (double)max) * 255);
+        }
+
+        int alive = 0;
+        for (int i = 0; i < frames; i++)
+        {
+            if (history[i][row, col])
+            {
+                alive++;
+            }
+        }
+
+        return (byte)Math.Round((alive / (double)frames) * 255);
     }
 
     private bool ValidateFrame(bool[,] frame) => frame.GetLength(0) == Rows && frame.GetLength(1) == Columns;

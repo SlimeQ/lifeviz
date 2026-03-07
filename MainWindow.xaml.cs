@@ -18,6 +18,7 @@ using System.Windows.Media.Effects;
 using System.Windows.Media.Imaging;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using System.Threading;
 using System.Windows.Threading;
 using System.Windows.Shell;
 using Windows.Devices.Enumeration;
@@ -54,11 +55,20 @@ public partial class MainWindow : Window
     private const int DefaultAudioReactiveLevelSeedMaxBursts = 24;
     private const double DefaultAudioInputGain = 1.0;
     private const double DefaultAudioOutputGain = 1.0;
+    private const double MinAudioInputGain = 0.0;
+    private const double MaxAudioInputGain = 2.0;
+    private const int AudioDebugHistorySeconds = 30;
+    private const int AudioDebugHistorySampleRate = 120;
+    private const int AudioDebugHistorySize = AudioDebugHistorySeconds * AudioDebugHistorySampleRate;
+    private const double DebugOverlayRefreshRateHz = 12.0;
+    private const double FrameTimingOverlayMaxMs = 50.0;
     private const int DefaultAudioReactiveSeedsPerBeat = 2;
     private const double DefaultAudioReactiveSeedCooldownMs = 180.0;
     private const int MaxAudioReactiveSeedBurstsPerStep = 64;
     private const int MaxSimulationStepsPerRender = 8;
     private const double MaxRgbHueShiftSpeedDegreesPerSecond = 180.0;
+    private const double MinReactiveHueFrequencyHz = 27.5;
+    private const double MaxReactiveHueFrequencyHz = 4186.01;
     private const double MaxColorDistance = 441.6729559300637;
     private const double UiInteractionThrottleFps = 20.0;
     private const int WmEnterMenuLoop = 0x0211;
@@ -136,13 +146,14 @@ public partial class MainWindow : Window
     private double _lifeOpacity = 1.0;
     private double _rgbHueShiftDegrees;
     private double _rgbHueShiftSpeedDegreesPerSecond;
-    private bool _suppressRgbHueShiftControlEvents;
     private bool _suppressThresholdControlEvents;
     private bool _invertComposite;
     private bool _showFps;
     private readonly Stopwatch _simulationFpsStopwatch = new();
     private int _simulationFrames;
-    private double _displayFps;
+    private int _renderFrames;
+    private double _renderDisplayFps;
+    private double _simulationDisplayFps;
     private GameOfLifeEngine.LifeMode _lifeMode = GameOfLifeEngine.LifeMode.NaiveGrayscale;
     private GameOfLifeEngine.BinningMode _binningMode = GameOfLifeEngine.BinningMode.Fill;
     private GameOfLifeEngine.InjectionMode _injectionMode = GameOfLifeEngine.InjectionMode.Threshold;
@@ -164,7 +175,12 @@ public partial class MainWindow : Window
     private Rect _previousBounds;
     private readonly Stopwatch _stepStopwatch = new();
     private readonly Stopwatch _lifetimeStopwatch = new();
-    private readonly DispatcherTimer _frameTimer;
+    private Timer? _framePumpTimer;
+    private int _frameCallbackQueued;
+    private long _nextFramePumpTimestamp;
+    private readonly FrameProfiler _frameProfiler = new();
+    private readonly UiThreadLatencyProbe _uiThreadLatencyProbe;
+    private readonly Dictionary<string, RollingMetricWindow> _liveMetrics = new(StringComparer.Ordinal);
     private double _timeSinceLastStep;
     private double _lastUiInteractionRenderTime;
     private bool _fpsOscillationEnabled;
@@ -178,8 +194,20 @@ public partial class MainWindow : Window
     private double _oscillationMaxFps = 60;
     private bool _updateInProgress;
     private double _smoothedEnergy;
+    private double _fastAudioLevel;
+    private double _smoothedLevelEnergy;
     private double _smoothedBass;
     private double _smoothedFreq;
+    private readonly Queue<double> _audioLevelHistory = new();
+    private readonly Queue<double> _audioBassHistory = new();
+    private readonly Queue<double> _audioFreqHistory = new();
+    private readonly Queue<double> _audioBassFreqHistory = new();
+    private readonly Queue<double> _audioMidFreqHistory = new();
+    private readonly Queue<double> _audioHighFreqHistory = new();
+    private readonly Queue<double> _frameGapHistory = new();
+    private double _audioLevelHistoryAccumulator;
+    private double _frameGapHistoryAccumulator;
+    private double _lastDebugOverlayUpdateTime = double.NegativeInfinity;
     private readonly Random _audioReactiveRandom = new();
     private bool _audioReactiveEnabled;
     private bool _audioReactiveLevelToFpsEnabled = true;
@@ -203,25 +231,26 @@ public partial class MainWindow : Window
     private long _lastAudioReactiveBeatCount;
     private DateTime _lastAudioReactiveSeedUtc = DateTime.MinValue;
     private double _effectiveLifeOpacity = 1.0;
+    private long _lastProfileFrameTimestamp;
+    private bool _highResolutionTimerEnabled;
 
     public MainWindow()
     {
         Logger.Initialize();
-        _frameTimer = new DispatcherTimer(DispatcherPriority.Background)
-        {
-            Interval = TimeSpan.FromMilliseconds(1)
-        };
-        _frameTimer.Tick += FrameTimer_Tick;
+        EnableHighResolutionTimer();
+
+        _uiThreadLatencyProbe = new UiThreadLatencyProbe(Dispatcher, _frameProfiler);
         InitializeComponent();
         _renderBackend = CreateRenderBackend(this, RenderSurfaceHost, GameImage);
-        if (!App.IsSmokeTestMode)
+        bool allowFullSmokeStartup = App.IsSmokeTestMode && App.LoadUserConfigInSmokeTest;
+        if (!App.IsSmokeTestMode || allowFullSmokeStartup)
         {
             ApplyAudioInputGainForSelection();
         }
 
         Loaded += (_, _) =>
         {
-            if (!App.IsSmokeTestMode)
+            if (!App.IsSmokeTestMode || allowFullSmokeStartup)
             {
                 LoadConfig();
                 InitializeVisualizer();
@@ -254,6 +283,7 @@ public partial class MainWindow : Window
 
             _isShuttingDown = true;
             DetachRenderLoop();
+            _uiThreadLatencyProbe.Stop();
 
             if (_layerEditorWindow != null)
             {
@@ -282,12 +312,78 @@ public partial class MainWindow : Window
                 _shutdownException = ex;
                 Logger.Error("Main window shutdown failed.", ex);
             }
+            finally
+            {
+                DisableHighResolutionTimer();
+            }
 
             Logger.Shutdown();
         };
     }
 
     internal string? GetShutdownErrorMessage() => _shutdownException?.ToString();
+
+    private long BeginProfileStamp() => Stopwatch.GetTimestamp();
+
+    private void EndProfileStamp(string metricName, long startTimestamp)
+    {
+        if (startTimestamp == 0)
+        {
+            return;
+        }
+
+        double elapsedMs = FrameProfiler.ElapsedMilliseconds(startTimestamp);
+        if (_frameProfiler.IsActive)
+        {
+            _frameProfiler.RecordSample(metricName, elapsedMs);
+        }
+
+        RecordLiveMetric(metricName, elapsedMs);
+    }
+
+    private void RecordLiveMetric(string metricName, double value)
+    {
+        if (string.IsNullOrWhiteSpace(metricName) || double.IsNaN(value) || double.IsInfinity(value))
+        {
+            return;
+        }
+
+        if (!_liveMetrics.TryGetValue(metricName, out var window))
+        {
+            window = new RollingMetricWindow(180);
+            _liveMetrics.Add(metricName, window);
+        }
+
+        window.Add(value);
+    }
+
+    private double GetLiveMetricAverage(string metricName)
+    {
+        return _liveMetrics.TryGetValue(metricName, out var window)
+            ? window.Average
+            : 0.0;
+    }
+
+    internal void StartProfilingSession(string sessionName)
+    {
+        _frameProfiler.Start(sessionName);
+        _lastProfileFrameTimestamp = 0;
+        _uiThreadLatencyProbe.Start(TimeSpan.FromMilliseconds(50));
+    }
+
+    internal (FrameProfileReport report, string path) StopProfilingSessionAndExport()
+    {
+        _uiThreadLatencyProbe.Stop();
+        var report = _frameProfiler.Stop();
+        string outputDirectory = App.IsSmokeTestMode
+            ? Path.Combine(AppContext.BaseDirectory, "profiles")
+            : Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                "lifeviz",
+                "profiles");
+        string path = _frameProfiler.Export(report, outputDirectory);
+        return (report, path);
+    }
 
     internal (int configuredRows, int engineRows, int engineColumns, int surfaceWidth, int surfaceHeight, int layerCount, bool allLayerRowsMatch, bool allLayerColumnsMatch) RunDimensionChangeSmoke(int rows, int depth)
     {
@@ -308,6 +404,32 @@ public partial class MainWindow : Window
         bool allLayerRowsMatch = _simulationLayers.All(layer => layer.Engine.Rows == engine.Rows);
         bool allLayerColumnsMatch = _simulationLayers.All(layer => layer.Engine.Columns == engine.Columns);
         return (_configuredRows, engine.Rows, engine.Columns, _renderBackend.PixelWidth, _renderBackend.PixelHeight, _simulationLayers.Count, allLayerRowsMatch, allLayerColumnsMatch);
+    }
+
+    internal (int configuredRows, int engineRows, int engineColumns, int surfaceWidth, int surfaceHeight, int layerCount, bool allLayerRowsMatch, bool allLayerColumnsMatch) RunSceneEditorDimensionSmoke(int rows, bool liveMode)
+    {
+        OpenLayerEditor();
+        var editor = _layerEditorWindow ?? throw new InvalidOperationException("Scene Editor was not available.");
+        editor.SetLiveModeForSmoke(liveMode);
+        editor.ApplySimulationHeightForSmoke(rows, applyImmediately: !liveMode);
+
+        var engine = GetReferenceSimulationEngine();
+        bool allLayerRowsMatch = _simulationLayers.All(layer => layer.Engine.Rows == engine.Rows);
+        bool allLayerColumnsMatch = _simulationLayers.All(layer => layer.Engine.Columns == engine.Columns);
+        return (_configuredRows, engine.Rows, engine.Columns, _renderBackend.PixelWidth, _renderBackend.PixelHeight, _simulationLayers.Count, allLayerRowsMatch, allLayerColumnsMatch);
+    }
+
+    internal void SetReferenceSimulationLayerLifeModeForSmoke(GameOfLifeEngine.LifeMode mode)
+    {
+        EnsureSimulationLayersInitialized();
+        if (_simulationLayers.Count == 0)
+        {
+            return;
+        }
+
+        _simulationLayers[0].LifeMode = mode;
+        ConfigureSimulationLayerEngines(_configuredRows, _configuredDepth, _currentAspectRatio, randomize: false);
+        RenderFrame();
     }
 
     private void InitializeVisualizer()
@@ -332,7 +454,10 @@ public partial class MainWindow : Window
             return;
         }
 
-        _frameTimer.Start();
+        _framePumpTimer?.Dispose();
+        _frameCallbackQueued = 0;
+        _nextFramePumpTimestamp = 0;
+        _framePumpTimer = new Timer(FramePumpTimerTick, null, Timeout.InfiniteTimeSpan, Timeout.InfiniteTimeSpan);
         _renderLoopAttached = true;
         _stepStopwatch.Restart();
         if (!_lifetimeStopwatch.IsRunning)
@@ -344,13 +469,17 @@ public partial class MainWindow : Window
             _simulationFpsStopwatch.Start();
         }
         _lastRenderTime = _lifetimeStopwatch.Elapsed.TotalSeconds;
+        ScheduleNextFramePump(immediate: true);
     }
 
     private void DetachRenderLoop()
     {
         if (_renderLoopAttached)
         {
-            _frameTimer.Stop();
+            _framePumpTimer?.Dispose();
+            _framePumpTimer = null;
+            Interlocked.Exchange(ref _frameCallbackQueued, 0);
+            _nextFramePumpTimestamp = 0;
             _renderLoopAttached = false;
         }
 
@@ -367,6 +496,7 @@ public partial class MainWindow : Window
         }
 
         _uiInteractionSuspendCount++;
+        ResetFramePumpCadence(scheduleImmediate: false);
     }
 
     private void ResumeRenderLoopAfterUiInteraction()
@@ -382,6 +512,8 @@ public partial class MainWindow : Window
         {
             return;
         }
+
+        ResetFramePumpCadence(scheduleImmediate: true);
     }
 
     private IntPtr MainWindow_WndProc(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam, ref bool handled)
@@ -401,6 +533,31 @@ public partial class MainWindow : Window
         return IntPtr.Zero;
     }
 
+    private void EnableHighResolutionTimer()
+    {
+        if (_highResolutionTimerEnabled)
+        {
+            return;
+        }
+
+        uint result = timeBeginPeriod(1);
+        if (result == 0)
+        {
+            _highResolutionTimerEnabled = true;
+        }
+    }
+
+    private void DisableHighResolutionTimer()
+    {
+        if (!_highResolutionTimerEnabled)
+        {
+            return;
+        }
+
+        timeEndPeriod(1);
+        _highResolutionTimerEnabled = false;
+    }
+
     private double _oscillationPhase;
     // We need to track previous time to calculate delta time for phase.
     private double _lastRenderTime;
@@ -411,6 +568,86 @@ public partial class MainWindow : Window
                (_layerEditorWindow?.IsActive ?? false);
     }
 
+    private void FramePumpTimerTick(object? state)
+    {
+        if (!_renderLoopAttached || _isShuttingDown)
+        {
+            return;
+        }
+
+        if (Interlocked.CompareExchange(ref _frameCallbackQueued, 1, 0) != 0)
+        {
+            return;
+        }
+
+        DispatcherPriority callbackPriority = IsUiInteractionThrottled()
+            ? DispatcherPriority.Background
+            : DispatcherPriority.Render;
+
+        Dispatcher.BeginInvoke(callbackPriority, new Action(() =>
+        {
+            Interlocked.Exchange(ref _frameCallbackQueued, 0);
+            if (!_renderLoopAttached || _isShuttingDown)
+            {
+                return;
+            }
+
+            FrameTimer_Tick(null, EventArgs.Empty);
+            ScheduleNextFramePump(immediate: false);
+        }));
+    }
+
+    private void ResetFramePumpCadence(bool scheduleImmediate)
+    {
+        _nextFramePumpTimestamp = 0;
+        _lastUiInteractionRenderTime = 0;
+        _lastProfileFrameTimestamp = 0;
+        _lastRenderTime = _lifetimeStopwatch.Elapsed.TotalSeconds;
+
+        if (!_renderLoopAttached || _isShuttingDown || _framePumpTimer == null)
+        {
+            return;
+        }
+
+        _framePumpTimer.Change(Timeout.InfiniteTimeSpan, Timeout.InfiniteTimeSpan);
+        if (scheduleImmediate)
+        {
+            ScheduleNextFramePump(immediate: true);
+        }
+    }
+
+    private void ScheduleNextFramePump(bool immediate)
+    {
+        if (!_renderLoopAttached || _isShuttingDown || _framePumpTimer == null)
+        {
+            return;
+        }
+
+        double throttledTargetFps = IsUiInteractionThrottled()
+            ? Math.Min(Math.Max(_currentFps, 1.0), UiInteractionThrottleFps)
+            : Math.Max(_currentFps, 1.0);
+        double intervalSeconds = 1.0 / throttledTargetFps;
+        long intervalTicks = Math.Max(1L, (long)Math.Round(intervalSeconds * Stopwatch.Frequency));
+        long now = Stopwatch.GetTimestamp();
+
+        if (immediate || _nextFramePumpTimestamp == 0)
+        {
+            _nextFramePumpTimestamp = now;
+        }
+        else
+        {
+            _nextFramePumpTimestamp += intervalTicks;
+            if (_nextFramePumpTimestamp < now - intervalTicks)
+            {
+                _nextFramePumpTimestamp = now;
+            }
+        }
+
+        long delayTicks = Math.Max(0, _nextFramePumpTimestamp - now);
+        double delayMs = delayTicks * 1000.0 / Stopwatch.Frequency;
+        _framePumpTimer.Change(TimeSpan.FromMilliseconds(delayMs), Timeout.InfiniteTimeSpan);
+    }
+
     private void FrameTimer_Tick(object? sender, EventArgs e)
     {
         if (_isShuttingDown)
@@ -418,8 +655,28 @@ public partial class MainWindow : Window
             return;
         }
 
+        long frameStartStamp = BeginProfileStamp();
+        double frameGapMs = 0;
+        if (frameStartStamp != 0)
+        {
+            if (_lastProfileFrameTimestamp != 0)
+            {
+                frameGapMs = FrameProfiler.ElapsedMilliseconds(_lastProfileFrameTimestamp, frameStartStamp);
+                _frameProfiler.RecordSample("frame_tick_gap_ms", frameGapMs);
+                _frameProfiler.RecordSample("frame_gap_over_25ms", frameGapMs > 25.0 ? 1.0 : 0.0);
+                _frameProfiler.RecordSample("frame_gap_over_33ms", frameGapMs > 33.333 ? 1.0 : 0.0);
+                _frameProfiler.RecordSample("frame_gap_over_50ms", frameGapMs > 50.0 ? 1.0 : 0.0);
+            }
+
+            _lastProfileFrameTimestamp = frameStartStamp;
+        }
+
         double now = _lifetimeStopwatch.Elapsed.TotalSeconds;
         bool interactionThrottled = IsUiInteractionThrottled();
+        if (frameStartStamp != 0)
+        {
+            _frameProfiler.RecordSample("ui_interaction_throttled", interactionThrottled ? 1.0 : 0.0);
+        }
         if (interactionThrottled)
         {
             double minInterval = 1.0 / UiInteractionThrottleFps;
@@ -433,6 +690,7 @@ public partial class MainWindow : Window
 
         double dt = now - _lastRenderTime;
         _lastRenderTime = now;
+        RecordFrameGapHistory(frameGapMs > 0 ? frameGapMs : dt * 1000.0, dt);
 
         // --- FPS Modulation ---
         if (_fpsOscillationEnabled)
@@ -489,8 +747,23 @@ public partial class MainWindow : Window
         _stepStopwatch.Restart();
         _timeSinceLastStep += elapsed;
 
+        UpdateAudioAnalysisRequirements();
+
         // Update smoothed audio values
+        long audioUpdateStamp = BeginProfileStamp();
         double audioLerp = Math.Min(dt * 15.0, 1.0);
+        double levelTarget = Math.Clamp(_audioBeatDetector.NormalizedEnergy, 0, 1);
+        double levelAttackLerp = Math.Min(dt * 30.0, 1.0);
+        double levelReleaseLerp = Math.Min(dt * 20.0, 1.0);
+        double levelLerp = levelTarget > _smoothedLevelEnergy ? levelAttackLerp : levelReleaseLerp;
+        _smoothedLevelEnergy = _smoothedLevelEnergy + (levelTarget - _smoothedLevelEnergy) * levelLerp;
+        if (_smoothedLevelEnergy < 0.01)
+        {
+            _smoothedLevelEnergy = 0;
+        }
+
+        _fastAudioLevel = Math.Clamp(_audioBeatDetector.EnvelopeEnergy, 0, 1);
+
         double energyTarget = Math.Clamp(_audioBeatDetector.TransientEnergy, 0, 1);
         double energyAttackLerp = Math.Min(dt * 45.0, 1.0);
         double energyReleaseLerp = Math.Min(dt * 70.0, 1.0);
@@ -500,12 +773,25 @@ public partial class MainWindow : Window
         {
             _smoothedEnergy = 0;
         }
-        _smoothedBass = _smoothedBass + (Math.Clamp(_audioBeatDetector.BassEnergy, 0, 100) - _smoothedBass) * audioLerp;
-        _smoothedFreq = _smoothedFreq + (Math.Clamp(_audioBeatDetector.MainFrequency, 0, 5000) - _smoothedFreq) * audioLerp;
+        if (NeedsAudioSpectrumAnalysis())
+        {
+            _smoothedBass = _smoothedBass + (Math.Clamp(_audioBeatDetector.BassEnergy, 0, 100) - _smoothedBass) * audioLerp;
+            _smoothedFreq = _smoothedFreq + (Math.Clamp(_audioBeatDetector.MainFrequency, 0, 5000) - _smoothedFreq) * audioLerp;
+        }
+        else
+        {
+            _smoothedBass = 0;
+            _smoothedFreq = 0;
+        }
+        if (_showFps)
+        {
+            RecordAudioLevelHistory(dt);
+        }
         ApplyAudioReactiveFps();
         ApplyAudioReactiveLifeOpacity();
         _audioReactiveLevelSeedBurstsLastStep = 0;
         _audioReactiveBeatSeedBurstsLastStep = 0;
+        EndProfileStamp("audio_update_ms", audioUpdateStamp);
 
         double effectiveStepFps = Math.Max(_currentFps, 0);
         if (interactionThrottled)
@@ -527,12 +813,19 @@ public partial class MainWindow : Window
             {
                 if (!_isPaused)
                 {
+                    long simulationStageStamp = BeginProfileStamp();
                     int stepsToRun = (int)Math.Floor(_timeSinceLastStep / desiredInterval);
                     stepsToRun = Math.Clamp(stepsToRun, 1, MaxSimulationStepsPerRender);
+                    long injectStamp = BeginProfileStamp();
                     InjectCaptureFrames();
+                    EndProfileStamp("inject_capture_ms", injectStamp);
+
+                    long seedingStamp = BeginProfileStamp();
                     _audioReactiveBeatSeedBurstsLastStep = ApplyAudioReactiveBeatSeeding();
                     _audioReactiveLevelSeedBurstsLastStep = ApplyAudioReactiveLevelSeeding(stepsToRun);
+                    EndProfileStamp("audio_reactive_seeding_ms", seedingStamp);
 
+                    long stepStamp = BeginProfileStamp();
                     for (int i = 0; i < stepsToRun; i++)
                     {
                         bool stepped = false;
@@ -551,6 +844,12 @@ public partial class MainWindow : Window
                             _simulationFrames++;
                         }
                     }
+                    EndProfileStamp("simulation_step_ms", stepStamp);
+                    if (simulationStageStamp != 0)
+                    {
+                        _frameProfiler.RecordSample("simulation_steps_per_frame", stepsToRun);
+                    }
+                    EndProfileStamp("simulation_total_ms", simulationStageStamp);
 
                     _timeSinceLastStep -= stepsToRun * desiredInterval;
                     if (stepsToRun >= MaxSimulationStepsPerRender &&
@@ -568,7 +867,10 @@ public partial class MainWindow : Window
         }
 
         // --- Rendering Step ---
+        long renderStamp = BeginProfileStamp();
         RenderFrame();
+        _renderFrames++;
+        EndProfileStamp("render_call_ms", renderStamp);
 
         // --- FPS Counter Update ---
         if (!_simulationFpsStopwatch.IsRunning)
@@ -580,12 +882,17 @@ public partial class MainWindow : Window
             double seconds = _simulationFpsStopwatch.Elapsed.TotalSeconds;
             if (seconds > 0)
             {
-                _displayFps = _simulationFrames / seconds;
+                _simulationDisplayFps = _simulationFrames / seconds;
+                _renderDisplayFps = _renderFrames / seconds;
             }
             _simulationFrames = 0;
+            _renderFrames = 0;
             _simulationFpsStopwatch.Restart();
         }
+        long overlayStamp = BeginProfileStamp();
         UpdateFpsOverlay();
+        EndProfileStamp("fps_overlay_ms", overlayStamp);
+        EndProfileStamp("frame_total_ms", frameStartStamp);
     }
 
     private void RebuildSurface() => UpdateDisplaySurface(force: true);
@@ -631,10 +938,24 @@ public partial class MainWindow : Window
             compositePassthroughInPixelBuffer = true;
         }
 
-        EnsureEngineColorBuffers();
-        var activeLayers = _simulationLayers
-            .Where(layer => layer.Enabled && layer.ColorBuffer != null)
+        long colorBuffersStamp = BeginProfileStamp();
+        var enabledLayers = _simulationLayers
+            .Where(layer => layer.Enabled)
             .ToArray();
+        var activeLayerEntries = new List<(SimulationLayerState Layer, SimulationPresentationLayerData Data)>(enabledLayers.Length);
+        foreach (var layer in enabledLayers)
+        {
+            if (TryBuildSimulationPresentationLayer(layer, Math.Clamp(_effectiveLifeOpacity * layer.LifeOpacity, 0, 1), out var presentationLayer))
+            {
+                activeLayerEntries.Add((layer, presentationLayer));
+            }
+        }
+        _frameProfiler.RecordSample("gpu_shared_sim_layer_count", activeLayerEntries.Count(entry => entry.Data.SharedTextureHandle != IntPtr.Zero));
+        _frameProfiler.RecordSample("cpu_uploaded_sim_layer_count", activeLayerEntries.Count(entry => entry.Data.SharedTextureHandle == IntPtr.Zero));
+        EndProfileStamp("fill_sim_color_buffers_ms", colorBuffersStamp);
+        var activeLayers = activeLayerEntries.Select(entry => entry.Layer).ToArray();
+        var presentationLayers = activeLayerEntries.Select(entry => entry.Data).ToArray();
+        long blendStamp = BeginProfileStamp();
         bool hasEnabledSubtractiveSimulationLayer = activeLayers.Any(layer => layer.BlendMode == BlendMode.Subtractive);
         bool hasEnabledNonSubtractiveSimulationLayer = activeLayers.Any(layer => layer.BlendMode != BlendMode.Subtractive);
         bool hasEnabledAdditiveSimulationLayer = activeLayers.Any(layer => layer.BlendMode == BlendMode.Additive);
@@ -670,6 +991,37 @@ public partial class MainWindow : Window
         }
 
         double globalLifeOpacity = Math.Clamp(_effectiveLifeOpacity, 0, 1);
+        if (!_isRecording &&
+            presentationLayers.Length > 0 &&
+            _renderBackend.SupportsGpuSimulationComposition)
+        {
+            long gpuCompositeStamp = BeginProfileStamp();
+            bool presented = _renderBackend.PresentSimulationComposition(
+                presentationLayers,
+                compositePassthroughInPixelBuffer ? passthroughBuffer : null,
+                null,
+                simulationBaseline,
+                useSignedAddSubPassthrough,
+                useMixedAddSubPassthroughModel,
+                _invertComposite);
+            EndProfileStamp("gpu_final_composite_submit_ms", gpuCompositeStamp);
+
+            if (presented)
+            {
+                _passthroughCompositedInPixelBuffer = compositePassthroughInPixelBuffer;
+                EndProfileStamp("cpu_blend_ms", blendStamp);
+
+                long gpuUnderlayStamp = BeginProfileStamp();
+                UpdateEffectInput();
+                EndProfileStamp("underlay_effect_ms", gpuUnderlayStamp);
+
+                long gpuRecordStamp = BeginProfileStamp();
+                TryRecordFrame(requiredLength);
+                EndProfileStamp("record_frame_ms", gpuRecordStamp);
+                return;
+            }
+        }
+
         Parallel.For(0, height, row =>
         {
             int sourceRow = _rowMap[row];
@@ -821,11 +1173,20 @@ public partial class MainWindow : Window
         {
             InvertBuffer(_pixelBuffer);
         }
+        EndProfileStamp("cpu_blend_ms", blendStamp);
 
+        long presentStamp = BeginProfileStamp();
         _renderBackend.PresentFrame(_pixelBuffer, stride);
+        EndProfileStamp("present_frame_ms", presentStamp);
+
+        long underlayStamp = BeginProfileStamp();
         UpdateUnderlayBitmap(requiredLength);
         UpdateEffectInput();
+        EndProfileStamp("underlay_effect_ms", underlayStamp);
+
+        long recordStamp = BeginProfileStamp();
         TryRecordFrame(requiredLength);
+        EndProfileStamp("record_frame_ms", recordStamp);
     }
 
     private void TryRecordFrame(int requiredLength)
@@ -1250,6 +1611,8 @@ public partial class MainWindow : Window
         }
     }
 
+    internal LayerEditorWindow? GetOpenLayerEditorForSmoke() => _layerEditorWindow;
+
     internal void OpenRootContextMenuAtScreenPoint(double screenX, double screenY)
     {
         if (RootContextMenu == null)
@@ -1526,6 +1889,7 @@ public partial class MainWindow : Window
         SnapWindowToAspect(preserveHeight: true);
         _lastCompositeFrame = null;
         RebuildSurface();
+        ResetFramePumpCadence(scheduleImmediate: false);
         RenderFrame();
         var resizedEngine = GetReferenceSimulationEngine();
         Logger.Info($"Applied simulation dimensions: {resizedEngine.Columns}x{resizedEngine.Rows} depth {_configuredDepth}.");
@@ -1894,6 +2258,20 @@ public partial class MainWindow : Window
         ResumeRenderLoopAfterUiInteraction();
     }
 
+    internal async Task OpenAndCloseRootContextMenuForSmokeAsync(TimeSpan openDuration)
+    {
+        if (RootContextMenu == null)
+        {
+            throw new InvalidOperationException("Root context menu is not available.");
+        }
+
+        RootContextMenu.IsOpen = true;
+        await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+        await Task.Delay(openDuration);
+        RootContextMenu.IsOpen = false;
+        await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+    }
+
     private async void SourcesMenu_OnSubmenuOpened(object sender, RoutedEventArgs e)
     {
         if (!ReferenceEquals(sender, e.Source))
@@ -2014,6 +2392,16 @@ public partial class MainWindow : Window
         }
         _lastAudioReactiveBeatCount = _audioBeatDetector.BeatCount;
         _lastAudioReactiveSeedUtc = DateTime.MinValue;
+        _smoothedLevelEnergy = 0;
+        _smoothedEnergy = 0;
+        _fastAudioLevel = 0;
+        _audioLevelHistory.Clear();
+        _audioBassHistory.Clear();
+        _audioFreqHistory.Clear();
+        _audioBassFreqHistory.Clear();
+        _audioMidFreqHistory.Clear();
+        _audioHighFreqHistory.Clear();
+        _audioLevelHistoryAccumulator = 0;
         _audioReactiveLevelSeedBurstsLastStep = 0;
         _audioReactiveBeatSeedBurstsLastStep = 0;
         UpdateAudioReactiveMenuState();
@@ -2034,6 +2422,16 @@ public partial class MainWindow : Window
         UpdateAudioInputGainUi();
         _lastAudioReactiveBeatCount = 0;
         _lastAudioReactiveSeedUtc = DateTime.MinValue;
+        _smoothedLevelEnergy = 0;
+        _smoothedEnergy = 0;
+        _fastAudioLevel = 0;
+        _audioLevelHistory.Clear();
+        _audioBassHistory.Clear();
+        _audioFreqHistory.Clear();
+        _audioBassFreqHistory.Clear();
+        _audioMidFreqHistory.Clear();
+        _audioHighFreqHistory.Clear();
+        _audioLevelHistoryAccumulator = 0;
         _audioReactiveFpsMultiplier = 1.0;
         _audioReactiveLevelSeedBurstsLastStep = 0;
         _audioReactiveBeatSeedBurstsLastStep = 0;
@@ -4528,6 +4926,7 @@ public partial class MainWindow : Window
     private void ClearSources()
     {
         bool hadSources = _sources.Count > 0;
+        bool preservePassthrough = _passthroughEnabled;
 
         foreach (var source in _sources.ToList())
         {
@@ -4538,12 +4937,12 @@ public partial class MainWindow : Window
         
         _sources.Clear();
         _lastCompositeFrame = null;
-        _passthroughEnabled = false;
+        _passthroughEnabled = preservePassthrough;
         
         Logger.Info("Cleared all sources; reset webcam capture.");
         if (PassthroughMenuItem != null)
         {
-            PassthroughMenuItem.IsChecked = false;
+            PassthroughMenuItem.IsChecked = _passthroughEnabled;
         }
         UpdateDisplaySurface(force: true);
         if (_aspectRatioLocked)
@@ -4573,7 +4972,9 @@ public partial class MainWindow : Window
         }
 
         double animationTime = _lifetimeStopwatch.Elapsed.TotalSeconds;
+        long captureSourcesStamp = BeginProfileStamp();
         bool removedAny = CaptureSourceList(_sources, animationTime);
+        EndProfileStamp("capture_sources_ms", captureSourcesStamp);
         if (_sources.Count == 0)
         {
             ClearSources();
@@ -4587,8 +4988,10 @@ public partial class MainWindow : Window
         }
 
         bool requireCompositeCpuReadback = _passthroughEnabled || _isRecording;
+        long compositeBuildStamp = BeginProfileStamp();
         var composite = BuildCompositeFrame(_sources, ref _compositeDownscaledBuffer, useEngineDimensions: true, animationTime,
             includeCpuReadback: requireCompositeCpuReadback);
+        EndProfileStamp("build_composite_ms", compositeBuildStamp);
         if (composite == null)
         {
             _lastCompositeFrame = null;
@@ -4596,9 +4999,54 @@ public partial class MainWindow : Window
         }
 
         _lastCompositeFrame = composite;
+        long surfaceStamp = BeginProfileStamp();
         UpdateDisplaySurface();
+        EndProfileStamp("update_display_surface_ms", surfaceStamp);
+
+        bool compositeHasCpuReadback = composite.DownscaledWidth > 0 &&
+                                       composite.DownscaledHeight > 0 &&
+                                       composite.Downscaled.Length >= composite.DownscaledWidth * composite.DownscaledHeight * 4;
+        bool attemptedCpuCompositeFallback = false;
+
+        bool EnsureCompositeCpuReadback()
+        {
+            if (compositeHasCpuReadback)
+            {
+                return true;
+            }
+
+            if (attemptedCpuCompositeFallback)
+            {
+                return false;
+            }
+
+            attemptedCpuCompositeFallback = true;
+            long fallbackCompositeStamp = BeginProfileStamp();
+            var cpuComposite = BuildCompositeFrame(
+                _sources,
+                ref _compositeDownscaledBuffer,
+                useEngineDimensions: true,
+                animationTime,
+                includeCpuReadback: true);
+            EndProfileStamp("build_composite_fallback_ms", fallbackCompositeStamp);
+            if (cpuComposite == null)
+            {
+                return false;
+            }
+
+            composite = cpuComposite;
+            _lastCompositeFrame = cpuComposite;
+            compositeHasCpuReadback = composite.DownscaledWidth > 0 &&
+                                      composite.DownscaledHeight > 0 &&
+                                      composite.Downscaled.Length >= composite.DownscaledWidth * composite.DownscaledHeight * 4;
+            return compositeHasCpuReadback;
+        }
 
         bool injectedAnyLayer = false;
+        int gpuHandoffLayerCount = 0;
+        int cpuGrayInjectLayerCount = 0;
+        int cpuRgbInjectLayerCount = 0;
+        long injectLayersStamp = BeginProfileStamp();
         foreach (var layer in _simulationLayers)
         {
             if (!layer.Enabled)
@@ -4607,26 +5055,36 @@ public partial class MainWindow : Window
             }
 
             bool invertInput = layer.InputFunction == SimulationInputFunction.Inverse;
+            double currentHueShiftDegrees = CurrentRgbHueShiftDegrees(layer);
+            if (layer.Engine is GpuSimulationBackend gpuEngine &&
+                composite.GpuSurface != null &&
+                gpuEngine.TryInjectCompositeSurface(
+                    composite.GpuSurface,
+                    layer.ThresholdMin,
+                    layer.ThresholdMax,
+                    layer.InvertThreshold,
+                    layer.InjectionMode,
+                    layer.InjectionNoise,
+                    layer.Engine.Depth,
+                    _pulseStep,
+                    invertInput,
+                    currentHueShiftDegrees))
+            {
+                gpuHandoffLayerCount++;
+                injectedAnyLayer = true;
+                continue;
+            }
+
             if (layer.LifeMode == GameOfLifeEngine.LifeMode.NaiveGrayscale)
             {
-                if (layer.Engine is GpuSimulationBackend gpuEngine &&
-                    composite.GpuSurface != null &&
-                    gpuEngine.TryInjectCompositeSurface(
-                        composite.GpuSurface,
-                        layer.ThresholdMin,
-                        layer.ThresholdMax,
-                        layer.InvertThreshold,
-                        layer.InjectionMode,
-                        layer.InjectionNoise,
-                        layer.Engine.Depth,
-                        _pulseStep,
-                        invertInput))
+                if (!EnsureCompositeCpuReadback())
                 {
-                    injectedAnyLayer = true;
                     continue;
                 }
 
-                var grayMask = BuildLuminanceMask(
+                layer.GrayMask = EnsureLayerMask(layer.GrayMask, composite.DownscaledHeight, composite.DownscaledWidth);
+                var grayMask = layer.GrayMask;
+                FillLuminanceMask(
                     composite.Downscaled,
                     composite.DownscaledWidth,
                     composite.DownscaledHeight,
@@ -4637,16 +5095,30 @@ public partial class MainWindow : Window
                     layer.InjectionNoise,
                     layer.Engine.Depth,
                     _pulseStep,
+                    grayMask,
                     invertInput);
                 layer.Engine.InjectFrame(grayMask);
+                cpuGrayInjectLayerCount++;
                 injectedAnyLayer = true;
             }
             else
             {
-                var (rMask, gMask, bMask) = BuildChannelMasks(
+                if (!EnsureCompositeCpuReadback())
+                {
+                    continue;
+                }
+
+                layer.RedMask = EnsureLayerMask(layer.RedMask, composite.DownscaledHeight, composite.DownscaledWidth);
+                layer.GreenMask = EnsureLayerMask(layer.GreenMask, composite.DownscaledHeight, composite.DownscaledWidth);
+                layer.BlueMask = EnsureLayerMask(layer.BlueMask, composite.DownscaledHeight, composite.DownscaledWidth);
+                var rMask = layer.RedMask;
+                var gMask = layer.GreenMask;
+                var bMask = layer.BlueMask;
+                FillChannelMasks(
                     composite.Downscaled,
                     composite.DownscaledWidth,
                     composite.DownscaledHeight,
+                    currentHueShiftDegrees,
                     layer.ThresholdMin,
                     layer.ThresholdMax,
                     layer.InvertThreshold,
@@ -4656,10 +5128,21 @@ public partial class MainWindow : Window
                     layer.Engine.GDepth,
                     layer.Engine.BDepth,
                     _pulseStep,
+                    rMask,
+                    gMask,
+                    bMask,
                     invertInput);
                 layer.Engine.InjectRgbFrame(rMask, gMask, bMask);
+                cpuRgbInjectLayerCount++;
                 injectedAnyLayer = true;
             }
+        }
+        EndProfileStamp("inject_layers_ms", injectLayersStamp);
+        if (_frameProfiler.IsActive)
+        {
+            _frameProfiler.RecordSample("gpu_handoff_layer_count", gpuHandoffLayerCount);
+            _frameProfiler.RecordSample("cpu_gray_inject_layer_count", cpuGrayInjectLayerCount);
+            _frameProfiler.RecordSample("cpu_rgb_inject_layer_count", cpuRgbInjectLayerCount);
         }
 
         if (injectedAnyLayer)
@@ -4688,6 +5171,153 @@ public partial class MainWindow : Window
         _currentFps = Math.Clamp(_currentFps * mappedMultiplier, 0, 144);
     }
 
+    private double GetDisplayedAudioLevel()
+    {
+        return Math.Clamp(_fastAudioLevel, 0, 1);
+    }
+
+    private void UpdateAudioAnalysisRequirements()
+    {
+        bool needsDebugHistory = _showFps;
+        bool needsSpectrum = NeedsAudioSpectrumAnalysis();
+        _audioBeatDetector.SetAnalysisRequirements(needsSpectrum, needsDebugHistory);
+
+        if (!needsDebugHistory)
+        {
+            ClearAudioDebugHistory();
+        }
+    }
+
+    private bool NeedsAudioSpectrumAnalysis()
+    {
+        if (_showFps)
+        {
+            return true;
+        }
+
+        if (_simulationLayers.Any(layer => layer.Enabled && layer.AudioFrequencyHueShiftDegrees > 0.001))
+        {
+            return true;
+        }
+
+        return SourceTreeHasAudioGranularAnimation(_sources);
+    }
+
+    private static bool SourceTreeHasAudioGranularAnimation(IEnumerable<CaptureSource> sources)
+    {
+        foreach (var source in sources)
+        {
+            if (source.Animations.Any(animation => animation.Type == AnimationType.AudioGranular))
+            {
+                return true;
+            }
+
+            if (source.Children.Count > 0 && SourceTreeHasAudioGranularAnimation(source.Children))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private void ClearAudioDebugHistory()
+    {
+        _audioLevelHistoryAccumulator = 0;
+        _audioLevelHistory.Clear();
+        _audioBassHistory.Clear();
+        _audioFreqHistory.Clear();
+        _audioBassFreqHistory.Clear();
+        _audioMidFreqHistory.Clear();
+        _audioHighFreqHistory.Clear();
+        _frameGapHistoryAccumulator = 0;
+        _frameGapHistory.Clear();
+    }
+
+    private void RecordFrameGapHistory(double frameGapMs, double dt)
+    {
+        if (!_showFps)
+        {
+            return;
+        }
+
+        _frameGapHistoryAccumulator += Math.Max(0, dt) * AudioDebugHistorySampleRate;
+        while (_frameGapHistoryAccumulator >= 1.0)
+        {
+            _frameGapHistory.Enqueue(Math.Max(0, frameGapMs));
+            _frameGapHistoryAccumulator -= 1.0;
+        }
+
+        while (_frameGapHistory.Count > AudioDebugHistorySize)
+        {
+            _frameGapHistory.Dequeue();
+        }
+    }
+
+    private (double averageMs, double p95Ms, int over25Ms, int over33Ms, int over50Ms) GetRecentFrameGapStats()
+    {
+        if (_frameGapHistory.Count == 0)
+        {
+            return (0, 0, 0, 0, 0);
+        }
+
+        double[] values = _frameGapHistory.ToArray();
+        double average = values.Average();
+        int over25 = values.Count(value => value > 25.0);
+        int over33 = values.Count(value => value > 33.333);
+        int over50 = values.Count(value => value > 50.0);
+        Array.Sort(values);
+        int index = (int)Math.Round((values.Length - 1) * 0.95);
+        index = Math.Clamp(index, 0, values.Length - 1);
+        return (average, values[index], over25, over33, over50);
+    }
+
+    private void RecordAudioLevelHistory(double dt)
+    {
+        _audioLevelHistoryAccumulator += Math.Max(0, dt) * AudioDebugHistorySampleRate;
+        double displayedLevel = GetDisplayedAudioLevel();
+        double bassLevel = Math.Clamp(_smoothedBass / 10.0, 0, 1);
+        double freqLevel = Math.Clamp(_smoothedFreq, 0, 5000.0);
+        double bassFreqLevel = Math.Clamp(_audioBeatDetector.BassFrequency, 0, 5000.0);
+        double midFreqLevel = Math.Clamp(_audioBeatDetector.MidFrequency, 0, 5000.0);
+        double highFreqLevel = Math.Clamp(_audioBeatDetector.HighFrequency, 0, 5000.0);
+        while (_audioLevelHistoryAccumulator >= 1.0)
+        {
+            _audioLevelHistory.Enqueue(displayedLevel);
+            _audioBassHistory.Enqueue(bassLevel);
+            _audioFreqHistory.Enqueue(freqLevel);
+            _audioBassFreqHistory.Enqueue(bassFreqLevel);
+            _audioMidFreqHistory.Enqueue(midFreqLevel);
+            _audioHighFreqHistory.Enqueue(highFreqLevel);
+            _audioLevelHistoryAccumulator -= 1.0;
+        }
+
+        while (_audioLevelHistory.Count > AudioDebugHistorySize)
+        {
+            _audioLevelHistory.Dequeue();
+        }
+        while (_audioBassHistory.Count > AudioDebugHistorySize)
+        {
+            _audioBassHistory.Dequeue();
+        }
+        while (_audioFreqHistory.Count > AudioDebugHistorySize)
+        {
+            _audioFreqHistory.Dequeue();
+        }
+        while (_audioBassFreqHistory.Count > AudioDebugHistorySize)
+        {
+            _audioBassFreqHistory.Dequeue();
+        }
+        while (_audioMidFreqHistory.Count > AudioDebugHistorySize)
+        {
+            _audioMidFreqHistory.Dequeue();
+        }
+        while (_audioHighFreqHistory.Count > AudioDebugHistorySize)
+        {
+            _audioHighFreqHistory.Dequeue();
+        }
+    }
+
     private void ApplyAudioReactiveLifeOpacity()
     {
         if (!_audioReactiveEnabled || !_audioReactiveLevelToLifeOpacityEnabled || string.IsNullOrWhiteSpace(_selectedAudioDeviceId))
@@ -4697,10 +5327,9 @@ public partial class MainWindow : Window
         }
 
         double gainScale = _audioReactiveEnergyGain / DefaultAudioReactiveEnergyGain;
-        double normalizedLevel = Math.Clamp(_smoothedEnergy * gainScale, 0, 1);
-        double shapedLevel = Math.Pow(normalizedLevel, 0.8);
+        double drive = Math.Clamp(_fastAudioLevel * gainScale, 0, 1);
         double minScalar = Math.Clamp(_audioReactiveLifeOpacityMinScalar, 0, 1);
-        double scalar = minScalar + ((1.0 - minScalar) * shapedLevel);
+        double scalar = minScalar + ((1.0 - minScalar) * drive);
         _effectiveLifeOpacity = Math.Clamp(_lifeOpacity * scalar, 0, 1);
     }
 
@@ -4862,6 +5491,8 @@ public partial class MainWindow : Window
 
         foreach (var source in sources.ToList())
         {
+            bool includeNativeSource = ShouldPreferNativeSourceFrame(source);
+
             if (source.Type == CaptureSource.SourceType.Group)
             {
                 if (source.Children.Count > 0)
@@ -4870,7 +5501,9 @@ public partial class MainWindow : Window
                 }
 
                 var groupDownscaled = source.CompositeDownscaledBuffer;
+                long groupCompositeStamp = BeginProfileStamp();
                 var groupComposite = BuildCompositeFrame(source.Children, ref groupDownscaled, useEngineDimensions: false, animationTime);
+                EndProfileStamp("capture_group_composite_ms", groupCompositeStamp);
                 source.CompositeDownscaledBuffer = groupDownscaled;
                 if (groupComposite != null)
                 {
@@ -4909,7 +5542,9 @@ public partial class MainWindow : Window
                 if (source.Type == CaptureSource.SourceType.Window && source.Window != null)
                 {
                     var referenceEngine = GetReferenceSimulationEngine();
-                    var windowFrame = _windowCapture.CaptureFrame(source.Window, referenceEngine.Columns, referenceEngine.Rows, source.FitMode, includeSource: false);
+                    long windowCaptureStamp = BeginProfileStamp();
+                    var windowFrame = _windowCapture.CaptureFrame(source.Window, referenceEngine.Columns, referenceEngine.Rows, source.FitMode, includeSource: includeNativeSource);
+                    EndProfileStamp("capture_window_frame_ms", windowCaptureStamp);
                     if (windowFrame != null)
                     {
                         frame = new SourceFrame(windowFrame.OverlayDownscaled, windowFrame.DownscaledWidth, windowFrame.DownscaledHeight,
@@ -4927,7 +5562,9 @@ public partial class MainWindow : Window
                 else if (source.Type == CaptureSource.SourceType.Webcam && !string.IsNullOrWhiteSpace(source.WebcamId))
                 {
                     var referenceEngine = GetReferenceSimulationEngine();
-                    var webcamFrame = _webcamCapture.CaptureFrame(source.WebcamId, referenceEngine.Columns, referenceEngine.Rows, source.FitMode, includeSource: false);
+                    long webcamCaptureStamp = BeginProfileStamp();
+                    var webcamFrame = _webcamCapture.CaptureFrame(source.WebcamId, referenceEngine.Columns, referenceEngine.Rows, source.FitMode, includeSource: includeNativeSource);
+                    EndProfileStamp("capture_webcam_frame_ms", webcamCaptureStamp);
                     if (webcamFrame != null)
                     {
                         frame = new SourceFrame(webcamFrame.OverlayDownscaled, webcamFrame.DownscaledWidth, webcamFrame.DownscaledHeight,
@@ -4944,7 +5581,9 @@ public partial class MainWindow : Window
                 else if (source.Type == CaptureSource.SourceType.VideoSequence && source.VideoSequence != null)
                 {
                     var referenceEngine = GetReferenceSimulationEngine();
-                    var sequenceFrame = source.VideoSequence.CaptureFrame(referenceEngine.Columns, referenceEngine.Rows, source.FitMode, includeSource: false);
+                    long sequenceCaptureStamp = BeginProfileStamp();
+                    var sequenceFrame = source.VideoSequence.CaptureFrame(referenceEngine.Columns, referenceEngine.Rows, source.FitMode, includeSource: includeNativeSource);
+                    EndProfileStamp("capture_sequence_frame_ms", sequenceCaptureStamp);
                     if (sequenceFrame.HasValue)
                     {
                         var value = sequenceFrame.Value;
@@ -4963,7 +5602,9 @@ public partial class MainWindow : Window
                 else if (source.Type == CaptureSource.SourceType.File && !string.IsNullOrWhiteSpace(source.FilePath))
                 {
                     var referenceEngine = GetReferenceSimulationEngine();
-                    var fileFrame = _fileCapture.CaptureFrame(source.FilePath, referenceEngine.Columns, referenceEngine.Rows, source.FitMode, includeSource: false);
+                    long fileCaptureStamp = BeginProfileStamp();
+                    var fileFrame = _fileCapture.CaptureFrame(source.FilePath, referenceEngine.Columns, referenceEngine.Rows, source.FitMode, includeSource: includeNativeSource);
+                    EndProfileStamp("capture_file_frame_ms", fileCaptureStamp);
                     if (fileFrame.HasValue)
                     {
                         var value = fileFrame.Value;
@@ -5095,6 +5736,27 @@ public partial class MainWindow : Window
         }
 
         return removedAny;
+    }
+
+    private bool ShouldPreferNativeSourceFrame(CaptureSource source)
+    {
+        if (!_renderBackend.PrefersNativeSourceFrames)
+        {
+            return false;
+        }
+
+        if (source.Type != CaptureSource.SourceType.File &&
+            source.Type != CaptureSource.SourceType.VideoSequence)
+        {
+            return false;
+        }
+
+        var referenceEngine = GetReferenceSimulationEngine();
+        int targetPixels = referenceEngine.Columns * referenceEngine.Rows;
+
+        // For tiny simulation grids, native video frames cost far more to move
+        // through the app than the visual benefit they provide.
+        return targetPixels >= (640 * 360);
     }
 
     private void TogglePassthrough_Click(object sender, RoutedEventArgs e)
@@ -5254,6 +5916,12 @@ public partial class MainWindow : Window
 
     [DllImport("user32.dll", SetLastError = true)]
     private static extern bool GetMonitorInfo(IntPtr monitor, ref MonitorInfo info);
+
+    [DllImport("winmm.dll", EntryPoint = "timeBeginPeriod")]
+    private static extern uint timeBeginPeriod(uint uPeriod);
+
+    [DllImport("winmm.dll", EntryPoint = "timeEndPeriod")]
+    private static extern uint timeEndPeriod(uint uPeriod);
 
     private void UpdateFullscreenMenuItem()
     {
@@ -5515,11 +6183,18 @@ public partial class MainWindow : Window
         public GameOfLifeEngine.BinningMode BinningMode { get; set; } = GameOfLifeEngine.BinningMode.Fill;
         public double InjectionNoise { get; set; }
         public double LifeOpacity { get; set; } = 1.0;
+        public double RgbHueShiftDegrees { get; set; }
+        public double RgbHueShiftSpeedDegreesPerSecond { get; set; }
+        public double AudioFrequencyHueShiftDegrees { get; set; }
         public double ThresholdMin { get; set; } = 0.35;
         public double ThresholdMax { get; set; } = 0.75;
         public bool InvertThreshold { get; set; }
         public ISimulationBackend Engine { get; set; } = new GpuSimulationBackend();
         public byte[]? ColorBuffer { get; set; }
+        public bool[,]? GrayMask { get; set; }
+        public bool[,]? RedMask { get; set; }
+        public bool[,]? GreenMask { get; set; }
+        public bool[,]? BlueMask { get; set; }
     }
 
     private sealed class SimulationLayerSpec
@@ -5534,6 +6209,9 @@ public partial class MainWindow : Window
         public GameOfLifeEngine.BinningMode BinningMode { get; init; } = GameOfLifeEngine.BinningMode.Fill;
         public double InjectionNoise { get; init; }
         public double LifeOpacity { get; init; } = 1.0;
+        public double RgbHueShiftDegrees { get; init; }
+        public double RgbHueShiftSpeedDegreesPerSecond { get; init; }
+        public double AudioFrequencyHueShiftDegrees { get; init; }
         public double ThresholdMin { get; init; } = 0.35;
         public double ThresholdMax { get; init; } = 0.75;
         public bool InvertThreshold { get; init; }
@@ -5641,6 +6319,9 @@ public partial class MainWindow : Window
             BinningMode = layer.BinningMode.ToString(),
             InjectionNoise = layer.InjectionNoise,
             LifeOpacity = layer.LifeOpacity,
+            RgbHueShiftDegrees = layer.RgbHueShiftDegrees,
+            RgbHueShiftSpeedDegreesPerSecond = layer.RgbHueShiftSpeedDegreesPerSecond,
+            AudioFrequencyHueShiftDegrees = layer.AudioFrequencyHueShiftDegrees,
             ThresholdMin = layer.ThresholdMin,
             ThresholdMax = layer.ThresholdMax,
             InvertThreshold = layer.InvertThreshold
@@ -5667,6 +6348,9 @@ public partial class MainWindow : Window
             BinningMode = specs[0].BinningMode,
             InjectionNoise = specs[0].InjectionNoise,
             LifeOpacity = specs[0].LifeOpacity,
+            RgbHueShiftDegrees = specs[0].RgbHueShiftDegrees,
+            RgbHueShiftSpeedDegreesPerSecond = specs[0].RgbHueShiftSpeedDegreesPerSecond,
+            AudioFrequencyHueShiftDegrees = specs[0].AudioFrequencyHueShiftDegrees,
             ThresholdMin = specs[0].ThresholdMin,
             ThresholdMax = specs[0].ThresholdMax,
             InvertThreshold = specs[0].InvertThreshold,
@@ -5684,6 +6368,9 @@ public partial class MainWindow : Window
             BinningMode = specs[1].BinningMode,
             InjectionNoise = specs[1].InjectionNoise,
             LifeOpacity = specs[1].LifeOpacity,
+            RgbHueShiftDegrees = specs[1].RgbHueShiftDegrees,
+            RgbHueShiftSpeedDegreesPerSecond = specs[1].RgbHueShiftSpeedDegreesPerSecond,
+            AudioFrequencyHueShiftDegrees = specs[1].AudioFrequencyHueShiftDegrees,
             ThresholdMin = specs[1].ThresholdMin,
             ThresholdMax = specs[1].ThresholdMax,
             InvertThreshold = specs[1].InvertThreshold,
@@ -5735,9 +6422,20 @@ public partial class MainWindow : Window
 
     private static void ApplySimulationLayerEngineSettings(SimulationLayerState layer)
     {
-        layer.Engine.SetMode(layer.LifeMode);
-        layer.Engine.SetBinningMode(layer.BinningMode);
-        layer.Engine.SetInjectionMode(layer.InjectionMode);
+        if (layer.Engine.Mode != layer.LifeMode)
+        {
+            layer.Engine.SetMode(layer.LifeMode);
+        }
+
+        if (layer.Engine.BinMode != layer.BinningMode)
+        {
+            layer.Engine.SetBinningMode(layer.BinningMode);
+        }
+
+        if (layer.Engine.InjectMode != layer.InjectionMode)
+        {
+            layer.Engine.SetInjectionMode(layer.InjectionMode);
+        }
     }
 
     private static List<SimulationLayerSpec> BuildDefaultSimulationLayerSpecs()
@@ -5752,6 +6450,9 @@ public partial class MainWindow : Window
                 InputFunction = SimulationInputFunction.Direct,
                 BlendMode = BlendMode.Additive,
                 InjectionMode = GameOfLifeEngine.InjectionMode.Threshold,
+                RgbHueShiftDegrees = 0,
+                RgbHueShiftSpeedDegreesPerSecond = 0,
+                AudioFrequencyHueShiftDegrees = 0,
                 ThresholdMin = 0.35,
                 ThresholdMax = 0.75,
                 InvertThreshold = false
@@ -5764,6 +6465,9 @@ public partial class MainWindow : Window
                 InputFunction = SimulationInputFunction.Inverse,
                 BlendMode = BlendMode.Subtractive,
                 InjectionMode = GameOfLifeEngine.InjectionMode.Threshold,
+                RgbHueShiftDegrees = 0,
+                RgbHueShiftSpeedDegreesPerSecond = 0,
+                AudioFrequencyHueShiftDegrees = 0,
                 ThresholdMin = 0.35,
                 ThresholdMax = 0.75,
                 InvertThreshold = false
@@ -5847,6 +6551,9 @@ public partial class MainWindow : Window
                     BinningMode = binningMode,
                     InjectionNoise = Math.Clamp(layer.InjectionNoise, 0, 1),
                     LifeOpacity = Math.Clamp(layer.LifeOpacity, 0, 1),
+                    RgbHueShiftDegrees = NormalizeHueDegrees(layer.RgbHueShiftDegrees),
+                    RgbHueShiftSpeedDegreesPerSecond = Math.Clamp(layer.RgbHueShiftSpeedDegreesPerSecond, -MaxRgbHueShiftSpeedDegreesPerSecond, MaxRgbHueShiftSpeedDegreesPerSecond),
+                    AudioFrequencyHueShiftDegrees = Math.Clamp(layer.AudioFrequencyHueShiftDegrees, 0, 360),
                     ThresholdMin = thresholdMin,
                     ThresholdMax = thresholdMax,
                     InvertThreshold = invertThreshold
@@ -5901,6 +6608,9 @@ public partial class MainWindow : Window
                     BinningMode = binningMode,
                     InjectionNoise = Math.Clamp(layer.InjectionNoise, 0, 1),
                     LifeOpacity = Math.Clamp(layer.LifeOpacity, 0, 1),
+                    RgbHueShiftDegrees = NormalizeHueDegrees(layer.RgbHueShiftDegrees != 0 ? layer.RgbHueShiftDegrees : _rgbHueShiftDegrees),
+                    RgbHueShiftSpeedDegreesPerSecond = Math.Clamp(layer.RgbHueShiftSpeedDegreesPerSecond != 0 ? layer.RgbHueShiftSpeedDegreesPerSecond : _rgbHueShiftSpeedDegreesPerSecond, -MaxRgbHueShiftSpeedDegreesPerSecond, MaxRgbHueShiftSpeedDegreesPerSecond),
+                    AudioFrequencyHueShiftDegrees = Math.Clamp(layer.AudioFrequencyHueShiftDegrees, 0, 360),
                     ThresholdMin = thresholdMin,
                     ThresholdMax = thresholdMax,
                     InvertThreshold = invertThreshold
@@ -5926,6 +6636,8 @@ public partial class MainWindow : Window
         GameOfLifeEngine.LifeMode lifeMode,
         GameOfLifeEngine.BinningMode binningMode,
         double injectionNoise,
+        double globalHueShiftDegrees,
+        double globalHueShiftSpeedDegreesPerSecond,
         double thresholdMin,
         double thresholdMax,
         bool invertThreshold)
@@ -5944,6 +6656,9 @@ public partial class MainWindow : Window
             BinningMode = binningMode,
             InjectionNoise = injectionNoise,
             LifeOpacity = 1.0,
+            RgbHueShiftDegrees = globalHueShiftDegrees,
+            RgbHueShiftSpeedDegreesPerSecond = globalHueShiftSpeedDegreesPerSecond,
+            AudioFrequencyHueShiftDegrees = 0,
             ThresholdMin = normalizedThresholdMin,
             ThresholdMax = normalizedThresholdMax,
             InvertThreshold = normalizedInvertThreshold
@@ -5960,6 +6675,9 @@ public partial class MainWindow : Window
             BinningMode = binningMode,
             InjectionNoise = injectionNoise,
             LifeOpacity = 1.0,
+            RgbHueShiftDegrees = globalHueShiftDegrees,
+            RgbHueShiftSpeedDegreesPerSecond = globalHueShiftSpeedDegreesPerSecond,
+            AudioFrequencyHueShiftDegrees = 0,
             ThresholdMin = normalizedThresholdMin,
             ThresholdMax = normalizedThresholdMax,
             InvertThreshold = normalizedInvertThreshold
@@ -6081,6 +6799,21 @@ public partial class MainWindow : Window
             if (Math.Abs(layer.LifeOpacity - spec.LifeOpacity) > 0.000001)
             {
                 layer.LifeOpacity = spec.LifeOpacity;
+                changed = true;
+            }
+            if (Math.Abs(layer.RgbHueShiftDegrees - spec.RgbHueShiftDegrees) > 0.000001)
+            {
+                layer.RgbHueShiftDegrees = spec.RgbHueShiftDegrees;
+                changed = true;
+            }
+            if (Math.Abs(layer.RgbHueShiftSpeedDegreesPerSecond - spec.RgbHueShiftSpeedDegreesPerSecond) > 0.000001)
+            {
+                layer.RgbHueShiftSpeedDegreesPerSecond = spec.RgbHueShiftSpeedDegreesPerSecond;
+                changed = true;
+            }
+            if (Math.Abs(layer.AudioFrequencyHueShiftDegrees - spec.AudioFrequencyHueShiftDegrees) > 0.000001)
+            {
+                layer.AudioFrequencyHueShiftDegrees = spec.AudioFrequencyHueShiftDegrees;
                 changed = true;
             }
             if (Math.Abs(layer.ThresholdMin - spec.ThresholdMin) > 0.000001)
@@ -6531,6 +7264,71 @@ public partial class MainWindow : Window
                (b != 0 || g != 0 || r != 0);
     }
 
+    internal bool RunSourceResetSmoke()
+    {
+        EnsureSimulationLayersInitialized();
+
+        int width = GetReferenceSimulationEngine().Columns;
+        int height = GetReferenceSimulationEngine().Rows;
+        var source = CaptureSource.CreateFile("source-reset", "Source Reset", width, height);
+        source.LastFrame = new SourceFrame(BuildSmokeSolidBgra(width, height, 48, 96, 192), width, height, null, width, height);
+        source.BlendMode = BlendMode.Additive;
+        source.Opacity = 1.0;
+
+        bool[] priorLayerEnabled = _simulationLayers.Select(layer => layer.Enabled).ToArray();
+        bool priorPassthrough = _passthroughEnabled;
+
+        try
+        {
+            foreach (var layer in _simulationLayers)
+            {
+                layer.Enabled = false;
+            }
+
+            _passthroughEnabled = true;
+            if (PassthroughMenuItem != null)
+            {
+                PassthroughMenuItem.IsChecked = true;
+            }
+
+            _sources.Clear();
+            _sources.Add(source);
+            UpdatePrimaryAspectIfNeeded();
+            byte[]? compositeBuffer = null;
+            _lastCompositeFrame = BuildCompositeFrame(_sources, ref compositeBuffer, useEngineDimensions: true, animationTime: 0.0);
+            RenderFrame();
+
+            ClearSources();
+            bool passthroughPreserved = _passthroughEnabled;
+
+            _sources.Add(source);
+            UpdatePrimaryAspectIfNeeded();
+            compositeBuffer = null;
+            _lastCompositeFrame = BuildCompositeFrame(_sources, ref compositeBuffer, useEngineDimensions: true, animationTime: 0.0);
+            bool secondCompositeVisible = BufferHasNonBlackPixel(_lastCompositeFrame?.Downscaled);
+            RenderFrame();
+            bool secondVisible = BufferHasNonBlackPixel(_pixelBuffer);
+
+            Logger.Info($"Source reset smoke: passthroughPreserved={passthroughPreserved}, secondCompositeVisible={secondCompositeVisible}, secondVisible={secondVisible}.");
+            return passthroughPreserved && secondCompositeVisible && secondVisible;
+        }
+        finally
+        {
+            _sources.Clear();
+            _lastCompositeFrame = null;
+            _passthroughEnabled = priorPassthrough;
+            if (PassthroughMenuItem != null)
+            {
+                PassthroughMenuItem.IsChecked = priorPassthrough;
+            }
+
+            for (int i = 0; i < _simulationLayers.Count && i < priorLayerEnabled.Length; i++)
+            {
+                _simulationLayers[i].Enabled = priorLayerEnabled[i];
+            }
+        }
+    }
+
     internal (bool ok, int passCount, long buildCount, double uploadMs, double drawMs, double readbackMs, int width, int height) RunGpuSourceCompositeBenchmark(int iterations)
     {
         ResetGpuSourceCompositeSmokeCounters();
@@ -6627,7 +7425,8 @@ public partial class MainWindow : Window
                 noiseProbability: 0.0,
                 period: backend.Depth,
                 pulseStep: i,
-                invertInput: false);
+                invertInput: false,
+                hueShiftDegrees: 0.0);
             injectTicks += Stopwatch.GetTimestamp() - start;
             if (!injected)
             {
@@ -6702,7 +7501,8 @@ public partial class MainWindow : Window
             noiseProbability: 0.0,
             period: backend.Depth,
             pulseStep: 0,
-            invertInput: false);
+            invertInput: false,
+            hueShiftDegrees: 0.0);
         if (!injected)
         {
             Logger.Warn("GPU handoff smoke: direct composite injection was rejected.");
@@ -6725,6 +7525,528 @@ public partial class MainWindow : Window
         return composite.Downscaled.Length == 0 && hasAnyLife;
     }
 
+    internal bool RunGpuCompositeRgbThresholdSmoke()
+    {
+        const int width = 128;
+        const int height = 72;
+
+        var source = CaptureSource.CreateFile("rgb-threshold-source", "RgbThreshold", width, height);
+        source.LastFrame = new SourceFrame(BuildSmokeSolidBgra(width, height, 255, 255, 255), width, height, null, width, height);
+        source.BlendMode = BlendMode.Normal;
+        source.Opacity = 1.0;
+
+        byte[]? compositeBuffer = null;
+        var composite = BuildCompositeFrame(new List<CaptureSource> { source }, ref compositeBuffer, useEngineDimensions: true, animationTime: 0.0,
+            includeCpuReadback: false);
+        if (composite?.GpuSurface == null)
+        {
+            Logger.Warn("GPU RGB threshold smoke: composite surface was unavailable.");
+            return false;
+        }
+
+        using var backend = new GpuSimulationBackend();
+        backend.Configure(composite.DownscaledHeight, 24, (double)composite.DownscaledWidth / composite.DownscaledHeight);
+        backend.SetBinningMode(GameOfLifeEngine.BinningMode.Fill);
+        backend.SetInjectionMode(GameOfLifeEngine.InjectionMode.Threshold);
+        backend.SetMode(GameOfLifeEngine.LifeMode.RgbChannels);
+        if (!backend.IsGpuActive)
+        {
+            Logger.Warn("GPU RGB threshold smoke: simulation backend was not active.");
+            return false;
+        }
+
+        bool injected = backend.TryInjectCompositeSurface(
+            composite.GpuSurface,
+            0.5,
+            1.0,
+            invertThreshold: false,
+            GameOfLifeEngine.InjectionMode.Threshold,
+            noiseProbability: 0.0,
+            period: backend.Depth,
+            pulseStep: 0,
+            invertInput: false,
+            hueShiftDegrees: 0.0);
+        if (!injected)
+        {
+            Logger.Warn("GPU RGB threshold smoke: composite RGB injection was rejected.");
+            return false;
+        }
+
+        byte[] colorBuffer = new byte[backend.Columns * backend.Rows * 4];
+        backend.FillColorBuffer(colorBuffer);
+        int centerIndex = ((backend.Rows / 2) * backend.Columns + (backend.Columns / 2)) * 4;
+        byte r = colorBuffer[centerIndex];
+        byte g = colorBuffer[centerIndex + 1];
+        byte b = colorBuffer[centerIndex + 2];
+        bool allChannelsInjected = r > 0 && g > 0 && b > 0;
+
+        using var directBackend = new GpuSimulationBackend();
+        directBackend.Configure(composite.DownscaledHeight, 24, (double)composite.DownscaledWidth / composite.DownscaledHeight);
+        directBackend.SetBinningMode(GameOfLifeEngine.BinningMode.Fill);
+        directBackend.SetInjectionMode(GameOfLifeEngine.InjectionMode.Threshold);
+        directBackend.SetMode(GameOfLifeEngine.LifeMode.RgbChannels);
+        bool[,] fullMask = new bool[directBackend.Rows, directBackend.Columns];
+        for (int row = 0; row < directBackend.Rows; row++)
+        {
+            for (int col = 0; col < directBackend.Columns; col++)
+            {
+                fullMask[row, col] = true;
+            }
+        }
+
+        directBackend.InjectRgbFrame(fullMask, fullMask, fullMask);
+        byte[] directColorBuffer = new byte[directBackend.Columns * directBackend.Rows * 4];
+        directBackend.FillColorBuffer(directColorBuffer);
+        int directCenterIndex = ((directBackend.Rows / 2) * directBackend.Columns + (directBackend.Columns / 2)) * 4;
+        byte directR = directColorBuffer[directCenterIndex];
+        byte directG = directColorBuffer[directCenterIndex + 1];
+        byte directB = directColorBuffer[directCenterIndex + 2];
+
+        Logger.Info($"GPU RGB threshold smoke: composite center rgb=({r},{g},{b}), direct center rgb=({directR},{directG},{directB}), allChannelsInjected={allChannelsInjected}.");
+        return allChannelsInjected;
+    }
+
+    internal bool RunGpuInjectionModeSmoke()
+    {
+        const int width = 128;
+        const int height = 72;
+        const double min = 0.5;
+        const double max = 1.0;
+
+        var source = CaptureSource.CreateFile("injection-mode-source", "InjectionMode", width, height);
+        source.LastFrame = new SourceFrame(BuildSmokeSolidBgra(width, height, 191, 191, 191), width, height, null, width, height);
+        source.BlendMode = BlendMode.Normal;
+        source.Opacity = 1.0;
+
+        byte[]? compositeBuffer = null;
+        var composite = BuildCompositeFrame(new List<CaptureSource> { source }, ref compositeBuffer, useEngineDimensions: true, animationTime: 0.0,
+            includeCpuReadback: false);
+        if (composite?.GpuSurface == null)
+        {
+            Logger.Warn("GPU injection-mode smoke: composite surface was unavailable.");
+            return false;
+        }
+
+        static double MeasureDensity(byte[] buffer)
+        {
+            long lit = 0;
+            long total = buffer.Length / 4;
+            for (int i = 0; i < buffer.Length; i += 4)
+            {
+                if (buffer[i] != 0 || buffer[i + 1] != 0 || buffer[i + 2] != 0)
+                {
+                    lit++;
+                }
+            }
+
+            return total == 0 ? 0.0 : lit / (double)total;
+        }
+
+        double RunMode(GameOfLifeEngine.InjectionMode mode, int pulseStep)
+        {
+            using var backend = new GpuSimulationBackend();
+            backend.Configure(composite.DownscaledHeight, 24, (double)composite.DownscaledWidth / composite.DownscaledHeight);
+            backend.SetBinningMode(GameOfLifeEngine.BinningMode.Fill);
+            backend.SetInjectionMode(mode);
+            backend.SetMode(GameOfLifeEngine.LifeMode.NaiveGrayscale);
+            if (!backend.IsGpuActive)
+            {
+                return -1.0;
+            }
+
+            bool injected = backend.TryInjectCompositeSurface(
+                composite.GpuSurface,
+                min,
+                max,
+                invertThreshold: false,
+                mode,
+                noiseProbability: 0.0,
+                period: backend.Depth,
+                pulseStep: pulseStep,
+                invertInput: false,
+                hueShiftDegrees: 0.0);
+            if (!injected)
+            {
+                return -1.0;
+            }
+
+            byte[] colorBuffer = new byte[backend.Columns * backend.Rows * 4];
+            backend.FillColorBuffer(colorBuffer);
+            return MeasureDensity(colorBuffer);
+        }
+
+        double thresholdDensity = RunMode(GameOfLifeEngine.InjectionMode.Threshold, 0);
+        double randomDensity = RunMode(GameOfLifeEngine.InjectionMode.RandomPulse, 0);
+        double pwmPhase0Density = RunMode(GameOfLifeEngine.InjectionMode.PulseWidthModulation, 0);
+        double pwmPhase23Density = RunMode(GameOfLifeEngine.InjectionMode.PulseWidthModulation, 23);
+
+        bool ok = thresholdDensity > 0.99 &&
+                  randomDensity > 0.30 && randomDensity < 0.70 &&
+                  pwmPhase0Density > 0.99 &&
+                  pwmPhase23Density < 0.01;
+        Logger.Info($"GPU injection-mode smoke: threshold={thresholdDensity:0.000}, random={randomDensity:0.000}, pwmPhase0={pwmPhase0Density:0.000}, pwmPhase23={pwmPhase23Density:0.000}, ok={ok}.");
+        return ok;
+    }
+
+    internal bool RunGpuFileInjectionModeSmoke(string smokeVideoPath)
+    {
+        if (string.IsNullOrWhiteSpace(smokeVideoPath))
+        {
+            Logger.Warn("GPU file injection-mode smoke: no video path provided.");
+            return false;
+        }
+
+        const int width = 128;
+        const int height = 72;
+        const double min = 0.5;
+        const double max = 1.0;
+
+        if (!_fileCapture.TryGetOrAdd(smokeVideoPath, out var info, out var error))
+        {
+            Logger.Warn($"GPU file injection-mode smoke: failed to prepare source '{smokeVideoPath}': {error ?? "unknown error"}.");
+            return false;
+        }
+
+        FileCaptureService.FileCaptureFrame? fileFrame = null;
+        var deadline = DateTime.UtcNow.AddSeconds(5);
+        while (DateTime.UtcNow < deadline)
+        {
+            fileFrame = _fileCapture.CaptureFrame(info.Path, width, height, FitMode.Fill, includeSource: true);
+            if (fileFrame.HasValue)
+            {
+                break;
+            }
+
+            System.Threading.Thread.Sleep(50);
+        }
+
+        if (!fileFrame.HasValue)
+        {
+            Logger.Warn("GPU file injection-mode smoke: file frame was unavailable.");
+            return false;
+        }
+
+        var source = CaptureSource.CreateFile(info.Path, info.DisplayName, info.Width, info.Height);
+        source.LastFrame = new SourceFrame(
+            fileFrame.Value.OverlayDownscaled,
+            fileFrame.Value.DownscaledWidth,
+            fileFrame.Value.DownscaledHeight,
+            fileFrame.Value.OverlaySource,
+            fileFrame.Value.SourceWidth,
+            fileFrame.Value.SourceHeight);
+        source.BlendMode = BlendMode.Normal;
+        source.Opacity = 1.0;
+
+        byte[]? compositeBuffer = null;
+        var composite = BuildCompositeFrame(new List<CaptureSource> { source }, ref compositeBuffer, useEngineDimensions: true, animationTime: 0.0,
+            includeCpuReadback: false);
+        if (composite?.GpuSurface == null)
+        {
+            Logger.Warn("GPU file injection-mode smoke: composite surface was unavailable.");
+            return false;
+        }
+
+        static double MeasureDensity(byte[] buffer)
+        {
+            long lit = 0;
+            long total = buffer.Length / 4;
+            for (int i = 0; i < buffer.Length; i += 4)
+            {
+                if (buffer[i] != 0 || buffer[i + 1] != 0 || buffer[i + 2] != 0)
+                {
+                    lit++;
+                }
+            }
+
+            return total == 0 ? 0.0 : lit / (double)total;
+        }
+
+        double RunMode(GameOfLifeEngine.InjectionMode mode, int pulseStep)
+        {
+            using var backend = new GpuSimulationBackend();
+            backend.Configure(composite.DownscaledHeight, 24, (double)composite.DownscaledWidth / composite.DownscaledHeight);
+            backend.SetBinningMode(GameOfLifeEngine.BinningMode.Fill);
+            backend.SetInjectionMode(mode);
+            backend.SetMode(GameOfLifeEngine.LifeMode.NaiveGrayscale);
+            if (!backend.IsGpuActive)
+            {
+                return -1.0;
+            }
+
+            bool injected = backend.TryInjectCompositeSurface(
+                composite.GpuSurface,
+                min,
+                max,
+                invertThreshold: false,
+                mode,
+                noiseProbability: 0.0,
+                period: backend.Depth,
+                pulseStep: pulseStep,
+                invertInput: false,
+                hueShiftDegrees: 0.0);
+            if (!injected)
+            {
+                return -1.0;
+            }
+
+            byte[] colorBuffer = new byte[backend.Columns * backend.Rows * 4];
+            backend.FillColorBuffer(colorBuffer);
+            return MeasureDensity(colorBuffer);
+        }
+
+        double thresholdDensity = RunMode(GameOfLifeEngine.InjectionMode.Threshold, 0);
+        double randomDensity = RunMode(GameOfLifeEngine.InjectionMode.RandomPulse, 0);
+        double pwmPhase0Density = RunMode(GameOfLifeEngine.InjectionMode.PulseWidthModulation, 0);
+        double pwmPhase23Density = RunMode(GameOfLifeEngine.InjectionMode.PulseWidthModulation, 23);
+
+        Logger.Info($"GPU file injection-mode smoke ({Path.GetFileName(info.Path)}): threshold={thresholdDensity:0.000}, random={randomDensity:0.000}, pwmPhase0={pwmPhase0Density:0.000}, pwmPhase23={pwmPhase23Density:0.000}.");
+        return true;
+    }
+
+    internal bool RunGpuFrequencyHueSmoke()
+    {
+        const int width = 128;
+        const int height = 72;
+        const double baseHueDegrees = 30.0;
+        const double reactiveHueDegrees = 120.0;
+
+        if (!_renderBackend.SupportsGpuSimulationComposition)
+        {
+            Logger.Warn("GPU frequency-hue smoke: render backend does not support GPU simulation composition.");
+            return false;
+        }
+
+        using var backend = new GpuSimulationBackend();
+        backend.Configure(height, 24, (double)width / height);
+        backend.SetBinningMode(GameOfLifeEngine.BinningMode.Fill);
+        backend.SetInjectionMode(GameOfLifeEngine.InjectionMode.Threshold);
+        backend.SetMode(GameOfLifeEngine.LifeMode.RgbChannels);
+        if (!backend.IsGpuActive)
+        {
+            Logger.Warn("GPU frequency-hue smoke: simulation backend was not active.");
+            return false;
+        }
+
+        bool[,] redMask = new bool[backend.Rows, backend.Columns];
+        bool[,] emptyMask = new bool[backend.Rows, backend.Columns];
+        for (int row = 0; row < backend.Rows; row++)
+        {
+            for (int col = 0; col < backend.Columns; col++)
+            {
+                redMask[row, col] = true;
+            }
+        }
+
+        backend.InjectRgbFrame(redMask, emptyMask, emptyMask);
+
+        var layer = new SimulationLayerState
+        {
+            Id = Guid.NewGuid(),
+            Name = "FreqHue",
+            Enabled = true,
+            InputFunction = SimulationInputFunction.Direct,
+            BlendMode = BlendMode.Additive,
+            InjectionMode = GameOfLifeEngine.InjectionMode.Threshold,
+            LifeMode = GameOfLifeEngine.LifeMode.RgbChannels,
+            BinningMode = GameOfLifeEngine.BinningMode.Fill,
+            LifeOpacity = 1.0,
+            RgbHueShiftDegrees = baseHueDegrees,
+            RgbHueShiftSpeedDegreesPerSecond = 0.0,
+            AudioFrequencyHueShiftDegrees = reactiveHueDegrees,
+            Engine = backend
+        };
+
+        double previousSmoothedFreq = _smoothedFreq;
+        bool previousRecording = _isRecording;
+        try
+        {
+            _isRecording = false;
+
+            _smoothedFreq = MinReactiveHueFrequencyHz;
+            if (!TryBuildSimulationPresentationLayer(layer, 1.0, out var lowPresentation))
+            {
+                Logger.Warn("GPU frequency-hue smoke: failed to build low-frequency presentation layer.");
+                return false;
+            }
+
+            byte[]? lowBuffer = lowPresentation.Buffer;
+            if (lowBuffer == null || lowBuffer.Length < backend.Columns * backend.Rows * 4)
+            {
+                Logger.Warn("GPU frequency-hue smoke: low-frequency presentation buffer was unavailable.");
+                return false;
+            }
+
+            int centerIndex = ((backend.Rows / 2) * backend.Columns + (backend.Columns / 2)) * 4;
+            byte lowR = lowBuffer[centerIndex];
+            byte lowG = lowBuffer[centerIndex + 1];
+            byte lowB = lowBuffer[centerIndex + 2];
+            float lowHue = lowPresentation.HueShiftDegrees;
+
+            _smoothedFreq = MaxReactiveHueFrequencyHz;
+            if (!TryBuildSimulationPresentationLayer(layer, 1.0, out var highPresentation))
+            {
+                Logger.Warn("GPU frequency-hue smoke: failed to build high-frequency presentation layer.");
+                return false;
+            }
+
+            byte[]? highBuffer = highPresentation.Buffer;
+            if (highBuffer == null || highBuffer.Length < backend.Columns * backend.Rows * 4)
+            {
+                Logger.Warn("GPU frequency-hue smoke: high-frequency presentation buffer was unavailable.");
+                return false;
+            }
+
+            byte highR = highBuffer[centerIndex];
+            byte highG = highBuffer[centerIndex + 1];
+            byte highB = highBuffer[centerIndex + 2];
+            float highHue = highPresentation.HueShiftDegrees;
+
+            bool lowHueOk = Math.Abs(lowHue - baseHueDegrees) <= 0.5f;
+            bool highHueOk = Math.Abs(highHue - (baseHueDegrees + reactiveHueDegrees)) <= 0.5f;
+            bool hueChanged = highHue > lowHue + 100.0f;
+            bool rawBufferStable = lowR == highR && lowG == highG && lowB == highB;
+            bool rawBufferLooksUnshifted = lowR > 0 && lowR >= lowG && lowR >= lowB;
+            bool ok = lowHueOk && highHueOk && hueChanged && rawBufferStable && rawBufferLooksUnshifted;
+
+            Logger.Info(
+                $"GPU frequency-hue smoke: lowHue={lowHue:0.##}deg, highHue={highHue:0.##}deg, " +
+                $"lowCenter=({lowR},{lowG},{lowB}), highCenter=({highR},{highG},{highB}), ok={ok}.");
+            return ok;
+        }
+        finally
+        {
+            _smoothedFreq = previousSmoothedFreq;
+            _isRecording = previousRecording;
+        }
+    }
+
+    internal bool RunGpuPassthroughCompositionSmoke()
+    {
+        if (!_renderLoopAttached)
+        {
+            InitializeVisualizer();
+        }
+
+        if (_sources.Count > 0)
+        {
+            ClearSources();
+        }
+
+        EnsureSimulationLayersInitialized();
+        _audioReactiveEnabled = false;
+        _isRecording = false;
+        _passthroughEnabled = true;
+        _blendMode = BlendMode.Additive;
+        _lifeOpacity = 1.0;
+        _effectiveLifeOpacity = 1.0;
+
+        ApplyDimensions(144, 24, DefaultAspectRatio, persist: false);
+
+        int width = GetReferenceSimulationEngine().Columns;
+        int height = GetReferenceSimulationEngine().Rows;
+        var source = CaptureSource.CreateFile("gpu-passthrough-source", "GPU Passthrough", width, height);
+        source.LastFrame = new SourceFrame(BuildSmokeGradientBgra(width, height), width, height, null, width, height);
+        source.BlendMode = BlendMode.Additive;
+        source.Opacity = 1.0;
+        _sources.Add(source);
+        UpdatePrimaryAspectIfNeeded();
+
+        _compositeDownscaledBuffer = null;
+        _lastCompositeFrame = null;
+        _passthroughCompositedInPixelBuffer = false;
+
+        InjectCaptureFrames();
+        RenderFrame();
+
+        int cpuReadbackBytes = _lastCompositeFrame?.Downscaled.Length ?? -1;
+        bool gpuSurfacePresent = _lastCompositeFrame?.GpuSurface != null;
+        bool compositedInFinalFrame = _passthroughCompositedInPixelBuffer;
+        bool overlayDisabled = !ShouldUseShaderPassthrough();
+
+        Logger.Info(
+            $"GPU passthrough smoke: cpuReadbackBytes={cpuReadbackBytes}, gpuSurfacePresent={gpuSurfacePresent}, composited={compositedInFinalFrame}, overlayDisabled={overlayDisabled}.");
+
+        return cpuReadbackBytes > 0 &&
+               gpuSurfacePresent &&
+               compositedInFinalFrame &&
+               overlayDisabled;
+    }
+
+    internal void ConfigureProfilingSmokeScene(int rows = 240, bool rgbMode = false, string? smokeVideoPath = null)
+    {
+        if (!_renderLoopAttached)
+        {
+            InitializeVisualizer();
+        }
+
+        if (_sources.Count > 0)
+        {
+            ClearSources();
+        }
+
+        EnsureSimulationLayersInitialized();
+        _audioReactiveEnabled = false;
+        _passthroughEnabled = true;
+        _blendMode = BlendMode.Additive;
+        _lifeOpacity = 1.0;
+        _effectiveLifeOpacity = 1.0;
+        _currentFpsFromConfig = 60;
+        _currentFps = 60;
+
+        int targetRows = Math.Clamp(rows, MinRows, MaxRows);
+        ApplyDimensions(targetRows, 24, DefaultAspectRatio, persist: false);
+        if (rgbMode)
+        {
+            SetReferenceSimulationLayerLifeModeForSmoke(GameOfLifeEngine.LifeMode.RgbChannels);
+        }
+        else
+        {
+            SetReferenceSimulationLayerLifeModeForSmoke(GameOfLifeEngine.LifeMode.NaiveGrayscale);
+        }
+
+        int width = GetReferenceSimulationEngine().Columns;
+        int height = GetReferenceSimulationEngine().Rows;
+
+        if (!string.IsNullOrWhiteSpace(smokeVideoPath))
+        {
+            if (!_fileCapture.TryGetOrAdd(smokeVideoPath, out var info, out var error))
+            {
+                throw new InvalidOperationException($"Failed to prepare smoke video source '{smokeVideoPath}': {error ?? "unknown error"}");
+            }
+
+            var fileSource = CaptureSource.CreateFile(info.Path, info.DisplayName, info.Width, info.Height);
+            fileSource.BlendMode = BlendMode.Additive;
+            fileSource.Opacity = 1.0;
+            _sources.Add(fileSource);
+            UpdatePrimaryAspectIfNeeded();
+            NotifyLayerEditorSourcesChanged();
+            RenderFrame();
+            return;
+        }
+
+        var background = CaptureSource.CreateFile("profile-bg", "Profile Background", width, height);
+        background.LastFrame = new SourceFrame(BuildSmokeGradientBgra(width, height), width, height, null, width, height);
+        background.BlendMode = BlendMode.Additive;
+        background.Opacity = 1.0;
+
+        var overlay = CaptureSource.CreateFile("profile-overlay", "Profile Overlay", width, height);
+        overlay.LastFrame = new SourceFrame(BuildSmokeCheckerBgra(width, height, 18, 28, 42, 120, 150, 220), width, height, null, width, height);
+        overlay.BlendMode = BlendMode.Screen;
+        overlay.Opacity = 0.65;
+
+        var accent = CaptureSource.CreateFile("profile-accent", "Profile Accent", width, height);
+        accent.LastFrame = new SourceFrame(BuildSmokeSolidBgra(width, height, 96, 96, 96), width, height, null, width, height);
+        accent.BlendMode = BlendMode.Overlay;
+        accent.Opacity = 0.45;
+
+        _sources.Add(background);
+        _sources.Add(overlay);
+        _sources.Add(accent);
+        UpdatePrimaryAspectIfNeeded();
+        NotifyLayerEditorSourcesChanged();
+        RenderFrame();
+    }
+
     private static byte[] BuildSmokeSolidBgra(int width, int height, byte b, byte g, byte r)
     {
         var buffer = new byte[width * height * 4];
@@ -6737,6 +8059,64 @@ public partial class MainWindow : Window
         }
 
         return buffer;
+    }
+
+    private static byte[] BuildSmokeGradientBgra(int width, int height)
+    {
+        var buffer = new byte[width * height * 4];
+        for (int row = 0; row < height; row++)
+        {
+            double rowT = height > 1 ? row / (double)(height - 1) : 0.0;
+            for (int col = 0; col < width; col++)
+            {
+                double colT = width > 1 ? col / (double)(width - 1) : 0.0;
+                int index = (row * width + col) * 4;
+                buffer[index] = (byte)Math.Clamp((int)Math.Round(32 + (160 * colT)), 0, 255);
+                buffer[index + 1] = (byte)Math.Clamp((int)Math.Round(24 + (176 * rowT)), 0, 255);
+                buffer[index + 2] = (byte)Math.Clamp((int)Math.Round(48 + (160 * ((colT + rowT) * 0.5))), 0, 255);
+                buffer[index + 3] = 255;
+            }
+        }
+
+        return buffer;
+    }
+
+    private static byte[] BuildSmokeCheckerBgra(int width, int height, byte bA, byte gA, byte rA, byte bB, byte gB, byte rB)
+    {
+        var buffer = new byte[width * height * 4];
+        int checkerSize = Math.Max(6, Math.Min(width, height) / 12);
+        for (int row = 0; row < height; row++)
+        {
+            for (int col = 0; col < width; col++)
+            {
+                bool useA = ((row / checkerSize) + (col / checkerSize)) % 2 == 0;
+                int index = (row * width + col) * 4;
+                buffer[index] = useA ? bA : bB;
+                buffer[index + 1] = useA ? gA : gB;
+                buffer[index + 2] = useA ? rA : rB;
+                buffer[index + 3] = 255;
+            }
+        }
+
+        return buffer;
+    }
+
+    private static bool BufferHasNonBlackPixel(byte[]? buffer)
+    {
+        if (buffer == null)
+        {
+            return false;
+        }
+
+        for (int i = 0; i <= buffer.Length - 4; i += 4)
+        {
+            if (buffer[i] != 0 || buffer[i + 1] != 0 || buffer[i + 2] != 0)
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private Transform2D BuildAnimationTransform(CaptureSource source, int destWidth, int destHeight, double timeSeconds)
@@ -6923,7 +8303,7 @@ public partial class MainWindow : Window
                 {
                     double intensityRaw = Math.Clamp(animation.BeatShakeIntensity, 0, MaxAudioGranularIntensity);
                     double intensity = Math.Pow(intensityRaw / MaxAudioGranularIntensity, 1.1) * 7.0;
-                    double energy = Math.Clamp(_smoothedEnergy, 0, 1);
+                    double energy = Math.Clamp(_fastAudioLevel, 0, 1);
                     double bassNorm = Math.Clamp(_smoothedBass / 16.0, 0, 1);
                     double freqNorm = Math.Clamp(_smoothedFreq / 4500.0, 0, 1);
                     double lowEq = Math.Clamp(animation.AudioGranularLowGain, 0, MaxAudioGranularEqBandGain);
@@ -7262,6 +8642,61 @@ public partial class MainWindow : Window
         }
     }
 
+    private bool TryBuildSimulationPresentationLayer(
+        SimulationLayerState layer,
+        double effectiveOpacity,
+        out SimulationPresentationLayerData presentationLayer)
+    {
+        presentationLayer = null!;
+
+        float opacity = (float)Math.Clamp(effectiveOpacity, 0, 1);
+        if (opacity <= 0.0001f)
+        {
+            return false;
+        }
+
+        if (layer.Engine is GpuSimulationBackend gpuBackend &&
+            gpuBackend.TryGetSharedColorTexture(out IntPtr sharedHandle, out int width, out int height))
+        {
+            float hueShiftDegrees = (float)CurrentRgbHueShiftDegrees(layer);
+            byte[]? fallbackBuffer = null;
+            if (App.IsSmokeTestMode)
+            {
+                EnsureEngineColorBuffer(layer);
+                fallbackBuffer = layer.ColorBuffer;
+            }
+
+            presentationLayer = new SimulationPresentationLayerData
+            {
+                Buffer = fallbackBuffer,
+                SharedTextureHandle = sharedHandle,
+                Width = width,
+                Height = height,
+                BlendMode = (int)layer.BlendMode,
+                Opacity = opacity,
+                HueShiftDegrees = hueShiftDegrees
+            };
+            return true;
+        }
+
+        EnsureEngineColorBuffer(layer);
+        if (layer.ColorBuffer == null)
+        {
+            return false;
+        }
+
+        presentationLayer = new SimulationPresentationLayerData
+        {
+            Buffer = layer.ColorBuffer,
+            Width = layer.Engine.Columns,
+            Height = layer.Engine.Rows,
+            BlendMode = (int)layer.BlendMode,
+            Opacity = opacity,
+            HueShiftDegrees = (float)CurrentRgbHueShiftDegrees(layer)
+        };
+        return true;
+    }
+
     private void EnsureEngineColorBuffer(SimulationLayerState layer)
     {
         var engine = layer.Engine;
@@ -7272,12 +8707,14 @@ public partial class MainWindow : Window
         }
         byte[] targetBuffer = layer.ColorBuffer;
         engine.FillColorBuffer(targetBuffer);
-
-        double hueShiftDegrees = CurrentRgbHueShiftDegrees();
-        bool applyHueShift = layer.LifeMode == GameOfLifeEngine.LifeMode.RgbChannels && Math.Abs(hueShiftDegrees) > 0.001;
-        if (applyHueShift)
+        if (!_renderBackend.SupportsGpuSimulationComposition || _isRecording)
         {
-            ApplyHueShiftToColorBuffer(targetBuffer, engine.Columns, engine.Rows, hueShiftDegrees);
+            double hueShiftDegrees = CurrentRgbHueShiftDegrees(layer);
+            bool applyHueShift = layer.LifeMode == GameOfLifeEngine.LifeMode.RgbChannels && Math.Abs(hueShiftDegrees) > 0.001;
+            if (applyHueShift)
+            {
+                ApplyHueShiftToColorBuffer(targetBuffer, engine.Columns, engine.Rows, hueShiftDegrees);
+            }
         }
     }
 
@@ -7409,16 +8846,29 @@ public partial class MainWindow : Window
 
         if (_showFps)
         {
+            double now = _lifetimeStopwatch.Elapsed.TotalSeconds;
+            if (now - _lastDebugOverlayUpdateTime < (1.0 / DebugOverlayRefreshRateHz))
+            {
+                return;
+            }
+            _lastDebugOverlayUpdateTime = now;
+
+            var pacingStats = GetRecentFrameGapStats();
             string audioStats;
             if (!string.IsNullOrWhiteSpace(_selectedAudioDeviceId))
             {
-                string signalState = _smoothedEnergy >= 0.02 ? "Signal" : "Low/No Signal";
-                audioStats = $"\nAudio: {_smoothedEnergy * 100:0}% ({signalState}) | Bass: {_smoothedBass:0.0} | Freq: {_smoothedFreq:0}Hz";
+                double displayedAudioLevel = GetDisplayedAudioLevel();
+                string signalState = displayedAudioLevel >= 0.02 ? "Signal" : "Low/No Signal";
+                audioStats = $"\nAudio: {displayedAudioLevel * 100:0}% ({signalState}) | Bass: {_smoothedBass:0.0} | Freq: {_smoothedFreq:0}Hz";
             }
             else
             {
                 audioStats = "\nAudio: None (Select Device)";
             }
+
+            string pacingStatsText = $"\nPacing: avg {pacingStats.averageMs:0.0}ms | p95 {pacingStats.p95Ms:0.0}ms | >25 {pacingStats.over25Ms} | >33 {pacingStats.over33Ms} | >50 {pacingStats.over50Ms}";
+            string stageStatsText =
+                $"\nWork: frame {GetLiveMetricAverage("frame_total_ms"):0.0}ms | capture {GetLiveMetricAverage("capture_sources_ms"):0.0} | composite {GetLiveMetricAverage("build_composite_ms"):0.0} | surface {GetLiveMetricAverage("update_display_surface_ms"):0.0} | inject {GetLiveMetricAverage("inject_layers_ms"):0.0} | sim {GetLiveMetricAverage("simulation_total_ms"):0.0} | render {GetLiveMetricAverage("render_call_ms"):0.0}";
 
             string reactiveStats = string.Empty;
             if (_audioReactiveEnabled)
@@ -7427,13 +8877,212 @@ public partial class MainWindow : Window
                 reactiveStats = $"\nReactive: {deviceState} | InGain x{_audioInputGain:0.00} | FPS x{_audioReactiveFpsMultiplier:0.00} (min {_audioReactiveFpsMinPercent * 100.0:0}%) | Opacity {_effectiveLifeOpacity:0.00} | Beats: {_audioBeatDetector.BeatCount} | Seeds L:{_audioReactiveLevelSeedBurstsLastStep} B:{_audioReactiveBeatSeedBurstsLastStep}";
             }
 
-            FpsText.Text = $"{_displayFps:0.0} fps (target {_currentFps:0.0}){audioStats}{reactiveStats}";
+            FpsText.Text = $"Render {_renderDisplayFps:0.0} fps | Sim {_simulationDisplayFps:0.0} sps (target {_currentFps:0.0}){pacingStatsText}{stageStatsText}{audioStats}{reactiveStats}";
             FpsText.Visibility = Visibility.Visible;
         }
         else
         {
             FpsText.Visibility = Visibility.Collapsed;
         }
+
+        UpdateAudioDebugOverlay();
+    }
+
+    private void UpdateAudioDebugOverlay()
+    {
+        if (FrameDebugOverlay == null || FrameDebugCanvas == null || FrameBudgetLine == null || FrameTimingLine == null ||
+            AudioDebugOverlay == null || AudioDebugCanvas == null || AudioWaveformLine == null || AudioLevelLine == null || AudioBassLine == null || AudioFrequencyLine == null || AudioBassFrequencyLine == null || AudioMidFrequencyLine == null || AudioHighFrequencyLine == null)
+        {
+            return;
+        }
+
+        bool visible = _showFps;
+        FrameDebugOverlay.Visibility = visible ? Visibility.Visible : Visibility.Collapsed;
+        AudioDebugOverlay.Visibility = visible ? Visibility.Visible : Visibility.Collapsed;
+        if (!visible)
+        {
+            return;
+        }
+
+        double frameWidth = FrameDebugCanvas.ActualWidth;
+        double frameHeight = FrameDebugCanvas.ActualHeight;
+        if (frameWidth >= 4 && frameHeight >= 4)
+        {
+            double[] frameGapHistory = _frameGapHistory.ToArray();
+            if (frameGapHistory.Length == 0)
+            {
+                frameGapHistory = new[] { 0d, 0d };
+            }
+            double frameBottom = frameHeight - 2;
+            double frameUsableHeight = frameHeight - 4;
+            FrameTimingLine.Points = BuildSampledPointCollection(
+                frameGapHistory.Length,
+                frameWidth,
+                GetOverlayPointCount(frameWidth, frameGapHistory.Length),
+                sourceIndex =>
+                {
+                    double normalizedGap = Math.Clamp(frameGapHistory[sourceIndex] / FrameTimingOverlayMaxMs, 0, 1);
+                    return frameBottom - (normalizedGap * frameUsableHeight);
+                });
+
+            double frameBudgetMs = 1000.0 / Math.Max(1.0, _currentFps);
+            double normalizedBudget = Math.Clamp(frameBudgetMs / FrameTimingOverlayMaxMs, 0, 1);
+            double budgetY = frameBottom - (normalizedBudget * frameUsableHeight);
+            FrameBudgetLine.Points = new PointCollection
+            {
+                new Point(0, budgetY),
+                new Point(frameWidth, budgetY)
+            };
+        }
+
+        double width = AudioDebugCanvas.ActualWidth;
+        double height = AudioDebugCanvas.ActualHeight;
+        if (width < 4 || height < 4)
+        {
+            return;
+        }
+
+        float[] waveform = _audioBeatDetector.GetWaveformHistory();
+        if (waveform.Length == 0)
+        {
+            waveform = new[] { 0f, 0f };
+        }
+        double centerY = height * 0.5;
+        double waveformAmplitude = height * 0.38;
+        AudioWaveformLine.Points = BuildSampledPointCollection(
+            waveform.Length,
+            width,
+            GetOverlayPointCount(width, waveform.Length),
+            sourceIndex => centerY - (waveform[sourceIndex] * waveformAmplitude));
+
+        float[] detectorEnvelopeHistory = _audioBeatDetector.GetEnvelopeHistory();
+        double[] levelHistory = detectorEnvelopeHistory.Length == 0
+            ? Array.Empty<double>()
+            : detectorEnvelopeHistory.Select(static value => (double)value).ToArray();
+        if (levelHistory.Length == 0)
+        {
+            levelHistory = new[] { 0d, 0d };
+        }
+        double[] bassHistory = _audioBassHistory.ToArray();
+        if (bassHistory.Length == 0)
+        {
+            bassHistory = new[] { 0d, 0d };
+        }
+        double[] freqHistory = _audioFreqHistory.ToArray();
+        if (freqHistory.Length == 0)
+        {
+            freqHistory = new[] { 0d, 0d };
+        }
+        double[] bassFreqHistory = _audioBassFreqHistory.ToArray();
+        if (bassFreqHistory.Length == 0)
+        {
+            bassFreqHistory = new[] { 0d, 0d };
+        }
+        double[] midFreqHistory = _audioMidFreqHistory.ToArray();
+        if (midFreqHistory.Length == 0)
+        {
+            midFreqHistory = new[] { 0d, 0d };
+        }
+        double[] highFreqHistory = _audioHighFreqHistory.ToArray();
+        if (highFreqHistory.Length == 0)
+        {
+            highFreqHistory = new[] { 0d, 0d };
+        }
+
+        double scalarAmplitude = height * 0.38;
+        const double MinNoteFrequencyHz = 27.5;
+        const double MaxNoteFrequencyHz = 4186.01;
+        double minLogFrequency = Math.Log(MinNoteFrequencyHz);
+        double maxLogFrequency = Math.Log(MaxNoteFrequencyHz);
+        double logFrequencyRange = Math.Max(0.0001, maxLogFrequency - minLogFrequency);
+        static double NormalizeLogFrequency(double hz, double minLogHz, double logRange)
+        {
+            const double minFrequency = MinNoteFrequencyHz;
+            const double maxFrequency = MaxNoteFrequencyHz;
+            return hz <= 0
+                ? 0
+                : Math.Clamp((Math.Log(Math.Clamp(hz, minFrequency, maxFrequency)) - minLogHz) / logRange, 0, 1);
+        }
+        AudioLevelLine.Points = BuildSampledPointCollection(
+            levelHistory.Length,
+            width,
+            GetOverlayPointCount(width, levelHistory.Length),
+            sourceIndex => centerY - (Math.Clamp(levelHistory[sourceIndex], 0, 1) * scalarAmplitude));
+        AudioBassLine.Points = BuildSampledPointCollection(
+            bassHistory.Length,
+            width,
+            GetOverlayPointCount(width, bassHistory.Length),
+            sourceIndex => centerY - (Math.Clamp(bassHistory[sourceIndex], 0, 1) * scalarAmplitude));
+        AudioFrequencyLine.Points = BuildSampledPointCollection(
+            freqHistory.Length,
+            width,
+            GetOverlayPointCount(width, freqHistory.Length),
+            sourceIndex =>
+            {
+                double normalizedLogFrequency = NormalizeLogFrequency(Math.Clamp(freqHistory[sourceIndex], 0, 5000.0), minLogFrequency, logFrequencyRange);
+                return (height - 2) - (normalizedLogFrequency * (height - 4));
+            });
+        AudioBassFrequencyLine.Points = BuildSampledPointCollection(
+            bassFreqHistory.Length,
+            width,
+            GetOverlayPointCount(width, bassFreqHistory.Length),
+            sourceIndex =>
+            {
+                double normalizedLogFrequency = NormalizeLogFrequency(bassFreqHistory[sourceIndex], minLogFrequency, logFrequencyRange);
+                return (height - 2) - (normalizedLogFrequency * (height - 4));
+            });
+        AudioMidFrequencyLine.Points = BuildSampledPointCollection(
+            midFreqHistory.Length,
+            width,
+            GetOverlayPointCount(width, midFreqHistory.Length),
+            sourceIndex =>
+            {
+                double normalizedLogFrequency = NormalizeLogFrequency(midFreqHistory[sourceIndex], minLogFrequency, logFrequencyRange);
+                return (height - 2) - (normalizedLogFrequency * (height - 4));
+            });
+        AudioHighFrequencyLine.Points = BuildSampledPointCollection(
+            highFreqHistory.Length,
+            width,
+            GetOverlayPointCount(width, highFreqHistory.Length),
+            sourceIndex =>
+            {
+                double normalizedLogFrequency = NormalizeLogFrequency(highFreqHistory[sourceIndex], minLogFrequency, logFrequencyRange);
+                return (height - 2) - (normalizedLogFrequency * (height - 4));
+            });
+    }
+
+    private static int GetOverlayPointCount(double width, int sourceLength)
+    {
+        int maxPoints = Math.Max(2, (int)Math.Ceiling(width));
+        return Math.Clamp(sourceLength, 2, maxPoints);
+    }
+
+    private static PointCollection BuildSampledPointCollection(int sourceLength, double width, int pointCount, Func<int, double> ySelector)
+    {
+        if (sourceLength <= 0)
+        {
+            return new PointCollection
+            {
+                new Point(0, 0),
+                new Point(width, 0)
+            };
+        }
+
+        pointCount = Math.Clamp(pointCount, 2, Math.Max(2, sourceLength));
+        var points = new PointCollection(pointCount);
+        double xDenom = Math.Max(1, pointCount - 1);
+        double sourceDenom = Math.Max(1, sourceLength - 1);
+        for (int i = 0; i < pointCount; i++)
+        {
+            int sourceIndex = pointCount >= sourceLength
+                ? i
+                : (int)Math.Round(i * sourceDenom / xDenom);
+            sourceIndex = Math.Clamp(sourceIndex, 0, sourceLength - 1);
+            double x = width * i / xDenom;
+            points.Add(new Point(x, ySelector(sourceIndex)));
+        }
+
+        return points;
     }
 
     private void InvertBuffer(byte[] buffer)
@@ -7627,11 +9276,6 @@ public partial class MainWindow : Window
             RgbHueShiftValueText.Text = $"{_rgbHueShiftDegrees:0.#}deg";
         }
 
-        if (_suppressRgbHueShiftControlEvents)
-        {
-            return;
-        }
-
         RenderFrame();
         SaveConfig();
     }
@@ -7642,11 +9286,6 @@ public partial class MainWindow : Window
         if (RgbHueShiftSpeedValueText != null)
         {
             RgbHueShiftSpeedValueText.Text = $"{_rgbHueShiftSpeedDegreesPerSecond:+0.#;-0.#;0}deg/s";
-        }
-
-        if (_suppressRgbHueShiftControlEvents)
-        {
-            return;
         }
 
         RenderFrame();
@@ -7753,17 +9392,36 @@ public partial class MainWindow : Window
         return normalized;
     }
 
-    private double CurrentRgbHueShiftDegrees()
+    private static double NormalizeReactiveHueFrequency(double hz)
     {
-        if (_lifeMode != GameOfLifeEngine.LifeMode.RgbChannels)
+        if (hz <= 0)
         {
             return 0;
         }
 
-        double animatedDegrees = _rgbHueShiftDegrees;
-        if (Math.Abs(_rgbHueShiftSpeedDegreesPerSecond) > 0.001)
+        double clampedHz = Math.Clamp(hz, MinReactiveHueFrequencyHz, MaxReactiveHueFrequencyHz);
+        double minLogFrequency = Math.Log(MinReactiveHueFrequencyHz);
+        double maxLogFrequency = Math.Log(MaxReactiveHueFrequencyHz);
+        double logRange = Math.Max(0.0001, maxLogFrequency - minLogFrequency);
+        return Math.Clamp((Math.Log(clampedHz) - minLogFrequency) / logRange, 0, 1);
+    }
+
+    private double CurrentRgbHueShiftDegrees(SimulationLayerState layer)
+    {
+        if (layer.LifeMode != GameOfLifeEngine.LifeMode.RgbChannels)
         {
-            animatedDegrees += _lifetimeStopwatch.Elapsed.TotalSeconds * _rgbHueShiftSpeedDegreesPerSecond;
+            return 0;
+        }
+
+        double animatedDegrees = layer.RgbHueShiftDegrees;
+        if (Math.Abs(layer.RgbHueShiftSpeedDegreesPerSecond) > 0.001)
+        {
+            animatedDegrees += _lifetimeStopwatch.Elapsed.TotalSeconds * layer.RgbHueShiftSpeedDegreesPerSecond;
+        }
+
+        if (layer.AudioFrequencyHueShiftDegrees > 0.001)
+        {
+            animatedDegrees += NormalizeReactiveHueFrequency(_smoothedFreq) * layer.AudioFrequencyHueShiftDegrees;
         }
 
         return NormalizeHueDegrees(animatedDegrees);
@@ -7771,50 +9429,23 @@ public partial class MainWindow : Window
 
     private void UpdateRgbHueShiftControls()
     {
-        bool rgbMode = _lifeMode == GameOfLifeEngine.LifeMode.RgbChannels;
         if (RgbHueShiftMenu != null)
         {
-            RgbHueShiftMenu.IsEnabled = rgbMode;
-        }
-
-        _suppressRgbHueShiftControlEvents = true;
-        try
-        {
-            if (RgbHueShiftSlider != null)
-            {
-                double normalizedOffset = NormalizeHueDegrees(_rgbHueShiftDegrees);
-                if (Math.Abs(RgbHueShiftSlider.Value - normalizedOffset) > 0.001)
-                {
-                    RgbHueShiftSlider.Value = normalizedOffset;
-                }
-            }
-
-            if (RgbHueShiftSpeedSlider != null)
-            {
-                double clampedSpeed = Math.Clamp(_rgbHueShiftSpeedDegreesPerSecond, -MaxRgbHueShiftSpeedDegreesPerSecond, MaxRgbHueShiftSpeedDegreesPerSecond);
-                if (Math.Abs(RgbHueShiftSpeedSlider.Value - clampedSpeed) > 0.001)
-                {
-                    RgbHueShiftSpeedSlider.Value = clampedSpeed;
-                }
-            }
-        }
-        finally
-        {
-            _suppressRgbHueShiftControlEvents = false;
-        }
-
-        if (RgbHueShiftValueText != null)
-        {
-            RgbHueShiftValueText.Text = $"{_rgbHueShiftDegrees:0.#}deg";
-        }
-
-        if (RgbHueShiftSpeedValueText != null)
-        {
-            RgbHueShiftSpeedValueText.Text = $"{_rgbHueShiftSpeedDegreesPerSecond:+0.#;-0.#;0}deg/s";
+            RgbHueShiftMenu.Visibility = Visibility.Collapsed;
         }
     }
 
-    private bool[,] BuildLuminanceMask(byte[] buffer, int width, int height, double min, double max, bool invert, GameOfLifeEngine.InjectionMode mode, double noiseProbability, int period, int pulseStep, bool invertInput = false)
+    private static bool[,] EnsureLayerMask(bool[,]? mask, int rows, int cols)
+    {
+        if (mask == null || mask.GetLength(0) != rows || mask.GetLength(1) != cols)
+        {
+            return new bool[rows, cols];
+        }
+
+        return mask;
+    }
+
+    private void FillLuminanceMask(byte[] buffer, int width, int height, double min, double max, bool invert, GameOfLifeEngine.InjectionMode mode, double noiseProbability, int period, int pulseStep, bool[,] mask, bool invertInput = false)
     {
         min = Math.Clamp(min, 0, 1);
         max = Math.Clamp(max, 0, 1);
@@ -7822,14 +9453,65 @@ public partial class MainWindow : Window
         period = Math.Max(1, period);
         int rows = Math.Max(0, height);
         int cols = Math.Max(0, width);
-        var mask = new bool[rows, cols];
+        bool useNoise = noiseProbability > 0;
+        bool randomPulse = mode == GameOfLifeEngine.InjectionMode.RandomPulse;
 
-        if (rows == 0 || cols == 0 || buffer.Length < rows * cols * 4)
+        if (rows == 0 || cols == 0 || buffer.Length < rows * cols * 4 ||
+            mask.GetLength(0) != rows || mask.GetLength(1) != cols)
         {
-            return mask;
+            return;
         }
 
         int stride = cols * 4;
+        if (mode == GameOfLifeEngine.InjectionMode.Threshold && !useNoise)
+        {
+            Parallel.For(0, rows, row =>
+            {
+                int rowOffset = row * stride;
+                for (int col = 0; col < cols; col++)
+                {
+                    int index = rowOffset + (col * 4);
+                    byte b = buffer[index];
+                    byte g = buffer[index + 1];
+                    byte r = buffer[index + 2];
+
+                    double luminance = (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255.0;
+                    if (invertInput)
+                    {
+                        luminance = 1.0 - luminance;
+                    }
+
+                    mask[row, col] = EvaluateThresholdValue(luminance, min, max, invert);
+                }
+            });
+            return;
+        }
+
+        if (mode == GameOfLifeEngine.InjectionMode.PulseWidthModulation && !useNoise)
+        {
+            Parallel.For(0, rows, row =>
+            {
+                int rowOffset = row * stride;
+                for (int col = 0; col < cols; col++)
+                {
+                    int index = rowOffset + (col * 4);
+                    byte b = buffer[index];
+                    byte g = buffer[index + 1];
+                    byte r = buffer[index + 2];
+
+                    double luminance = (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255.0;
+                    if (invertInput)
+                    {
+                        luminance = 1.0 - luminance;
+                    }
+
+                    double injectionDrive = MapIntensityThroughThresholdWindow(luminance, min, max, invert);
+                    mask[row, col] = PulseWidthAlive(injectionDrive, period, pulseStep);
+                }
+            });
+            return;
+        }
+
         Parallel.For(0, rows, row =>
         {
             int rowOffset = row * stride;
@@ -7840,7 +9522,8 @@ public partial class MainWindow : Window
                 byte g = buffer[index + 1];
                 byte r = buffer[index + 2];
 
-                bool noiseFail = noiseProbability > 0 && Random.Shared.NextDouble() < noiseProbability;
+                double randomValue = (useNoise || randomPulse) ? Random.Shared.NextDouble() : 0.0;
+                bool noiseFail = useNoise && randomValue < noiseProbability;
                 double luminance = (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255.0;
                 if (invertInput)
                 {
@@ -7852,7 +9535,7 @@ public partial class MainWindow : Window
                 if (mode == GameOfLifeEngine.InjectionMode.RandomPulse)
                 {
                     // Random pulse uses threshold-window-shaped intensity as alive probability.
-                    alive = Random.Shared.NextDouble() < injectionDrive;
+                    alive = randomValue < injectionDrive;
                 }
                 else if (mode == GameOfLifeEngine.InjectionMode.PulseWidthModulation)
                 {
@@ -7866,11 +9549,9 @@ public partial class MainWindow : Window
                 mask[row, col] = !noiseFail && alive;
             }
         });
-
-        return mask;
     }
 
-    private (bool[,] r, bool[,] g, bool[,] b) BuildChannelMasks(byte[] buffer, int width, int height, double min, double max, bool invert, GameOfLifeEngine.InjectionMode mode, double noiseProbability, int rPeriod, int gPeriod, int bPeriod, int pulseStep, bool invertInput = false)
+    private void FillChannelMasks(byte[] buffer, int width, int height, double hueShiftDegrees, double min, double max, bool invert, GameOfLifeEngine.InjectionMode mode, double noiseProbability, int rPeriod, int gPeriod, int bPeriod, int pulseStep, bool[,] rMask, bool[,] gMask, bool[,] bMask, bool invertInput = false)
     {
         min = Math.Clamp(min, 0, 1);
         max = Math.Clamp(max, 0, 1);
@@ -7880,16 +9561,17 @@ public partial class MainWindow : Window
         bPeriod = Math.Max(1, bPeriod);
         int rows = Math.Max(0, height);
         int cols = Math.Max(0, width);
-        var rMask = new bool[rows, cols];
-        var gMask = new bool[rows, cols];
-        var bMask = new bool[rows, cols];
+        bool useNoise = noiseProbability > 0;
+        bool randomPulse = mode == GameOfLifeEngine.InjectionMode.RandomPulse;
 
-        if (rows == 0 || cols == 0 || buffer.Length < rows * cols * 4)
+        if (rows == 0 || cols == 0 || buffer.Length < rows * cols * 4 ||
+            rMask.GetLength(0) != rows || rMask.GetLength(1) != cols ||
+            gMask.GetLength(0) != rows || gMask.GetLength(1) != cols ||
+            bMask.GetLength(0) != rows || bMask.GetLength(1) != cols)
         {
-            return (rMask, gMask, bMask);
+            return;
         }
 
-        double hueShiftDegrees = CurrentRgbHueShiftDegrees();
         bool remapToRotatedBins = Math.Abs(hueShiftDegrees) > 0.001;
         double rr = 0, rg = 0, rb = 0, gr = 0, gg = 0, gb = 0, br = 0, bg = 0, bb = 0;
         if (remapToRotatedBins)
@@ -7899,6 +9581,87 @@ public partial class MainWindow : Window
         }
 
         int stride = cols * 4;
+        if (mode == GameOfLifeEngine.InjectionMode.Threshold && !useNoise)
+        {
+            Parallel.For(0, rows, row =>
+            {
+                int rowOffset = row * stride;
+                for (int col = 0; col < cols; col++)
+                {
+                    int index = rowOffset + (col * 4);
+                    byte b = buffer[index];
+                    byte g = buffer[index + 1];
+                    byte r = buffer[index + 2];
+
+                    double nr = r / 255.0;
+                    double ng = g / 255.0;
+                    double nb = b / 255.0;
+                    if (invertInput)
+                    {
+                        nr = 1.0 - nr;
+                        ng = 1.0 - ng;
+                        nb = 1.0 - nb;
+                    }
+                    if (remapToRotatedBins)
+                    {
+                        double mappedR = (rr * nr) + (rg * ng) + (rb * nb);
+                        double mappedG = (gr * nr) + (gg * ng) + (gb * nb);
+                        double mappedB = (br * nr) + (bg * ng) + (bb * nb);
+                        nr = Math.Clamp(mappedR, 0, 1);
+                        ng = Math.Clamp(mappedG, 0, 1);
+                        nb = Math.Clamp(mappedB, 0, 1);
+                    }
+
+                    rMask[row, col] = EvaluateThresholdValue(nr, min, max, invert);
+                    gMask[row, col] = EvaluateThresholdValue(ng, min, max, invert);
+                    bMask[row, col] = EvaluateThresholdValue(nb, min, max, invert);
+                }
+            });
+            return;
+        }
+
+        if (mode == GameOfLifeEngine.InjectionMode.PulseWidthModulation && !useNoise)
+        {
+            Parallel.For(0, rows, row =>
+            {
+                int rowOffset = row * stride;
+                for (int col = 0; col < cols; col++)
+                {
+                    int index = rowOffset + (col * 4);
+                    byte b = buffer[index];
+                    byte g = buffer[index + 1];
+                    byte r = buffer[index + 2];
+
+                    double nr = r / 255.0;
+                    double ng = g / 255.0;
+                    double nb = b / 255.0;
+                    if (invertInput)
+                    {
+                        nr = 1.0 - nr;
+                        ng = 1.0 - ng;
+                        nb = 1.0 - nb;
+                    }
+                    if (remapToRotatedBins)
+                    {
+                        double mappedR = (rr * nr) + (rg * ng) + (rb * nb);
+                        double mappedG = (gr * nr) + (gg * ng) + (gb * nb);
+                        double mappedB = (br * nr) + (bg * ng) + (bb * nb);
+                        nr = Math.Clamp(mappedR, 0, 1);
+                        ng = Math.Clamp(mappedG, 0, 1);
+                        nb = Math.Clamp(mappedB, 0, 1);
+                    }
+
+                    double rDrive = MapIntensityThroughThresholdWindow(nr, min, max, invert);
+                    double gDrive = MapIntensityThroughThresholdWindow(ng, min, max, invert);
+                    double bDrive = MapIntensityThroughThresholdWindow(nb, min, max, invert);
+                    rMask[row, col] = PulseWidthAlive(rDrive, rPeriod, pulseStep);
+                    gMask[row, col] = PulseWidthAlive(gDrive, gPeriod, pulseStep);
+                    bMask[row, col] = PulseWidthAlive(bDrive, bPeriod, pulseStep);
+                }
+            });
+            return;
+        }
+
         Parallel.For(0, rows, row =>
         {
             int rowOffset = row * stride;
@@ -7909,8 +9672,8 @@ public partial class MainWindow : Window
                 byte g = buffer[index + 1];
                 byte r = buffer[index + 2];
 
-                double randomGate = Random.Shared.NextDouble();
-                bool noiseFail = noiseProbability > 0 && randomGate < noiseProbability;
+                double randomGate = (useNoise || randomPulse) ? Random.Shared.NextDouble() : 0.0;
+                bool noiseFail = useNoise && randomGate < noiseProbability;
                 double nr = r / 255.0;
                 double ng = g / 255.0;
                 double nb = b / 255.0;
@@ -7955,8 +9718,6 @@ public partial class MainWindow : Window
                 bMask[row, col] = !noiseFail && bAlive;
             }
         });
-
-        return (rMask, gMask, bMask);
     }
 
     private void FpsOscillation_OnChecked(object sender, RoutedEventArgs e)
@@ -8094,7 +9855,7 @@ public partial class MainWindow : Window
 
     private void AudioInputGainSlider_OnValueChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
     {
-        _audioInputGain = Math.Clamp(e.NewValue, 0.25, 64);
+        _audioInputGain = Math.Clamp(e.NewValue, MinAudioInputGain, MaxAudioInputGain);
         if (IsOutputAudioSelection(_selectedAudioDeviceId))
         {
             _audioInputGainRender = _audioInputGain;
@@ -8339,12 +10100,8 @@ public partial class MainWindow : Window
             _audioReactiveLevelToFpsEnabled = config.AudioReactiveLevelToFpsEnabled;
             _audioReactiveLevelToLifeOpacityEnabled = config.AudioReactiveLevelToLifeOpacityEnabled;
             _audioReactiveLevelSeedEnabled = config.AudioReactiveLevelSeedEnabled;
-            _audioInputGainCapture = config.AudioInputGainCapture > 0
-                ? Math.Clamp(config.AudioInputGainCapture, 0.25, 64)
-                : Math.Clamp(config.AudioInputGain, 0.25, 64);
-            _audioInputGainRender = config.AudioInputGainRender > 0
-                ? Math.Clamp(config.AudioInputGainRender, 0.25, 64)
-                : DefaultAudioOutputGain;
+            _audioInputGainCapture = Math.Clamp(config.AudioInputGainCapture, MinAudioInputGain, MaxAudioInputGain);
+            _audioInputGainRender = Math.Clamp(config.AudioInputGainRender, MinAudioInputGain, MaxAudioInputGain);
             _audioReactiveEnergyGain = Math.Clamp(config.AudioReactiveEnergyGain, 1, 48);
             _audioReactiveFpsBoost = Math.Clamp(config.AudioReactiveFpsBoost, 0, 2);
             _audioReactiveFpsMinPercent = Math.Clamp(config.AudioReactiveFpsMinPercent, 0, 1);
@@ -8386,6 +10143,8 @@ public partial class MainWindow : Window
                     _lifeMode,
                     _binningMode,
                     _injectionNoise,
+                    _rgbHueShiftDegrees,
+                    _rgbHueShiftSpeedDegreesPerSecond,
                     _captureThresholdMin,
                     _captureThresholdMax,
                     _invertThreshold);
@@ -8445,8 +10204,8 @@ public partial class MainWindow : Window
                 InjectionMode = _injectionMode.ToString(),
                 InjectionNoise = _injectionNoise,
                 LifeOpacity = _lifeOpacity,
-                RgbHueShiftDegrees = _rgbHueShiftDegrees,
-                RgbHueShiftSpeedDegreesPerSecond = _rgbHueShiftSpeedDegreesPerSecond,
+                RgbHueShiftDegrees = 0,
+                RgbHueShiftSpeedDegreesPerSecond = 0,
                 InvertComposite = _invertComposite,
                 ShowFps = _showFps,
                 AnimationBpm = _animationBpm,
@@ -8521,6 +10280,9 @@ public partial class MainWindow : Window
             BinningMode = layer.BinningMode.ToString(),
             InjectionNoise = layer.InjectionNoise,
             LifeOpacity = layer.LifeOpacity,
+            RgbHueShiftDegrees = layer.RgbHueShiftDegrees,
+            RgbHueShiftSpeedDegreesPerSecond = layer.RgbHueShiftSpeedDegreesPerSecond,
+            AudioFrequencyHueShiftDegrees = layer.AudioFrequencyHueShiftDegrees,
             ThresholdMin = layer.ThresholdMin,
             ThresholdMax = layer.ThresholdMax,
             InvertThreshold = layer.InvertThreshold
@@ -9347,6 +11109,9 @@ public partial class MainWindow : Window
             public string BinningMode { get; set; } = GameOfLifeEngine.BinningMode.Fill.ToString();
             public double InjectionNoise { get; set; }
             public double LifeOpacity { get; set; } = 1.0;
+            public double RgbHueShiftDegrees { get; set; }
+            public double RgbHueShiftSpeedDegreesPerSecond { get; set; }
+            public double AudioFrequencyHueShiftDegrees { get; set; }
             public double ThresholdMin { get; set; } = 0.35;
             public double ThresholdMax { get; set; } = 0.75;
             public bool InvertThreshold { get; set; }

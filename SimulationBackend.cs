@@ -60,27 +60,7 @@ internal sealed class CpuSimulationBackend : ISimulationBackend
     public (byte r, byte g, byte b) GetColor(int row, int col) => _engine.GetColor(row, col);
 
     public void FillColorBuffer(byte[] targetBuffer)
-    {
-        int expectedLength = _engine.Columns * _engine.Rows * 4;
-        if (targetBuffer.Length < expectedLength)
-        {
-            throw new ArgumentException("Target buffer is smaller than simulation output.", nameof(targetBuffer));
-        }
-
-        for (int row = 0; row < _engine.Rows; row++)
-        {
-            int rowOffset = row * _engine.Columns * 4;
-            for (int col = 0; col < _engine.Columns; col++)
-            {
-                var (r, g, b) = _engine.GetColor(row, col);
-                int index = rowOffset + (col * 4);
-                targetBuffer[index] = r;
-                targetBuffer[index + 1] = g;
-                targetBuffer[index + 2] = b;
-                targetBuffer[index + 3] = 255;
-            }
-        }
-    }
+        => _engine.FillColorBuffer(targetBuffer);
 
     public void InjectFrame(bool[,] frame) => _engine.InjectFrame(frame);
 

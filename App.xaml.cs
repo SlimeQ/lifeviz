@@ -11,6 +11,7 @@ public partial class App : Application
 {
     public static bool SuppressErrorDialogs { get; set; }
     public static bool IsSmokeTestMode { get; set; }
+    public static bool LoadUserConfigInSmokeTest { get; set; }
 
     public App()
     {

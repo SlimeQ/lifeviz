@@ -26,6 +26,8 @@ internal sealed class LayerEditorOption
 
     public string Value { get; }
     public string Label { get; }
+
+    public override string ToString() => Label;
 }
 
 internal static class LayerEditorOptions
@@ -705,6 +707,9 @@ internal sealed class LayerEditorSimulationLayer : LayerEditorNotify
     private double _thresholdMin = 0.35;
     private double _thresholdMax = 0.75;
     private bool _invertThreshold;
+    private double _rgbHueShiftDegrees;
+    private double _rgbHueShiftSpeedDegreesPerSecond;
+    private double _audioFrequencyHueShiftDegrees;
     private bool _isExpanded = true;
     private bool _isSelected;
 
@@ -858,6 +863,42 @@ internal sealed class LayerEditorSimulationLayer : LayerEditorNotify
         }
     }
 
+    public double RgbHueShiftDegrees
+    {
+        get => _rgbHueShiftDegrees;
+        set
+        {
+            if (SetField(ref _rgbHueShiftDegrees, value))
+            {
+                OnPropertyChanged(nameof(Details));
+            }
+        }
+    }
+
+    public double RgbHueShiftSpeedDegreesPerSecond
+    {
+        get => _rgbHueShiftSpeedDegreesPerSecond;
+        set
+        {
+            if (SetField(ref _rgbHueShiftSpeedDegreesPerSecond, value))
+            {
+                OnPropertyChanged(nameof(Details));
+            }
+        }
+    }
+
+    public double AudioFrequencyHueShiftDegrees
+    {
+        get => _audioFrequencyHueShiftDegrees;
+        set
+        {
+            if (SetField(ref _audioFrequencyHueShiftDegrees, value))
+            {
+                OnPropertyChanged(nameof(Details));
+            }
+        }
+    }
+
     public bool IsExpanded
     {
         get => _isExpanded;
@@ -872,7 +913,7 @@ internal sealed class LayerEditorSimulationLayer : LayerEditorNotify
 
     public string TreeLabel => string.IsNullOrWhiteSpace(Name) ? "Simulation Layer" : Name;
 
-    public string Details => $"{(Enabled ? "Enabled" : "Disabled")} | {InputFunction} | {BlendMode} | {LifeMode} | {BinningMode} | Noise {InjectionNoise:P0} | Opacity {LifeOpacity:P0} | {InjectionMode} | Th {ThresholdMin:P0}-{ThresholdMax:P0}{(InvertThreshold ? " inv" : string.Empty)}";
+    public string Details => $"{(Enabled ? "Enabled" : "Disabled")} | {InputFunction} | {BlendMode} | {LifeMode} | {BinningMode} | Noise {InjectionNoise:P0} | Opacity {LifeOpacity:P0} | Hue {RgbHueShiftDegrees:0.#}deg {RgbHueShiftSpeedDegreesPerSecond:+0.#;-0.#;0}deg/s | FreqHue {AudioFrequencyHueShiftDegrees:0.#}deg | {InjectionMode} | Th {ThresholdMin:P0}-{ThresholdMax:P0}{(InvertThreshold ? " inv" : string.Empty)}";
 
     public IReadOnlyList<LayerEditorOption> BlendModeOptions => LayerEditorOptions.BlendModes;
     public IReadOnlyList<LayerEditorOption> InputFunctionOptions => LayerEditorOptions.SimulationInputFunctions;
