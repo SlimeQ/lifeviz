@@ -1,4 +1,4 @@
-﻿# Build & Install
+# Build & Install
 
 ## Prerequisites
 
@@ -45,7 +45,19 @@ dotnet bin\Debug\net9.0-windows-sbx\lifeviz.dll --smoke-test profile-file-rgb-24
 dotnet bin\Debug\net9.0-windows-sbx\lifeviz.dll --smoke-test profile-file-rgb-480 C:\path\to\video.mp4
 dotnet bin\Debug\net9.0-windows-sbx\lifeviz.dll --smoke-test profile-current-scene
 dotnet bin\Debug\net9.0-windows-sbx\lifeviz.dll --smoke-test profile-current-scene-visible
+dotnet bin\Debug\net9.0-windows-sbx\lifeviz.dll --smoke-test profile-current-scene-fullscreen
+dotnet bin\Debug\net9.0-windows-sbx\lifeviz.dll --smoke-test profile-current-scene-720
+dotnet bin\Debug\net9.0-windows-sbx\lifeviz.dll --smoke-test profile-current-scene-visible-720
+dotnet bin\Debug\net9.0-windows-sbx\lifeviz.dll --smoke-test profile-current-scene-fullscreen-720
+dotnet bin\Debug\net9.0-windows-sbx\lifeviz.dll --smoke-test profile-current-scene-presets
+dotnet bin\Debug\net9.0-windows-sbx\lifeviz.dll --smoke-test profile-current-scene-visible-presets
+dotnet bin\Debug\net9.0-windows-sbx\lifeviz.dll --smoke-test profile-current-scene-fullscreen-presets
 dotnet bin\Debug\net9.0-windows-sbx\lifeviz.dll --smoke-test profile-current-scene-interaction
+dotnet bin\Debug\net9.0-windows-sbx\lifeviz.dll --smoke-test pacing-current-scene-visible-presets
+dotnet bin\Debug\net9.0-windows-sbx\lifeviz.dll --smoke-test pacing-current-scene-fullscreen-presets
+dotnet bin\Debug\net9.0-windows-sbx\lifeviz.dll --smoke-test pacing-current-scene-interaction
+dotnet bin\Debug\net9.0-windows-sbx\lifeviz.dll --smoke-test pacing-current-scene-overlay-fullscreen-144
+dotnet bin\Debug\net9.0-windows-sbx\lifeviz.dll --smoke-test pacing-current-scene-suite
 dotnet bin\Debug\net9.0-windows-sbx\lifeviz.dll --smoke-test frame-pump-thread-safety
 dotnet bin\Debug\net9.0-windows-sbx\lifeviz.dll --smoke-test dimensions
 dotnet bin\Debug\net9.0-windows-sbx\lifeviz.dll --smoke-test shutdown
@@ -66,11 +78,18 @@ dotnet bin\Debug\net9.0-windows-sbx\lifeviz.dll --smoke-test all
 - `profile-mainloop` runs the real frame loop against a hidden synthetic scene, writes a JSON timing report to `%LOCALAPPDATA%\lifeviz\profiles` in normal app runs, and writes to `bin\Debug\net9.0-windows-sbx\profiles\` in smoke-test mode so local test runs stay self-contained. The exported report also includes frame-gap spike counters (`>25ms`, `>33ms`, `>50ms`) so pacing regressions can be diagnosed separately from average stage cost.
 - `profile-240` / `profile-480` run the same hidden-scene profiler at fixed grayscale resolutions.
 - `profile-rgb-240` / `profile-rgb-480` run the profiler with the reference simulation layer forced to `RGB Channel Bins`, which is the right target when performance work touches RGB injection or Conway stepping.
-- `profile-file-240` / `profile-file-480` run that same profiler against a real file source instead of synthetic buffers.
+- `profile-file-240` / `profile-file-480` run that same profiler against a real file source instead of synthetic buffers, and now fail if the file source stops publishing fresh frame tokens during the run.
 - `profile-file-rgb-240` / `profile-file-rgb-480` do the same with the reference simulation layer pinned to `RGB Channel Bins`, which is the right target when file-video playback performance only collapses once RGB layers are enabled.
 - `profile-current-scene` loads the persisted user config/scene and profiles it headlessly, which is the fastest way to capture real-stage timings from the current setup without manually reading the on-screen overlay.
 - `profile-current-scene-visible` does the same in a visible window so display/presentation pacing regressions can be measured against the actual desktop composition path. It now also logs file-video freshness/age metrics (`capture_file_fresh_frame_ratio`, `capture_file_frame_age_ms`) so "smooth life, slideshow underlay" regressions can be diagnosed directly.
-- `profile-current-scene-interaction` performs that same real-scene visible run but opens and closes the root context menu mid-test, then fails unless post-interaction frame pacing recovers to the pre-interaction baseline.
+- `profile-current-scene-fullscreen` does the same after forcing the main output window into fullscreen, and now also fails if the presented image collapses into the old tiny centered/top-centered rectangle instead of occupying the expected fullscreen display rect.
+- `profile-current-scene-<144|240|480|720|1080|1440|2160>`, `profile-current-scene-visible-<...>`, and `profile-current-scene-fullscreen-<...>` force the real saved scene to that exact preset height before profiling, which is the right tool when a regression only appears at a specific output size.
+- `profile-current-scene-presets`, `profile-current-scene-visible-presets`, and `profile-current-scene-fullscreen-presets` sweep the full preset ladder (`144/240/480/720/1080/1440/2160`) automatically so resolution cliffs are caught without manually relaunching the app seven times. The preset suite uses a shorter per-preset dwell than the single-target profiles so the full ladder remains practical to run as a routine smoke.
+- `profile-current-scene-interaction` performs that same real-scene visible run, opens the Scene Editor, verifies that the main output does not remain interaction-throttled while the editor is open, then cycles the root context menu and fails unless post-interaction frame pacing recovers to the pre-interaction baseline.
+- `pacing-current-scene-visible-presets` and `pacing-current-scene-fullscreen-presets` are the hard pacing/underrun suites. They take the real saved scene, force a stable `60 fps` target, walk the realtime preset ladder (`144/240/480`), and fail on explicit frame-gap budgets plus underrun ratios (`>25ms`, `>33ms`, `>50ms`) instead of merely exporting a profile.
+- `pacing-current-scene-interaction` runs the same hard pacing assertions around the `480p` interaction case with the Scene Editor and root context menu.
+- `pacing-current-scene-overlay-fullscreen-144` enables `Show FPS` in fullscreen at `144p` and fails if the diagnostic overlay itself causes pacing regressions.
+- `pacing-current-scene-suite` runs the visible preset pacing ladder plus the interaction pacing case as one regression pass.
 - `frame-pump-thread-safety` opens the real Scene Editor and then evaluates the frame-pump interaction state from a worker thread, which catches cross-thread WPF access regressions in the timer-driven frame scheduler.
 - Pass the file path as the third argument or set `LIFEVIZ_SMOKE_VIDEO` before launching the smoke test.
 - `dimensions` applies a live height/depth change through `MainWindow`, forces the reference simulation layer into `RGB Channel Bins`, then drives the real Scene Editor height dropdown in both Live Mode and deferred Apply mode, and verifies that every simulation layer plus the presentation surface resize together.
@@ -155,4 +174,5 @@ Downloaders should grab the single `lifeviz_installer.exe` from the release and 
 - If Rider/VS doesn't see the run configs, ensure the `.run/` folder and `.idea` contents are checked out.
 - Window capture requires desktop composition (Aero); minimized or hidden windows cannot be sampled.
 - ClickOnce "already installed from a different location" error: use `Install-ClickOnce.ps1` to stage to `%LOCALAPPDATA%\lifeviz-clickonce`, which uses a stable deployment URI and clears the cache before installing. If you prefer manual cleanup, uninstall the previous LifeViz entry first.
+
 

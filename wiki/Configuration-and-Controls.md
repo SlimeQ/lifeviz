@@ -2,7 +2,7 @@
 
 The UI stays invisible until you right-click anywhere on the canvas, revealing the context menu.
 
-- The main output window now uses a custom chrome strip instead of the native title bar. The strip includes buttons for the root app menu (`...`), Scene Editor (`SE`), minimize, fullscreen, and close. Dragging anywhere on the output background moves the window, double-clicking that background toggles fullscreen, and resizing from the left/right/bottom edges stays inside LifeViz's own pointer handling instead of entering the OS non-client drag loop.
+- The main output window now uses a custom chrome strip instead of the native title bar. The strip includes buttons for the root app menu (`...`), Scene Editor (`SE`), minimize, fullscreen, and close. Dragging anywhere on the output background moves the window, double-clicking that background toggles fullscreen, and resizing from the left/right/bottom edges stays inside LifeViz's own pointer handling instead of entering the OS non-client drag loop. Custom resize now preserves the active aspect ratio during the drag itself, so the window does not snap back when you release the mouse.
 
 ## Menu Actions
 
@@ -21,7 +21,7 @@ The UI stays invisible until you right-click anywhere on the canvas, revealing t
 - **Audio Reactivity** - configurable audio-driven simulation control (uses the selected **Audio Source** device). The menu includes:
   - *Enable Audio Reactivity* master toggle.
   - *Input Gain* (0.00x-2.00x, snapped in 0.05x steps) to amplify or trim incoming signal before beat/energy analysis; the app remembers separate gain values for input-device mode vs output-device mode.
-  - *Level -> Framerate* with `Energy Gain`, `Framerate Boost`, and `Framerate Minimum` sliders (maps smoothed audio level from the configured minimum floor to 100% of the selected target FPS; boost controls how quickly loudness reaches full-speed).
+  - *Level -> Framerate* with `Energy Gain`, `Framerate Boost`, and `Framerate Minimum` sliders (maps smoothed audio level from the configured minimum floor to 100% of the selected target simulation FPS; boost controls how quickly loudness reaches full-speed, while render/video cadence stays pinned to the main framerate menu target).
   - *Level -> Life Opacity* with `Opacity Min Scalar` (maps a rectified short-window max envelope signal directly to a scalar floor..1.0, applied against the base **Life Opacity** slider value).
   - *Level -> Seeder* with `Max Level Seeds` (continuously injects patterns as loudness rises, making reactivity obvious even without strong beat detection).
   - *Beat -> Seeder* with `Seeds Per Beat`, `Seed Cooldown`, and `Seed Pattern` (Glider, R-pentomino, Random Burst) to inject patterns on detected beat edges.
@@ -32,7 +32,7 @@ The UI stays invisible until you right-click anywhere on the canvas, revealing t
   - Audio normalization is tuned for typical program material instead of near-full-scale samples, so normal loopback music reaches a much larger portion of the displayed range.
   - The `Audio: %` value uses that same rectified short-window max envelope signal directly, so it tracks the absolute waveform peaks per bucket instead of averaging them down.
   - Two debug panels appear at the bottom of the window while the overlay is enabled. The upper timing panel shows orange rolling frame-gap history and a red dashed frame-budget line (`1000 / target fps`). The lower audio panel shows white rolling waveform history, yellow rolling rectified max-envelope history, cyan rolling bass-energy history, magenta rolling dominant-frequency history, blue bass-band dominant frequency, green mid-band dominant frequency, and red high-band dominant frequency. All traces share the same fixed 30-second timescale, with new data entering on the right and scrolling left.
-  - The debug overlay is decimated to approximately one sample per horizontal pixel and refreshed at a lower fixed rate so the diagnostic UI itself does not add excessive visible jitter.
+- The debug overlay is decimated to a capped sample count and refreshed on split cadences: the timing panel updates faster than the audio panel, and the audio traces are read directly from `AudioBeatDetector` history buffers rather than being re-sampled through extra UI-side queues. The white waveform trace now renders min/max bucket ranges instead of one sample per bucket, so it stays readable at long timescales.
   - Yellow and cyan use the same zero baseline as the white waveform, so you can compare how the derived control signals fit the real waveform envelope directly. Orange/red timing traces use the full panel height on a `0..50 ms` scale so pacing spikes are obvious. Magenta/blue/green/red use the full panel height on a logarithmic note-like scale so equal musical intervals are spaced more evenly.
 - **Simulation Layers** - root submenu for simulation controls. It includes *Manage In Scene Editor...* plus the global master *Life Opacity* control. Per-layer life mode, binning mode, injection mode, injection noise, thresholds, and layer opacity now live in the Scene Editor's **Simulation Layers** tab.
 - **Composite Blend** - controls shader-fallback passthrough mixing (Additive default; Normal, Multiply, Screen, Overlay, Lighten, Darken, Subtractive). In normal operation, passthrough is precomposited into the simulation buffer first so simulation-layer blend modes apply directly on top of the underlay.
@@ -59,7 +59,7 @@ The UI stays invisible until you right-click anywhere on the canvas, revealing t
 - Loading a layer config replaces the current stack and restores simulation-layer settings; in live mode it applies immediately, otherwise it updates the draft state until you press *Apply*.
 - Reconfiguring height recomputes columns to maintain the current aspect ratio (either 16:9 or the current primary source's ratio).
 - Clearing all scene sources resets the source stack and default aspect handling, but it no longer disables *Passthrough Underlay*; if passthrough was on before the stack went empty, re-adding sources will still display the underlay immediately.
-- The window stays in the current aspect ratio and can be resized from the corner grip; height presets or fullscreen adjust the simulation resolution without introducing letterboxing.
+- The window stays in the current aspect ratio and can be resized from the custom edge/corner grips; height presets or fullscreen adjust the simulation resolution without introducing letterboxing.
 
 ## Persistence
 

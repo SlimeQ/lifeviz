@@ -1,6 +1,8 @@
 using System;
 using System.Diagnostics;
+using System.IO;
 using System.Linq;
+using System.Text.Json;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Threading;
@@ -9,6 +11,12 @@ namespace lifeviz;
 
 internal static class SmokeTestRunner
 {
+    private static readonly int[] CurrentScenePresetRows = { 144, 240, 480, 720, 1080, 1440, 2160 };
+    private static readonly int[] RealtimePacingRows = { 144, 240, 480 };
+    private static readonly TimeSpan CurrentScenePresetProfileDuration = TimeSpan.FromSeconds(6);
+    private static readonly TimeSpan RealtimePacingProfileDuration = TimeSpan.FromSeconds(8);
+    private const double RealtimePacingTargetFps = 60.0;
+
     public static bool TryRun(string[] args, out int exitCode)
     {
         exitCode = 0;
@@ -25,6 +33,11 @@ internal static class SmokeTestRunner
         {
             string target = args[1].Trim();
             string? smokeVideoPath = args.Length >= 3 ? args[2] : Environment.GetEnvironmentVariable("LIFEVIZ_SMOKE_VIDEO");
+            if (TryRunCurrentScenePresetProfileTarget(target, out exitCode))
+            {
+                return true;
+            }
+
             exitCode = target.ToLowerInvariant() switch
             {
                 "profile-240" => RunFrameProfileSmokeTest(240, "smoke-mainloop-240p"),
@@ -37,7 +50,16 @@ internal static class SmokeTestRunner
                 "profile-file-rgb-480" => RunFrameProfileSmokeTest(480, "smoke-mainloop-file-rgb-480p", rgbMode: true, smokeVideoPath),
                 "profile-current-scene" => RunCurrentSceneProfileSmokeTest(visibleWindow: false),
                 "profile-current-scene-visible" => RunCurrentSceneProfileSmokeTest(visibleWindow: true),
+                "profile-current-scene-fullscreen" => RunCurrentSceneProfileSmokeTest(visibleWindow: true, forcedRows: null, fullscreen: true),
+                "profile-current-scene-presets" => RunCurrentScenePresetProfileSmokeSuite(visibleWindow: false),
+                "profile-current-scene-visible-presets" => RunCurrentScenePresetProfileSmokeSuite(visibleWindow: true),
+                "profile-current-scene-fullscreen-presets" => RunCurrentScenePresetProfileSmokeSuite(visibleWindow: true, fullscreen: true),
                 "profile-current-scene-interaction" => RunCurrentSceneInteractionProfileSmokeTest(),
+                "pacing-current-scene-visible-presets" => RunCurrentScenePacingSmokeSuite(visibleWindow: true),
+                "pacing-current-scene-fullscreen-presets" => RunCurrentScenePacingSmokeSuite(visibleWindow: true, fullscreen: true),
+                "pacing-current-scene-interaction" => RunCurrentSceneInteractionPacingSmokeTest(),
+                "pacing-current-scene-overlay-fullscreen-144" => RunCurrentSceneOverlayPacingSmokeTest(fullscreen: true, rows: 144),
+                "pacing-current-scene-suite" => RunCurrentScenePacingSuite(),
                 "frame-pump-thread-safety" => RunFramePumpThreadSafetySmokeTest(),
                 "gpu-benchmark" => RunGpuBenchmark(),
                 "gpu-handoff" => RunGpuCompositeToSimulationSmokeTest(),
@@ -53,8 +75,9 @@ internal static class SmokeTestRunner
                 "dimensions" => RunDimensionChangeSmokeTest(),
                 "shutdown" => RunShutdownSmokeTest(),
                 "startup" => RunStartupSmokeTest(),
+                "startup-recovery" => RunStartupRecoverySmokeTest(),
                 "all" => RunAllSmokeTests(),
-                _ => throw new ArgumentException($"Unknown smoke test target '{target}'. Expected profile-240, profile-480, profile-rgb-240, profile-rgb-480, profile-file-240, profile-file-480, profile-file-rgb-240, profile-file-rgb-480, profile-current-scene, profile-current-scene-visible, profile-current-scene-interaction, frame-pump-thread-safety, gpu-benchmark, gpu-handoff, gpu-rgb-threshold, gpu-frequency-hue, gpu-injection-mode, gpu-file-injection-mode, gpu-sim, gpu-source, source-reset, gpu-render, profile-mainloop, dimensions, shutdown, startup, or all.")
+                _ => throw new ArgumentException($"Unknown smoke test target '{target}'. Expected profile-240, profile-480, profile-rgb-240, profile-rgb-480, profile-file-240, profile-file-480, profile-file-rgb-240, profile-file-rgb-480, profile-current-scene, profile-current-scene-visible, profile-current-scene-fullscreen, profile-current-scene-presets, profile-current-scene-visible-presets, profile-current-scene-fullscreen-presets, profile-current-scene-<144|240|480|720|1080|1440|2160>, profile-current-scene-visible-<144|240|480|720|1080|1440|2160>, profile-current-scene-fullscreen-<144|240|480|720|1080|1440|2160>, profile-current-scene-interaction, pacing-current-scene-visible-presets, pacing-current-scene-fullscreen-presets, pacing-current-scene-interaction, pacing-current-scene-overlay-fullscreen-144, pacing-current-scene-suite, frame-pump-thread-safety, gpu-benchmark, gpu-handoff, gpu-rgb-threshold, gpu-frequency-hue, gpu-injection-mode, gpu-file-injection-mode, gpu-sim, gpu-source, source-reset, gpu-render, profile-mainloop, dimensions, shutdown, startup, startup-recovery, or all.")
             };
         }
         catch (Exception ex)
@@ -83,6 +106,48 @@ internal static class SmokeTestRunner
         }
 
         return RunGpuUiSmokeSuite();
+    }
+
+    private static bool TryRunCurrentScenePresetProfileTarget(string target, out int exitCode)
+    {
+        exitCode = 0;
+        const string hiddenPrefix = "profile-current-scene-";
+        const string visiblePrefix = "profile-current-scene-visible-";
+        const string fullscreenPrefix = "profile-current-scene-fullscreen-";
+
+        bool visibleWindow;
+        bool fullscreen;
+        string? suffix;
+        if (target.StartsWith(fullscreenPrefix, StringComparison.OrdinalIgnoreCase))
+        {
+            visibleWindow = true;
+            fullscreen = true;
+            suffix = target.Substring(fullscreenPrefix.Length);
+        }
+        else if (target.StartsWith(visiblePrefix, StringComparison.OrdinalIgnoreCase))
+        {
+            visibleWindow = true;
+            fullscreen = false;
+            suffix = target.Substring(visiblePrefix.Length);
+        }
+        else if (target.StartsWith(hiddenPrefix, StringComparison.OrdinalIgnoreCase))
+        {
+            visibleWindow = false;
+            fullscreen = false;
+            suffix = target.Substring(hiddenPrefix.Length);
+        }
+        else
+        {
+            return false;
+        }
+
+        if (!int.TryParse(suffix, out int rows) || !CurrentScenePresetRows.Contains(rows))
+        {
+            return false;
+        }
+
+        exitCode = RunCurrentSceneProfileSmokeTest(visibleWindow, rows, fullscreen);
+        return true;
     }
 
     private static int RunFramePumpThreadSafetySmokeTest()
@@ -241,6 +306,7 @@ internal static class SmokeTestRunner
         Exception? failure = null;
         var app = new App();
         app.InitializeComponent();
+        app.StartupUri = null;
         app.ShutdownMode = ShutdownMode.OnExplicitShutdown;
         app.DispatcherUnhandledException += (_, args) =>
         {
@@ -317,6 +383,7 @@ internal static class SmokeTestRunner
 
         var app = new App();
         app.InitializeComponent();
+        app.StartupUri = null;
         app.ShutdownMode = ShutdownMode.OnExplicitShutdown;
         app.DispatcherUnhandledException += (_, args) =>
         {
@@ -895,6 +962,17 @@ internal static class SmokeTestRunner
                                 return;
                             }
 
+                            if (!string.IsNullOrWhiteSpace(smokeVideoPath))
+                            {
+                                var freshMetric = report.Metrics.FirstOrDefault(metric => metric.Name == "capture_file_fresh_frame_ratio");
+                                if (freshMetric == null || freshMetric.Count < 10)
+                                {
+                                    failure ??= new InvalidOperationException("File-video profiler did not record enough fresh-frame samples.");
+                                    app.Shutdown(1);
+                                    return;
+                                }
+                            }
+
                             Logger.Info($"Frame profile report written to {path}");
                             foreach (var metric in report.Metrics
                                          .Where(metric => metric.Name.EndsWith("_ms", StringComparison.Ordinal))
@@ -932,8 +1010,13 @@ internal static class SmokeTestRunner
     }
 
     private static int RunCurrentSceneProfileSmokeTest(bool visibleWindow)
+        => RunCurrentSceneProfileSmokeTest(visibleWindow, forcedRows: null, fullscreen: false);
+
+    private static int RunCurrentSceneProfileSmokeTest(bool visibleWindow, int? forcedRows, bool fullscreen)
     {
-        Logger.Info($"Running current-scene profile smoke test (visibleWindow={visibleWindow}).");
+        Logger.Info(forcedRows.HasValue
+            ? $"Running current-scene profile smoke test (visibleWindow={visibleWindow}, fullscreen={fullscreen}, rows={forcedRows.Value})."
+            : $"Running current-scene profile smoke test (visibleWindow={visibleWindow}, fullscreen={fullscreen}).");
         Exception? failure = null;
         App.LoadUserConfigInSmokeTest = true;
 
@@ -972,48 +1055,84 @@ internal static class SmokeTestRunner
                     window.Opacity = 0.0;
                 }
 
-                window.Dispatcher.BeginInvoke(new Action(() =>
+                window.Dispatcher.BeginInvoke(new Func<Task>(async () =>
                 {
-                    window.StartProfilingSession(visibleWindow ? "smoke-current-scene-visible" : "smoke-current-scene");
-
-                    var timer = new DispatcherTimer(DispatcherPriority.ApplicationIdle)
+                    try
                     {
-                        Interval = TimeSpan.FromSeconds(10)
-                    };
-                    timer.Tick += (_, _) =>
-                    {
-                        timer.Stop();
-                        try
+                        if (forcedRows.HasValue)
                         {
-                            var (report, path) = window.StopProfilingSessionAndExport();
-                            var frameMetric = report.Metrics.FirstOrDefault(metric => metric.Name == "frame_total_ms");
-                            if (frameMetric == null || frameMetric.Count < 20)
+                            int appliedRows = window.SetSimulationRowsForSmoke(forcedRows.Value);
+                            if (appliedRows != forcedRows.Value)
                             {
-                                failure ??= new InvalidOperationException("Current-scene profiler did not collect enough frame samples.");
+                                throw new InvalidOperationException($"Requested current-scene smoke rows {forcedRows.Value} but engine applied {appliedRows}.");
+                            }
+                        }
+
+                        if (fullscreen)
+                        {
+                            window.EnterFullscreenForSmoke();
+                            await Task.Delay(250);
+                            var (layoutOk, detail) = window.ValidateRenderLayoutForSmoke(fullscreenExpected: true);
+                            if (!layoutOk)
+                            {
+                                throw new InvalidOperationException($"Fullscreen render layout validation failed before profiling. {detail}");
+                            }
+                        }
+
+                        string sessionName = forcedRows.HasValue
+                            ? (fullscreen
+                                ? $"smoke-current-scene-fullscreen-{forcedRows.Value}p"
+                                : (visibleWindow ? $"smoke-current-scene-visible-{forcedRows.Value}p" : $"smoke-current-scene-{forcedRows.Value}p"))
+                            : (fullscreen
+                                ? "smoke-current-scene-fullscreen"
+                                : (visibleWindow ? "smoke-current-scene-visible" : "smoke-current-scene"));
+                        window.StartProfilingSession(sessionName);
+
+                        var timer = new DispatcherTimer(DispatcherPriority.ApplicationIdle)
+                        {
+                            Interval = TimeSpan.FromSeconds(10)
+                        };
+                        timer.Tick += (_, _) =>
+                        {
+                            timer.Stop();
+                            try
+                            {
+                                var (report, path) = window.StopProfilingSessionAndExport();
+                                var frameMetric = report.Metrics.FirstOrDefault(metric => metric.Name == "frame_total_ms");
+                                if (frameMetric == null || frameMetric.Count < 20)
+                                {
+                                    failure ??= new InvalidOperationException("Current-scene profiler did not collect enough frame samples.");
+                                    app.Shutdown(1);
+                                    return;
+                                }
+
+                                Logger.Info($"Current-scene profile report written to {path}");
+                                foreach (var metric in report.Metrics
+                                             .Where(metric => metric.Name.EndsWith("_ms", StringComparison.Ordinal))
+                                             .OrderByDescending(metric => metric.Average)
+                                             .Take(16))
+                                {
+                                    Logger.Info($"Profile metric {metric.Name}: avg={metric.Average:F3} ms, p95={metric.P95:F3} ms, max={metric.Maximum:F3} ms, count={metric.Count}.");
+                                }
+
+                                window.Close();
+                                app.Shutdown(0);
+                            }
+                            catch (Exception ex)
+                            {
+                                failure ??= ex;
+                                window.Close();
                                 app.Shutdown(1);
-                                return;
                             }
-
-                            Logger.Info($"Current-scene profile report written to {path}");
-                            foreach (var metric in report.Metrics
-                                         .Where(metric => metric.Name.EndsWith("_ms", StringComparison.Ordinal))
-                                         .OrderByDescending(metric => metric.Average)
-                                         .Take(16))
-                            {
-                                Logger.Info($"Profile metric {metric.Name}: avg={metric.Average:F3} ms, p95={metric.P95:F3} ms, max={metric.Maximum:F3} ms, count={metric.Count}.");
-                            }
-
-                            window.Close();
-                            app.Shutdown(0);
-                        }
-                        catch (Exception ex)
-                        {
-                            failure ??= ex;
-                            window.Close();
-                            app.Shutdown(1);
-                        }
-                    };
-                    timer.Start();
+                        };
+                        timer.Start();
+                    }
+                    catch (Exception ex)
+                    {
+                        failure ??= ex;
+                        window.Close();
+                        app.Shutdown(1);
+                    }
                 }), DispatcherPriority.ApplicationIdle);
             };
 
@@ -1027,6 +1146,118 @@ internal static class SmokeTestRunner
         }
 
         Logger.Info("Current-scene profile smoke test passed.");
+        return exitCode;
+    }
+
+    private static int RunCurrentScenePresetProfileSmokeSuite(bool visibleWindow, bool fullscreen = false)
+    {
+        Logger.Info($"Running current-scene preset profile smoke suite (visibleWindow={visibleWindow}, fullscreen={fullscreen}).");
+        Exception? failure = null;
+        App.LoadUserConfigInSmokeTest = true;
+
+        var app = new App();
+        app.InitializeComponent();
+        app.ShutdownMode = ShutdownMode.OnExplicitShutdown;
+        app.DispatcherUnhandledException += (_, args) =>
+        {
+            failure ??= args.Exception;
+            args.Handled = true;
+            app.Shutdown(1);
+        };
+
+        app.Startup += (_, _) =>
+        {
+            var waitForWindow = new DispatcherTimer(DispatcherPriority.ApplicationIdle)
+            {
+                Interval = TimeSpan.FromMilliseconds(50)
+            };
+
+            waitForWindow.Tick += (_, _) =>
+            {
+                if (app.MainWindow is not MainWindow window)
+                {
+                    return;
+                }
+
+                waitForWindow.Stop();
+
+                if (!visibleWindow)
+                {
+                    window.ShowInTaskbar = false;
+                    window.ShowActivated = false;
+                    window.Left = -10000;
+                    window.Top = -10000;
+                    window.Opacity = 0.0;
+                }
+
+                window.Dispatcher.BeginInvoke(new Func<Task>(async () =>
+                {
+                    try
+                    {
+                        foreach (int rows in CurrentScenePresetRows)
+                        {
+                            int appliedRows = window.SetSimulationRowsForSmoke(rows);
+                            if (appliedRows != rows)
+                            {
+                                throw new InvalidOperationException($"Requested preset smoke rows {rows} but engine applied {appliedRows}.");
+                            }
+
+                            if (fullscreen)
+                            {
+                                window.EnterFullscreenForSmoke();
+                                await Task.Delay(150);
+                                var (layoutOk, detail) = window.ValidateRenderLayoutForSmoke(fullscreenExpected: true);
+                                if (!layoutOk)
+                                {
+                                    throw new InvalidOperationException($"Fullscreen render layout validation failed for {rows}p. {detail}");
+                                }
+                            }
+
+                            string sessionName = fullscreen
+                                ? $"smoke-current-scene-fullscreen-{rows}p"
+                                : (visibleWindow ? $"smoke-current-scene-visible-{rows}p" : $"smoke-current-scene-{rows}p");
+                            window.StartProfilingSession(sessionName);
+                            await Task.Delay(CurrentScenePresetProfileDuration);
+
+                            var (report, path) = window.StopProfilingSessionAndExport();
+                            var frameMetric = report.Metrics.FirstOrDefault(metric => metric.Name == "frame_total_ms");
+                            if (frameMetric == null || frameMetric.Count < 20)
+                            {
+                                throw new InvalidOperationException($"Current-scene preset profiler did not collect enough samples for {rows}p.");
+                            }
+
+                            Logger.Info($"Current-scene preset profile report written to {path}");
+                            foreach (var metric in report.Metrics
+                                         .Where(metric => metric.Name.EndsWith("_ms", StringComparison.Ordinal))
+                                         .OrderByDescending(metric => metric.Average)
+                                         .Take(12))
+                            {
+                                Logger.Info($"[{rows}p] Profile metric {metric.Name}: avg={metric.Average:F3} ms, p95={metric.P95:F3} ms, max={metric.Maximum:F3} ms, count={metric.Count}.");
+                            }
+                        }
+
+                        window.Close();
+                        app.Shutdown(0);
+                    }
+                    catch (Exception ex)
+                    {
+                        failure ??= ex;
+                        window.Close();
+                        app.Shutdown(1);
+                    }
+                }), DispatcherPriority.ApplicationIdle);
+            };
+
+            waitForWindow.Start();
+        };
+
+        int exitCode = app.Run();
+        if (failure != null)
+        {
+            throw new InvalidOperationException("Current-scene preset profile smoke suite failed.", failure);
+        }
+
+        Logger.Info("Current-scene preset profile smoke suite passed.");
         return exitCode;
     }
 
@@ -1071,6 +1302,15 @@ internal static class SmokeTestRunner
                         await Task.Delay(TimeSpan.FromSeconds(4));
                         var (preReport, prePath) = window.StopProfilingSessionAndExport();
 
+                        window.OpenLayerEditor();
+                        await Task.Delay(TimeSpan.FromMilliseconds(750));
+                        window.Activate();
+                        await Task.Delay(TimeSpan.FromMilliseconds(500));
+
+                        window.StartProfilingSession("smoke-current-scene-editor-open");
+                        await Task.Delay(TimeSpan.FromSeconds(4));
+                        var (editorReport, editorPath) = window.StopProfilingSessionAndExport();
+
                         await window.OpenAndCloseRootContextMenuForSmokeAsync(TimeSpan.FromMilliseconds(750));
                         await Task.Delay(TimeSpan.FromSeconds(1));
 
@@ -1079,16 +1319,39 @@ internal static class SmokeTestRunner
                         var (postReport, postPath) = window.StopProfilingSessionAndExport();
 
                         var preGap = RequireMetric(preReport, "frame_tick_gap_ms");
+                        var editorGap = RequireMetric(editorReport, "frame_tick_gap_ms");
                         var postGap = RequireMetric(postReport, "frame_tick_gap_ms");
+                        var editorThrottle = RequireMetric(editorReport, "ui_interaction_throttled");
+                        var postThrottle = RequireMetric(postReport, "ui_interaction_throttled");
 
                         Logger.Info($"Current-scene interaction pre profile written to {prePath}");
+                        Logger.Info($"Current-scene interaction editor-open profile written to {editorPath}");
                         Logger.Info($"Current-scene interaction post profile written to {postPath}");
                         Logger.Info($"Pre interaction frame gap: avg={preGap.Average:F3} ms, p95={preGap.P95:F3} ms, max={preGap.Maximum:F3} ms.");
+                        Logger.Info($"Editor-open frame gap: avg={editorGap.Average:F3} ms, p95={editorGap.P95:F3} ms, max={editorGap.Maximum:F3} ms.");
                         Logger.Info($"Post interaction frame gap: avg={postGap.Average:F3} ms, p95={postGap.P95:F3} ms, max={postGap.Maximum:F3} ms.");
 
-                        if (preGap.Count < 20 || postGap.Count < 20)
+                        if (preGap.Count < 20 || editorGap.Count < 20 || postGap.Count < 20)
                         {
                             throw new InvalidOperationException("Interaction profile smoke did not collect enough frame samples.");
+                        }
+
+                        if (editorThrottle.Average > 0.10)
+                        {
+                            throw new InvalidOperationException(
+                                $"Main window remained throttled while the Scene Editor was open. ui_interaction_throttled avg={editorThrottle.Average:F3}.");
+                        }
+
+                        if (postThrottle.Average > 0.10)
+                        {
+                            throw new InvalidOperationException(
+                                $"Main window remained throttled after interaction recovery. ui_interaction_throttled avg={postThrottle.Average:F3}.");
+                        }
+
+                        if (editorGap.Average > 25.0 || editorGap.P95 > 35.0 || editorGap.Average > preGap.Average + 5.0)
+                        {
+                            throw new InvalidOperationException(
+                                $"Frame pacing degraded while the Scene Editor was open. Pre avg={preGap.Average:F3} ms, editor avg={editorGap.Average:F3} ms, editor p95={editorGap.P95:F3} ms.");
                         }
 
                         if (postGap.Average > 25.0 || postGap.P95 > 35.0 || postGap.Average > preGap.Average + 5.0)
@@ -1122,10 +1385,363 @@ internal static class SmokeTestRunner
         return exitCode;
     }
 
+    private static int RunCurrentScenePacingSuite()
+    {
+        int visibleResult = RunCurrentScenePacingSmokeSuite(visibleWindow: true);
+        if (visibleResult != 0)
+        {
+            return visibleResult;
+        }
+
+        return RunCurrentSceneInteractionPacingSmokeTest();
+    }
+
+    private static int RunCurrentScenePacingSmokeSuite(bool visibleWindow, bool fullscreen = false)
+    {
+        Logger.Info($"Running current-scene pacing smoke suite (visibleWindow={visibleWindow}, fullscreen={fullscreen}).");
+        Exception? failure = null;
+        App.LoadUserConfigInSmokeTest = true;
+
+        var app = new App();
+        app.InitializeComponent();
+        app.ShutdownMode = ShutdownMode.OnExplicitShutdown;
+        app.DispatcherUnhandledException += (_, args) =>
+        {
+            failure ??= args.Exception;
+            args.Handled = true;
+            app.Shutdown(1);
+        };
+
+        app.Startup += (_, _) =>
+        {
+            var waitForWindow = new DispatcherTimer(DispatcherPriority.ApplicationIdle)
+            {
+                Interval = TimeSpan.FromMilliseconds(50)
+            };
+
+            waitForWindow.Tick += (_, _) =>
+            {
+                if (app.MainWindow is not MainWindow window)
+                {
+                    return;
+                }
+
+                waitForWindow.Stop();
+
+                if (!visibleWindow)
+                {
+                    window.ShowInTaskbar = false;
+                    window.ShowActivated = false;
+                    window.Left = -10000;
+                    window.Top = -10000;
+                    window.Opacity = 0.0;
+                }
+
+                window.Dispatcher.BeginInvoke(new Func<Task>(async () =>
+                {
+                    try
+                    {
+                        foreach (int rows in RealtimePacingRows)
+                        {
+                            double appliedFps = window.ConfigurePacingSmokeScenario(rows, RealtimePacingTargetFps);
+                            if (Math.Abs(appliedFps - RealtimePacingTargetFps) > 0.1)
+                            {
+                                throw new InvalidOperationException($"Requested pacing target {RealtimePacingTargetFps:F1} fps but engine applied {appliedFps:F1} fps.");
+                            }
+
+                            if (fullscreen)
+                            {
+                                window.EnterFullscreenForSmoke();
+                                await Task.Delay(750);
+                                var (layoutOk, detail) = window.ValidateRenderLayoutForSmoke(fullscreenExpected: true);
+                                if (!layoutOk)
+                                {
+                                    throw new InvalidOperationException($"Fullscreen render layout validation failed for pacing suite at {rows}p. {detail}");
+                                }
+                            }
+
+                            string sessionName = fullscreen
+                                ? $"smoke-current-scene-pacing-fullscreen-{rows}p"
+                                : $"smoke-current-scene-pacing-visible-{rows}p";
+                            window.StartProfilingSession(sessionName);
+                            await Task.Delay(RealtimePacingProfileDuration);
+
+                            var (report, path) = window.StopProfilingSessionAndExport();
+                            ValidateRealtimePacing(report, $"{rows}p {(fullscreen ? "fullscreen" : "visible")}", RealtimePacingTargetFps);
+
+                            Logger.Info($"Current-scene pacing profile report written to {path}");
+                        }
+
+                        window.Close();
+                        app.Shutdown(0);
+                    }
+                    catch (Exception ex)
+                    {
+                        failure ??= ex;
+                        window.Close();
+                        app.Shutdown(1);
+                    }
+                }), DispatcherPriority.ApplicationIdle);
+            };
+
+            waitForWindow.Start();
+        };
+
+        int exitCode = app.Run();
+        if (failure != null)
+        {
+            throw new InvalidOperationException("Current-scene pacing smoke suite failed.", failure);
+        }
+
+        Logger.Info("Current-scene pacing smoke suite passed.");
+        return exitCode;
+    }
+
+    private static int RunCurrentSceneInteractionPacingSmokeTest()
+    {
+        Logger.Info("Running current-scene interaction pacing smoke test.");
+        Exception? failure = null;
+        App.LoadUserConfigInSmokeTest = true;
+
+        var app = new App();
+        app.InitializeComponent();
+        app.ShutdownMode = ShutdownMode.OnExplicitShutdown;
+        app.DispatcherUnhandledException += (_, args) =>
+        {
+            failure ??= args.Exception;
+            args.Handled = true;
+            app.Shutdown(1);
+        };
+
+        app.Startup += (_, _) =>
+        {
+            var waitForWindow = new DispatcherTimer(DispatcherPriority.ApplicationIdle)
+            {
+                Interval = TimeSpan.FromMilliseconds(50)
+            };
+
+            waitForWindow.Tick += (_, _) =>
+            {
+                if (app.MainWindow is not MainWindow window)
+                {
+                    return;
+                }
+
+                waitForWindow.Stop();
+                window.Dispatcher.BeginInvoke(async () =>
+                {
+                    try
+                    {
+                        window.ConfigurePacingSmokeScenario(480, RealtimePacingTargetFps);
+                        await Task.Delay(TimeSpan.FromSeconds(2));
+
+                        window.StartProfilingSession("smoke-current-scene-pacing-pre-interaction");
+                        await Task.Delay(TimeSpan.FromSeconds(4));
+                        var (preReport, prePath) = window.StopProfilingSessionAndExport();
+                        ValidateRealtimePacing(preReport, "480p visible pre-interaction", RealtimePacingTargetFps);
+
+                        window.OpenLayerEditor();
+                        await Task.Delay(TimeSpan.FromMilliseconds(750));
+                        window.Activate();
+                        await Task.Delay(TimeSpan.FromMilliseconds(500));
+
+                        window.StartProfilingSession("smoke-current-scene-pacing-editor-open");
+                        await Task.Delay(TimeSpan.FromSeconds(4));
+                        var (editorReport, editorPath) = window.StopProfilingSessionAndExport();
+                        ValidateRealtimePacing(editorReport, "480p visible editor-open", RealtimePacingTargetFps);
+
+                        await window.OpenAndCloseRootContextMenuForSmokeAsync(TimeSpan.FromMilliseconds(750));
+                        await Task.Delay(TimeSpan.FromSeconds(1));
+
+                        window.StartProfilingSession("smoke-current-scene-pacing-post-interaction");
+                        await Task.Delay(TimeSpan.FromSeconds(4));
+                        var (postReport, postPath) = window.StopProfilingSessionAndExport();
+                        ValidateRealtimePacing(postReport, "480p visible post-interaction", RealtimePacingTargetFps);
+
+                        var editorThrottle = RequireMetric(editorReport, "ui_interaction_throttled");
+                        var postThrottle = RequireMetric(postReport, "ui_interaction_throttled");
+
+                        Logger.Info($"Current-scene interaction pacing pre profile written to {prePath}");
+                        Logger.Info($"Current-scene interaction pacing editor profile written to {editorPath}");
+                        Logger.Info($"Current-scene interaction pacing post profile written to {postPath}");
+
+                        if (editorThrottle.Average > 0.10)
+                        {
+                            throw new InvalidOperationException(
+                                $"Main window remained throttled while the Scene Editor was open during pacing smoke. ui_interaction_throttled avg={editorThrottle.Average:F3}.");
+                        }
+
+                        if (postThrottle.Average > 0.10)
+                        {
+                            throw new InvalidOperationException(
+                                $"Main window remained throttled after context menu recovery during pacing smoke. ui_interaction_throttled avg={postThrottle.Average:F3}.");
+                        }
+
+                        window.Close();
+                        app.Shutdown(0);
+                    }
+                    catch (Exception ex)
+                    {
+                        failure ??= ex;
+                        window.Close();
+                        app.Shutdown(1);
+                    }
+                }, DispatcherPriority.ApplicationIdle);
+            };
+
+            waitForWindow.Start();
+        };
+
+        int exitCode = app.Run();
+        if (failure != null)
+        {
+            throw new InvalidOperationException("Current-scene interaction pacing smoke test failed.", failure);
+        }
+
+        Logger.Info("Current-scene interaction pacing smoke test passed.");
+        return exitCode;
+    }
+
+    private static int RunCurrentSceneOverlayPacingSmokeTest(bool fullscreen, int rows)
+    {
+        Logger.Info($"Running current-scene overlay pacing smoke test (fullscreen={fullscreen}, rows={rows}).");
+        Exception? failure = null;
+        App.LoadUserConfigInSmokeTest = true;
+
+        var app = new App();
+        app.InitializeComponent();
+        app.ShutdownMode = ShutdownMode.OnExplicitShutdown;
+        app.DispatcherUnhandledException += (_, args) =>
+        {
+            failure ??= args.Exception;
+            args.Handled = true;
+            app.Shutdown(1);
+        };
+
+        app.Startup += (_, _) =>
+        {
+            var waitForWindow = new DispatcherTimer(DispatcherPriority.ApplicationIdle)
+            {
+                Interval = TimeSpan.FromMilliseconds(50)
+            };
+
+            waitForWindow.Tick += (_, _) =>
+            {
+                if (app.MainWindow is not MainWindow window)
+                {
+                    return;
+                }
+
+                waitForWindow.Stop();
+                window.Dispatcher.BeginInvoke(new Func<Task>(async () =>
+                {
+                    try
+                    {
+                        window.ConfigurePacingSmokeScenario(rows, RealtimePacingTargetFps);
+                        if (fullscreen)
+                        {
+                            window.EnterFullscreenForSmoke();
+                            await Task.Delay(750);
+                            var (layoutOk, detail) = window.ValidateRenderLayoutForSmoke(fullscreenExpected: true);
+                            if (!layoutOk)
+                            {
+                                throw new InvalidOperationException($"Fullscreen render layout validation failed for overlay pacing smoke at {rows}p. {detail}");
+                            }
+                        }
+
+                        window.SetShowFpsForSmoke(true);
+                        await Task.Delay(1000);
+
+                        string sessionName = fullscreen
+                            ? $"smoke-current-scene-overlay-fullscreen-{rows}p"
+                            : $"smoke-current-scene-overlay-visible-{rows}p";
+                        window.StartProfilingSession(sessionName);
+                        await Task.Delay(RealtimePacingProfileDuration);
+
+                        var (report, path) = window.StopProfilingSessionAndExport();
+                        ValidateRealtimePacing(report, $"{rows}p {(fullscreen ? "fullscreen" : "visible")} overlay", RealtimePacingTargetFps);
+
+                        var overlayMetric = RequireMetric(report, "fps_overlay_ms");
+                        Logger.Info($"Current-scene overlay pacing profile report written to {path}");
+                        Logger.Info($"Overlay timing: avg={overlayMetric.Average:F3} ms, p95={overlayMetric.P95:F3} ms, max={overlayMetric.Maximum:F3} ms.");
+
+                        window.Close();
+                        app.Shutdown(0);
+                    }
+                    catch (Exception ex)
+                    {
+                        failure ??= ex;
+                        window.Close();
+                        app.Shutdown(1);
+                    }
+                }), DispatcherPriority.ApplicationIdle);
+            };
+
+            waitForWindow.Start();
+        };
+
+        int exitCode = app.Run();
+        if (failure != null)
+        {
+            throw new InvalidOperationException("Current-scene overlay pacing smoke test failed.", failure);
+        }
+
+        Logger.Info("Current-scene overlay pacing smoke test passed.");
+        return exitCode;
+    }
+
     private static FrameProfileMetricReport RequireMetric(FrameProfileReport report, string name)
     {
         return report.Metrics.FirstOrDefault(metric => string.Equals(metric.Name, name, StringComparison.Ordinal))
             ?? throw new InvalidOperationException($"Expected profile metric '{name}' was not collected.");
+    }
+
+    private static void ValidateRealtimePacing(FrameProfileReport report, string label, double targetFps)
+    {
+        double frameBudgetMs = 1000.0 / Math.Max(1.0, targetFps);
+        var frameGap = RequireMetric(report, "frame_tick_gap_ms");
+        var over25 = RequireMetric(report, "frame_gap_over_25ms");
+        var over33 = RequireMetric(report, "frame_gap_over_33ms");
+        var over50 = RequireMetric(report, "frame_gap_over_50ms");
+
+        if (frameGap.Count < 60)
+        {
+            throw new InvalidOperationException($"{label}: pacing smoke did not collect enough frame-gap samples ({frameGap.Count}).");
+        }
+
+        double maxAverageGap = frameBudgetMs * 1.12;
+        double maxP95Gap = frameBudgetMs * 1.35;
+        double maxP99Gap = frameBudgetMs * 1.80;
+
+        if (frameGap.Average > maxAverageGap)
+        {
+            throw new InvalidOperationException($"{label}: average frame gap {frameGap.Average:F3} ms exceeded pacing budget {maxAverageGap:F3} ms.");
+        }
+
+        if (frameGap.P95 > maxP95Gap)
+        {
+            throw new InvalidOperationException($"{label}: p95 frame gap {frameGap.P95:F3} ms exceeded pacing budget {maxP95Gap:F3} ms.");
+        }
+
+        if (frameGap.P99 > maxP99Gap)
+        {
+            throw new InvalidOperationException($"{label}: p99 frame gap {frameGap.P99:F3} ms exceeded pacing budget {maxP99Gap:F3} ms.");
+        }
+
+        if (over25.Average > 0.02)
+        {
+            throw new InvalidOperationException($"{label}: underrun ratio over 25 ms was {over25.Average:P1}, expected <= 2.0%.");
+        }
+
+        if (over33.Average > 0.01)
+        {
+            throw new InvalidOperationException($"{label}: underrun ratio over 33 ms was {over33.Average:P1}, expected <= 1.0%.");
+        }
+
+        if (over50.Average > 0.005)
+        {
+            throw new InvalidOperationException($"{label}: detected too many frame gaps over 50 ms (ratio {over50.Average:P1}), expected <= 0.5%.");
+        }
     }
 
     private static int RunGpuUiSmokeSuite()
@@ -1280,6 +1896,119 @@ internal static class SmokeTestRunner
 
         Logger.Info("Startup smoke test passed.");
         return exitCode;
+    }
+
+    private static int RunStartupRecoverySmokeTest()
+    {
+        Logger.Info("Running startup recovery smoke test.");
+        Exception? failure = null;
+        App.LoadUserConfigInSmokeTest = true;
+        WriteStartupRecoveryFlagForSmoke();
+
+        var app = new App();
+        app.InitializeComponent();
+        app.ShutdownMode = ShutdownMode.OnExplicitShutdown;
+        app.DispatcherUnhandledException += (_, args) =>
+        {
+            failure ??= args.Exception;
+            args.Handled = true;
+            app.Shutdown(1);
+        };
+
+        app.Startup += (_, _) =>
+        {
+            var window = new MainWindow
+            {
+                ShowInTaskbar = false,
+                ShowActivated = false,
+                WindowStartupLocation = WindowStartupLocation.Manual,
+                Left = -10000,
+                Top = -10000,
+                Opacity = 0.0
+            };
+
+            window.Loaded += (_, _) =>
+            {
+                var timer = new DispatcherTimer(DispatcherPriority.ApplicationIdle)
+                {
+                    Interval = TimeSpan.FromMilliseconds(900)
+                };
+                timer.Tick += (_, _) =>
+                {
+                    timer.Stop();
+                    var state = window.GetStartupRecoveryStateForSmoke();
+                    string configPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "lifeviz", "config.json");
+                    string persistedJson = File.ReadAllText(configPath);
+                    using JsonDocument persistedDocument = JsonDocument.Parse(persistedJson);
+                    JsonElement root = persistedDocument.RootElement;
+                    int persistedRows = root.TryGetProperty("Height", out var heightProperty) ? heightProperty.GetInt32() : 0;
+                    double persistedFps = root.TryGetProperty("Framerate", out var fpsProperty) ? fpsProperty.GetDouble() : 0;
+                    bool persistedFullscreen = root.TryGetProperty("Fullscreen", out var fullscreenProperty) && fullscreenProperty.GetBoolean();
+                    bool persistedShowFps = root.TryGetProperty("ShowFps", out var showFpsProperty) && showFpsProperty.GetBoolean();
+                    bool persistedLevelToFramerate = root.TryGetProperty("AudioReactiveLevelToFpsEnabled", out var levelToFpsProperty) && levelToFpsProperty.GetBoolean();
+                    if (state.rows > 480 ||
+                        state.renderFps > 60.0 ||
+                        state.simulationFps > 60.0 ||
+                        state.fullscreen ||
+                        state.showFps ||
+                        state.levelToFramerate ||
+                        persistedRows > 480 ||
+                        persistedFps > 60.0 ||
+                        persistedFullscreen ||
+                        persistedShowFps ||
+                        persistedLevelToFramerate ||
+                        state.sourceCount <= 0)
+                    {
+                        failure ??= new InvalidOperationException(
+                            $"Startup recovery did not apply safe launch overrides before scene restore. " +
+                            $"rows={state.rows}, renderFps={state.renderFps:0.##}, simFps={state.simulationFps:0.##}, fullscreen={state.fullscreen}, showFps={state.showFps}, levelToFramerate={state.levelToFramerate}, " +
+                            $"persistedRows={persistedRows}, persistedFps={persistedFps:0.##}, persistedFullscreen={persistedFullscreen}, persistedShowFps={persistedShowFps}, persistedLevelToFramerate={persistedLevelToFramerate}, sourceCount={state.sourceCount}.");
+                    }
+
+                    window.Close();
+                    app.Shutdown(failure == null ? 0 : 1);
+                };
+                timer.Start();
+            };
+
+            window.Show();
+        };
+
+        int exitCode = app.Run();
+        ClearStartupRecoveryFlagForSmoke();
+        if (failure != null)
+        {
+            throw new InvalidOperationException("Startup recovery smoke test failed.", failure);
+        }
+
+        Logger.Info("Startup recovery smoke test passed.");
+        return exitCode;
+    }
+
+    private static string GetStartupRecoveryFlagPath()
+    {
+        return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "lifeviz", "startup-recovery.flag");
+    }
+
+    private static void WriteStartupRecoveryFlagForSmoke()
+    {
+        string path = GetStartupRecoveryFlagPath();
+        string? directory = Path.GetDirectoryName(path);
+        if (!string.IsNullOrWhiteSpace(directory))
+        {
+            Directory.CreateDirectory(directory);
+        }
+
+        File.WriteAllText(path, DateTime.UtcNow.ToString("O"));
+    }
+
+    private static void ClearStartupRecoveryFlagForSmoke()
+    {
+        string path = GetStartupRecoveryFlagPath();
+        if (File.Exists(path))
+        {
+            File.Delete(path);
+        }
     }
 
     private static int RunShutdownSmokeTest()

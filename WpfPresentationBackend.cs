@@ -43,9 +43,6 @@ internal sealed class WpfPresentationBackend : IDisposable
             _pixelBuffer = new byte[width * height * 4];
         }
 
-        _targetImage.Width = width;
-        _targetImage.Height = height;
-
         if (_underlayBitmap == null || _underlayBitmap.PixelWidth != width || _underlayBitmap.PixelHeight != height || force)
         {
             _underlayBitmap = new WriteableBitmap(width, height, 96, 96, PixelFormats.Bgra32, null);

@@ -639,24 +639,23 @@
                 PreviewMouseLeftButtonDown="ResizeGrip_OnPreviewMouseLeftButtonDown"
                 Tag="BottomRight" />
 
-        <Viewbox Stretch="Uniform"
-                 IsHitTestVisible="False"
-                 HorizontalAlignment="Center"
-                 VerticalAlignment="Center">
-            <Border Background="Black"
-                    IsHitTestVisible="False"
-                    Padding="0"
-                    SnapsToDevicePixels="True">
-                <Grid x:Name="RenderSurfaceHost"
-                      IsHitTestVisible="False">
-                    <Image x:Name="GameImage"
-                           IsHitTestVisible="False"
-                           RenderOptions.BitmapScalingMode="NearestNeighbor"
-                           RenderOptions.EdgeMode="Aliased"
-                           SnapsToDevicePixels="True" />
-                </Grid>
-            </Border>
-        </Viewbox>
+        <Border Background="Black"
+                IsHitTestVisible="False"
+                Padding="0"
+                SnapsToDevicePixels="True">
+            <Grid x:Name="RenderSurfaceHost"
+                  IsHitTestVisible="False"
+                  ClipToBounds="True">
+                <Image x:Name="GameImage"
+                       IsHitTestVisible="False"
+                       Stretch="Uniform"
+                       HorizontalAlignment="Stretch"
+                       VerticalAlignment="Stretch"
+                       RenderOptions.BitmapScalingMode="NearestNeighbor"
+                       RenderOptions.EdgeMode="Aliased"
+                       SnapsToDevicePixels="True" />
+            </Grid>
+        </Border>
 
         <TextBlock x:Name="FpsText"
                    Margin="8"
@@ -676,8 +675,8 @@
                     IsHitTestVisible="False">
             <Border x:Name="FrameDebugOverlay"
                     Margin="0,0,0,6"
-                    Padding="6"
-                    Height="48"
+                    Padding="4"
+                    Height="34"
                     HorizontalAlignment="Stretch"
                     Background="#66000000"
                     BorderBrush="#66FFFFFF"
@@ -686,16 +685,21 @@
                     Visibility="Collapsed"
                     IsHitTestVisible="False">
                 <Canvas x:Name="FrameDebugCanvas">
+                    <Path x:Name="FrameUnderrunBars"
+                          Stroke="#66FFB000"
+                          StrokeThickness="1"
+                          StrokeStartLineCap="Square"
+                          StrokeEndLineCap="Square" />
                     <Polyline x:Name="FrameBudgetLine"
                               Stroke="#AAFF5555"
-                              StrokeThickness="1.25"
+                              StrokeThickness="1"
                               StrokeDashArray="4 3"
                               StrokeLineJoin="Round"
                               StrokeStartLineCap="Round"
                               StrokeEndLineCap="Round" />
                     <Polyline x:Name="FrameTimingLine"
                               Stroke="#FF9A2E"
-                              StrokeThickness="2"
+                              StrokeThickness="1.5"
                               StrokeLineJoin="Round"
                               StrokeStartLineCap="Round"
                               StrokeEndLineCap="Round" />
@@ -703,8 +707,8 @@
             </Border>
 
             <Border x:Name="AudioDebugOverlay"
-                    Padding="6"
-                    Height="92"
+                    Padding="4"
+                    Height="76"
                     HorizontalAlignment="Stretch"
                     Background="#66000000"
                     BorderBrush="#66FFFFFF"
@@ -713,45 +717,44 @@
                     Visibility="Collapsed"
                     IsHitTestVisible="False">
                 <Canvas x:Name="AudioDebugCanvas">
-                    <Polyline x:Name="AudioWaveformLine"
-                              Stroke="White"
-                              StrokeThickness="1.5"
-                              StrokeLineJoin="Round"
-                              StrokeStartLineCap="Round"
-                              StrokeEndLineCap="Round" />
+                    <Path x:Name="AudioWaveformRange"
+                          Stroke="White"
+                          StrokeThickness="1"
+                          StrokeStartLineCap="Square"
+                          StrokeEndLineCap="Square" />
                     <Polyline x:Name="AudioLevelLine"
                               Stroke="#FFD84A"
-                              StrokeThickness="2"
+                              StrokeThickness="1.1"
                               StrokeLineJoin="Round"
                               StrokeStartLineCap="Round"
                               StrokeEndLineCap="Round" />
                     <Polyline x:Name="AudioBassLine"
                               Stroke="#38E7FF"
-                              StrokeThickness="1.75"
+                              StrokeThickness="1.1"
                               StrokeLineJoin="Round"
                               StrokeStartLineCap="Round"
                               StrokeEndLineCap="Round" />
                     <Polyline x:Name="AudioFrequencyLine"
                               Stroke="#FF4DFF"
-                              StrokeThickness="1.5"
+                              StrokeThickness="1"
                               StrokeLineJoin="Round"
                               StrokeStartLineCap="Round"
                               StrokeEndLineCap="Round" />
                     <Polyline x:Name="AudioBassFrequencyLine"
                               Stroke="#3E6BFF"
-                              StrokeThickness="1.5"
+                              StrokeThickness="1"
                               StrokeLineJoin="Round"
                               StrokeStartLineCap="Round"
                               StrokeEndLineCap="Round" />
                     <Polyline x:Name="AudioMidFrequencyLine"
                               Stroke="#39D353"
-                              StrokeThickness="1.5"
+                              StrokeThickness="1"
                               StrokeLineJoin="Round"
                               StrokeStartLineCap="Round"
                               StrokeEndLineCap="Round" />
                     <Polyline x:Name="AudioHighFrequencyLine"
                               Stroke="#FF4A4A"
-                              StrokeThickness="1.5"
+                              StrokeThickness="1"
                               StrokeLineJoin="Round"
                               StrokeStartLineCap="Round"
                               StrokeEndLineCap="Round" />

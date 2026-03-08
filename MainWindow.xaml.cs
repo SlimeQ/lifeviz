@@ -17,6 +17,7 @@ using System.Windows.Input;
 using System.Windows.Media;
 using System.Windows.Media.Effects;
 using System.Windows.Media.Imaging;
+using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Threading;
@@ -71,7 +72,9 @@ public partial class MainWindow : Window
     private const int AudioDebugHistorySeconds = 30;
     private const int AudioDebugHistorySampleRate = 120;
     private const int AudioDebugHistorySize = AudioDebugHistorySeconds * AudioDebugHistorySampleRate;
-    private const double DebugOverlayRefreshRateHz = 12.0;
+    private const double DebugTimingOverlayRefreshRateHz = 6.0;
+    private const double DebugAudioOverlayRefreshRateHz = 3.0;
+    private const int DebugOverlayMaxPoints = 640;
     private const double FrameTimingOverlayMaxMs = 50.0;
     private const int DefaultAudioReactiveSeedsPerBeat = 2;
     private const double DefaultAudioReactiveSeedCooldownMs = 180.0;
@@ -82,13 +85,13 @@ public partial class MainWindow : Window
     private const double MaxReactiveHueFrequencyHz = 4186.01;
     private const double MaxColorDistance = 441.6729559300637;
     private const double UiInteractionThrottleFps = 20.0;
-    private const int WmEnterMenuLoop = 0x0211;
-    private const int WmExitMenuLoop = 0x0212;
     private const int WmEnterSizeMove = 0x0231;
     private const int WmExitSizeMove = 0x0232;
     private const string GitHubRepoOwner = "SlimeQ";
     private const string GitHubRepoName = "lifeviz";
     private const string GitHubReleaseAssetName = "lifeviz_installer.exe";
+    private static readonly string StartupRecoveryPath =
+        Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "lifeviz", "startup-recovery.flag");
     private static readonly Uri GitHubLatestReleaseUri = new($"https://api.github.com/repos/{GitHubRepoOwner}/{GitHubRepoName}/releases/latest");
     private static readonly JsonSerializerOptions GitHubJsonOptions = new() { PropertyNameCaseInsensitive = true };
     private static readonly (int rowOffset, int colOffset)[] GliderPattern =
@@ -108,7 +111,6 @@ public partial class MainWindow : Window
     private readonly AudioBeatDetector _audioBeatDetector = new();
     private IRenderBackend _renderBackend = new NullRenderBackend();
     private LayerEditorWindow? _layerEditorWindow;
-    private int _layerEditorWindowActive;
     private bool _suppressLayerEditorRefresh;
     private int _configuredRows = DefaultRows;
     private int _configuredDepth = DefaultDepth;
@@ -170,6 +172,7 @@ public partial class MainWindow : Window
     private GameOfLifeEngine.BinningMode _binningMode = GameOfLifeEngine.BinningMode.Fill;
     private GameOfLifeEngine.InjectionMode _injectionMode = GameOfLifeEngine.InjectionMode.Threshold;
     private double _currentFps = DefaultFps;
+    private double _currentSimulationTargetFps = DefaultFps;
     private double _animationBpm = DefaultAnimationBpm;
     private double _captureThresholdMin = 0.35;
     private double _captureThresholdMax = 0.75;
@@ -187,9 +190,11 @@ public partial class MainWindow : Window
     private Rect _previousBounds;
     private readonly Stopwatch _stepStopwatch = new();
     private readonly Stopwatch _lifetimeStopwatch = new();
-    private Timer? _framePumpTimer;
+    private Thread? _framePumpThread;
+    private readonly AutoResetEvent _framePumpWakeEvent = new(false);
     private int _frameCallbackQueued;
     private long _nextFramePumpTimestamp;
+    private int _framePumpStopRequested;
     private readonly FrameProfiler _frameProfiler = new();
     private readonly UiThreadLatencyProbe _uiThreadLatencyProbe;
     private readonly Dictionary<string, RollingMetricWindow> _liveMetrics = new(StringComparer.Ordinal);
@@ -210,16 +215,10 @@ public partial class MainWindow : Window
     private double _smoothedLevelEnergy;
     private double _smoothedBass;
     private double _smoothedFreq;
-    private readonly Queue<double> _audioLevelHistory = new();
-    private readonly Queue<double> _audioBassHistory = new();
-    private readonly Queue<double> _audioFreqHistory = new();
-    private readonly Queue<double> _audioBassFreqHistory = new();
-    private readonly Queue<double> _audioMidFreqHistory = new();
-    private readonly Queue<double> _audioHighFreqHistory = new();
     private readonly Queue<double> _frameGapHistory = new();
-    private double _audioLevelHistoryAccumulator;
     private double _frameGapHistoryAccumulator;
-    private double _lastDebugOverlayUpdateTime = double.NegativeInfinity;
+    private double _lastTimingOverlayUpdateTime = double.NegativeInfinity;
+    private double _lastAudioOverlayUpdateTime = double.NegativeInfinity;
     private readonly Random _audioReactiveRandom = new();
     private bool _audioReactiveEnabled;
     private bool _audioReactiveLevelToFpsEnabled = true;
@@ -252,10 +251,13 @@ public partial class MainWindow : Window
     private ChromeResizeDirection _chromeResizeDirection;
     private Point _chromeResizeStartScreen;
     private Rect _chromeResizeStartBounds;
+    private readonly bool _startupRecoveryTriggered;
 
     public MainWindow()
     {
         Logger.Initialize();
+        _startupRecoveryTriggered = TryConsumeStartupRecoveryFlag();
+        MarkStartupPending();
         EnableHighResolutionTimer();
 
         _uiThreadLatencyProbe = new UiThreadLatencyProbe(Dispatcher, _frameProfiler);
@@ -281,6 +283,7 @@ public partial class MainWindow : Window
             _lastWindowSize = new Size(ActualWidth, ActualHeight);
             _lastClientSize = new Size(Root.ActualWidth, Root.ActualHeight);
             UpdateChromeUi();
+            MarkStartupComplete();
             Logger.Info(App.IsSmokeTestMode
                 ? "Main window loaded in smoke test mode."
                 : "Main window loaded and visualizer initialized.");
@@ -336,6 +339,7 @@ public partial class MainWindow : Window
             }
             finally
             {
+                MarkStartupComplete();
                 DisableHighResolutionTimer();
             }
 
@@ -499,6 +503,9 @@ public partial class MainWindow : Window
             Mouse.Capture(null);
         }
 
+        _lastWindowSize = new Size(ActualWidth, ActualHeight);
+        _lastClientSize = new Size(Root.ActualWidth, Root.ActualHeight);
+
         e.Handled = true;
     }
 
@@ -527,6 +534,7 @@ public partial class MainWindow : Window
     {
         const double MinWindowWidth = 360.0;
         const double MinWindowHeight = 220.0;
+        double aspect = _currentAspectRatio > 0 ? _currentAspectRatio : DefaultAspectRatio;
 
         Vector delta = screenDip - _chromeResizeStartScreen;
         double left = _chromeResizeStartBounds.Left;
@@ -571,10 +579,47 @@ public partial class MainWindow : Window
             height = MinWindowHeight;
         }
 
+        bool horizontalResize = _chromeResizeDirection == ChromeResizeDirection.Left ||
+                                _chromeResizeDirection == ChromeResizeDirection.Right ||
+                                _chromeResizeDirection == ChromeResizeDirection.BottomLeft ||
+                                _chromeResizeDirection == ChromeResizeDirection.BottomRight;
+        bool verticalResize = _chromeResizeDirection == ChromeResizeDirection.Bottom ||
+                              _chromeResizeDirection == ChromeResizeDirection.BottomLeft ||
+                              _chromeResizeDirection == ChromeResizeDirection.BottomRight;
+
+        if (horizontalResize && !verticalResize)
+        {
+            height = Math.Max(MinWindowHeight, width / aspect);
+        }
+        else if (verticalResize && !horizontalResize)
+        {
+            width = Math.Max(MinWindowWidth, height * aspect);
+        }
+        else if (horizontalResize && verticalResize)
+        {
+            bool preserveWidth = Math.Abs(delta.X) >= Math.Abs(delta.Y);
+            if (preserveWidth)
+            {
+                height = Math.Max(MinWindowHeight, width / aspect);
+            }
+            else
+            {
+                width = Math.Max(MinWindowWidth, height * aspect);
+            }
+        }
+
+        if ((_chromeResizeDirection == ChromeResizeDirection.Left || _chromeResizeDirection == ChromeResizeDirection.BottomLeft) &&
+            Math.Abs(left + width - _chromeResizeStartBounds.Right) > 0.001)
+        {
+            left = _chromeResizeStartBounds.Right - width;
+        }
+
+        _suppressWindowResize = true;
         Left = left;
         Top = top;
         Width = width;
         Height = height;
+        _suppressWindowResize = false;
     }
 
     private Point GetScreenDipPosition(MouseEventArgs e)
@@ -717,6 +762,40 @@ public partial class MainWindow : Window
         RenderFrame();
     }
 
+    internal int SetSimulationRowsForSmoke(int rows)
+    {
+        ApplyDimensions(rows, null, _currentAspectRatio, persist: false);
+        return GetReferenceSimulationEngine().Rows;
+    }
+
+    internal double ConfigurePacingSmokeScenario(int rows, double targetFps)
+    {
+        _fpsOscillationEnabled = false;
+        _audioReactiveLevelToFpsEnabled = false;
+        _currentFpsFromConfig = Math.Clamp(targetFps, 5, 144);
+        _currentFps = _currentFpsFromConfig;
+        _currentSimulationTargetFps = _currentFpsFromConfig;
+        UpdateFramerateMenuChecks();
+        ApplyDimensions(rows, null, _currentAspectRatio, persist: false);
+        ResetFramePumpCadence(scheduleImmediate: true);
+        return _currentFpsFromConfig;
+    }
+
+    internal (int rows, double renderFps, double simulationFps, bool fullscreen, bool showFps, bool levelToFramerate, int sourceCount) GetStartupRecoveryStateForSmoke()
+    {
+        return (_configuredRows, _currentFpsFromConfig, _currentSimulationTargetFps, _pendingFullscreen || _isFullscreen, _showFps, _audioReactiveLevelToFpsEnabled, _sources.Count);
+    }
+
+    internal void SetShowFpsForSmoke(bool enabled)
+    {
+        _showFps = enabled;
+        if (ShowFpsMenuItem != null)
+        {
+            ShowFpsMenuItem.IsChecked = _showFps;
+        }
+        UpdateFpsOverlay();
+    }
+
     private void InitializeVisualizer()
     {
         EnsureSimulationLayersInitialized();
@@ -739,10 +818,14 @@ public partial class MainWindow : Window
             return;
         }
 
-        _framePumpTimer?.Dispose();
         _frameCallbackQueued = 0;
         _nextFramePumpTimestamp = 0;
-        _framePumpTimer = new Timer(FramePumpTimerTick, null, Timeout.InfiniteTimeSpan, Timeout.InfiniteTimeSpan);
+        Interlocked.Exchange(ref _framePumpStopRequested, 0);
+        _framePumpThread = new Thread(FramePumpThreadMain)
+        {
+            IsBackground = true,
+            Name = "LifeViz.FramePump"
+        };
         _renderLoopAttached = true;
         _stepStopwatch.Restart();
         if (!_lifetimeStopwatch.IsRunning)
@@ -754,15 +837,22 @@ public partial class MainWindow : Window
             _simulationFpsStopwatch.Start();
         }
         _lastRenderTime = _lifetimeStopwatch.Elapsed.TotalSeconds;
-        ScheduleNextFramePump(immediate: true);
+        _framePumpThread.Start();
+        ResetFramePumpCadence(scheduleImmediate: true);
     }
 
     private void DetachRenderLoop()
     {
         if (_renderLoopAttached)
         {
-            _framePumpTimer?.Dispose();
-            _framePumpTimer = null;
+            Interlocked.Exchange(ref _framePumpStopRequested, 1);
+            _framePumpWakeEvent.Set();
+            if (_framePumpThread is { IsAlive: true } framePumpThread &&
+                framePumpThread != Thread.CurrentThread)
+            {
+                framePumpThread.Join(millisecondsTimeout: 1000);
+            }
+            _framePumpThread = null;
             Interlocked.Exchange(ref _frameCallbackQueued, 0);
             _nextFramePumpTimestamp = 0;
             _renderLoopAttached = false;
@@ -806,11 +896,9 @@ public partial class MainWindow : Window
         switch (msg)
         {
             case WmEnterSizeMove:
-            case WmEnterMenuLoop:
                 SuspendRenderLoopForUiInteraction();
                 break;
             case WmExitSizeMove:
-            case WmExitMenuLoop:
                 ResumeRenderLoopAfterUiInteraction();
                 break;
         }
@@ -849,40 +937,121 @@ public partial class MainWindow : Window
 
     private bool IsUiInteractionThrottled()
     {
-        bool layerEditorActive = Dispatcher.CheckAccess()
-            ? (_layerEditorWindow?.IsActive ?? false)
-            : Volatile.Read(ref _layerEditorWindowActive) != 0;
-        return Volatile.Read(ref _uiInteractionSuspendCount) > 0 || layerEditorActive;
-    }
-
-    private void SetLayerEditorActiveState(bool isActive)
-    {
-        Volatile.Write(ref _layerEditorWindowActive, isActive ? 1 : 0);
-    }
-
-    private void LayerEditorWindow_OnActivated(object? sender, EventArgs e)
-    {
-        SetLayerEditorActiveState(true);
-    }
-
-    private void LayerEditorWindow_OnDeactivated(object? sender, EventArgs e)
-    {
-        SetLayerEditorActiveState(false);
+        return Volatile.Read(ref _uiInteractionSuspendCount) > 0;
     }
 
     private void LayerEditorWindow_OnClosed(object? sender, EventArgs e)
     {
-        SetLayerEditorActiveState(false);
         _layerEditorWindow = null;
     }
 
-    private void FramePumpTimerTick(object? state)
+    private void FramePumpThreadMain()
     {
+        while (Interlocked.CompareExchange(ref _framePumpStopRequested, 0, 0) == 0)
+        {
+            if (!_renderLoopAttached || _isShuttingDown)
+            {
+                _framePumpWakeEvent.WaitOne(20);
+                continue;
+            }
+
+            long intervalTicks = GetFramePumpIntervalTicks();
+            long now = Stopwatch.GetTimestamp();
+            long scheduled = Interlocked.Read(ref _nextFramePumpTimestamp);
+            if (scheduled == 0)
+            {
+                scheduled = now;
+                Interlocked.Exchange(ref _nextFramePumpTimestamp, scheduled);
+            }
+
+            long delayTicks = scheduled - now;
+            if (WaitForFramePumpDelay(delayTicks))
+            {
+                continue;
+            }
+
+            now = Stopwatch.GetTimestamp();
+            scheduled = Interlocked.Read(ref _nextFramePumpTimestamp);
+            long nextScheduled = scheduled + intervalTicks;
+            if (nextScheduled < now - intervalTicks)
+            {
+                nextScheduled = now;
+            }
+            Interlocked.Exchange(ref _nextFramePumpTimestamp, nextScheduled);
+
+            QueueFrameCallback();
+        }
+    }
+
+    private void ResetFramePumpCadence(bool scheduleImmediate)
+    {
+        _nextFramePumpTimestamp = 0;
+        _lastUiInteractionRenderTime = 0;
+        _lastProfileFrameTimestamp = 0;
+        _lastRenderTime = _lifetimeStopwatch.Elapsed.TotalSeconds;
+
         if (!_renderLoopAttached || _isShuttingDown)
         {
             return;
         }
 
+        if (scheduleImmediate)
+        {
+            _nextFramePumpTimestamp = 0;
+        }
+
+        _framePumpWakeEvent.Set();
+    }
+
+    private long GetFramePumpIntervalTicks()
+    {
+        double throttledTargetFps = IsUiInteractionThrottled()
+            ? Math.Min(Math.Max(_currentFpsFromConfig, 1.0), UiInteractionThrottleFps)
+            : Math.Max(_currentFpsFromConfig, 1.0);
+        double intervalSeconds = 1.0 / throttledTargetFps;
+        return Math.Max(1L, (long)Math.Round(intervalSeconds * Stopwatch.Frequency));
+    }
+
+    private bool WaitForFramePumpDelay(long delayTicks)
+    {
+        if (delayTicks <= 0)
+        {
+            return false;
+        }
+
+        double delayMs = delayTicks * 1000.0 / Stopwatch.Frequency;
+        if (delayMs > 2.0)
+        {
+            int coarseWaitMs = Math.Max(1, (int)Math.Floor(delayMs - 0.75));
+            if (_framePumpWakeEvent.WaitOne(coarseWaitMs))
+            {
+                return true;
+            }
+        }
+
+        while (true)
+        {
+            if (Interlocked.CompareExchange(ref _framePumpStopRequested, 0, 0) != 0)
+            {
+                return true;
+            }
+
+            if (_framePumpWakeEvent.WaitOne(0))
+            {
+                return true;
+            }
+
+            if (Stopwatch.GetTimestamp() >= Interlocked.Read(ref _nextFramePumpTimestamp))
+            {
+                return false;
+            }
+
+            Thread.SpinWait(256);
+        }
+    }
+
+    private void QueueFrameCallback()
+    {
         if (Interlocked.CompareExchange(ref _frameCallbackQueued, 1, 0) != 0)
         {
             return;
@@ -901,59 +1070,7 @@ public partial class MainWindow : Window
             }
 
             FrameTimer_Tick(null, EventArgs.Empty);
-            ScheduleNextFramePump(immediate: false);
         }));
-    }
-
-    private void ResetFramePumpCadence(bool scheduleImmediate)
-    {
-        _nextFramePumpTimestamp = 0;
-        _lastUiInteractionRenderTime = 0;
-        _lastProfileFrameTimestamp = 0;
-        _lastRenderTime = _lifetimeStopwatch.Elapsed.TotalSeconds;
-
-        if (!_renderLoopAttached || _isShuttingDown || _framePumpTimer == null)
-        {
-            return;
-        }
-
-        _framePumpTimer.Change(Timeout.InfiniteTimeSpan, Timeout.InfiniteTimeSpan);
-        if (scheduleImmediate)
-        {
-            ScheduleNextFramePump(immediate: true);
-        }
-    }
-
-    private void ScheduleNextFramePump(bool immediate)
-    {
-        if (!_renderLoopAttached || _isShuttingDown || _framePumpTimer == null)
-        {
-            return;
-        }
-
-        double throttledTargetFps = IsUiInteractionThrottled()
-            ? Math.Min(Math.Max(_currentFps, 1.0), UiInteractionThrottleFps)
-            : Math.Max(_currentFps, 1.0);
-        double intervalSeconds = 1.0 / throttledTargetFps;
-        long intervalTicks = Math.Max(1L, (long)Math.Round(intervalSeconds * Stopwatch.Frequency));
-        long now = Stopwatch.GetTimestamp();
-
-        if (immediate || _nextFramePumpTimestamp == 0)
-        {
-            _nextFramePumpTimestamp = now;
-        }
-        else
-        {
-            _nextFramePumpTimestamp += intervalTicks;
-            if (_nextFramePumpTimestamp < now - intervalTicks)
-            {
-                _nextFramePumpTimestamp = now;
-            }
-        }
-
-        long delayTicks = Math.Max(0, _nextFramePumpTimestamp - now);
-        double delayMs = delayTicks * 1000.0 / Stopwatch.Frequency;
-        _framePumpTimer.Change(TimeSpan.FromMilliseconds(delayMs), Timeout.InfiniteTimeSpan);
     }
 
     private void FrameTimer_Tick(object? sender, EventArgs e)
@@ -1039,15 +1156,14 @@ public partial class MainWindow : Window
             double factor = (Math.Sin(2 * Math.PI * _oscillationPhase) + 1.0) / 2.0;
             double targetFps = _oscillationMinFps + (_oscillationMaxFps - _oscillationMinFps) * factor;
             
-            _currentFps = Math.Clamp(targetFps, 1, 144);
+            _currentSimulationTargetFps = Math.Clamp(targetFps, 1, 144);
         }
         else
         {
-             // Ensure we stay at config FPS if disabled (redundant safety)
-             if (Math.Abs(_currentFps - _currentFpsFromConfig) > 0.1)
-             {
-                 _currentFps = _currentFpsFromConfig;
-             }
+            if (Math.Abs(_currentSimulationTargetFps - _currentFpsFromConfig) > 0.1)
+            {
+                _currentSimulationTargetFps = _currentFpsFromConfig;
+            }
         }
 
         // --- Simulation Step ---
@@ -1091,17 +1207,13 @@ public partial class MainWindow : Window
             _smoothedBass = 0;
             _smoothedFreq = 0;
         }
-        if (_showFps)
-        {
-            RecordAudioLevelHistory(dt);
-        }
         ApplyAudioReactiveFps();
         ApplyAudioReactiveLifeOpacity();
         _audioReactiveLevelSeedBurstsLastStep = 0;
         _audioReactiveBeatSeedBurstsLastStep = 0;
         EndProfileStamp("audio_update_ms", audioUpdateStamp);
 
-        double effectiveStepFps = Math.Max(_currentFps, 0);
+        double effectiveStepFps = Math.Max(_currentSimulationTargetFps, 0);
         if (interactionThrottled)
         {
             effectiveStepFps = Math.Min(effectiveStepFps, UiInteractionThrottleFps);
@@ -1897,11 +2009,8 @@ public partial class MainWindow : Window
             if (_layerEditorWindow == null)
             {
                 _layerEditorWindow = new LayerEditorWindow(this);
-                _layerEditorWindow.Activated += LayerEditorWindow_OnActivated;
-                _layerEditorWindow.Deactivated += LayerEditorWindow_OnDeactivated;
                 _layerEditorWindow.Closed += LayerEditorWindow_OnClosed;
                 _layerEditorWindow.Show();
-                SetLayerEditorActiveState(_layerEditorWindow.IsActive);
                 return;
             }
 
@@ -1912,14 +2021,12 @@ public partial class MainWindow : Window
 
             _layerEditorWindow.Activate();
             _layerEditorWindow.RefreshFromSourcesIfLive();
-            SetLayerEditorActiveState(_layerEditorWindow.IsActive);
         }
         catch (Exception ex)
         {
             Logger.Error("Failed to open Scene Editor window.", ex);
             MessageBox.Show(this, $"Failed to open Scene Editor:\n{ex.Message}", "Scene Editor Error",
                 MessageBoxButton.OK, MessageBoxImage.Error);
-            SetLayerEditorActiveState(false);
             _layerEditorWindow = null;
         }
     }
@@ -1936,7 +2043,6 @@ public partial class MainWindow : Window
         }
 
         editor.Activate();
-        SetLayerEditorActiveState(editor.IsActive);
 
         Exception? workerException = null;
         using var done = new ManualResetEventSlim(false);
@@ -2447,8 +2553,6 @@ public partial class MainWindow : Window
 
     private void RootContextMenu_OnOpened(object sender, RoutedEventArgs e)
     {
-        SuspendRenderLoopForUiInteraction();
-
         if (PassthroughMenuItem != null)
         {
             PassthroughMenuItem.IsChecked = _passthroughEnabled;
@@ -2616,7 +2720,6 @@ public partial class MainWindow : Window
 
     private void RootContextMenu_OnClosed(object sender, RoutedEventArgs e)
     {
-        ResumeRenderLoopAfterUiInteraction();
     }
 
     internal async Task OpenAndCloseRootContextMenuForSmokeAsync(TimeSpan openDuration)
@@ -2756,13 +2859,6 @@ public partial class MainWindow : Window
         _smoothedLevelEnergy = 0;
         _smoothedEnergy = 0;
         _fastAudioLevel = 0;
-        _audioLevelHistory.Clear();
-        _audioBassHistory.Clear();
-        _audioFreqHistory.Clear();
-        _audioBassFreqHistory.Clear();
-        _audioMidFreqHistory.Clear();
-        _audioHighFreqHistory.Clear();
-        _audioLevelHistoryAccumulator = 0;
         _audioReactiveLevelSeedBurstsLastStep = 0;
         _audioReactiveBeatSeedBurstsLastStep = 0;
         UpdateAudioReactiveMenuState();
@@ -2786,13 +2882,6 @@ public partial class MainWindow : Window
         _smoothedLevelEnergy = 0;
         _smoothedEnergy = 0;
         _fastAudioLevel = 0;
-        _audioLevelHistory.Clear();
-        _audioBassHistory.Clear();
-        _audioFreqHistory.Clear();
-        _audioBassFreqHistory.Clear();
-        _audioMidFreqHistory.Clear();
-        _audioHighFreqHistory.Clear();
-        _audioLevelHistoryAccumulator = 0;
         _audioReactiveFpsMultiplier = 1.0;
         _audioReactiveLevelSeedBurstsLastStep = 0;
         _audioReactiveBeatSeedBurstsLastStep = 0;
@@ -4420,6 +4509,59 @@ public partial class MainWindow : Window
         return false;
     }
 
+    private static bool TryConsumeStartupRecoveryFlag()
+    {
+        try
+        {
+            if (!File.Exists(StartupRecoveryPath))
+            {
+                return false;
+            }
+
+            File.Delete(StartupRecoveryPath);
+            Logger.Warn("Startup recovery triggered after previous incomplete launch.");
+            return true;
+        }
+        catch (Exception ex)
+        {
+            Logger.Warn($"Failed to inspect startup recovery flag. {ex.Message}");
+            return false;
+        }
+    }
+
+    private static void MarkStartupPending()
+    {
+        try
+        {
+            string? directory = Path.GetDirectoryName(StartupRecoveryPath);
+            if (!string.IsNullOrWhiteSpace(directory))
+            {
+                Directory.CreateDirectory(directory);
+            }
+
+            File.WriteAllText(StartupRecoveryPath, DateTime.UtcNow.ToString("O"));
+        }
+        catch (Exception ex)
+        {
+            Logger.Warn($"Failed to write startup recovery flag. {ex.Message}");
+        }
+    }
+
+    private static void MarkStartupComplete()
+    {
+        try
+        {
+            if (File.Exists(StartupRecoveryPath))
+            {
+                File.Delete(StartupRecoveryPath);
+            }
+        }
+        catch (Exception ex)
+        {
+            Logger.Warn($"Failed to clear startup recovery flag. {ex.Message}");
+        }
+    }
+
     private bool SetSourceVideoPlaybackPaused(CaptureSource source, bool paused)
     {
         if (!IsVideoSource(source))
@@ -4809,6 +4951,7 @@ public partial class MainWindow : Window
             _configuredDepth = nextDepth;
             _currentFpsFromConfig = Math.Clamp(settings.Framerate, 5, 144);
             _currentFps = _currentFpsFromConfig;
+            _currentSimulationTargetFps = _currentFpsFromConfig;
             _lifeOpacity = Math.Clamp(settings.LifeOpacity, 0, 1);
             _effectiveLifeOpacity = _lifeOpacity;
             _rgbHueShiftDegrees = NormalizeHueDegrees(settings.RgbHueShiftDegrees);
@@ -5529,7 +5672,7 @@ public partial class MainWindow : Window
         double minMultiplier = Math.Clamp(_audioReactiveFpsMinPercent, 0, 1);
         double mappedMultiplier = minMultiplier + ((1.0 - minMultiplier) * shapedDrive);
         _audioReactiveFpsMultiplier = mappedMultiplier;
-        _currentFps = Math.Clamp(_currentFps * mappedMultiplier, 0, 144);
+        _currentSimulationTargetFps = Math.Clamp(_currentSimulationTargetFps * mappedMultiplier, 0, 144);
     }
 
     private double GetDisplayedAudioLevel()
@@ -5584,13 +5727,6 @@ public partial class MainWindow : Window
 
     private void ClearAudioDebugHistory()
     {
-        _audioLevelHistoryAccumulator = 0;
-        _audioLevelHistory.Clear();
-        _audioBassHistory.Clear();
-        _audioFreqHistory.Clear();
-        _audioBassFreqHistory.Clear();
-        _audioMidFreqHistory.Clear();
-        _audioHighFreqHistory.Clear();
         _frameGapHistoryAccumulator = 0;
         _frameGapHistory.Clear();
     }
@@ -5631,52 +5767,6 @@ public partial class MainWindow : Window
         int index = (int)Math.Round((values.Length - 1) * 0.95);
         index = Math.Clamp(index, 0, values.Length - 1);
         return (average, values[index], over25, over33, over50);
-    }
-
-    private void RecordAudioLevelHistory(double dt)
-    {
-        _audioLevelHistoryAccumulator += Math.Max(0, dt) * AudioDebugHistorySampleRate;
-        double displayedLevel = GetDisplayedAudioLevel();
-        double bassLevel = Math.Clamp(_smoothedBass / 10.0, 0, 1);
-        double freqLevel = Math.Clamp(_smoothedFreq, 0, 5000.0);
-        double bassFreqLevel = Math.Clamp(_audioBeatDetector.BassFrequency, 0, 5000.0);
-        double midFreqLevel = Math.Clamp(_audioBeatDetector.MidFrequency, 0, 5000.0);
-        double highFreqLevel = Math.Clamp(_audioBeatDetector.HighFrequency, 0, 5000.0);
-        while (_audioLevelHistoryAccumulator >= 1.0)
-        {
-            _audioLevelHistory.Enqueue(displayedLevel);
-            _audioBassHistory.Enqueue(bassLevel);
-            _audioFreqHistory.Enqueue(freqLevel);
-            _audioBassFreqHistory.Enqueue(bassFreqLevel);
-            _audioMidFreqHistory.Enqueue(midFreqLevel);
-            _audioHighFreqHistory.Enqueue(highFreqLevel);
-            _audioLevelHistoryAccumulator -= 1.0;
-        }
-
-        while (_audioLevelHistory.Count > AudioDebugHistorySize)
-        {
-            _audioLevelHistory.Dequeue();
-        }
-        while (_audioBassHistory.Count > AudioDebugHistorySize)
-        {
-            _audioBassHistory.Dequeue();
-        }
-        while (_audioFreqHistory.Count > AudioDebugHistorySize)
-        {
-            _audioFreqHistory.Dequeue();
-        }
-        while (_audioBassFreqHistory.Count > AudioDebugHistorySize)
-        {
-            _audioBassFreqHistory.Dequeue();
-        }
-        while (_audioMidFreqHistory.Count > AudioDebugHistorySize)
-        {
-            _audioMidFreqHistory.Dequeue();
-        }
-        while (_audioHighFreqHistory.Count > AudioDebugHistorySize)
-        {
-            _audioHighFreqHistory.Dequeue();
-        }
     }
 
     private void ApplyAudioReactiveLifeOpacity()
@@ -6115,10 +6205,23 @@ public partial class MainWindow : Window
 
         var referenceEngine = GetReferenceSimulationEngine();
         int targetPixels = referenceEngine.Columns * referenceEngine.Rows;
+        const int staticNativeThresholdPixels = 640 * 360;
 
-        // For tiny simulation grids, native video frames cost far more to move
-        // through the app than the visual benefit they provide.
-        return targetPixels >= (640 * 360);
+        if (source.Type == CaptureSource.SourceType.VideoSequence)
+        {
+            return false;
+        }
+
+        if (source.Type == CaptureSource.SourceType.File &&
+            !string.IsNullOrWhiteSpace(source.FilePath) &&
+            _fileCapture.GetKind(source.FilePath) == FileCaptureService.FileSourceKind.Video)
+        {
+            // For file-backed video, exact/adapted decoder output is consistently
+            // fresher than switching back to native frames and resampling on CPU.
+            return false;
+        }
+
+        return targetPixels >= staticNativeThresholdPixels;
     }
 
     private void TogglePassthrough_Click(object sender, RoutedEventArgs e)
@@ -6198,6 +6301,84 @@ public partial class MainWindow : Window
         }
         UpdateChromeUi();
         UpdateFullscreenMenuItem();
+        ResetFramePumpCadence(scheduleImmediate: true);
+    }
+
+    internal void EnterFullscreenForSmoke()
+    {
+        EnterFullscreen(applyConfig: false);
+    }
+
+    internal (bool ok, string detail) ValidateRenderLayoutForSmoke(bool fullscreenExpected)
+    {
+        if (RenderSurfaceHost == null)
+        {
+            return (false, "RenderSurfaceHost was null.");
+        }
+
+        double hostWidth = RenderSurfaceHost.ActualWidth;
+        double hostHeight = RenderSurfaceHost.ActualHeight;
+        if (hostWidth < 4 || hostHeight < 4)
+        {
+            return (false, $"Render host size was invalid ({hostWidth:0.0}x{hostHeight:0.0}).");
+        }
+
+        FrameworkElement? presentedElement = null;
+        if (RenderSurfaceHost.Children.Count > 0)
+        {
+            presentedElement = RenderSurfaceHost.Children[0] as FrameworkElement;
+        }
+        else if (GameImage != null)
+        {
+            presentedElement = GameImage;
+        }
+
+        if (presentedElement == null)
+        {
+            return (false, "No presented render element was available.");
+        }
+
+        double elementWidth = presentedElement.ActualWidth;
+        double elementHeight = presentedElement.ActualHeight;
+        if (elementWidth < 4 || elementHeight < 4)
+        {
+            return (false, $"Presented element size was invalid ({elementWidth:0.0}x{elementHeight:0.0}).");
+        }
+
+        GeneralTransform transform = presentedElement.TransformToAncestor(RenderSurfaceHost);
+        Rect elementBounds = transform.TransformBounds(new Rect(0, 0, elementWidth, elementHeight));
+
+        double aspect = _displayHeight > 0
+            ? Math.Max(0.01, _displayWidth / (double)_displayHeight)
+            : Math.Max(0.01, _currentAspectRatio);
+        double hostAspect = hostWidth / hostHeight;
+        double expectedWidth;
+        double expectedHeight;
+        if (hostAspect > aspect)
+        {
+            expectedHeight = hostHeight;
+            expectedWidth = hostHeight * aspect;
+        }
+        else
+        {
+            expectedWidth = hostWidth;
+            expectedHeight = hostWidth / aspect;
+        }
+
+        double widthCoverage = elementBounds.Width / Math.Max(1.0, expectedWidth);
+        double heightCoverage = elementBounds.Height / Math.Max(1.0, expectedHeight);
+        double expectedLeft = (hostWidth - expectedWidth) * 0.5;
+        double expectedTop = (hostHeight - expectedHeight) * 0.5;
+        double offsetErrorX = Math.Abs(elementBounds.Left - expectedLeft);
+        double offsetErrorY = Math.Abs(elementBounds.Top - expectedTop);
+
+        bool sizeOk = widthCoverage >= 0.85 && heightCoverage >= 0.85;
+        bool alignmentOk = offsetErrorX <= Math.Max(24.0, hostWidth * 0.05) &&
+                           offsetErrorY <= Math.Max(24.0, hostHeight * 0.05);
+        bool fullscreenOk = !fullscreenExpected || (_isFullscreen && WindowState == WindowState.Normal);
+
+        string detail = $"host={hostWidth:0.0}x{hostHeight:0.0}, element={elementBounds.Width:0.0}x{elementBounds.Height:0.0}@({elementBounds.Left:0.0},{elementBounds.Top:0.0}), expected={expectedWidth:0.0}x{expectedHeight:0.0}@({expectedLeft:0.0},{expectedTop:0.0}), coverage={widthCoverage:0.00}/{heightCoverage:0.00}, fullscreen={_isFullscreen}.";
+        return (fullscreenOk && sizeOk && alignmentOk, detail);
     }
 
     private void ExitFullscreen()
@@ -6226,6 +6407,7 @@ public partial class MainWindow : Window
         SnapWindowToAspect(preserveHeight: true);
         SaveConfig();
         UpdateFullscreenMenuItem();
+        ResetFramePumpCadence(scheduleImmediate: true);
     }
 
     private Rect GetCurrentMonitorBounds()
@@ -6633,11 +6815,58 @@ public partial class MainWindow : Window
             _frameProfiler.RecordSample(ratioMetricName, isFreshFrame ? 1.0 : 0.0);
         }
 
+        string sourceMetricSuffix = BuildFreshnessMetricSuffix(source);
+        if (!string.IsNullOrEmpty(sourceMetricSuffix) && !string.IsNullOrEmpty(ratioMetricName))
+        {
+            _frameProfiler.RecordSample($"{ratioMetricName}_{sourceMetricSuffix}", isFreshFrame ? 1.0 : 0.0);
+        }
+
         if (!string.IsNullOrEmpty(ageMetricName) && frame.FramePublishTimestamp > 0)
         {
             double ageMs = FrameProfiler.ElapsedMilliseconds(frame.FramePublishTimestamp, Stopwatch.GetTimestamp());
             _frameProfiler.RecordSample(ageMetricName, Math.Max(0.0, ageMs));
+            if (!string.IsNullOrEmpty(sourceMetricSuffix))
+            {
+                _frameProfiler.RecordSample($"{ageMetricName}_{sourceMetricSuffix}", Math.Max(0.0, ageMs));
+            }
         }
+    }
+
+    private static string BuildFreshnessMetricSuffix(CaptureSource source)
+    {
+        string raw = source.Type switch
+        {
+            CaptureSource.SourceType.File when !string.IsNullOrWhiteSpace(source.FilePath)
+                => Path.GetFileName(source.FilePath),
+            CaptureSource.SourceType.VideoSequence when source.VideoSequence != null
+                => Path.GetFileName(source.VideoSequence.Paths.FirstOrDefault() ?? source.DisplayName),
+            _ => source.DisplayName
+        };
+
+        if (string.IsNullOrWhiteSpace(raw))
+        {
+            return string.Empty;
+        }
+
+        var builder = new StringBuilder(raw.Length);
+        foreach (char ch in raw)
+        {
+            if (char.IsLetterOrDigit(ch))
+            {
+                builder.Append(char.ToLowerInvariant(ch));
+            }
+            else if (builder.Length == 0 || builder[builder.Length - 1] != '_')
+            {
+                builder.Append('_');
+            }
+
+            if (builder.Length >= 48)
+            {
+                break;
+            }
+        }
+
+        return builder.ToString().Trim('_');
     }
 
     private static BlendMode ParseBlendModeOrDefault(string? value, BlendMode fallback)
@@ -7448,7 +7677,7 @@ public partial class MainWindow : Window
 
     private void MainWindow_OnSizeChanged(object sender, SizeChangedEventArgs e)
     {
-        if (_suppressWindowResize || _isFullscreen)
+        if (_suppressWindowResize || _isFullscreen || _isChromeResizing)
         {
             _lastWindowSize = new Size(ActualWidth, ActualHeight);
             _lastClientSize = new Size(Root.ActualWidth, Root.ActualHeight);
@@ -8392,6 +8621,7 @@ public partial class MainWindow : Window
         _effectiveLifeOpacity = 1.0;
         _currentFpsFromConfig = 60;
         _currentFps = 60;
+        _currentSimulationTargetFps = 60;
 
         int targetRows = Math.Clamp(rows, MinRows, MaxRows);
         ApplyDimensions(targetRows, 24, DefaultAspectRatio, persist: false);
@@ -9247,12 +9477,6 @@ public partial class MainWindow : Window
         if (_showFps)
         {
             double now = _lifetimeStopwatch.Elapsed.TotalSeconds;
-            if (now - _lastDebugOverlayUpdateTime < (1.0 / DebugOverlayRefreshRateHz))
-            {
-                return;
-            }
-            _lastDebugOverlayUpdateTime = now;
-
             var pacingStats = GetRecentFrameGapStats();
             string audioStats;
             if (!string.IsNullOrWhiteSpace(_selectedAudioDeviceId))
@@ -9277,63 +9501,79 @@ public partial class MainWindow : Window
                 reactiveStats = $"\nReactive: {deviceState} | InGain x{_audioInputGain:0.00} | FPS x{_audioReactiveFpsMultiplier:0.00} (min {_audioReactiveFpsMinPercent * 100.0:0}%) | Opacity {_effectiveLifeOpacity:0.00} | Beats: {_audioBeatDetector.BeatCount} | Seeds L:{_audioReactiveLevelSeedBurstsLastStep} B:{_audioReactiveBeatSeedBurstsLastStep}";
             }
 
-            FpsText.Text = $"Render {_renderDisplayFps:0.0} fps | Sim {_simulationDisplayFps:0.0} sps (target {_currentFps:0.0}){pacingStatsText}{stageStatsText}{audioStats}{reactiveStats}";
+            FpsText.Text = $"Render {_renderDisplayFps:0.0} fps (target {_currentFpsFromConfig:0.0}) | Sim {_simulationDisplayFps:0.0} sps (target {_currentSimulationTargetFps:0.0}){pacingStatsText}{stageStatsText}{audioStats}{reactiveStats}";
             FpsText.Visibility = Visibility.Visible;
+
+            UpdateDebugOverlays(now);
         }
         else
         {
             FpsText.Visibility = Visibility.Collapsed;
+            UpdateDebugOverlayVisibility(false);
         }
-
-        UpdateAudioDebugOverlay();
     }
 
-    private void UpdateAudioDebugOverlay()
+    private void UpdateDebugOverlays(double now)
     {
-        if (FrameDebugOverlay == null || FrameDebugCanvas == null || FrameBudgetLine == null || FrameTimingLine == null ||
-            AudioDebugOverlay == null || AudioDebugCanvas == null || AudioWaveformLine == null || AudioLevelLine == null || AudioBassLine == null || AudioFrequencyLine == null || AudioBassFrequencyLine == null || AudioMidFrequencyLine == null || AudioHighFrequencyLine == null)
+        if (FrameDebugOverlay == null || FrameDebugCanvas == null || FrameBudgetLine == null || FrameTimingLine == null || FrameUnderrunBars == null ||
+            AudioDebugOverlay == null || AudioDebugCanvas == null || AudioWaveformRange == null || AudioLevelLine == null || AudioBassLine == null || AudioFrequencyLine == null || AudioBassFrequencyLine == null || AudioMidFrequencyLine == null || AudioHighFrequencyLine == null)
         {
             return;
         }
 
-        bool visible = _showFps;
-        FrameDebugOverlay.Visibility = visible ? Visibility.Visible : Visibility.Collapsed;
-        AudioDebugOverlay.Visibility = visible ? Visibility.Visible : Visibility.Collapsed;
-        if (!visible)
+        UpdateDebugOverlayVisibility(_showFps);
+        if (!_showFps)
         {
             return;
         }
 
-        double frameWidth = FrameDebugCanvas.ActualWidth;
-        double frameHeight = FrameDebugCanvas.ActualHeight;
-        if (frameWidth >= 4 && frameHeight >= 4)
+        if (now - _lastTimingOverlayUpdateTime >= (1.0 / DebugTimingOverlayRefreshRateHz))
         {
-            double[] frameGapHistory = _frameGapHistory.ToArray();
-            if (frameGapHistory.Length == 0)
+            _lastTimingOverlayUpdateTime = now;
+
+            double frameWidth = FrameDebugCanvas.ActualWidth;
+            double frameHeight = FrameDebugCanvas.ActualHeight;
+            if (frameWidth >= 4 && frameHeight >= 4)
             {
-                frameGapHistory = new[] { 0d, 0d };
-            }
-            double frameBottom = frameHeight - 2;
-            double frameUsableHeight = frameHeight - 4;
-            FrameTimingLine.Points = BuildSampledPointCollection(
-                frameGapHistory.Length,
-                frameWidth,
-                GetOverlayPointCount(frameWidth, frameGapHistory.Length),
-                sourceIndex =>
+                double[] frameGapHistory = _frameGapHistory.ToArray();
+                if (frameGapHistory.Length == 0)
                 {
-                    double normalizedGap = Math.Clamp(frameGapHistory[sourceIndex] / FrameTimingOverlayMaxMs, 0, 1);
-                    return frameBottom - (normalizedGap * frameUsableHeight);
-                });
+                    frameGapHistory = new[] { 0d, 0d };
+                }
+                double frameBottom = frameHeight - 2;
+                double frameUsableHeight = frameHeight - 4;
+                FrameTimingLine.Points = BuildSampledPointCollection(
+                    frameGapHistory.Length,
+                    frameWidth,
+                    GetOverlayPointCount(frameWidth, frameGapHistory.Length),
+                    sourceIndex =>
+                    {
+                        double normalizedGap = Math.Clamp(frameGapHistory[sourceIndex] / FrameTimingOverlayMaxMs, 0, 1);
+                        return frameBottom - (normalizedGap * frameUsableHeight);
+                    });
 
-            double frameBudgetMs = 1000.0 / Math.Max(1.0, _currentFps);
-            double normalizedBudget = Math.Clamp(frameBudgetMs / FrameTimingOverlayMaxMs, 0, 1);
-            double budgetY = frameBottom - (normalizedBudget * frameUsableHeight);
-            FrameBudgetLine.Points = new PointCollection
-            {
-                new Point(0, budgetY),
-                new Point(frameWidth, budgetY)
-            };
+                double frameBudgetMs = 1000.0 / Math.Max(1.0, _currentFps);
+                double normalizedBudget = Math.Clamp(frameBudgetMs / FrameTimingOverlayMaxMs, 0, 1);
+                double budgetY = frameBottom - (normalizedBudget * frameUsableHeight);
+                FrameBudgetLine.Points = new PointCollection
+                {
+                    new Point(0, budgetY),
+                    new Point(frameWidth, budgetY)
+                };
+
+                FrameUnderrunBars.Data = BuildFrameUnderrunGeometry(
+                    frameGapHistory,
+                    frameWidth,
+                    frameBottom,
+                    frameBudgetMs);
+            }
         }
+
+        if (now - _lastAudioOverlayUpdateTime < (1.0 / DebugAudioOverlayRefreshRateHz))
+        {
+            return;
+        }
+        _lastAudioOverlayUpdateTime = now;
 
         double width = AudioDebugCanvas.ActualWidth;
         double height = AudioDebugCanvas.ActualHeight;
@@ -9342,18 +9582,20 @@ public partial class MainWindow : Window
             return;
         }
 
-        float[] waveform = _audioBeatDetector.GetWaveformHistory();
-        if (waveform.Length == 0)
+        var (waveformMin, waveformMax) = _audioBeatDetector.GetWaveformRangeHistory();
+        if (waveformMin.Length == 0 || waveformMax.Length == 0)
         {
-            waveform = new[] { 0f, 0f };
+            waveformMin = new[] { 0f, 0f };
+            waveformMax = new[] { 0f, 0f };
         }
         double centerY = height * 0.5;
         double waveformAmplitude = height * 0.38;
-        AudioWaveformLine.Points = BuildSampledPointCollection(
-            waveform.Length,
+        AudioWaveformRange.Data = BuildVerticalRangeGeometry(
+            waveformMin,
+            waveformMax,
             width,
-            GetOverlayPointCount(width, waveform.Length),
-            sourceIndex => centerY - (waveform[sourceIndex] * waveformAmplitude));
+            GetOverlayPointCount(width, Math.Min(waveformMin.Length, waveformMax.Length)),
+            sample => centerY - (sample * waveformAmplitude));
 
         float[] detectorEnvelopeHistory = _audioBeatDetector.GetEnvelopeHistory();
         double[] levelHistory = detectorEnvelopeHistory.Length == 0
@@ -9363,27 +9605,42 @@ public partial class MainWindow : Window
         {
             levelHistory = new[] { 0d, 0d };
         }
-        double[] bassHistory = _audioBassHistory.ToArray();
+        float[] detectorBassHistory = _audioBeatDetector.GetBassEnergyHistory();
+        double[] bassHistory = detectorBassHistory.Length == 0
+            ? Array.Empty<double>()
+            : detectorBassHistory.Select(static value => (double)value).ToArray();
         if (bassHistory.Length == 0)
         {
             bassHistory = new[] { 0d, 0d };
         }
-        double[] freqHistory = _audioFreqHistory.ToArray();
+        float[] detectorMainFrequencyHistory = _audioBeatDetector.GetMainFrequencyHistory();
+        double[] freqHistory = detectorMainFrequencyHistory.Length == 0
+            ? Array.Empty<double>()
+            : detectorMainFrequencyHistory.Select(static value => (double)value).ToArray();
         if (freqHistory.Length == 0)
         {
             freqHistory = new[] { 0d, 0d };
         }
-        double[] bassFreqHistory = _audioBassFreqHistory.ToArray();
+        float[] detectorBassFrequencyHistory = _audioBeatDetector.GetBassFrequencyHistory();
+        double[] bassFreqHistory = detectorBassFrequencyHistory.Length == 0
+            ? Array.Empty<double>()
+            : detectorBassFrequencyHistory.Select(static value => (double)value).ToArray();
         if (bassFreqHistory.Length == 0)
         {
             bassFreqHistory = new[] { 0d, 0d };
         }
-        double[] midFreqHistory = _audioMidFreqHistory.ToArray();
+        float[] detectorMidFrequencyHistory = _audioBeatDetector.GetMidFrequencyHistory();
+        double[] midFreqHistory = detectorMidFrequencyHistory.Length == 0
+            ? Array.Empty<double>()
+            : detectorMidFrequencyHistory.Select(static value => (double)value).ToArray();
         if (midFreqHistory.Length == 0)
         {
             midFreqHistory = new[] { 0d, 0d };
         }
-        double[] highFreqHistory = _audioHighFreqHistory.ToArray();
+        float[] detectorHighFrequencyHistory = _audioBeatDetector.GetHighFrequencyHistory();
+        double[] highFreqHistory = detectorHighFrequencyHistory.Length == 0
+            ? Array.Empty<double>()
+            : detectorHighFrequencyHistory.Select(static value => (double)value).ToArray();
         if (highFreqHistory.Length == 0)
         {
             highFreqHistory = new[] { 0d, 0d };
@@ -9451,9 +9708,110 @@ public partial class MainWindow : Window
             });
     }
 
+    private void UpdateDebugOverlayVisibility(bool visible)
+    {
+        if (FrameDebugOverlay != null)
+        {
+            FrameDebugOverlay.Visibility = visible ? Visibility.Visible : Visibility.Collapsed;
+        }
+
+        if (AudioDebugOverlay != null)
+        {
+            AudioDebugOverlay.Visibility = visible ? Visibility.Visible : Visibility.Collapsed;
+        }
+    }
+
+    private static Geometry? BuildFrameUnderrunGeometry(double[] frameGapHistory, double width, double bottomY, double budgetMs)
+    {
+        if (frameGapHistory.Length == 0 || width <= 0 || bottomY <= 0 || budgetMs <= 0)
+        {
+            return null;
+        }
+
+        int sampleCount = GetOverlayPointCount(width, frameGapHistory.Length);
+        if (sampleCount <= 0)
+        {
+            return null;
+        }
+
+        int overrunCount = 0;
+        for (int sampleIndex = 0; sampleIndex < sampleCount; sampleIndex++)
+        {
+            int sourceIndex = sampleCount == 1
+                ? frameGapHistory.Length - 1
+                : (int)Math.Round(sampleIndex * (frameGapHistory.Length - 1d) / (sampleCount - 1d));
+            if (frameGapHistory[sourceIndex] > budgetMs)
+            {
+                overrunCount++;
+            }
+        }
+
+        if (overrunCount == 0)
+        {
+            return null;
+        }
+
+        double barTop = 2;
+        var geometry = new StreamGeometry();
+        using (var context = geometry.Open())
+        {
+            for (int sampleIndex = 0; sampleIndex < sampleCount; sampleIndex++)
+            {
+                int sourceIndex = sampleCount == 1
+                    ? frameGapHistory.Length - 1
+                    : (int)Math.Round(sampleIndex * (frameGapHistory.Length - 1d) / (sampleCount - 1d));
+                if (frameGapHistory[sourceIndex] <= budgetMs)
+                {
+                    continue;
+                }
+
+                double x = sampleCount == 1
+                    ? width * 0.5
+                    : sampleIndex * width / (sampleCount - 1d);
+                context.BeginFigure(new Point(x, bottomY), isFilled: false, isClosed: false);
+                context.LineTo(new Point(x, barTop), isStroked: true, isSmoothJoin: false);
+            }
+        }
+
+        geometry.Freeze();
+        return geometry;
+    }
+
+    private static Geometry? BuildVerticalRangeGeometry(float[] minValues, float[] maxValues, double width, int pointCount, Func<double, double> ySelector)
+    {
+        int sourceLength = Math.Min(minValues.Length, maxValues.Length);
+        if (sourceLength <= 0 || width <= 0 || pointCount <= 0)
+        {
+            return null;
+        }
+
+        pointCount = Math.Clamp(pointCount, 2, Math.Max(2, sourceLength));
+        var geometry = new StreamGeometry();
+        using (var context = geometry.Open())
+        {
+            double xDenom = Math.Max(1, pointCount - 1);
+            double sourceDenom = Math.Max(1, sourceLength - 1);
+            for (int i = 0; i < pointCount; i++)
+            {
+                int sourceIndex = pointCount >= sourceLength
+                    ? i
+                    : (int)Math.Round(i * sourceDenom / xDenom);
+                sourceIndex = Math.Clamp(sourceIndex, 0, sourceLength - 1);
+                double x = width * i / xDenom;
+                double yMin = ySelector(minValues[sourceIndex]);
+                double yMax = ySelector(maxValues[sourceIndex]);
+                context.BeginFigure(new Point(x, Math.Min(yMin, yMax)), isFilled: false, isClosed: false);
+                context.LineTo(new Point(x, Math.Max(yMin, yMax)), isStroked: true, isSmoothJoin: false);
+            }
+        }
+
+        geometry.Freeze();
+        return geometry;
+    }
+
     private static int GetOverlayPointCount(double width, int sourceLength)
     {
-        int maxPoints = Math.Max(2, (int)Math.Ceiling(width));
+        int maxPoints = Math.Max(2, Math.Min((int)Math.Ceiling(width), DebugOverlayMaxPoints));
         return Math.Clamp(sourceLength, 2, maxPoints);
     }
 
@@ -9629,10 +9987,12 @@ public partial class MainWindow : Window
     {
         fps = Math.Clamp(fps, 5, 144);
         _currentFpsFromConfig = fps;
+        _currentFps = fps;
         if (!_fpsOscillationEnabled)
         {
-            _currentFps = fps;
+            _currentSimulationTargetFps = fps;
         }
+        ResetFramePumpCadence(scheduleImmediate: true);
         UpdateFramerateMenuChecks();
         SaveConfig();
     }
@@ -10448,6 +10808,7 @@ public partial class MainWindow : Window
             _invertThreshold = config.InvertThreshold;
             _currentFpsFromConfig = Math.Clamp(config.Framerate, 5, 144);
             _currentFps = _currentFpsFromConfig;
+            _currentSimulationTargetFps = _currentFpsFromConfig;
             _lifeOpacity = Math.Clamp(config.LifeOpacity, 0, 1);
             _rgbHueShiftDegrees = NormalizeHueDegrees(config.RgbHueShiftDegrees);
             _rgbHueShiftSpeedDegreesPerSecond = Math.Clamp(config.RgbHueShiftSpeedDegreesPerSecond, -MaxRgbHueShiftSpeedDegreesPerSecond, MaxRgbHueShiftSpeedDegreesPerSecond);
@@ -10523,6 +10884,10 @@ public partial class MainWindow : Window
             ApplyAudioInputGainForSelection();
             _aspectRatioLocked = config.AspectRatioLocked;
             _lockedAspectRatio = config.LockedAspectRatio > 0 ? config.LockedAspectRatio : DefaultAspectRatio;
+            _pendingFullscreen = config.Fullscreen;
+
+            // Apply startup recovery before any heavyweight scene/audio/simulation restore.
+            ApplyStartupRecoveryOverridesIfNeeded();
 
             if (!string.IsNullOrWhiteSpace(_selectedAudioDeviceId))
             {
@@ -10561,7 +10926,6 @@ public partial class MainWindow : Window
                 _invertThreshold = firstLayer.InvertThreshold;
             }
 
-            _pendingFullscreen = config.Fullscreen;
             RestoreSources(config.Sources);
             ApplyMasterVideoAudioState();
             if (_pendingLegacyColumns.HasValue)
@@ -10580,6 +10944,75 @@ public partial class MainWindow : Window
         {
             // Allow saves after the first load attempt so startup events don't clobber existing config.
             _configReady = true;
+        }
+    }
+
+    private void ApplyStartupRecoveryOverridesIfNeeded()
+    {
+        if (!_startupRecoveryTriggered)
+        {
+            return;
+        }
+
+        int recoveredRows = Math.Min(_configuredRows, 480);
+        double recoveredFps = Math.Min(_currentFpsFromConfig, 60);
+        bool wasFullscreen = _pendingFullscreen;
+        bool wasShowFps = _showFps;
+        bool wasReactiveFpsEnabled = _audioReactiveLevelToFpsEnabled;
+
+        _configuredRows = Math.Clamp(recoveredRows, MinRows, MaxRows);
+        _currentFpsFromConfig = Math.Clamp(recoveredFps, 5, 144);
+        _currentFps = _currentFpsFromConfig;
+        _currentSimulationTargetFps = _currentFpsFromConfig;
+        _pendingFullscreen = false;
+        _showFps = false;
+        _fpsOscillationEnabled = false;
+        _audioReactiveLevelToFpsEnabled = false;
+
+        PersistStartupRecoveryOverridesToConfig();
+
+        Logger.Warn(
+            $"Startup recovery applied safe launch overrides. " +
+            $"Rows={_configuredRows}, Fps={_currentFpsFromConfig:0}, Fullscreen {wasFullscreen}->{_pendingFullscreen}, " +
+            $"ShowFps {wasShowFps}->{_showFps}, LevelToFramerate {wasReactiveFpsEnabled}->{_audioReactiveLevelToFpsEnabled}.");
+    }
+
+    private void PersistStartupRecoveryOverridesToConfig()
+    {
+        try
+        {
+            if (!File.Exists(ConfigPath))
+            {
+                return;
+            }
+
+            string json = File.ReadAllText(ConfigPath);
+            var config = JsonSerializer.Deserialize<AppConfig>(json);
+            if (config == null)
+            {
+                return;
+            }
+
+            config.Height = _configuredRows;
+            config.Columns = 0;
+            config.Framerate = _currentFpsFromConfig;
+            config.Fullscreen = false;
+            config.ShowFps = false;
+            config.OscillationEnabled = false;
+            config.AudioReactiveLevelToFpsEnabled = false;
+
+            string directory = Path.GetDirectoryName(ConfigPath) ?? string.Empty;
+            if (!Directory.Exists(directory))
+            {
+                Directory.CreateDirectory(directory);
+            }
+
+            string updatedJson = JsonSerializer.Serialize(config, new JsonSerializerOptions { WriteIndented = true });
+            File.WriteAllText(ConfigPath, updatedJson);
+        }
+        catch (Exception ex)
+        {
+            Logger.Warn($"Failed to persist startup recovery overrides. {ex.Message}");
         }
     }
 

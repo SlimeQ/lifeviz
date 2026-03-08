@@ -152,6 +152,8 @@ internal sealed class GpuPresentationBackend : IDisposable
             Focusable = false,
             IsHitTestVisible = false,
             Stretch = Stretch.Fill,
+            HorizontalAlignment = HorizontalAlignment.Center,
+            VerticalAlignment = VerticalAlignment.Center,
             SnapsToDevicePixels = true
         };
 
@@ -161,6 +163,7 @@ internal sealed class GpuPresentationBackend : IDisposable
         _drawingSurface.LoadContent += DrawingSurface_OnLoadContent;
         _drawingSurface.Draw += DrawingSurface_OnDraw;
         _drawingSurface.UnloadContent += DrawingSurface_OnUnloadContent;
+        _host.SizeChanged += Host_OnSizeChanged;
 
         _host.Children.Clear();
         _host.Children.Add(_drawingSurface);
@@ -227,11 +230,9 @@ internal sealed class GpuPresentationBackend : IDisposable
                 _simulationLayerCount = 0;
                 DisposeTextureResources();
             }
-
-            _drawingSurface.Width = width;
-            _drawingSurface.Height = height;
         }
 
+        UpdatePresentationLayout();
         return _pixelBuffer;
     }
 
@@ -415,6 +416,7 @@ internal sealed class GpuPresentationBackend : IDisposable
         }
 
         _disposed = true;
+        _host.SizeChanged -= Host_OnSizeChanged;
         _drawingSurface.LoadContent -= DrawingSurface_OnLoadContent;
         _drawingSurface.Draw -= DrawingSurface_OnDraw;
         _drawingSurface.UnloadContent -= DrawingSurface_OnUnloadContent;
@@ -426,6 +428,46 @@ internal sealed class GpuPresentationBackend : IDisposable
             _host.Children.Clear();
             _host.Children.Add(_fallbackImage);
         }
+    }
+
+    private void Host_OnSizeChanged(object sender, SizeChangedEventArgs e)
+    {
+        UpdatePresentationLayout();
+    }
+
+    private void UpdatePresentationLayout()
+    {
+        if (_surfaceWidth <= 0 || _surfaceHeight <= 0)
+        {
+            _drawingSurface.Width = double.NaN;
+            _drawingSurface.Height = double.NaN;
+            return;
+        }
+
+        double hostWidth = _host.ActualWidth;
+        double hostHeight = _host.ActualHeight;
+        if (hostWidth <= 0 || hostHeight <= 0)
+        {
+            return;
+        }
+
+        double aspect = _surfaceWidth / (double)_surfaceHeight;
+        double hostAspect = hostWidth / hostHeight;
+        double targetWidth;
+        double targetHeight;
+        if (hostAspect > aspect)
+        {
+            targetHeight = hostHeight;
+            targetWidth = targetHeight * aspect;
+        }
+        else
+        {
+            targetWidth = hostWidth;
+            targetHeight = targetWidth / aspect;
+        }
+
+        _drawingSurface.Width = targetWidth;
+        _drawingSurface.Height = targetHeight;
     }
 
     private void DrawingSurface_OnLoadContent(object? sender, DrawingSurfaceEventArgs e)
@@ -571,8 +613,12 @@ internal sealed class GpuPresentationBackend : IDisposable
         };
         UploadConstants(e.Context, _compositeParametersBuffer, parameters);
 
+        var colorDescription = e.Surface.ColorTexture!.Description;
+        float viewportWidth = colorDescription.Width;
+        float viewportHeight = colorDescription.Height;
+
         e.Context.OMSetRenderTargets(e.Surface.ColorTextureView, null);
-        e.Context.RSSetViewports(new[] { new Viewport(0, 0, _surfaceWidth, _surfaceHeight, 0.0f, 1.0f) });
+        e.Context.RSSetViewports(new[] { new Viewport(0, 0, viewportWidth, viewportHeight, 0.0f, 1.0f) });
         e.Context.IASetPrimitiveTopology(PrimitiveTopology.TriangleList);
         e.Context.IASetInputLayout(null);
         e.Context.VSSetShader(_compositeVertexShader);
@@ -603,8 +649,12 @@ internal sealed class GpuPresentationBackend : IDisposable
 
         UploadConstants(e.Context, _finalCompositeParametersBuffer, _finalCompositeParameters);
 
+        var colorDescription = e.Surface.ColorTexture!.Description;
+        float viewportWidth = colorDescription.Width;
+        float viewportHeight = colorDescription.Height;
+
         e.Context.OMSetRenderTargets(e.Surface.ColorTextureView, null);
-        e.Context.RSSetViewports(new[] { new Viewport(0, 0, _surfaceWidth, _surfaceHeight, 0.0f, 1.0f) });
+        e.Context.RSSetViewports(new[] { new Viewport(0, 0, viewportWidth, viewportHeight, 0.0f, 1.0f) });
         e.Context.IASetPrimitiveTopology(PrimitiveTopology.TriangleList);
         e.Context.IASetInputLayout(null);
         e.Context.VSSetShader(_compositeVertexShader);
