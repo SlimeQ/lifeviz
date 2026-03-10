@@ -31,6 +31,14 @@ internal sealed class GpuSharedDevice
         }
     }
 
+    public static void FlushIfCreated()
+    {
+        lock (InstanceLock)
+        {
+            _instance?.Context.Flush();
+        }
+    }
+
     private static GpuSharedDevice Create()
     {
         FeatureLevel[] primaryLevels =

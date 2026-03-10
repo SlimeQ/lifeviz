@@ -17,6 +17,12 @@ public static class Program
             return;
         }
 
+        if (DiagnosticTestRunner.TryRun(args, out exitCode))
+        {
+            Environment.ExitCode = exitCode;
+            return;
+        }
+
         var app = new App();
         app.InitializeComponent();
         app.Run();

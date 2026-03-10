@@ -125,6 +125,29 @@ internal static class LayerEditorOptions
         new LayerEditorOption("RandomPulse", "Random Pulse"),
         new LayerEditorOption("PulseWidthModulation", "Pulse Width Modulation")
     };
+
+    public static readonly IReadOnlyList<LayerEditorOption> SimulationReactiveInputs = new[]
+    {
+        new LayerEditorOption(nameof(SimulationReactiveInput.Level), "Level"),
+        new LayerEditorOption(nameof(SimulationReactiveInput.Bass), "Low"),
+        new LayerEditorOption(nameof(SimulationReactiveInput.Mid), "Mid"),
+        new LayerEditorOption(nameof(SimulationReactiveInput.High), "High"),
+        new LayerEditorOption(nameof(SimulationReactiveInput.Frequency), "Frequency"),
+        new LayerEditorOption(nameof(SimulationReactiveInput.BassFrequency), "Low Frequency"),
+        new LayerEditorOption(nameof(SimulationReactiveInput.MidFrequency), "Mid Frequency"),
+        new LayerEditorOption(nameof(SimulationReactiveInput.HighFrequency), "High Frequency")
+    };
+
+    public static readonly IReadOnlyList<LayerEditorOption> SimulationReactiveOutputs = new[]
+    {
+        new LayerEditorOption(nameof(SimulationReactiveOutput.Opacity), "Opacity"),
+        new LayerEditorOption(nameof(SimulationReactiveOutput.Framerate), "Framerate"),
+        new LayerEditorOption(nameof(SimulationReactiveOutput.HueShift), "Hue Shift"),
+        new LayerEditorOption(nameof(SimulationReactiveOutput.HueSpeed), "Hue Speed"),
+        new LayerEditorOption(nameof(SimulationReactiveOutput.InjectionNoise), "Injection Noise"),
+        new LayerEditorOption(nameof(SimulationReactiveOutput.ThresholdMin), "Threshold Min"),
+        new LayerEditorOption(nameof(SimulationReactiveOutput.ThresholdMax), "Threshold Max")
+    };
 }
 
 internal abstract class LayerEditorNotify : INotifyPropertyChanged
@@ -692,6 +715,129 @@ internal sealed class LayerEditorProjectSettings
     public string CompositeBlendMode { get; set; } = "Additive";
 }
 
+internal sealed class LayerEditorSimulationReactiveMapping : LayerEditorNotify
+{
+    private Guid _id;
+    private string _input = nameof(SimulationReactiveInput.Level);
+    private string _output = nameof(SimulationReactiveOutput.Opacity);
+    private double _amount = 1.0;
+
+    public Guid Id
+    {
+        get => _id;
+        set => SetField(ref _id, value);
+    }
+
+    public string Input
+    {
+        get => _input;
+        set
+        {
+            if (SetField(ref _input, value))
+            {
+                OnPropertyChanged(nameof(DisplayText));
+            }
+        }
+    }
+
+    public string Output
+    {
+        get => _output;
+        set
+        {
+            if (SetField(ref _output, value))
+            {
+                Amount = SimulationReactivity.ClampAmount(ParseOutput(value), Amount);
+                OnPropertyChanged(nameof(IsHueShiftOutput));
+                OnPropertyChanged(nameof(AmountMaximum));
+                OnPropertyChanged(nameof(AmountTickFrequency));
+                OnPropertyChanged(nameof(AmountLargeChange));
+                OnPropertyChanged(nameof(AmountSmallChange));
+                OnPropertyChanged(nameof(AmountLabel));
+                OnPropertyChanged(nameof(AmountDisplay));
+                OnPropertyChanged(nameof(DisplayText));
+            }
+        }
+    }
+
+    public double Amount
+    {
+        get => _amount;
+        set
+        {
+            double clamped = SimulationReactivity.ClampAmount(ParseOutput(Output), value);
+            if (SetField(ref _amount, clamped))
+            {
+                OnPropertyChanged(nameof(AmountDisplay));
+                OnPropertyChanged(nameof(DisplayText));
+            }
+        }
+    }
+
+    public bool IsHueShiftOutput => ParseOutput(Output) == SimulationReactiveOutput.HueShift;
+    public bool IsHueSpeedOutput => ParseOutput(Output) == SimulationReactiveOutput.HueSpeed;
+    public double AmountMaximum => ParseOutput(Output) switch
+    {
+        SimulationReactiveOutput.HueShift => 360.0,
+        SimulationReactiveOutput.HueSpeed => 180.0,
+        _ => 1.0
+    };
+    public double AmountTickFrequency => ParseOutput(Output) switch
+    {
+        SimulationReactiveOutput.HueShift => 15.0,
+        SimulationReactiveOutput.HueSpeed => 10.0,
+        _ => 0.05
+    };
+    public double AmountLargeChange => ParseOutput(Output) switch
+    {
+        SimulationReactiveOutput.HueShift => 15.0,
+        SimulationReactiveOutput.HueSpeed => 10.0,
+        _ => 0.1
+    };
+    public double AmountSmallChange => ParseOutput(Output) switch
+    {
+        SimulationReactiveOutput.HueShift => 1.0,
+        SimulationReactiveOutput.HueSpeed => 1.0,
+        _ => 0.05
+    };
+    public string AmountLabel => ParseOutput(Output) switch
+    {
+        SimulationReactiveOutput.HueShift => "Degrees",
+        SimulationReactiveOutput.HueSpeed => "Deg/sec",
+        _ => "Strength"
+    };
+    public string AmountDisplay => ParseOutput(Output) switch
+    {
+        SimulationReactiveOutput.HueShift => $"{Amount:0.#}deg",
+        SimulationReactiveOutput.HueSpeed => $"{Amount:0.#}deg/s",
+        _ => $"{Amount:P0}"
+    };
+    public string DisplayText => $"{ResolveLabel(Input, LayerEditorOptions.SimulationReactiveInputs)} -> {ResolveLabel(Output, LayerEditorOptions.SimulationReactiveOutputs)} ({AmountDisplay})";
+
+    public IReadOnlyList<LayerEditorOption> InputOptions => LayerEditorOptions.SimulationReactiveInputs;
+    public IReadOnlyList<LayerEditorOption> OutputOptions => LayerEditorOptions.SimulationReactiveOutputs;
+
+    private static SimulationReactiveOutput ParseOutput(string? value)
+    {
+        return Enum.TryParse<SimulationReactiveOutput>(value, true, out var output)
+            ? output
+            : SimulationReactiveOutput.Opacity;
+    }
+
+    private static string ResolveLabel(string? value, IReadOnlyList<LayerEditorOption> options)
+    {
+        foreach (var option in options)
+        {
+            if (string.Equals(option.Value, value, StringComparison.OrdinalIgnoreCase))
+            {
+                return option.Label;
+            }
+        }
+
+        return value ?? string.Empty;
+    }
+}
+
 internal sealed class LayerEditorSimulationLayer : LayerEditorNotify
 {
     private Guid _id;
@@ -710,6 +856,7 @@ internal sealed class LayerEditorSimulationLayer : LayerEditorNotify
     private double _rgbHueShiftDegrees;
     private double _rgbHueShiftSpeedDegreesPerSecond;
     private double _audioFrequencyHueShiftDegrees;
+    private ObservableCollection<LayerEditorSimulationReactiveMapping> _reactiveMappings = new();
     private bool _isExpanded = true;
     private bool _isSelected;
 
@@ -899,6 +1046,20 @@ internal sealed class LayerEditorSimulationLayer : LayerEditorNotify
         }
     }
 
+    public ObservableCollection<LayerEditorSimulationReactiveMapping> ReactiveMappings
+    {
+        get => _reactiveMappings;
+        set
+        {
+            if (!ReferenceEquals(_reactiveMappings, value))
+            {
+                _reactiveMappings = value ?? new ObservableCollection<LayerEditorSimulationReactiveMapping>();
+                OnPropertyChanged();
+                OnPropertyChanged(nameof(Details));
+            }
+        }
+    }
+
     public bool IsExpanded
     {
         get => _isExpanded;
@@ -913,11 +1074,13 @@ internal sealed class LayerEditorSimulationLayer : LayerEditorNotify
 
     public string TreeLabel => string.IsNullOrWhiteSpace(Name) ? "Simulation Layer" : Name;
 
-    public string Details => $"{(Enabled ? "Enabled" : "Disabled")} | {InputFunction} | {BlendMode} | {LifeMode} | {BinningMode} | Noise {InjectionNoise:P0} | Opacity {LifeOpacity:P0} | Hue {RgbHueShiftDegrees:0.#}deg {RgbHueShiftSpeedDegreesPerSecond:+0.#;-0.#;0}deg/s | FreqHue {AudioFrequencyHueShiftDegrees:0.#}deg | {InjectionMode} | Th {ThresholdMin:P0}-{ThresholdMax:P0}{(InvertThreshold ? " inv" : string.Empty)}";
+    public string Details => $"{(Enabled ? "Enabled" : "Disabled")} | {InputFunction} | {BlendMode} | {LifeMode} | {BinningMode} | Noise {InjectionNoise:P0} | Opacity {LifeOpacity:P0} | Hue {RgbHueShiftDegrees:0.#}deg {RgbHueShiftSpeedDegreesPerSecond:+0.#;-0.#;0}deg/s | Reactive {ReactiveMappings.Count} | {InjectionMode} | Th {ThresholdMin:P0}-{ThresholdMax:P0}{(InvertThreshold ? " inv" : string.Empty)}";
 
     public IReadOnlyList<LayerEditorOption> BlendModeOptions => LayerEditorOptions.BlendModes;
     public IReadOnlyList<LayerEditorOption> InputFunctionOptions => LayerEditorOptions.SimulationInputFunctions;
     public IReadOnlyList<LayerEditorOption> InjectionModeOptions => LayerEditorOptions.SimulationInjectionModes;
     public IReadOnlyList<LayerEditorOption> LifeModeOptions => LayerEditorOptions.SimulationLifeModes;
     public IReadOnlyList<LayerEditorOption> BinningModeOptions => LayerEditorOptions.SimulationBinningModes;
+
+    public void NotifyDetailsChanged() => OnPropertyChanged(nameof(Details));
 }

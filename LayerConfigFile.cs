@@ -1,12 +1,13 @@
 using System;
 using System.Collections.Generic;
+using System.Collections.ObjectModel;
 using System.Linq;
 
 namespace lifeviz;
 
 internal sealed class LayerConfigFile
 {
-    public int Version { get; set; } = 4;
+    public int Version { get; set; } = 5;
     public DateTime SavedUtc { get; set; } = DateTime.UtcNow;
     public LayerConfigProjectSettings ProjectSettings { get; set; } = new();
     public List<LayerConfigSimulationLayer> SimulationLayers { get; set; } = new();
@@ -51,7 +52,17 @@ internal sealed class LayerConfigFile
                 LifeOpacity = Math.Clamp(layer.LifeOpacity, 0, 1),
                 RgbHueShiftDegrees = layer.RgbHueShiftDegrees,
                 RgbHueShiftSpeedDegreesPerSecond = layer.RgbHueShiftSpeedDegreesPerSecond,
-                AudioFrequencyHueShiftDegrees = layer.AudioFrequencyHueShiftDegrees,
+                // Legacy field is load-only now. Persist the canonical mapping list instead.
+                AudioFrequencyHueShiftDegrees = 0,
+                ReactiveMappings = layer.ReactiveMappings
+                    .Select(mapping => new LayerConfigReactiveMapping
+                    {
+                        Id = mapping.Id,
+                        Input = string.IsNullOrWhiteSpace(mapping.Input) ? nameof(SimulationReactiveInput.Level) : mapping.Input,
+                        Output = string.IsNullOrWhiteSpace(mapping.Output) ? nameof(SimulationReactiveOutput.Opacity) : mapping.Output,
+                        Amount = mapping.Amount
+                    })
+                    .ToList(),
                 ThresholdMin = Math.Clamp(layer.ThresholdMin, 0, 1),
                 ThresholdMax = Math.Clamp(layer.ThresholdMax, 0, 1),
                 InvertThreshold = layer.InvertThreshold
@@ -76,6 +87,7 @@ internal sealed class LayerConfigFile
                     RgbHueShiftDegrees = 0,
                     RgbHueShiftSpeedDegreesPerSecond = 0,
                     AudioFrequencyHueShiftDegrees = 0,
+                    ReactiveMappings = new List<LayerConfigReactiveMapping>(),
                     ThresholdMin = 0.35,
                     ThresholdMax = 0.75,
                     InvertThreshold = false
@@ -95,6 +107,7 @@ internal sealed class LayerConfigFile
                     RgbHueShiftDegrees = 0,
                     RgbHueShiftSpeedDegreesPerSecond = 0,
                     AudioFrequencyHueShiftDegrees = 0,
+                    ReactiveMappings = new List<LayerConfigReactiveMapping>(),
                     ThresholdMin = 0.35,
                     ThresholdMax = 0.75,
                     InvertThreshold = false
@@ -122,24 +135,51 @@ internal sealed class LayerConfigFile
     {
         if (SimulationLayers != null && SimulationLayers.Count > 0)
         {
-            return SimulationLayers.Select(layer => new LayerEditorSimulationLayer
+            return SimulationLayers.Select(layer =>
             {
-                Id = layer.Id == Guid.Empty ? Guid.NewGuid() : layer.Id,
-                Name = string.IsNullOrWhiteSpace(layer.Name) ? "Simulation Layer" : layer.Name,
-                Enabled = layer.Enabled,
-                InputFunction = string.IsNullOrWhiteSpace(layer.InputFunction) ? "Direct" : layer.InputFunction,
-                BlendMode = string.IsNullOrWhiteSpace(layer.BlendMode) ? "Subtractive" : layer.BlendMode,
-                InjectionMode = string.IsNullOrWhiteSpace(layer.InjectionMode) ? "Threshold" : layer.InjectionMode,
-                LifeMode = string.IsNullOrWhiteSpace(layer.LifeMode) ? "NaiveGrayscale" : layer.LifeMode,
-                BinningMode = string.IsNullOrWhiteSpace(layer.BinningMode) ? "Fill" : layer.BinningMode,
-                InjectionNoise = Math.Clamp(layer.InjectionNoise, 0, 1),
-                LifeOpacity = Math.Clamp(layer.LifeOpacity, 0, 1),
-                RgbHueShiftDegrees = layer.RgbHueShiftDegrees,
-                RgbHueShiftSpeedDegreesPerSecond = layer.RgbHueShiftSpeedDegreesPerSecond,
-                AudioFrequencyHueShiftDegrees = layer.AudioFrequencyHueShiftDegrees,
-                ThresholdMin = Math.Clamp(layer.ThresholdMin, 0, 1),
-                ThresholdMax = Math.Clamp(layer.ThresholdMax, 0, 1),
-                InvertThreshold = layer.InvertThreshold
+                var reactiveMappings = (layer.ReactiveMappings ?? new List<LayerConfigReactiveMapping>())
+                    .Select(mapping => new LayerEditorSimulationReactiveMapping
+                    {
+                        Id = mapping.Id == Guid.Empty ? Guid.NewGuid() : mapping.Id,
+                        Input = string.IsNullOrWhiteSpace(mapping.Input) ? nameof(SimulationReactiveInput.Level) : mapping.Input,
+                        Output = string.IsNullOrWhiteSpace(mapping.Output) ? nameof(SimulationReactiveOutput.Opacity) : mapping.Output,
+                        Amount = SimulationReactivity.ClampAmount(
+                            ParseReactiveOutputOrDefault(mapping.Output, SimulationReactiveOutput.Opacity),
+                            mapping.Amount)
+                    })
+                    .ToList();
+
+                if (reactiveMappings.Count == 0 && layer.AudioFrequencyHueShiftDegrees > 0.001)
+                {
+                    reactiveMappings.Add(new LayerEditorSimulationReactiveMapping
+                    {
+                        Id = Guid.NewGuid(),
+                        Input = nameof(SimulationReactiveInput.Frequency),
+                        Output = nameof(SimulationReactiveOutput.HueShift),
+                        Amount = Math.Clamp(layer.AudioFrequencyHueShiftDegrees, 0, 360)
+                    });
+                }
+
+                return new LayerEditorSimulationLayer
+                {
+                    Id = layer.Id == Guid.Empty ? Guid.NewGuid() : layer.Id,
+                    Name = string.IsNullOrWhiteSpace(layer.Name) ? "Simulation Layer" : layer.Name,
+                    Enabled = layer.Enabled,
+                    InputFunction = string.IsNullOrWhiteSpace(layer.InputFunction) ? "Direct" : layer.InputFunction,
+                    BlendMode = string.IsNullOrWhiteSpace(layer.BlendMode) ? "Subtractive" : layer.BlendMode,
+                    InjectionMode = string.IsNullOrWhiteSpace(layer.InjectionMode) ? "Threshold" : layer.InjectionMode,
+                    LifeMode = string.IsNullOrWhiteSpace(layer.LifeMode) ? "NaiveGrayscale" : layer.LifeMode,
+                    BinningMode = string.IsNullOrWhiteSpace(layer.BinningMode) ? "Fill" : layer.BinningMode,
+                    InjectionNoise = Math.Clamp(layer.InjectionNoise, 0, 1),
+                    LifeOpacity = Math.Clamp(layer.LifeOpacity, 0, 1),
+                    RgbHueShiftDegrees = layer.RgbHueShiftDegrees,
+                    RgbHueShiftSpeedDegreesPerSecond = layer.RgbHueShiftSpeedDegreesPerSecond,
+                    AudioFrequencyHueShiftDegrees = 0,
+                    ReactiveMappings = new ObservableCollection<LayerEditorSimulationReactiveMapping>(reactiveMappings),
+                    ThresholdMin = Math.Clamp(layer.ThresholdMin, 0, 1),
+                    ThresholdMax = Math.Clamp(layer.ThresholdMax, 0, 1),
+                    InvertThreshold = layer.InvertThreshold
+                };
             }).ToList();
         }
 
@@ -317,6 +357,7 @@ internal sealed class LayerConfigFile
                 RgbHueShiftDegrees = ProjectSettings?.RgbHueShiftDegrees ?? 0,
                 RgbHueShiftSpeedDegreesPerSecond = ProjectSettings?.RgbHueShiftSpeedDegreesPerSecond ?? 0,
                 AudioFrequencyHueShiftDegrees = 0,
+                ReactiveMappings = new ObservableCollection<LayerEditorSimulationReactiveMapping>(),
                 ThresholdMin = 0.35,
                 ThresholdMax = 0.75,
                 InvertThreshold = false
@@ -336,6 +377,7 @@ internal sealed class LayerConfigFile
                 RgbHueShiftDegrees = ProjectSettings?.RgbHueShiftDegrees ?? 0,
                 RgbHueShiftSpeedDegreesPerSecond = ProjectSettings?.RgbHueShiftSpeedDegreesPerSecond ?? 0,
                 AudioFrequencyHueShiftDegrees = 0,
+                ReactiveMappings = new ObservableCollection<LayerEditorSimulationReactiveMapping>(),
                 ThresholdMin = 0.35,
                 ThresholdMax = 0.75,
                 InvertThreshold = false
@@ -396,6 +438,17 @@ internal sealed class LayerConfigFile
 
         return normalized;
     }
+
+    private static SimulationReactiveOutput ParseReactiveOutputOrDefault(string? value, SimulationReactiveOutput fallback)
+    {
+        if (!string.IsNullOrWhiteSpace(value) &&
+            Enum.TryParse<SimulationReactiveOutput>(value, true, out var parsed))
+        {
+            return parsed;
+        }
+
+        return fallback;
+    }
 }
 
 internal sealed class LayerConfigSource
@@ -450,9 +503,18 @@ internal sealed class LayerConfigSimulationLayer
     public double RgbHueShiftDegrees { get; set; }
     public double RgbHueShiftSpeedDegreesPerSecond { get; set; }
     public double AudioFrequencyHueShiftDegrees { get; set; }
+    public List<LayerConfigReactiveMapping> ReactiveMappings { get; set; } = new();
     public double ThresholdMin { get; set; } = 0.35;
     public double ThresholdMax { get; set; } = 0.75;
     public bool InvertThreshold { get; set; }
+}
+
+internal sealed class LayerConfigReactiveMapping
+{
+    public Guid Id { get; set; }
+    public string Input { get; set; } = nameof(SimulationReactiveInput.Level);
+    public string Output { get; set; } = nameof(SimulationReactiveOutput.Opacity);
+    public double Amount { get; set; } = 1.0;
 }
 
 internal sealed class LayerConfigProjectSettings

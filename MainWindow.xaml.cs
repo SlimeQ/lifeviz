@@ -1,4 +1,5 @@
 using System;
+using System.Collections.ObjectModel;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Globalization;
@@ -167,7 +168,9 @@ public partial class MainWindow : Window
     private int _simulationFrames;
     private int _renderFrames;
     private double _renderDisplayFps;
+    private double _presentationDisplayFps;
     private double _simulationDisplayFps;
+    private int _lastPresentationDrawCount;
     private GameOfLifeEngine.LifeMode _lifeMode = GameOfLifeEngine.LifeMode.NaiveGrayscale;
     private GameOfLifeEngine.BinningMode _binningMode = GameOfLifeEngine.BinningMode.Fill;
     private GameOfLifeEngine.InjectionMode _injectionMode = GameOfLifeEngine.InjectionMode.Threshold;
@@ -243,6 +246,7 @@ public partial class MainWindow : Window
     private DateTime _lastAudioReactiveSeedUtc = DateTime.MinValue;
     private double _effectiveLifeOpacity = 1.0;
     private long _lastProfileFrameTimestamp;
+    private bool _liveProfileExportInProgress;
     private bool _highResolutionTimerEnabled;
     private bool _isChromeDragging;
     private Point _chromeDragStartScreen;
@@ -397,7 +401,7 @@ public partial class MainWindow : Window
 
     private bool TryBeginWindowDragOrToggleFullscreen(MouseButtonEventArgs e)
     {
-        if (_isFullscreen || e.ChangedButton != MouseButton.Left)
+        if (e.ChangedButton != MouseButton.Left)
         {
             return false;
         }
@@ -414,6 +418,11 @@ public partial class MainWindow : Window
             ToggleFullscreen_Click(this, new RoutedEventArgs());
             e.Handled = true;
             return true;
+        }
+
+        if (_isFullscreen)
+        {
+            return false;
         }
 
         _isChromeDragging = true;
@@ -698,19 +707,25 @@ public partial class MainWindow : Window
     {
         _frameProfiler.Start(sessionName);
         _lastProfileFrameTimestamp = 0;
+        _lastPresentationDrawCount = _renderBackend.PresentationDrawCount;
         _uiThreadLatencyProbe.Start(TimeSpan.FromMilliseconds(50));
     }
 
     internal (FrameProfileReport report, string path) StopProfilingSessionAndExport()
     {
-        _uiThreadLatencyProbe.Stop();
-        var report = _frameProfiler.Stop();
-        string outputDirectory = App.IsSmokeTestMode
+        string outputDirectory = App.IsSmokeTestMode || App.IsDiagnosticTestMode
             ? Path.Combine(AppContext.BaseDirectory, "profiles")
             : Path.Combine(
                 Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
                 "lifeviz",
                 "profiles");
+        return StopProfilingSessionAndExport(outputDirectory);
+    }
+
+    internal (FrameProfileReport report, string path) StopProfilingSessionAndExport(string outputDirectory)
+    {
+        _uiThreadLatencyProbe.Stop();
+        var report = _frameProfiler.Stop();
         string path = _frameProfiler.Export(report, outputDirectory);
         return (report, path);
     }
@@ -1209,80 +1224,125 @@ public partial class MainWindow : Window
         }
         ApplyAudioReactiveFps();
         ApplyAudioReactiveLifeOpacity();
+        ApplySimulationLayerReactiveState();
         _audioReactiveLevelSeedBurstsLastStep = 0;
         _audioReactiveBeatSeedBurstsLastStep = 0;
         EndProfileStamp("audio_update_ms", audioUpdateStamp);
 
-        double effectiveStepFps = Math.Max(_currentSimulationTargetFps, 0);
-        if (interactionThrottled)
+        int maxStepsThisFrame = 0;
+        bool anyLayerNeedsInject = false;
+        foreach (var layer in _simulationLayers)
         {
-            effectiveStepFps = Math.Min(effectiveStepFps, UiInteractionThrottleFps);
+            if (!layer.Enabled)
+            {
+                layer.TimeSinceLastStep = 0;
+                continue;
+            }
+
+            double layerTargetFps = Math.Max(layer.EffectiveSimulationTargetFps, 0);
+            if (interactionThrottled)
+            {
+                layerTargetFps = Math.Min(layerTargetFps, UiInteractionThrottleFps);
+            }
+
+            layer.EffectiveSimulationTargetFps = layerTargetFps;
+            if (layerTargetFps < 0.01)
+            {
+                layer.TimeSinceLastStep = 0;
+                continue;
+            }
+
+            layer.TimeSinceLastStep += elapsed;
+            double desiredInterval = 1.0 / layerTargetFps;
+            if (layer.TimeSinceLastStep >= desiredInterval)
+            {
+                anyLayerNeedsInject = true;
+                int stepsToRun = (int)Math.Floor(layer.TimeSinceLastStep / desiredInterval);
+                stepsToRun = Math.Clamp(stepsToRun, 1, MaxSimulationStepsPerRender);
+                maxStepsThisFrame = Math.Max(maxStepsThisFrame, stepsToRun);
+            }
         }
-        if (effectiveStepFps < 0.01)
+
+        _timeSinceLastStep = _simulationLayers.Count == 0 ? 0 : _simulationLayers.Max(layer => layer.TimeSinceLastStep);
+
+        if (_sources.Count > 0)
         {
-            if (!_isPaused)
+            long injectStamp = BeginProfileStamp();
+            InjectCaptureFrames(injectLayers: !_isPaused && maxStepsThisFrame > 0 && anyLayerNeedsInject);
+            EndProfileStamp("inject_capture_ms", injectStamp);
+        }
+
+        if (maxStepsThisFrame == 0)
+        {
+            if (!_isPaused && _simulationLayers.Any(layer => layer.Enabled))
             {
                 _audioReactiveLevelSeedBurstsLastStep = ApplyAudioReactiveLevelSeeding(1);
             }
-            _timeSinceLastStep = 0;
         }
-        else
+        else if (!_isPaused && anyLayerNeedsInject)
         {
-            double desiredInterval = 1.0 / effectiveStepFps;
-            if (_timeSinceLastStep >= desiredInterval)
+            long simulationStageStamp = BeginProfileStamp();
+            long seedingStamp = BeginProfileStamp();
+            _audioReactiveBeatSeedBurstsLastStep = ApplyAudioReactiveBeatSeeding();
+            _audioReactiveLevelSeedBurstsLastStep = ApplyAudioReactiveLevelSeeding(maxStepsThisFrame);
+            EndProfileStamp("audio_reactive_seeding_ms", seedingStamp);
+
+            long stepStamp = BeginProfileStamp();
+            for (int i = 0; i < maxStepsThisFrame; i++)
             {
-                if (!_isPaused)
+                bool stepped = false;
+                foreach (var layer in _simulationLayers)
                 {
-                    long simulationStageStamp = BeginProfileStamp();
-                    int stepsToRun = (int)Math.Floor(_timeSinceLastStep / desiredInterval);
-                    stepsToRun = Math.Clamp(stepsToRun, 1, MaxSimulationStepsPerRender);
-                    long injectStamp = BeginProfileStamp();
-                    InjectCaptureFrames();
-                    EndProfileStamp("inject_capture_ms", injectStamp);
-
-                    long seedingStamp = BeginProfileStamp();
-                    _audioReactiveBeatSeedBurstsLastStep = ApplyAudioReactiveBeatSeeding();
-                    _audioReactiveLevelSeedBurstsLastStep = ApplyAudioReactiveLevelSeeding(stepsToRun);
-                    EndProfileStamp("audio_reactive_seeding_ms", seedingStamp);
-
-                    long stepStamp = BeginProfileStamp();
-                    for (int i = 0; i < stepsToRun; i++)
+                    if (!layer.Enabled || i >= maxStepsThisFrame)
                     {
-                        bool stepped = false;
-                        foreach (var layer in _simulationLayers)
-                        {
-                            if (!layer.Enabled)
-                            {
-                                continue;
-                            }
+                        continue;
+                    }
 
-                            layer.Engine.Step();
-                            stepped = true;
-                        }
-                        if (stepped)
-                        {
-                            _simulationFrames++;
-                        }
-                    }
-                    EndProfileStamp("simulation_step_ms", stepStamp);
-                    if (simulationStageStamp != 0)
+                    double targetFps = Math.Max(layer.EffectiveSimulationTargetFps, 0);
+                    if (targetFps < 0.01)
                     {
-                        _frameProfiler.RecordSample("simulation_steps_per_frame", stepsToRun);
+                        layer.TimeSinceLastStep = 0;
+                        continue;
                     }
-                    EndProfileStamp("simulation_total_ms", simulationStageStamp);
 
-                    _timeSinceLastStep -= stepsToRun * desiredInterval;
-                    if (stepsToRun >= MaxSimulationStepsPerRender &&
-                        _timeSinceLastStep > desiredInterval * MaxSimulationStepsPerRender)
+                    double desiredInterval = 1.0 / targetFps;
+                    if (layer.TimeSinceLastStep + 0.0000001 < desiredInterval)
                     {
-                        // Drop excessive backlog if render stalls to avoid unbounded catch-up bursts.
-                        _timeSinceLastStep = desiredInterval;
+                        continue;
                     }
+
+                    layer.Engine.Step();
+                    layer.TimeSinceLastStep -= desiredInterval;
+                    if (layer.TimeSinceLastStep > desiredInterval * MaxSimulationStepsPerRender)
+                    {
+                        layer.TimeSinceLastStep = desiredInterval;
+                    }
+                    stepped = true;
                 }
-                else
+
+                if (stepped)
                 {
-                    _timeSinceLastStep = Math.Min(_timeSinceLastStep, desiredInterval);
+                    _simulationFrames++;
                 }
+            }
+            EndProfileStamp("simulation_step_ms", stepStamp);
+            if (simulationStageStamp != 0)
+            {
+                _frameProfiler.RecordSample("simulation_steps_per_frame", maxStepsThisFrame);
+            }
+            EndProfileStamp("simulation_total_ms", simulationStageStamp);
+        }
+        else if (_isPaused)
+        {
+            foreach (var layer in _simulationLayers)
+            {
+                if (!layer.Enabled || layer.EffectiveSimulationTargetFps < 0.01)
+                {
+                    continue;
+                }
+
+                double desiredInterval = 1.0 / layer.EffectiveSimulationTargetFps;
+                layer.TimeSinceLastStep = Math.Min(layer.TimeSinceLastStep, desiredInterval);
             }
         }
 
@@ -1295,6 +1355,7 @@ public partial class MainWindow : Window
         // --- FPS Counter Update ---
         if (!_simulationFpsStopwatch.IsRunning)
         {
+            _lastPresentationDrawCount = _renderBackend.PresentationDrawCount;
             _simulationFpsStopwatch.Start();
         }
         else if (_simulationFpsStopwatch.ElapsedMilliseconds >= 500)
@@ -1302,8 +1363,28 @@ public partial class MainWindow : Window
             double seconds = _simulationFpsStopwatch.Elapsed.TotalSeconds;
             if (seconds > 0)
             {
+                int currentPresentationDrawCount = _renderBackend.PresentationDrawCount;
+                int presentationFrames = currentPresentationDrawCount - _lastPresentationDrawCount;
+                if (presentationFrames < 0)
+                {
+                    presentationFrames = currentPresentationDrawCount;
+                }
+
                 _simulationDisplayFps = _simulationFrames / seconds;
                 _renderDisplayFps = _renderFrames / seconds;
+                _presentationDisplayFps = presentationFrames / seconds;
+                _lastPresentationDrawCount = currentPresentationDrawCount;
+
+                if (_frameProfiler.IsActive)
+                {
+                    _frameProfiler.RecordSample("frame_loop_fps", _renderDisplayFps);
+                    _frameProfiler.RecordSample("presentation_draw_fps", _presentationDisplayFps);
+                    _frameProfiler.RecordSample("simulation_steps_per_second", _simulationDisplayFps);
+                }
+
+                RecordLiveMetric("frame_loop_fps", _renderDisplayFps);
+                RecordLiveMetric("presentation_draw_fps", _presentationDisplayFps);
+                RecordLiveMetric("simulation_steps_per_second", _simulationDisplayFps);
             }
             _simulationFrames = 0;
             _renderFrames = 0;
@@ -1365,7 +1446,7 @@ public partial class MainWindow : Window
         var activeLayerEntries = new List<(SimulationLayerState Layer, SimulationPresentationLayerData Data)>(enabledLayers.Length);
         foreach (var layer in enabledLayers)
         {
-            if (TryBuildSimulationPresentationLayer(layer, Math.Clamp(_effectiveLifeOpacity * layer.LifeOpacity, 0, 1), out var presentationLayer))
+            if (TryBuildSimulationPresentationLayer(layer, Math.Clamp(_effectiveLifeOpacity * layer.EffectiveLifeOpacity, 0, 1), out var presentationLayer))
             {
                 activeLayerEntries.Add((layer, presentationLayer));
             }
@@ -1375,7 +1456,39 @@ public partial class MainWindow : Window
         EndProfileStamp("fill_sim_color_buffers_ms", colorBuffersStamp);
         var activeLayers = activeLayerEntries.Select(entry => entry.Layer).ToArray();
         var presentationLayers = activeLayerEntries.Select(entry => entry.Data).ToArray();
+
         long blendStamp = BeginProfileStamp();
+
+        if (_passthroughEnabled &&
+            presentationLayers.Length == 0 &&
+            composite != null &&
+            composite.DownscaledWidth == width &&
+            composite.DownscaledHeight == height &&
+            composite.Downscaled.Length >= requiredLength)
+        {
+            Buffer.BlockCopy(composite.Downscaled, 0, _pixelBuffer, 0, requiredLength);
+            if (_invertComposite)
+            {
+                InvertBuffer(_pixelBuffer);
+            }
+
+            _passthroughCompositedInPixelBuffer = true;
+
+            long presentPassthroughStamp = BeginProfileStamp();
+            _renderBackend.PresentFrame(_pixelBuffer, stride);
+            EndProfileStamp("present_frame_ms", presentPassthroughStamp);
+
+            long underlayOnlyStamp = BeginProfileStamp();
+            UpdateEffectInput();
+            EndProfileStamp("underlay_effect_ms", underlayOnlyStamp);
+
+            long recordUnderlayStamp = BeginProfileStamp();
+            TryRecordFrame(requiredLength);
+            EndProfileStamp("record_frame_ms", recordUnderlayStamp);
+            EndProfileStamp("cpu_blend_ms", blendStamp);
+            return;
+        }
+
         bool hasEnabledSubtractiveSimulationLayer = activeLayers.Any(layer => layer.BlendMode == BlendMode.Subtractive);
         bool hasEnabledNonSubtractiveSimulationLayer = activeLayers.Any(layer => layer.BlendMode != BlendMode.Subtractive);
         bool hasEnabledAdditiveSimulationLayer = activeLayers.Any(layer => layer.BlendMode == BlendMode.Additive);
@@ -1384,10 +1497,13 @@ public partial class MainWindow : Window
         bool hasEnabledNonAddSubSimulationLayer = activeLayers.Any(layer =>
             layer.BlendMode != BlendMode.Additive &&
             layer.BlendMode != BlendMode.Subtractive);
-        bool useSignedAddSubPassthrough = compositePassthroughInPixelBuffer &&
-                                          passthroughBuffer != null &&
-                                          activeLayers.Length > 0 &&
-                                          !hasEnabledNonAddSubSimulationLayer;
+        GpuCompositeSurface? passthroughSurface =
+            _passthroughEnabled && !compositePassthroughInPixelBuffer ? composite?.GpuSurface : null;
+        bool hasPassthroughBaseline = (compositePassthroughInPixelBuffer && passthroughBuffer != null) || passthroughSurface != null;
+        bool useSignedAddSubPassthrough = ShouldUseSignedAddSubPassthrough(
+            hasPassthroughBaseline,
+            activeLayers.Length > 0,
+            hasEnabledNonAddSubSimulationLayer);
         bool useMixedAddSubPassthroughModel = useSignedAddSubPassthrough &&
                                               additiveLayerCount > 0 &&
                                               subtractiveLayerCount > 0;
@@ -1411,15 +1527,24 @@ public partial class MainWindow : Window
         }
 
         double globalLifeOpacity = Math.Clamp(_effectiveLifeOpacity, 0, 1);
+        bool hasGpuPassthroughUnderlay = compositePassthroughInPixelBuffer ? passthroughBuffer != null : passthroughSurface != null;
         if (!_isRecording &&
-            presentationLayers.Length > 0 &&
-            _renderBackend.SupportsGpuSimulationComposition)
+            _renderBackend.SupportsGpuSimulationComposition &&
+            (presentationLayers.Length > 0 || hasGpuPassthroughUnderlay))
         {
+            bool hasSharedGpuProducerResources =
+                presentationLayers.Any(layer => layer.SharedTextureHandle != IntPtr.Zero) ||
+                (passthroughSurface?.SharedTextureHandle ?? IntPtr.Zero) != IntPtr.Zero;
+            if (hasSharedGpuProducerResources)
+            {
+                GpuSharedDevice.FlushIfCreated();
+            }
+
             long gpuCompositeStamp = BeginProfileStamp();
             bool presented = _renderBackend.PresentSimulationComposition(
                 presentationLayers,
                 compositePassthroughInPixelBuffer ? passthroughBuffer : null,
-                null,
+                passthroughSurface,
                 simulationBaseline,
                 useSignedAddSubPassthrough,
                 useMixedAddSubPassthroughModel,
@@ -1428,7 +1553,7 @@ public partial class MainWindow : Window
 
             if (presented)
             {
-                _passthroughCompositedInPixelBuffer = compositePassthroughInPixelBuffer;
+                _passthroughCompositedInPixelBuffer = hasGpuPassthroughUnderlay;
                 EndProfileStamp("cpu_blend_ms", blendStamp);
 
                 long gpuUnderlayStamp = BeginProfileStamp();
@@ -1477,7 +1602,7 @@ public partial class MainWindow : Window
                             continue;
                         }
 
-                        double layerOpacity = Math.Clamp(globalLifeOpacity * layer.LifeOpacity, 0, 1);
+                        double layerOpacity = Math.Clamp(globalLifeOpacity * layer.EffectiveLifeOpacity, 0, 1);
                         if (layerOpacity <= 0.0001)
                         {
                             continue;
@@ -1547,7 +1672,7 @@ public partial class MainWindow : Window
                         continue;
                     }
 
-                    double layerOpacity = Math.Clamp(globalLifeOpacity * layer.LifeOpacity, 0, 1);
+                    double layerOpacity = Math.Clamp(globalLifeOpacity * layer.EffectiveLifeOpacity, 0, 1);
                     if (layerOpacity <= 0.0001)
                     {
                         continue;
@@ -4511,6 +4636,11 @@ public partial class MainWindow : Window
 
     private static bool TryConsumeStartupRecoveryFlag()
     {
+        if (App.IsDiagnosticTestMode)
+        {
+            return false;
+        }
+
         try
         {
             if (!File.Exists(StartupRecoveryPath))
@@ -4531,6 +4661,11 @@ public partial class MainWindow : Window
 
     private static void MarkStartupPending()
     {
+        if (App.IsDiagnosticTestMode)
+        {
+            return;
+        }
+
         try
         {
             string? directory = Path.GetDirectoryName(StartupRecoveryPath);
@@ -4549,6 +4684,11 @@ public partial class MainWindow : Window
 
     private static void MarkStartupComplete()
     {
+        if (App.IsDiagnosticTestMode)
+        {
+            return;
+        }
+
         try
         {
             if (File.Exists(StartupRecoveryPath))
@@ -5467,7 +5607,7 @@ public partial class MainWindow : Window
         NotifyLayerEditorSourcesChanged();
     }
 
-    private void InjectCaptureFrames()
+    private void InjectCaptureFrames(bool injectLayers = true)
     {
         if (_sources.Count == 0)
         {
@@ -5491,7 +5631,10 @@ public partial class MainWindow : Window
             return;
         }
 
-        bool requireCompositeCpuReadback = _passthroughEnabled || _isRecording;
+        bool hasEnabledSimulationLayers = _simulationLayers.Any(layer => layer.Enabled);
+        bool requireCompositeCpuReadback =
+            _isRecording ||
+            (_passthroughEnabled && (!_renderBackend.SupportsGpuSimulationComposition || !hasEnabledSimulationLayers));
         long compositeBuildStamp = BeginProfileStamp();
         var composite = BuildCompositeFrame(_sources, ref _compositeDownscaledBuffer, useEngineDimensions: true, animationTime,
             includeCpuReadback: requireCompositeCpuReadback);
@@ -5506,6 +5649,11 @@ public partial class MainWindow : Window
         long surfaceStamp = BeginProfileStamp();
         UpdateDisplaySurface();
         EndProfileStamp("update_display_surface_ms", surfaceStamp);
+
+        if (!injectLayers)
+        {
+            return;
+        }
 
         bool compositeHasCpuReadback = composite.DownscaledWidth > 0 &&
                                        composite.DownscaledHeight > 0 &&
@@ -5564,11 +5712,11 @@ public partial class MainWindow : Window
                 composite.GpuSurface != null &&
                 gpuEngine.TryInjectCompositeSurface(
                     composite.GpuSurface,
-                    layer.ThresholdMin,
-                    layer.ThresholdMax,
+                    layer.EffectiveThresholdMin,
+                    layer.EffectiveThresholdMax,
                     layer.InvertThreshold,
                     layer.InjectionMode,
-                    layer.InjectionNoise,
+                    layer.EffectiveInjectionNoise,
                     layer.Engine.Depth,
                     _pulseStep,
                     invertInput,
@@ -5592,11 +5740,11 @@ public partial class MainWindow : Window
                     composite.Downscaled,
                     composite.DownscaledWidth,
                     composite.DownscaledHeight,
-                    layer.ThresholdMin,
-                    layer.ThresholdMax,
+                    layer.EffectiveThresholdMin,
+                    layer.EffectiveThresholdMax,
                     layer.InvertThreshold,
                     layer.InjectionMode,
-                    layer.InjectionNoise,
+                    layer.EffectiveInjectionNoise,
                     layer.Engine.Depth,
                     _pulseStep,
                     grayMask,
@@ -5623,11 +5771,11 @@ public partial class MainWindow : Window
                     composite.DownscaledWidth,
                     composite.DownscaledHeight,
                     currentHueShiftDegrees,
-                    layer.ThresholdMin,
-                    layer.ThresholdMax,
+                    layer.EffectiveThresholdMin,
+                    layer.EffectiveThresholdMax,
                     layer.InvertThreshold,
                     layer.InjectionMode,
-                    layer.InjectionNoise,
+                    layer.EffectiveInjectionNoise,
                     layer.Engine.RDepth,
                     layer.Engine.GDepth,
                     layer.Engine.BDepth,
@@ -5699,7 +5847,9 @@ public partial class MainWindow : Window
             return true;
         }
 
-        if (_simulationLayers.Any(layer => layer.Enabled && layer.AudioFrequencyHueShiftDegrees > 0.001))
+        if (_simulationLayers.Any(layer =>
+                layer.Enabled &&
+                layer.ReactiveMappings.Any(mapping => SimulationReactivity.RequiresSpectrum(mapping.Input))))
         {
             return true;
         }
@@ -5782,6 +5932,103 @@ public partial class MainWindow : Window
         double minScalar = Math.Clamp(_audioReactiveLifeOpacityMinScalar, 0, 1);
         double scalar = minScalar + ((1.0 - minScalar) * drive);
         _effectiveLifeOpacity = Math.Clamp(_lifeOpacity * scalar, 0, 1);
+    }
+
+    private bool HasSimulationReactiveAudioInput()
+    {
+        return !string.IsNullOrWhiteSpace(_selectedAudioDeviceId);
+    }
+
+    private double GetReactiveInputValue(SimulationReactiveInput input)
+    {
+        if (!HasSimulationReactiveAudioInput())
+        {
+            return 0;
+        }
+
+        return input switch
+        {
+            SimulationReactiveInput.Level => Math.Clamp(_fastAudioLevel, 0, 1),
+            SimulationReactiveInput.Bass => Math.Clamp(_audioBeatDetector.BassNormalizedLevel, 0, 1),
+            SimulationReactiveInput.Mid => Math.Clamp(_audioBeatDetector.MidNormalizedLevel, 0, 1),
+            SimulationReactiveInput.High => Math.Clamp(_audioBeatDetector.HighNormalizedLevel, 0, 1),
+            SimulationReactiveInput.Frequency => Math.Clamp(_audioBeatDetector.MainFrequencyNormalized, 0, 1),
+            SimulationReactiveInput.BassFrequency => Math.Clamp(_audioBeatDetector.BassFrequencyNormalized, 0, 1),
+            SimulationReactiveInput.MidFrequency => Math.Clamp(_audioBeatDetector.MidFrequencyNormalized, 0, 1),
+            SimulationReactiveInput.HighFrequency => Math.Clamp(_audioBeatDetector.HighFrequencyNormalized, 0, 1),
+            _ => 0
+        };
+    }
+
+    private void ApplySimulationLayerReactiveState()
+    {
+        foreach (var layer in _simulationLayers)
+        {
+            layer.EffectiveLifeOpacity = Math.Clamp(layer.LifeOpacity, 0, 1);
+            layer.EffectiveSimulationTargetFps = Math.Max(_currentSimulationTargetFps, 0);
+            layer.ReactiveHueShiftDegrees = 0;
+            layer.EffectiveRgbHueShiftSpeedDegreesPerSecond = Math.Clamp(
+                layer.RgbHueShiftSpeedDegreesPerSecond,
+                -MaxRgbHueShiftSpeedDegreesPerSecond,
+                MaxRgbHueShiftSpeedDegreesPerSecond);
+            layer.EffectiveInjectionNoise = Math.Clamp(layer.InjectionNoise, 0, 1);
+            layer.EffectiveThresholdMin = Math.Clamp(layer.ThresholdMin, 0, 1);
+            layer.EffectiveThresholdMax = Math.Clamp(layer.ThresholdMax, 0, 1);
+
+            if (!layer.Enabled)
+            {
+                layer.TimeSinceLastStep = 0;
+                continue;
+            }
+
+            if (!HasSimulationReactiveAudioInput())
+            {
+                continue;
+            }
+
+            foreach (var mapping in layer.ReactiveMappings)
+            {
+                double inputValue = GetReactiveInputValue(mapping.Input);
+                switch (mapping.Output)
+                {
+                    case SimulationReactiveOutput.Opacity:
+                    {
+                        double multiplier = 1.0 + ((inputValue - 1.0) * Math.Clamp(mapping.Amount, 0, 1));
+                        layer.EffectiveLifeOpacity = Math.Clamp(layer.EffectiveLifeOpacity * multiplier, 0, 1);
+                        break;
+                    }
+                    case SimulationReactiveOutput.Framerate:
+                    {
+                        double multiplier = 1.0 + ((inputValue - 1.0) * Math.Clamp(mapping.Amount, 0, 1));
+                        layer.EffectiveSimulationTargetFps = Math.Max(0, layer.EffectiveSimulationTargetFps * multiplier);
+                        break;
+                    }
+                    case SimulationReactiveOutput.HueShift:
+                        layer.ReactiveHueShiftDegrees += inputValue * Math.Clamp(mapping.Amount, 0, 360);
+                        break;
+                    case SimulationReactiveOutput.HueSpeed:
+                        layer.EffectiveRgbHueShiftSpeedDegreesPerSecond = Math.Clamp(
+                            layer.EffectiveRgbHueShiftSpeedDegreesPerSecond + (inputValue * Math.Clamp(mapping.Amount, 0, 180)),
+                            -MaxRgbHueShiftSpeedDegreesPerSecond,
+                            MaxRgbHueShiftSpeedDegreesPerSecond);
+                        break;
+                    case SimulationReactiveOutput.InjectionNoise:
+                        layer.EffectiveInjectionNoise = Math.Clamp(layer.EffectiveInjectionNoise + (inputValue * Math.Clamp(mapping.Amount, 0, 1)), 0, 1);
+                        break;
+                    case SimulationReactiveOutput.ThresholdMin:
+                        layer.EffectiveThresholdMin = Math.Clamp(layer.EffectiveThresholdMin + (inputValue * Math.Clamp(mapping.Amount, 0, 1)), 0, 1);
+                        break;
+                    case SimulationReactiveOutput.ThresholdMax:
+                        layer.EffectiveThresholdMax = Math.Clamp(layer.EffectiveThresholdMax - (inputValue * Math.Clamp(mapping.Amount, 0, 1)), 0, 1);
+                        break;
+                }
+            }
+
+            if (layer.EffectiveThresholdMin > layer.EffectiveThresholdMax)
+            {
+                (layer.EffectiveThresholdMin, layer.EffectiveThresholdMax) = (layer.EffectiveThresholdMax, layer.EffectiveThresholdMin);
+            }
+        }
     }
 
     private int ApplyAudioReactiveLevelSeeding(int stepFactor)
@@ -6732,9 +6979,18 @@ public partial class MainWindow : Window
         public double RgbHueShiftDegrees { get; set; }
         public double RgbHueShiftSpeedDegreesPerSecond { get; set; }
         public double AudioFrequencyHueShiftDegrees { get; set; }
+        public List<SimulationReactiveMapping> ReactiveMappings { get; set; } = new();
         public double ThresholdMin { get; set; } = 0.35;
         public double ThresholdMax { get; set; } = 0.75;
         public bool InvertThreshold { get; set; }
+        public double EffectiveLifeOpacity { get; set; } = 1.0;
+        public double EffectiveSimulationTargetFps { get; set; } = DefaultFps;
+        public double ReactiveHueShiftDegrees { get; set; }
+        public double EffectiveRgbHueShiftSpeedDegreesPerSecond { get; set; }
+        public double EffectiveInjectionNoise { get; set; }
+        public double EffectiveThresholdMin { get; set; } = 0.35;
+        public double EffectiveThresholdMax { get; set; } = 0.75;
+        public double TimeSinceLastStep { get; set; }
         public ISimulationBackend Engine { get; set; } = new GpuSimulationBackend();
         public byte[]? ColorBuffer { get; set; }
         public bool[,]? GrayMask { get; set; }
@@ -6758,6 +7014,7 @@ public partial class MainWindow : Window
         public double RgbHueShiftDegrees { get; init; }
         public double RgbHueShiftSpeedDegreesPerSecond { get; init; }
         public double AudioFrequencyHueShiftDegrees { get; init; }
+        public List<SimulationReactiveMapping> ReactiveMappings { get; init; } = new();
         public double ThresholdMin { get; init; } = 0.35;
         public double ThresholdMax { get; init; } = 0.75;
         public bool InvertThreshold { get; init; }
@@ -6950,7 +7207,15 @@ public partial class MainWindow : Window
             LifeOpacity = layer.LifeOpacity,
             RgbHueShiftDegrees = layer.RgbHueShiftDegrees,
             RgbHueShiftSpeedDegreesPerSecond = layer.RgbHueShiftSpeedDegreesPerSecond,
-            AudioFrequencyHueShiftDegrees = layer.AudioFrequencyHueShiftDegrees,
+            AudioFrequencyHueShiftDegrees = 0,
+            ReactiveMappings = new ObservableCollection<LayerEditorSimulationReactiveMapping>(
+                layer.ReactiveMappings.Select(mapping => new LayerEditorSimulationReactiveMapping
+                {
+                    Id = mapping.Id,
+                    Input = mapping.Input.ToString(),
+                    Output = mapping.Output.ToString(),
+                    Amount = mapping.Amount
+                })),
             ThresholdMin = layer.ThresholdMin,
             ThresholdMax = layer.ThresholdMax,
             InvertThreshold = layer.InvertThreshold
@@ -6980,8 +7245,15 @@ public partial class MainWindow : Window
             RgbHueShiftDegrees = specs[0].RgbHueShiftDegrees,
             RgbHueShiftSpeedDegreesPerSecond = specs[0].RgbHueShiftSpeedDegreesPerSecond,
             AudioFrequencyHueShiftDegrees = specs[0].AudioFrequencyHueShiftDegrees,
+            ReactiveMappings = CloneReactiveMappings(specs[0].ReactiveMappings),
+            EffectiveLifeOpacity = specs[0].LifeOpacity,
+            EffectiveSimulationTargetFps = _currentSimulationTargetFps,
+            EffectiveRgbHueShiftSpeedDegreesPerSecond = specs[0].RgbHueShiftSpeedDegreesPerSecond,
+            EffectiveInjectionNoise = specs[0].InjectionNoise,
             ThresholdMin = specs[0].ThresholdMin,
             ThresholdMax = specs[0].ThresholdMax,
+            EffectiveThresholdMin = specs[0].ThresholdMin,
+            EffectiveThresholdMax = specs[0].ThresholdMax,
             InvertThreshold = specs[0].InvertThreshold,
             Engine = _engine
         });
@@ -7000,8 +7272,15 @@ public partial class MainWindow : Window
             RgbHueShiftDegrees = specs[1].RgbHueShiftDegrees,
             RgbHueShiftSpeedDegreesPerSecond = specs[1].RgbHueShiftSpeedDegreesPerSecond,
             AudioFrequencyHueShiftDegrees = specs[1].AudioFrequencyHueShiftDegrees,
+            ReactiveMappings = CloneReactiveMappings(specs[1].ReactiveMappings),
+            EffectiveLifeOpacity = specs[1].LifeOpacity,
+            EffectiveSimulationTargetFps = _currentSimulationTargetFps,
+            EffectiveRgbHueShiftSpeedDegreesPerSecond = specs[1].RgbHueShiftSpeedDegreesPerSecond,
+            EffectiveInjectionNoise = specs[1].InjectionNoise,
             ThresholdMin = specs[1].ThresholdMin,
             ThresholdMax = specs[1].ThresholdMax,
+            EffectiveThresholdMin = specs[1].ThresholdMin,
+            EffectiveThresholdMax = specs[1].ThresholdMax,
             InvertThreshold = specs[1].InvertThreshold,
             Engine = CreateConfiguredSimulationEngine(randomize: true)
         });
@@ -7131,6 +7410,250 @@ public partial class MainWindow : Window
         return (min, max, invert);
     }
 
+    private static SimulationReactiveInput ParseReactiveInputOrDefault(string? value, SimulationReactiveInput fallback)
+    {
+        if (!string.IsNullOrWhiteSpace(value) &&
+            Enum.TryParse<SimulationReactiveInput>(value, true, out var parsed))
+        {
+            return parsed;
+        }
+
+        return fallback;
+    }
+
+    private static SimulationReactiveOutput ParseReactiveOutputOrDefault(string? value, SimulationReactiveOutput fallback)
+    {
+        if (!string.IsNullOrWhiteSpace(value) &&
+            Enum.TryParse<SimulationReactiveOutput>(value, true, out var parsed))
+        {
+            return parsed;
+        }
+
+        return fallback;
+    }
+
+    private static List<SimulationReactiveMapping> NormalizeReactiveMappings(
+        IEnumerable<LayerEditorSimulationReactiveMapping>? mappings,
+        double legacyAudioFrequencyHueShiftDegrees)
+    {
+        var normalized = new List<SimulationReactiveMapping>();
+        var seenIds = new HashSet<Guid>();
+
+        if (mappings != null)
+        {
+            foreach (var mapping in mappings)
+            {
+                Guid id = mapping.Id;
+                if (id == Guid.Empty || !seenIds.Add(id))
+                {
+                    do
+                    {
+                        id = Guid.NewGuid();
+                    } while (!seenIds.Add(id));
+                }
+
+                var output = ParseReactiveOutputOrDefault(mapping.Output, SimulationReactiveOutput.Opacity);
+                normalized.Add(new SimulationReactiveMapping
+                {
+                    Id = id,
+                    Input = ParseReactiveInputOrDefault(mapping.Input, SimulationReactiveInput.Level),
+                    Output = output,
+                    Amount = SimulationReactivity.ClampAmount(output, mapping.Amount)
+                });
+            }
+        }
+
+        MigrateLegacyReactiveHueMapping(normalized, legacyAudioFrequencyHueShiftDegrees);
+        return normalized;
+    }
+
+    private static List<SimulationReactiveMapping> NormalizeReactiveMappings(
+        IEnumerable<AppConfig.ReactiveMappingConfig>? mappings,
+        double legacyAudioFrequencyHueShiftDegrees)
+    {
+        var normalized = new List<SimulationReactiveMapping>();
+        var seenIds = new HashSet<Guid>();
+
+        if (mappings != null)
+        {
+            foreach (var mapping in mappings)
+            {
+                Guid id = mapping.Id;
+                if (id == Guid.Empty || !seenIds.Add(id))
+                {
+                    do
+                    {
+                        id = Guid.NewGuid();
+                    } while (!seenIds.Add(id));
+                }
+
+                var output = ParseReactiveOutputOrDefault(mapping.Output, SimulationReactiveOutput.Opacity);
+                normalized.Add(new SimulationReactiveMapping
+                {
+                    Id = id,
+                    Input = ParseReactiveInputOrDefault(mapping.Input, SimulationReactiveInput.Level),
+                    Output = output,
+                    Amount = SimulationReactivity.ClampAmount(output, mapping.Amount)
+                });
+            }
+        }
+
+        MigrateLegacyReactiveHueMapping(normalized, legacyAudioFrequencyHueShiftDegrees);
+        return normalized;
+    }
+
+    private static void MigrateLegacyReactiveHueMapping(List<SimulationReactiveMapping> mappings, double legacyAudioFrequencyHueShiftDegrees)
+    {
+        if (legacyAudioFrequencyHueShiftDegrees <= 0.001)
+        {
+            return;
+        }
+
+        if (mappings.Any(mapping => mapping.Output == SimulationReactiveOutput.HueShift))
+        {
+            return;
+        }
+
+        mappings.Add(new SimulationReactiveMapping
+        {
+            Id = Guid.NewGuid(),
+            Input = SimulationReactiveInput.Frequency,
+            Output = SimulationReactiveOutput.HueShift,
+            Amount = SimulationReactivity.ClampAmount(SimulationReactiveOutput.HueShift, legacyAudioFrequencyHueShiftDegrees)
+        });
+    }
+
+    private static bool ReactiveMappingsEqual(IReadOnlyList<SimulationReactiveMapping> left, IReadOnlyList<SimulationReactiveMapping> right)
+    {
+        if (left.Count != right.Count)
+        {
+            return false;
+        }
+
+        for (int i = 0; i < left.Count; i++)
+        {
+            if (left[i].Id != right[i].Id ||
+                left[i].Input != right[i].Input ||
+                left[i].Output != right[i].Output ||
+                Math.Abs(left[i].Amount - right[i].Amount) > 0.000001)
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    private static List<SimulationReactiveMapping> CloneReactiveMappings(IEnumerable<SimulationReactiveMapping> mappings)
+    {
+        return mappings.Select(mapping => mapping.Clone()).ToList();
+    }
+
+    private static bool HasReactiveMapping(
+        IEnumerable<SimulationReactiveMapping> mappings,
+        SimulationReactiveInput input,
+        SimulationReactiveOutput output)
+    {
+        return mappings.Any(mapping => mapping.Input == input && mapping.Output == output);
+    }
+
+    private static void AddReactiveMappingIfMissing(
+        List<SimulationReactiveMapping> mappings,
+        SimulationReactiveInput input,
+        SimulationReactiveOutput output,
+        double amount)
+    {
+        if (HasReactiveMapping(mappings, input, output))
+        {
+            return;
+        }
+
+        double normalizedAmount = SimulationReactivity.ClampAmount(output, amount);
+        if (normalizedAmount <= 0.000001)
+        {
+            return;
+        }
+
+        mappings.Add(new SimulationReactiveMapping
+        {
+            Id = Guid.NewGuid(),
+            Input = input,
+            Output = output,
+            Amount = normalizedAmount
+        });
+    }
+
+    private bool MigrateLegacyGlobalReactiveMappings(List<SimulationLayerSpec> specs)
+    {
+        bool migrateFramerate = _audioReactiveLevelToFpsEnabled;
+        bool migrateOpacity = _audioReactiveLevelToLifeOpacityEnabled;
+        if (!migrateFramerate && !migrateOpacity)
+        {
+            return false;
+        }
+
+        double framerateAmount = 1.0 - Math.Clamp(_audioReactiveFpsMinPercent, 0, 1);
+        double opacityAmount = 1.0 - Math.Clamp(_audioReactiveLifeOpacityMinScalar, 0, 1);
+        bool changed = false;
+
+        for (int i = 0; i < specs.Count; i++)
+        {
+            var spec = specs[i];
+            var mappings = CloneReactiveMappings(spec.ReactiveMappings);
+            int beforeCount = mappings.Count;
+
+            if (migrateFramerate)
+            {
+                AddReactiveMappingIfMissing(mappings, SimulationReactiveInput.Level, SimulationReactiveOutput.Framerate, framerateAmount);
+            }
+
+            if (migrateOpacity)
+            {
+                AddReactiveMappingIfMissing(mappings, SimulationReactiveInput.Level, SimulationReactiveOutput.Opacity, opacityAmount);
+            }
+
+            if (mappings.Count != beforeCount)
+            {
+                changed = true;
+                specs[i] = new SimulationLayerSpec
+                {
+                    Id = spec.Id,
+                    Name = spec.Name,
+                    Enabled = spec.Enabled,
+                    InputFunction = spec.InputFunction,
+                    BlendMode = spec.BlendMode,
+                    InjectionMode = spec.InjectionMode,
+                    LifeMode = spec.LifeMode,
+                    BinningMode = spec.BinningMode,
+                    InjectionNoise = spec.InjectionNoise,
+                    LifeOpacity = spec.LifeOpacity,
+                    RgbHueShiftDegrees = spec.RgbHueShiftDegrees,
+                    RgbHueShiftSpeedDegreesPerSecond = spec.RgbHueShiftSpeedDegreesPerSecond,
+                    AudioFrequencyHueShiftDegrees = spec.AudioFrequencyHueShiftDegrees,
+                    ReactiveMappings = mappings,
+                    ThresholdMin = spec.ThresholdMin,
+                    ThresholdMax = spec.ThresholdMax,
+                    InvertThreshold = spec.InvertThreshold
+                };
+            }
+        }
+
+        if (migrateFramerate)
+        {
+            _audioReactiveLevelToFpsEnabled = false;
+        }
+
+        if (migrateOpacity)
+        {
+            _audioReactiveLevelToLifeOpacityEnabled = false;
+        }
+
+        Logger.Info(
+            $"Migrated legacy global audio-reactive controls to per-layer mappings. " +
+            $"Framerate={migrateFramerate}, Opacity={migrateOpacity}, Layers={specs.Count}, AddedMappings={changed}.");
+        return true;
+    }
+
     private static string NormalizeSimulationLayerName(string? value, int index)
     {
         if (!string.IsNullOrWhiteSpace(value))
@@ -7182,7 +7705,9 @@ public partial class MainWindow : Window
                     LifeOpacity = Math.Clamp(layer.LifeOpacity, 0, 1),
                     RgbHueShiftDegrees = NormalizeHueDegrees(layer.RgbHueShiftDegrees),
                     RgbHueShiftSpeedDegreesPerSecond = Math.Clamp(layer.RgbHueShiftSpeedDegreesPerSecond, -MaxRgbHueShiftSpeedDegreesPerSecond, MaxRgbHueShiftSpeedDegreesPerSecond),
-                    AudioFrequencyHueShiftDegrees = Math.Clamp(layer.AudioFrequencyHueShiftDegrees, 0, 360),
+                    // Editor-owned reactive mappings are canonical. Do not resurrect legacy frequency->hue data here.
+                    AudioFrequencyHueShiftDegrees = 0,
+                    ReactiveMappings = NormalizeReactiveMappings(layer.ReactiveMappings, 0),
                     ThresholdMin = thresholdMin,
                     ThresholdMax = thresholdMax,
                     InvertThreshold = invertThreshold
@@ -7239,7 +7764,9 @@ public partial class MainWindow : Window
                     LifeOpacity = Math.Clamp(layer.LifeOpacity, 0, 1),
                     RgbHueShiftDegrees = NormalizeHueDegrees(layer.RgbHueShiftDegrees != 0 ? layer.RgbHueShiftDegrees : _rgbHueShiftDegrees),
                     RgbHueShiftSpeedDegreesPerSecond = Math.Clamp(layer.RgbHueShiftSpeedDegreesPerSecond != 0 ? layer.RgbHueShiftSpeedDegreesPerSecond : _rgbHueShiftSpeedDegreesPerSecond, -MaxRgbHueShiftSpeedDegreesPerSecond, MaxRgbHueShiftSpeedDegreesPerSecond),
-                    AudioFrequencyHueShiftDegrees = Math.Clamp(layer.AudioFrequencyHueShiftDegrees, 0, 360),
+                    // Legacy field is migration-only. Fold it into the mapping list and clear it in runtime state.
+                    AudioFrequencyHueShiftDegrees = 0,
+                    ReactiveMappings = NormalizeReactiveMappings(layer.ReactiveMappings, layer.AudioFrequencyHueShiftDegrees),
                     ThresholdMin = thresholdMin,
                     ThresholdMax = thresholdMax,
                     InvertThreshold = invertThreshold
@@ -7288,6 +7815,7 @@ public partial class MainWindow : Window
             RgbHueShiftDegrees = globalHueShiftDegrees,
             RgbHueShiftSpeedDegreesPerSecond = globalHueShiftSpeedDegreesPerSecond,
             AudioFrequencyHueShiftDegrees = 0,
+            ReactiveMappings = new List<SimulationReactiveMapping>(),
             ThresholdMin = normalizedThresholdMin,
             ThresholdMax = normalizedThresholdMax,
             InvertThreshold = normalizedInvertThreshold
@@ -7307,6 +7835,7 @@ public partial class MainWindow : Window
             RgbHueShiftDegrees = globalHueShiftDegrees,
             RgbHueShiftSpeedDegreesPerSecond = globalHueShiftSpeedDegreesPerSecond,
             AudioFrequencyHueShiftDegrees = 0,
+            ReactiveMappings = new List<SimulationReactiveMapping>(),
             ThresholdMin = normalizedThresholdMin,
             ThresholdMax = normalizedThresholdMax,
             InvertThreshold = normalizedInvertThreshold
@@ -7372,7 +7901,14 @@ public partial class MainWindow : Window
                 layer = new SimulationLayerState
                 {
                     Id = spec.Id,
-                    Engine = engine
+                    Engine = engine,
+                    ReactiveMappings = CloneReactiveMappings(spec.ReactiveMappings),
+                    EffectiveLifeOpacity = spec.LifeOpacity,
+                    EffectiveSimulationTargetFps = _currentSimulationTargetFps,
+                    EffectiveRgbHueShiftSpeedDegreesPerSecond = spec.RgbHueShiftSpeedDegreesPerSecond,
+                    EffectiveInjectionNoise = spec.InjectionNoise,
+                    EffectiveThresholdMin = spec.ThresholdMin,
+                    EffectiveThresholdMax = spec.ThresholdMax
                 };
                 changed = true;
             }
@@ -7445,6 +7981,11 @@ public partial class MainWindow : Window
                 layer.AudioFrequencyHueShiftDegrees = spec.AudioFrequencyHueShiftDegrees;
                 changed = true;
             }
+            if (!ReactiveMappingsEqual(layer.ReactiveMappings, spec.ReactiveMappings))
+            {
+                layer.ReactiveMappings = CloneReactiveMappings(spec.ReactiveMappings);
+                changed = true;
+            }
             if (Math.Abs(layer.ThresholdMin - spec.ThresholdMin) > 0.000001)
             {
                 layer.ThresholdMin = spec.ThresholdMin;
@@ -7460,6 +8001,15 @@ public partial class MainWindow : Window
                 layer.InvertThreshold = spec.InvertThreshold;
                 changed = true;
             }
+
+            layer.EffectiveLifeOpacity = layer.LifeOpacity;
+            layer.EffectiveSimulationTargetFps = _currentSimulationTargetFps;
+            layer.ReactiveHueShiftDegrees = 0;
+            layer.EffectiveRgbHueShiftSpeedDegreesPerSecond = layer.RgbHueShiftSpeedDegreesPerSecond;
+            layer.EffectiveInjectionNoise = layer.InjectionNoise;
+            layer.EffectiveThresholdMin = layer.ThresholdMin;
+            layer.EffectiveThresholdMax = layer.ThresholdMax;
+            layer.TimeSinceLastStep = 0;
 
             ApplySimulationLayerEngineSettings(layer);
             nextLayers.Add(layer);
@@ -8549,6 +9099,385 @@ public partial class MainWindow : Window
         }
     }
 
+    internal bool RunSimulationReactiveMappingsSmoke()
+    {
+        EnsureSimulationLayersInitialized();
+        if (_simulationLayers.Count == 0)
+        {
+            Logger.Warn("Simulation reactive mappings smoke: no layers were initialized.");
+            return false;
+        }
+
+        var layer = _simulationLayers[0];
+        double previousSimulationTargetFps = _currentSimulationTargetFps;
+        double previousFastAudioLevel = _fastAudioLevel;
+        bool previousAudioReactiveEnabled = _audioReactiveEnabled;
+        string? previousAudioDeviceId = _selectedAudioDeviceId;
+        try
+        {
+            layer.Enabled = true;
+            layer.LifeMode = GameOfLifeEngine.LifeMode.RgbChannels;
+            layer.LifeOpacity = 0.8;
+            layer.RgbHueShiftDegrees = 30.0;
+            layer.ReactiveMappings = new List<SimulationReactiveMapping>
+            {
+                new()
+                {
+                    Input = SimulationReactiveInput.Level,
+                    Output = SimulationReactiveOutput.Opacity,
+                    Amount = 1.0
+                },
+                new()
+                {
+                    Input = SimulationReactiveInput.Level,
+                    Output = SimulationReactiveOutput.Framerate,
+                    Amount = 1.0
+                },
+                new()
+                {
+                    Input = SimulationReactiveInput.Frequency,
+                    Output = SimulationReactiveOutput.HueShift,
+                    Amount = 180.0
+                },
+                new()
+                {
+                    Input = SimulationReactiveInput.Bass,
+                    Output = SimulationReactiveOutput.InjectionNoise,
+                    Amount = 0.5
+                },
+                new()
+                {
+                    Input = SimulationReactiveInput.Mid,
+                    Output = SimulationReactiveOutput.ThresholdMin,
+                    Amount = 0.2
+                },
+                new()
+                {
+                    Input = SimulationReactiveInput.High,
+                    Output = SimulationReactiveOutput.ThresholdMax,
+                    Amount = 0.1
+                },
+                new()
+                {
+                    Input = SimulationReactiveInput.Level,
+                    Output = SimulationReactiveOutput.HueSpeed,
+                    Amount = 60.0
+                }
+            };
+
+            _audioReactiveEnabled = false;
+            _selectedAudioDeviceId = "smoke";
+            _currentSimulationTargetFps = 60.0;
+            _fastAudioLevel = 0.25;
+            layer.InjectionNoise = 0.1;
+            layer.ThresholdMin = 0.35;
+            layer.ThresholdMax = 0.75;
+            layer.RgbHueShiftSpeedDegreesPerSecond = 5.0;
+            _audioBeatDetector.SetSmokeReactiveState(
+                level: 0.25,
+                bass: 0.1,
+                mid: 0.2,
+                high: 0.3,
+                frequency: 0.5,
+                bassFrequency: 0.4,
+                midFrequency: 0.5,
+                highFrequency: 0.6);
+
+            ApplySimulationLayerReactiveState();
+
+            bool opacityOk = Math.Abs(layer.EffectiveLifeOpacity - 0.2) < 0.0001;
+            bool fpsOk = Math.Abs(layer.EffectiveSimulationTargetFps - 15.0) < 0.0001;
+            bool reactiveHueOk = Math.Abs(layer.ReactiveHueShiftDegrees - 90.0) < 0.0001;
+            bool finalHueOk = Math.Abs(CurrentRgbHueShiftDegrees(layer) - 120.0) < 0.0001;
+            bool noiseOk = Math.Abs(layer.EffectiveInjectionNoise - 0.15) < 0.0001;
+            bool thresholdMinOk = Math.Abs(layer.EffectiveThresholdMin - 0.39) < 0.0001;
+            bool thresholdMaxOk = Math.Abs(layer.EffectiveThresholdMax - 0.72) < 0.0001;
+            bool hueSpeedOk = Math.Abs(layer.EffectiveRgbHueShiftSpeedDegreesPerSecond - 20.0) < 0.0001;
+            bool ok = opacityOk && fpsOk && reactiveHueOk && finalHueOk && noiseOk && thresholdMinOk && thresholdMaxOk && hueSpeedOk;
+
+            Logger.Info(
+                $"Simulation reactive mappings smoke: globalAudioReactiveEnabled={_audioReactiveEnabled}, " +
+                $"opacity={layer.EffectiveLifeOpacity:0.###}, fps={layer.EffectiveSimulationTargetFps:0.###}, " +
+                $"reactiveHue={layer.ReactiveHueShiftDegrees:0.###}, finalHue={CurrentRgbHueShiftDegrees(layer):0.###}, " +
+                $"noise={layer.EffectiveInjectionNoise:0.###}, thMin={layer.EffectiveThresholdMin:0.###}, thMax={layer.EffectiveThresholdMax:0.###}, " +
+                $"hueSpeed={layer.EffectiveRgbHueShiftSpeedDegreesPerSecond:0.###}, ok={ok}.");
+            return ok;
+        }
+        finally
+        {
+            _currentSimulationTargetFps = previousSimulationTargetFps;
+            _fastAudioLevel = previousFastAudioLevel;
+            _audioReactiveEnabled = previousAudioReactiveEnabled;
+            _selectedAudioDeviceId = previousAudioDeviceId;
+        }
+    }
+
+    internal bool RunSimulationReactiveMappingsPersistenceSmoke()
+    {
+        var editorLayer = new LayerEditorSimulationLayer
+        {
+            Id = Guid.NewGuid(),
+            Name = "Reactive Test",
+            Enabled = true,
+            InputFunction = nameof(SimulationInputFunction.Direct),
+            BlendMode = nameof(BlendMode.Additive),
+            InjectionMode = nameof(GameOfLifeEngine.InjectionMode.RandomPulse),
+            LifeMode = nameof(GameOfLifeEngine.LifeMode.RgbChannels),
+            BinningMode = nameof(GameOfLifeEngine.BinningMode.Fill),
+            InjectionNoise = 0.25,
+            LifeOpacity = 0.75,
+            RgbHueShiftDegrees = 12.0,
+            RgbHueShiftSpeedDegreesPerSecond = 3.0,
+            ThresholdMin = 0.2,
+            ThresholdMax = 0.8,
+            InvertThreshold = false,
+            ReactiveMappings = new ObservableCollection<LayerEditorSimulationReactiveMapping>
+            {
+                new()
+                {
+                    Id = Guid.NewGuid(),
+                    Input = nameof(SimulationReactiveInput.Level),
+                    Output = nameof(SimulationReactiveOutput.Opacity),
+                    Amount = 0.8
+                },
+                new()
+                {
+                    Id = Guid.NewGuid(),
+                    Input = nameof(SimulationReactiveInput.Mid),
+                    Output = nameof(SimulationReactiveOutput.Framerate),
+                    Amount = 0.65
+                },
+                new()
+                {
+                    Id = Guid.NewGuid(),
+                    Input = nameof(SimulationReactiveInput.HighFrequency),
+                    Output = nameof(SimulationReactiveOutput.HueShift),
+                    Amount = 210.0
+                }
+            }
+        };
+
+        static bool EditorMappingsEqual(
+            IReadOnlyList<LayerEditorSimulationReactiveMapping> left,
+            IReadOnlyList<LayerEditorSimulationReactiveMapping> right)
+        {
+            if (left.Count != right.Count)
+            {
+                return false;
+            }
+
+            for (int i = 0; i < left.Count; i++)
+            {
+                if (left[i].Id != right[i].Id ||
+                    !string.Equals(left[i].Input, right[i].Input, StringComparison.Ordinal) ||
+                    !string.Equals(left[i].Output, right[i].Output, StringComparison.Ordinal) ||
+                    Math.Abs(left[i].Amount - right[i].Amount) > 0.000001)
+                {
+                    return false;
+                }
+            }
+
+            return true;
+        }
+
+        var projectSettings = new LayerEditorProjectSettings
+        {
+            Height = 480,
+            Depth = 24,
+            Framerate = 60,
+            LifeOpacity = 1.0
+        };
+
+        var file = LayerConfigFile.FromEditorSources(
+            Array.Empty<LayerEditorSource>(),
+            new[] { editorLayer },
+            projectSettings);
+        List<LayerEditorSimulationLayer> roundTripLayers = file.ToEditorSimulationLayers();
+        bool projectRoundTripOk =
+            roundTripLayers.Count == 1 &&
+            Math.Abs(file.SimulationLayers[0].AudioFrequencyHueShiftDegrees) <= 0.000001 &&
+            Math.Abs(roundTripLayers[0].AudioFrequencyHueShiftDegrees) <= 0.000001 &&
+            EditorMappingsEqual(editorLayer.ReactiveMappings, roundTripLayers[0].ReactiveMappings.ToList());
+
+        var appConfigs = new List<AppConfig.SimulationLayerConfig>
+        {
+            new()
+            {
+                Id = editorLayer.Id,
+                Name = editorLayer.Name,
+                Enabled = editorLayer.Enabled,
+                InputFunction = editorLayer.InputFunction,
+                BlendMode = editorLayer.BlendMode,
+                InjectionMode = editorLayer.InjectionMode,
+                LifeMode = editorLayer.LifeMode,
+                BinningMode = editorLayer.BinningMode,
+                InjectionNoise = editorLayer.InjectionNoise,
+                LifeOpacity = editorLayer.LifeOpacity,
+                RgbHueShiftDegrees = editorLayer.RgbHueShiftDegrees,
+                RgbHueShiftSpeedDegreesPerSecond = editorLayer.RgbHueShiftSpeedDegreesPerSecond,
+                AudioFrequencyHueShiftDegrees = 180.0,
+                ThresholdMin = editorLayer.ThresholdMin,
+                ThresholdMax = editorLayer.ThresholdMax,
+                InvertThreshold = editorLayer.InvertThreshold,
+                ReactiveMappings = editorLayer.ReactiveMappings.Select(mapping => new AppConfig.ReactiveMappingConfig
+                {
+                    Id = mapping.Id,
+                    Input = mapping.Input,
+                    Output = mapping.Output,
+                    Amount = mapping.Amount
+                }).ToList()
+            }
+        };
+
+        List<SimulationLayerSpec> normalizedSpecs = NormalizeSimulationLayerSpecs(appConfigs);
+        bool appConfigRoundTripOk =
+            normalizedSpecs.Count == 1 &&
+            Math.Abs(normalizedSpecs[0].AudioFrequencyHueShiftDegrees) <= 0.000001 &&
+            normalizedSpecs[0].ReactiveMappings.Count == editorLayer.ReactiveMappings.Count &&
+            normalizedSpecs[0].ReactiveMappings.Zip(editorLayer.ReactiveMappings, (runtime, editor) =>
+                runtime.Id == editor.Id &&
+                runtime.Input.ToString() == editor.Input &&
+                runtime.Output.ToString() == editor.Output &&
+                Math.Abs(runtime.Amount - editor.Amount) <= 0.000001).All(match => match);
+
+        bool ok = projectRoundTripOk && appConfigRoundTripOk;
+        Logger.Info(
+            $"Simulation reactive persistence smoke: projectRoundTrip={projectRoundTripOk}, " +
+            $"appConfigRoundTrip={appConfigRoundTripOk}, ok={ok}.");
+        return ok;
+    }
+
+    internal bool RunSimulationReactiveLegacyMigrationSmoke()
+    {
+        bool previousAudioReactiveEnabled = _audioReactiveEnabled;
+        bool previousLevelToFpsEnabled = _audioReactiveLevelToFpsEnabled;
+        bool previousLevelToOpacityEnabled = _audioReactiveLevelToLifeOpacityEnabled;
+        double previousFpsMinPercent = _audioReactiveFpsMinPercent;
+        double previousOpacityMinScalar = _audioReactiveLifeOpacityMinScalar;
+
+        try
+        {
+            _audioReactiveEnabled = true;
+            _audioReactiveLevelToFpsEnabled = true;
+            _audioReactiveLevelToLifeOpacityEnabled = true;
+            _audioReactiveFpsMinPercent = 0.35;
+            _audioReactiveLifeOpacityMinScalar = 0.2;
+
+            var specs = new List<SimulationLayerSpec>
+            {
+                new()
+                {
+                    Id = Guid.NewGuid(),
+                    Name = "Reactive Legacy",
+                    Enabled = true,
+                    InputFunction = SimulationInputFunction.Direct,
+                    BlendMode = BlendMode.Additive,
+                    InjectionMode = GameOfLifeEngine.InjectionMode.Threshold,
+                    LifeMode = GameOfLifeEngine.LifeMode.RgbChannels,
+                    BinningMode = GameOfLifeEngine.BinningMode.Fill,
+                    InjectionNoise = 0,
+                    LifeOpacity = 1.0,
+                    RgbHueShiftDegrees = 0,
+                    RgbHueShiftSpeedDegreesPerSecond = 0,
+                    AudioFrequencyHueShiftDegrees = 0,
+                    ReactiveMappings = new List<SimulationReactiveMapping>(),
+                    ThresholdMin = 0.35,
+                    ThresholdMax = 0.75,
+                    InvertThreshold = false
+                }
+            };
+
+            bool migrated = MigrateLegacyGlobalReactiveMappings(specs);
+            var mappings = specs[0].ReactiveMappings;
+            var fpsMapping = mappings.FirstOrDefault(mapping =>
+                mapping.Input == SimulationReactiveInput.Level &&
+                mapping.Output == SimulationReactiveOutput.Framerate);
+            var opacityMapping = mappings.FirstOrDefault(mapping =>
+                mapping.Input == SimulationReactiveInput.Level &&
+                mapping.Output == SimulationReactiveOutput.Opacity);
+
+            bool hasFps = fpsMapping != null;
+            bool hasOpacity = opacityMapping != null;
+            bool amountsOk =
+                fpsMapping != null && Math.Abs(fpsMapping.Amount - 0.65) < 0.000001 &&
+                opacityMapping != null && Math.Abs(opacityMapping.Amount - 0.8) < 0.000001;
+            bool flagsCleared = !_audioReactiveLevelToFpsEnabled && !_audioReactiveLevelToLifeOpacityEnabled;
+            bool ok = migrated && hasFps && hasOpacity && amountsOk && flagsCleared;
+
+            Logger.Info(
+                $"Simulation reactive legacy migration smoke: migrated={migrated}, hasFps={hasFps}, hasOpacity={hasOpacity}, " +
+                $"amountsOk={amountsOk}, flagsCleared={flagsCleared}, ok={ok}.");
+            return ok;
+        }
+        finally
+        {
+            _audioReactiveEnabled = previousAudioReactiveEnabled;
+            _audioReactiveLevelToFpsEnabled = previousLevelToFpsEnabled;
+            _audioReactiveLevelToLifeOpacityEnabled = previousLevelToOpacityEnabled;
+            _audioReactiveFpsMinPercent = previousFpsMinPercent;
+            _audioReactiveLifeOpacityMinScalar = previousOpacityMinScalar;
+        }
+    }
+
+    internal bool RunSimulationReactiveRemovalSmoke()
+    {
+        EnsureSimulationLayersInitialized();
+        if (_simulationLayers.Count == 0)
+        {
+            Logger.Warn("Simulation reactive removal smoke: no layers were initialized.");
+            return false;
+        }
+
+        var layer = _simulationLayers[0];
+        double previousSimulationTargetFps = _currentSimulationTargetFps;
+        double previousFastAudioLevel = _fastAudioLevel;
+        string? previousAudioDeviceId = _selectedAudioDeviceId;
+        bool previousAudioReactiveEnabled = _audioReactiveEnabled;
+        var previousMappings = CloneReactiveMappings(layer.ReactiveMappings);
+        double previousLifeOpacity = layer.LifeOpacity;
+
+        try
+        {
+            layer.Enabled = true;
+            layer.LifeOpacity = 0.8;
+            layer.ReactiveMappings = new List<SimulationReactiveMapping>
+            {
+                new()
+                {
+                    Input = SimulationReactiveInput.Level,
+                    Output = SimulationReactiveOutput.Opacity,
+                    Amount = 1.0
+                }
+            };
+
+            _audioReactiveEnabled = false;
+            _selectedAudioDeviceId = "smoke";
+            _currentSimulationTargetFps = 60.0;
+            _fastAudioLevel = 0.25;
+
+            ApplySimulationLayerReactiveState();
+            bool beforeRemovalOk = Math.Abs(layer.EffectiveLifeOpacity - 0.2) < 0.0001;
+
+            layer.ReactiveMappings.Clear();
+            ApplySimulationLayerReactiveState();
+            bool afterRemovalOk = Math.Abs(layer.EffectiveLifeOpacity - 0.8) < 0.0001;
+
+            bool ok = beforeRemovalOk && afterRemovalOk;
+            Logger.Info(
+                $"Simulation reactive removal smoke: beforeRemovalOk={beforeRemovalOk}, afterRemovalOk={afterRemovalOk}, ok={ok}.");
+            return ok;
+        }
+        finally
+        {
+            _currentSimulationTargetFps = previousSimulationTargetFps;
+            _fastAudioLevel = previousFastAudioLevel;
+            _selectedAudioDeviceId = previousAudioDeviceId;
+            _audioReactiveEnabled = previousAudioReactiveEnabled;
+            layer.LifeOpacity = previousLifeOpacity;
+            layer.ReactiveMappings = previousMappings;
+        }
+    }
+
     internal bool RunGpuPassthroughCompositionSmoke()
     {
         if (!_renderLoopAttached)
@@ -8599,6 +9528,80 @@ public partial class MainWindow : Window
                gpuSurfacePresent &&
                compositedInFinalFrame &&
                overlayDisabled;
+    }
+
+    internal bool RunGpuPassthroughSignedModelSmoke()
+    {
+        bool withCpuUnderlay = ShouldUseSignedAddSubPassthrough(
+            hasPassthroughBaseline: true,
+            hasActiveSimulationLayers: true,
+            hasEnabledNonAddSubSimulationLayer: false);
+        bool withGpuUnderlay = ShouldUseSignedAddSubPassthrough(
+            hasPassthroughBaseline: true,
+            hasActiveSimulationLayers: true,
+            hasEnabledNonAddSubSimulationLayer: false);
+        bool withoutPassthrough = ShouldUseSignedAddSubPassthrough(
+            hasPassthroughBaseline: false,
+            hasActiveSimulationLayers: true,
+            hasEnabledNonAddSubSimulationLayer: false);
+        bool withNormalLayer = ShouldUseSignedAddSubPassthrough(
+            hasPassthroughBaseline: true,
+            hasActiveSimulationLayers: true,
+            hasEnabledNonAddSubSimulationLayer: true);
+
+        bool ok = withCpuUnderlay && withGpuUnderlay && !withoutPassthrough && !withNormalLayer;
+        Logger.Info(
+            $"GPU passthrough signed-model smoke: cpuUnderlay={withCpuUnderlay}, gpuUnderlay={withGpuUnderlay}, " +
+            $"withoutPassthrough={withoutPassthrough}, withNormalLayer={withNormalLayer}, ok={ok}.");
+        return ok;
+    }
+
+    internal bool RunPassthroughUnderlayOnlySmoke()
+    {
+        if (!_renderLoopAttached)
+        {
+            InitializeVisualizer();
+        }
+
+        if (_sources.Count > 0)
+        {
+            ClearSources();
+        }
+
+        EnsureSimulationLayersInitialized();
+        foreach (var layer in _simulationLayers)
+        {
+            layer.Enabled = false;
+        }
+
+        _audioReactiveEnabled = false;
+        _isRecording = false;
+        _passthroughEnabled = true;
+        _blendMode = BlendMode.Additive;
+        _lifeOpacity = 1.0;
+        _effectiveLifeOpacity = 1.0;
+
+        ApplyDimensions(144, 24, DefaultAspectRatio, persist: false);
+
+        int width = GetReferenceSimulationEngine().Columns;
+        int height = GetReferenceSimulationEngine().Rows;
+        var source = CaptureSource.CreateFile("passthrough-underlay-only", "Passthrough Underlay Only", width, height);
+        source.LastFrame = new SourceFrame(BuildSmokeGradientBgra(width, height), width, height, null, width, height);
+        source.BlendMode = BlendMode.Additive;
+        source.Opacity = 1.0;
+        _sources.Add(source);
+        UpdatePrimaryAspectIfNeeded();
+
+        _compositeDownscaledBuffer = null;
+        _lastCompositeFrame = null;
+        FrameTimer_Tick(null, EventArgs.Empty);
+
+        bool outputVisible = BufferHasNonBlackPixel(_pixelBuffer);
+        bool compositedInFinalFrame = _passthroughCompositedInPixelBuffer;
+        bool overlayDisabled = !ShouldUseShaderPassthrough();
+        Logger.Info(
+            $"Passthrough underlay-only smoke: outputVisible={outputVisible}, composited={compositedInFinalFrame}, overlayDisabled={overlayDisabled}.");
+        return outputVisible && compositedInFinalFrame && overlayDisabled;
     }
 
     internal void ConfigureProfilingSmokeScene(int rows = 240, bool rgbMode = false, string? smokeVideoPath = null)
@@ -9290,7 +10293,7 @@ public partial class MainWindow : Window
         {
             float hueShiftDegrees = (float)CurrentRgbHueShiftDegrees(layer);
             byte[]? fallbackBuffer = null;
-            if (App.IsSmokeTestMode)
+            if (App.IsSmokeTestMode && App.CaptureGpuFallbackBuffersInSmokeTest)
             {
                 EnsureEngineColorBuffer(layer);
                 fallbackBuffer = layer.ColorBuffer;
@@ -9467,6 +10470,16 @@ public partial class MainWindow : Window
         return _blendMode;
     }
 
+    private static bool ShouldUseSignedAddSubPassthrough(
+        bool hasPassthroughBaseline,
+        bool hasActiveSimulationLayers,
+        bool hasEnabledNonAddSubSimulationLayer)
+    {
+        return hasPassthroughBaseline &&
+               hasActiveSimulationLayers &&
+               !hasEnabledNonAddSubSimulationLayer;
+    }
+
     private void UpdateFpsOverlay()
     {
         if (FpsText == null)
@@ -9501,7 +10514,7 @@ public partial class MainWindow : Window
                 reactiveStats = $"\nReactive: {deviceState} | InGain x{_audioInputGain:0.00} | FPS x{_audioReactiveFpsMultiplier:0.00} (min {_audioReactiveFpsMinPercent * 100.0:0}%) | Opacity {_effectiveLifeOpacity:0.00} | Beats: {_audioBeatDetector.BeatCount} | Seeds L:{_audioReactiveLevelSeedBurstsLastStep} B:{_audioReactiveBeatSeedBurstsLastStep}";
             }
 
-            FpsText.Text = $"Render {_renderDisplayFps:0.0} fps (target {_currentFpsFromConfig:0.0}) | Sim {_simulationDisplayFps:0.0} sps (target {_currentSimulationTargetFps:0.0}){pacingStatsText}{stageStatsText}{audioStats}{reactiveStats}";
+            FpsText.Text = $"Present {_presentationDisplayFps:0.0} fps (target {_currentFpsFromConfig:0.0}) | Loop {_renderDisplayFps:0.0} fps | Sim {_simulationDisplayFps:0.0} sps (target {_currentSimulationTargetFps:0.0}){pacingStatsText}{stageStatsText}{audioStats}{reactiveStats}";
             FpsText.Visibility = Visibility.Visible;
 
             UpdateDebugOverlays(now);
@@ -10086,6 +11099,71 @@ public partial class MainWindow : Window
         SaveConfig();
     }
 
+    private async void ExportLiveProfile_Click(object sender, RoutedEventArgs e)
+    {
+        if (_liveProfileExportInProgress || _isShuttingDown)
+        {
+            return;
+        }
+
+        _liveProfileExportInProgress = true;
+        if (sender is MenuItem menuItem)
+        {
+            menuItem.IsEnabled = false;
+        }
+
+        try
+        {
+            string sessionName = $"live-profile-{_configuredRows}p";
+            StartProfilingSession(sessionName);
+            await Task.Delay(TimeSpan.FromSeconds(6));
+            var (report, path) = StopProfilingSessionAndExport();
+
+            var presentMetric = report.Metrics.FirstOrDefault(metric => string.Equals(metric.Name, "presentation_draw_fps", StringComparison.Ordinal));
+            if (presentMetric != null)
+            {
+                Logger.Info($"Live profile exported to {path}. Present avg={presentMetric.Average:F2} fps, p95={presentMetric.P95:F2} fps-equivalent samples.");
+            }
+            else
+            {
+                Logger.Info($"Live profile exported to {path}.");
+            }
+
+            try
+            {
+                Clipboard.SetText(path);
+            }
+            catch
+            {
+            }
+
+            MessageBox.Show(
+                this,
+                $"Live profile exported to:\n{path}",
+                "LifeViz",
+                MessageBoxButton.OK,
+                MessageBoxImage.Information);
+        }
+        catch (Exception ex)
+        {
+            Logger.Error("Failed to export live profile.", ex);
+            MessageBox.Show(
+                this,
+                $"Failed to export live profile.\n{ex.Message}",
+                "LifeViz",
+                MessageBoxButton.OK,
+                MessageBoxImage.Error);
+        }
+        finally
+        {
+            _liveProfileExportInProgress = false;
+            if (sender is MenuItem item)
+            {
+                item.IsEnabled = true;
+            }
+        }
+    }
+
     private void LifeModeItem_Click(object sender, RoutedEventArgs e)
     {
         if (sender is not MenuItem { Header: string header })
@@ -10174,15 +11252,12 @@ public partial class MainWindow : Window
         }
 
         double animatedDegrees = layer.RgbHueShiftDegrees;
-        if (Math.Abs(layer.RgbHueShiftSpeedDegreesPerSecond) > 0.001)
+        if (Math.Abs(layer.EffectiveRgbHueShiftSpeedDegreesPerSecond) > 0.001)
         {
-            animatedDegrees += _lifetimeStopwatch.Elapsed.TotalSeconds * layer.RgbHueShiftSpeedDegreesPerSecond;
+            animatedDegrees += _lifetimeStopwatch.Elapsed.TotalSeconds * layer.EffectiveRgbHueShiftSpeedDegreesPerSecond;
         }
 
-        if (layer.AudioFrequencyHueShiftDegrees > 0.001)
-        {
-            animatedDegrees += NormalizeReactiveHueFrequency(_smoothedFreq) * layer.AudioFrequencyHueShiftDegrees;
-        }
+        animatedDegrees += layer.ReactiveHueShiftDegrees;
 
         return NormalizeHueDegrees(animatedDegrees);
     }
@@ -10789,6 +11864,8 @@ public partial class MainWindow : Window
 
     private void LoadConfig()
     {
+        bool migratedLegacyReactiveMappings = false;
+        bool sanitizedLegacyReactiveHueMappings = false;
         try
         {
             if (!File.Exists(ConfigPath))
@@ -10896,6 +11973,8 @@ public partial class MainWindow : Window
             _lastAudioReactiveBeatCount = _audioBeatDetector.BeatCount;
 
             _blendMode = ParseBlendModeOrDefault(config.BlendMode, _blendMode);
+            sanitizedLegacyReactiveHueMappings = config.SimulationLayers != null &&
+                                                 config.SimulationLayers.Any(layer => layer.AudioFrequencyHueShiftDegrees > 0.001);
             var simulationSpecs = (config.SimulationLayers != null && config.SimulationLayers.Count > 0)
                 ? NormalizeSimulationLayerSpecs(config.SimulationLayers)
                 : BuildLegacySimulationLayerSpecs(
@@ -10913,6 +11992,7 @@ public partial class MainWindow : Window
                     _captureThresholdMin,
                     _captureThresholdMax,
                     _invertThreshold);
+            migratedLegacyReactiveMappings = MigrateLegacyGlobalReactiveMappings(simulationSpecs);
             ApplySimulationLayerSpecs(simulationSpecs);
             if (_simulationLayers.Count > 0)
             {
@@ -10944,6 +12024,10 @@ public partial class MainWindow : Window
         {
             // Allow saves after the first load attempt so startup events don't clobber existing config.
             _configReady = true;
+            if (migratedLegacyReactiveMappings || sanitizedLegacyReactiveHueMappings)
+            {
+                SaveConfig();
+            }
         }
     }
 
@@ -11115,7 +12199,15 @@ public partial class MainWindow : Window
             LifeOpacity = layer.LifeOpacity,
             RgbHueShiftDegrees = layer.RgbHueShiftDegrees,
             RgbHueShiftSpeedDegreesPerSecond = layer.RgbHueShiftSpeedDegreesPerSecond,
-            AudioFrequencyHueShiftDegrees = layer.AudioFrequencyHueShiftDegrees,
+            // Legacy field is load-only now. Persist the canonical mapping list instead.
+            AudioFrequencyHueShiftDegrees = 0,
+            ReactiveMappings = layer.ReactiveMappings.Select(mapping => new AppConfig.ReactiveMappingConfig
+            {
+                Id = mapping.Id,
+                Input = mapping.Input.ToString(),
+                Output = mapping.Output.ToString(),
+                Amount = mapping.Amount
+            }).ToList(),
             ThresholdMin = layer.ThresholdMin,
             ThresholdMax = layer.ThresholdMax,
             InvertThreshold = layer.InvertThreshold
@@ -11945,9 +13037,18 @@ public partial class MainWindow : Window
             public double RgbHueShiftDegrees { get; set; }
             public double RgbHueShiftSpeedDegreesPerSecond { get; set; }
             public double AudioFrequencyHueShiftDegrees { get; set; }
+            public List<ReactiveMappingConfig> ReactiveMappings { get; set; } = new();
             public double ThresholdMin { get; set; } = 0.35;
             public double ThresholdMax { get; set; } = 0.75;
             public bool InvertThreshold { get; set; }
+        }
+
+        public sealed class ReactiveMappingConfig
+        {
+            public Guid Id { get; set; }
+            public string Input { get; set; } = nameof(SimulationReactiveInput.Level);
+            public string Output { get; set; } = nameof(SimulationReactiveOutput.Opacity);
+            public double Amount { get; set; } = 1.0;
         }
 
         public sealed class SourceConfig

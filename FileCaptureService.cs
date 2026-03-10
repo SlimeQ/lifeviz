@@ -878,6 +878,20 @@ internal sealed class FileCaptureService : IDisposable
 
     private sealed class VideoSession : FileSession
     {
+        internal readonly struct VideoProbeInfo
+        {
+            public VideoProbeInfo(int width, int height, double durationSeconds)
+            {
+                Width = width;
+                Height = height;
+                DurationSeconds = durationSeconds;
+            }
+
+            public int Width { get; }
+            public int Height { get; }
+            public double DurationSeconds { get; }
+        }
+
         public readonly struct ResolvedPlayback
         {
             public ResolvedPlayback(string videoUrl, string? audioUrl)
@@ -943,7 +957,7 @@ internal sealed class FileCaptureService : IDisposable
         private int _readyHeight;
         private int _readyDownscaledWidth;
         private int _readyDownscaledHeight;
-        public VideoSession(string path, string displayName, bool loopPlayback, Func<Task<ResolvedPlayback>>? urlResolver = null)
+        public VideoSession(string path, string displayName, bool loopPlayback, Func<Task<ResolvedPlayback>>? urlResolver = null, VideoProbeInfo? cachedProbe = null)
             : base(path, displayName, 0, 0)
         {
             _loopPlayback = loopPlayback;
@@ -952,7 +966,7 @@ internal sealed class FileCaptureService : IDisposable
             if (_urlResolver == null)
             {
                 // Local file: Initialize immediately (blocking probe)
-                InitializeSync(path);
+                InitializeSync(path, cachedProbe);
             }
             else
             {
@@ -962,18 +976,25 @@ internal sealed class FileCaptureService : IDisposable
         }
 
         // Constructor for legacy usage
-        public VideoSession(string path, bool loopPlayback) 
-            : this(path, System.IO.Path.GetFileName(path), loopPlayback, null)
+        public VideoSession(string path, bool loopPlayback, VideoProbeInfo? cachedProbe = null) 
+            : this(path, System.IO.Path.GetFileName(path), loopPlayback, null, cachedProbe)
         {
         }
 
-        private void InitializeSync(string path)
+        private void InitializeSync(string path, VideoProbeInfo? cachedProbe)
         {
             try
             {
                 Logger.Info($"Initializing local video: {path}");
-                
-                if (!ProbeVideo(path, out _nativeWidth, out _nativeHeight, out var durationSeconds))
+
+                double durationSeconds;
+                if (cachedProbe.HasValue)
+                {
+                    _nativeWidth = cachedProbe.Value.Width;
+                    _nativeHeight = cachedProbe.Value.Height;
+                    durationSeconds = cachedProbe.Value.DurationSeconds;
+                }
+                else if (!ProbeVideo(path, out _nativeWidth, out _nativeHeight, out durationSeconds))
                 {
                     _hasError = true;
                     _errorMessage = "Failed to probe video dimensions.";
@@ -1615,7 +1636,7 @@ internal sealed class FileCaptureService : IDisposable
                 return;
             }
 
-            StopVideoPipeline();
+            StopVideoPipeline(preserveReadyFrame: true);
             StopAudioPlayback();
 
             _ended = false;
@@ -1650,7 +1671,11 @@ internal sealed class FileCaptureService : IDisposable
             }
 
             _cts = new CancellationTokenSource();
-            _workerTask = Task.Run(() => FfmpegWorker(_videoPlaybackUrl!, _cts.Token, startOffsetSeconds));
+            _workerTask = Task.Factory.StartNew(
+                () => FfmpegWorker(_videoPlaybackUrl!, _cts.Token, startOffsetSeconds),
+                CancellationToken.None,
+                TaskCreationOptions.LongRunning,
+                TaskScheduler.Default);
             RefreshAudioPlayback();
         }
 
@@ -1673,11 +1698,15 @@ internal sealed class FileCaptureService : IDisposable
             }
 
             _cts = new CancellationTokenSource();
-            _workerTask = Task.Run(() => FfmpegWorker(_videoPlaybackUrl!, _cts.Token, startOffsetSeconds));
+            _workerTask = Task.Factory.StartNew(
+                () => FfmpegWorker(_videoPlaybackUrl!, _cts.Token, startOffsetSeconds),
+                CancellationToken.None,
+                TaskCreationOptions.LongRunning,
+                TaskScheduler.Default);
             RefreshAudioPlayback();
         }
 
-        private void StopVideoPipeline()
+        private void StopVideoPipeline(bool preserveReadyFrame = false)
         {
             var cts = _cts;
             _cts = null;
@@ -1695,12 +1724,15 @@ internal sealed class FileCaptureService : IDisposable
                 _pendingRawFrames.Clear();
                 _rawFramePool.Clear();
                 _readerBuffer = null;
-                _readyDownscaled = null;
-                _readyRaw = null;
-                _readyWidth = 0;
-                _readyHeight = 0;
-                _readyDownscaledWidth = 0;
-                _readyDownscaledHeight = 0;
+                if (!preserveReadyFrame)
+                {
+                    _readyDownscaled = null;
+                    _readyRaw = null;
+                    _readyWidth = 0;
+                    _readyHeight = 0;
+                    _readyDownscaledWidth = 0;
+                    _readyDownscaledHeight = 0;
+                }
             }
         }
 
@@ -1913,9 +1945,11 @@ internal sealed class FileCaptureService : IDisposable
                 output.Play();
 
                 var audioCts = new CancellationTokenSource();
-                var decodeTask = Task.Run(
+                var decodeTask = Task.Factory.StartNew(
                     () => AudioDecodeWorker(process, audioCts.Token, () => Volatile.Read(ref fatalAudioError) != 0),
-                    audioCts.Token);
+                    audioCts.Token,
+                    TaskCreationOptions.LongRunning,
+                    TaskScheduler.Default);
 
                 bool shouldAbort = false;
                 lock (_audioLock)
@@ -2230,7 +2264,7 @@ internal sealed class FileCaptureService : IDisposable
             }
         }
 
-        private static bool ProbeVideo(string path, out int width, out int height, out double durationSeconds)
+        internal static bool ProbeVideo(string path, out int width, out int height, out double durationSeconds)
         {
             width = 0;
             height = 0;
@@ -2280,10 +2314,15 @@ internal sealed class FileCaptureService : IDisposable
             
     internal sealed class VideoSequenceSession : IDisposable
     {
+
         private readonly List<string> _paths;
         private readonly string _displayName;
+        private readonly object _lock = new();
+        private readonly Dictionary<string, VideoSession.VideoProbeInfo> _probeCache = new(StringComparer.OrdinalIgnoreCase);
         private int _index;
         private VideoSession? _current;
+        private Task<VideoSession?>? _pendingAdvanceTask;
+        private int _pendingAdvanceIndex = -1;
         private int _errorStreak;
         private bool _hasError;
         private bool _audioEnabled;
@@ -2291,17 +2330,24 @@ internal sealed class FileCaptureService : IDisposable
         private bool _masterAudioEnabled = true;
         private double _masterAudioVolume = 1.0;
         private bool _playbackPaused;
+        private FileCaptureFrame? _lastFrame;
             
         public VideoSequenceSession(IReadOnlyList<string> paths)
         {
             _paths = new List<string>(paths);
             _displayName = BuildDisplayName(_paths);
             _index = 0;
-            _current = new VideoSession(_paths[_index], loopPlayback: false);
+            TryCacheProbe(_paths[_index]);
+            _current = new VideoSession(_paths[_index], loopPlayback: false, GetCachedProbe(_paths[_index]));
             _current.SetMasterAudio(_masterAudioEnabled, _masterAudioVolume);
             _current.SetAudioVolume(_audioVolume);
             _current.SetAudioEnabled(_audioEnabled);
             _current.SetPlaybackPaused(_playbackPaused);
+            _ = Task.Factory.StartNew(
+                PrimeProbeCache,
+                CancellationToken.None,
+                TaskCreationOptions.LongRunning,
+                TaskScheduler.Default);
         }
             
                     public IReadOnlyList<string> Paths => _paths;
@@ -2315,52 +2361,82 @@ internal sealed class FileCaptureService : IDisposable
                             {
                                 return FileCaptureState.Error;
                             }
-            
-                            if (_current == null)
+
+                            lock (_lock)
                             {
-                                return FileCaptureState.Error;
+                                if (_pendingAdvanceTask != null)
+                                {
+                                    return FileCaptureState.Pending;
+                                }
+
+                                if (_current == null)
+                                {
+                                    return _lastFrame.HasValue
+                                        ? FileCaptureState.Ready
+                                        : FileCaptureState.Pending;
+                                }
+
+                                return _current.State;
                             }
-            
-                            return _current.State;
                         }
                     }
             
                     public FileCaptureFrame? CaptureFrame(int targetWidth, int targetHeight, FitMode fitMode, bool includeSource)
                     {
-                        if (_hasError || _current == null)
+                        TryPromotePendingAdvance();
+
+                        if (_hasError)
                         {
-                            return null;
+                            return _lastFrame;
+                        }
+
+                        VideoSession? current;
+                        lock (_lock)
+                        {
+                            current = _current;
+                        }
+
+                        if (current == null)
+                        {
+                            return _lastFrame;
                         }
             
-                        var frame = _current.CaptureFrame(targetWidth, targetHeight, fitMode, includeSource);
-            
-                        if (_current.ConsumeEnded())
+                        var frame = current.CaptureFrame(targetWidth, targetHeight, fitMode, includeSource);
+                        if (frame.HasValue)
                         {
-                            Advance(isError: false);
-                            return null;
+                            _lastFrame = frame;
+                            _errorStreak = 0;
+                        }
+
+                        if (current.ConsumeEnded())
+                        {
+                            BeginAdvance(isError: false);
+                            return frame ?? _lastFrame;
                         }
             
-                        if (_current.State == FileCaptureState.Error)
+                        if (current.State == FileCaptureState.Error)
                         {
-                            if (!Advance(isError: true))
+                            if (!BeginAdvance(isError: true))
                             {
                                 Logger.Warn($"All videos in sequence failed: {_displayName}");
                                 _hasError = true;
-                                return null;
                             }
-                        }
-                        else if (frame.HasValue)
-                        {
-                            _errorStreak = 0;
+
+                            return frame ?? _lastFrame;
                         }
             
-                        return frame;
+                        return frame ?? _lastFrame;
                     }
             
         public void Restart()
         {
             _hasError = false;
             _errorStreak = 0;
+            lock (_lock)
+            {
+                _pendingAdvanceTask = null;
+                _pendingAdvanceIndex = -1;
+            }
             _current?.Dispose();
             _index = 0;
             _current = new VideoSession(_paths[_index], loopPlayback: false);
@@ -2413,35 +2489,154 @@ internal sealed class FileCaptureService : IDisposable
             
                     public void Dispose()
                     {
+                        lock (_lock)
+                        {
+                            _pendingAdvanceTask = null;
+                            _pendingAdvanceIndex = -1;
+                        }
                         _current?.Dispose();
                         _current = null;
                     }
             
-        private bool Advance(bool isError)
+        private bool BeginAdvance(bool isError)
         {
-            _current?.Dispose();
-            _index = (_index + 1) % _paths.Count;
-            _current = new VideoSession(_paths[_index], loopPlayback: false);
-            _current.SetMasterAudio(_masterAudioEnabled, _masterAudioVolume);
-            _current.SetAudioVolume(_audioVolume);
-            _current.SetAudioEnabled(_audioEnabled);
-            _current.SetPlaybackPaused(_playbackPaused);
-            
-                        if (isError)
-                        {
-                            _errorStreak++;
-                            if (_errorStreak >= _paths.Count)
-                            {
-                                return false;
-                            }
-                        }
-                        else
-                        {
-                            _errorStreak = 0;
-                        }
-            
-                        return true;
-                    }
+            lock (_lock)
+            {
+                if (_pendingAdvanceTask != null)
+                {
+                    return true;
+                }
+            }
+
+            if (isError)
+            {
+                _errorStreak++;
+                if (_errorStreak >= _paths.Count)
+                {
+                    return false;
+                }
+            }
+            else
+            {
+                _errorStreak = 0;
+            }
+
+            VideoSession? previous;
+            int nextIndex;
+            lock (_lock)
+            {
+                previous = _current;
+                _current = null;
+                nextIndex = (_index + 1) % _paths.Count;
+                _pendingAdvanceIndex = nextIndex;
+                _pendingAdvanceTask = Task.Factory.StartNew<VideoSession?>(
+                    () => CreateSequenceVideoSession(_paths[nextIndex]),
+                    CancellationToken.None,
+                    TaskCreationOptions.LongRunning,
+                    TaskScheduler.Default);
+            }
+
+            if (previous != null)
+            {
+                _ = Task.Factory.StartNew(
+                    previous.Dispose,
+                    CancellationToken.None,
+                    TaskCreationOptions.LongRunning,
+                    TaskScheduler.Default);
+            }
+
+            return true;
+        }
+
+        private void TryPromotePendingAdvance()
+        {
+            Task<VideoSession?>? pendingTask;
+            int pendingIndex;
+            lock (_lock)
+            {
+                pendingTask = _pendingAdvanceTask;
+                pendingIndex = _pendingAdvanceIndex;
+            }
+
+            if (pendingTask == null || !pendingTask.IsCompleted)
+            {
+                return;
+            }
+
+            VideoSession? nextSession = null;
+            try
+            {
+                nextSession = pendingTask.GetAwaiter().GetResult();
+            }
+            catch (Exception ex)
+            {
+                Logger.Warn($"Failed to advance video sequence {_displayName}. {ex.Message}");
+            }
+
+            lock (_lock)
+            {
+                _pendingAdvanceTask = null;
+                _pendingAdvanceIndex = -1;
+                if (nextSession != null)
+                {
+                    _current = nextSession;
+                    _index = pendingIndex;
+                }
+            }
+
+            if (nextSession == null)
+            {
+                _hasError = true;
+            }
+        }
+
+        private VideoSession CreateSequenceVideoSession(string path)
+        {
+            var session = new VideoSession(path, loopPlayback: false, GetCachedProbe(path));
+            session.SetMasterAudio(_masterAudioEnabled, _masterAudioVolume);
+            session.SetAudioVolume(_audioVolume);
+            session.SetAudioEnabled(_audioEnabled);
+            session.SetPlaybackPaused(_playbackPaused);
+            return session;
+        }
+
+        private void PrimeProbeCache()
+        {
+            foreach (string path in _paths)
+            {
+                TryCacheProbe(path);
+            }
+        }
+
+        private void TryCacheProbe(string path)
+        {
+            lock (_lock)
+            {
+                if (_probeCache.ContainsKey(path))
+                {
+                    return;
+                }
+            }
+
+            if (!VideoSession.ProbeVideo(path, out int width, out int height, out double durationSeconds))
+            {
+                return;
+            }
+
+            var probe = new VideoSession.VideoProbeInfo(width, height, durationSeconds);
+            lock (_lock)
+            {
+                _probeCache[path] = probe;
+            }
+        }
+
+        private VideoSession.VideoProbeInfo? GetCachedProbe(string path)
+        {
+            lock (_lock)
+            {
+                return _probeCache.TryGetValue(path, out var probe) ? probe : null;
+            }
+        }
             
                     private static string BuildDisplayName(IReadOnlyList<string> paths)
                     {

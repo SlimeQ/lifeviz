@@ -472,8 +472,6 @@ internal sealed class GpuSimulationBackend : ISimulationBackend
                 return false;
             }
 
-            // Shared-resource visibility across devices requires command submission.
-            _context!.Flush();
             sharedHandle = _colorSharedHandle;
             width = _columns;
             height = _rows;

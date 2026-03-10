@@ -3,6 +3,7 @@ using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Text.Json;
+using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Threading;
@@ -13,6 +14,7 @@ internal static class SmokeTestRunner
 {
     private static readonly int[] CurrentScenePresetRows = { 144, 240, 480, 720, 1080, 1440, 2160 };
     private static readonly int[] RealtimePacingRows = { 144, 240, 480 };
+    private static readonly TimeSpan CurrentSceneProfileWarmupDuration = TimeSpan.FromSeconds(4);
     private static readonly TimeSpan CurrentScenePresetProfileDuration = TimeSpan.FromSeconds(6);
     private static readonly TimeSpan RealtimePacingProfileDuration = TimeSpan.FromSeconds(8);
     private const double RealtimePacingTargetFps = 60.0;
@@ -32,6 +34,9 @@ internal static class SmokeTestRunner
         try
         {
             string target = args[1].Trim();
+            App.CaptureGpuFallbackBuffersInSmokeTest =
+                !(target.StartsWith("profile-", StringComparison.OrdinalIgnoreCase) ||
+                  target.StartsWith("pacing-", StringComparison.OrdinalIgnoreCase));
             string? smokeVideoPath = args.Length >= 3 ? args[2] : Environment.GetEnvironmentVariable("LIFEVIZ_SMOKE_VIDEO");
             if (TryRunCurrentScenePresetProfileTarget(target, out exitCode))
             {
@@ -64,7 +69,14 @@ internal static class SmokeTestRunner
                 "gpu-benchmark" => RunGpuBenchmark(),
                 "gpu-handoff" => RunGpuCompositeToSimulationSmokeTest(),
                 "gpu-rgb-threshold" => RunGpuCompositeRgbThresholdSmokeTest(),
+                "gpu-passthrough-signed-model" => RunGpuPassthroughSignedModelSmokeTest(),
+                "passthrough-underlay-only" => RunPassthroughUnderlayOnlySmokeTest(),
                 "gpu-frequency-hue" => RunGpuFrequencyHueSmokeTest(),
+                "simulation-reactive-mappings" => RunSimulationReactiveMappingsSmokeTest(),
+                "simulation-reactive-persistence" => RunSimulationReactiveMappingsPersistenceSmokeTest(),
+                "simulation-reactive-legacy-migration" => RunSimulationReactiveLegacyMigrationSmokeTest(),
+                "simulation-reactive-removal" => RunSimulationReactiveRemovalSmokeTest(),
+                "simulation-reactive-editor-isolation" => RunSimulationReactiveEditorIsolationSmokeTest(),
                 "gpu-injection-mode" => RunGpuInjectionModeSmokeTest(),
                 "gpu-file-injection-mode" => RunGpuFileInjectionModeSmokeTest(smokeVideoPath),
                 "gpu-sim" => RunGpuSimulationSmokeTest(),
@@ -77,7 +89,7 @@ internal static class SmokeTestRunner
                 "startup" => RunStartupSmokeTest(),
                 "startup-recovery" => RunStartupRecoverySmokeTest(),
                 "all" => RunAllSmokeTests(),
-                _ => throw new ArgumentException($"Unknown smoke test target '{target}'. Expected profile-240, profile-480, profile-rgb-240, profile-rgb-480, profile-file-240, profile-file-480, profile-file-rgb-240, profile-file-rgb-480, profile-current-scene, profile-current-scene-visible, profile-current-scene-fullscreen, profile-current-scene-presets, profile-current-scene-visible-presets, profile-current-scene-fullscreen-presets, profile-current-scene-<144|240|480|720|1080|1440|2160>, profile-current-scene-visible-<144|240|480|720|1080|1440|2160>, profile-current-scene-fullscreen-<144|240|480|720|1080|1440|2160>, profile-current-scene-interaction, pacing-current-scene-visible-presets, pacing-current-scene-fullscreen-presets, pacing-current-scene-interaction, pacing-current-scene-overlay-fullscreen-144, pacing-current-scene-suite, frame-pump-thread-safety, gpu-benchmark, gpu-handoff, gpu-rgb-threshold, gpu-frequency-hue, gpu-injection-mode, gpu-file-injection-mode, gpu-sim, gpu-source, source-reset, gpu-render, profile-mainloop, dimensions, shutdown, startup, startup-recovery, or all.")
+                _ => throw new ArgumentException($"Unknown smoke test target '{target}'. Expected profile-240, profile-480, profile-rgb-240, profile-rgb-480, profile-file-240, profile-file-480, profile-file-rgb-240, profile-file-rgb-480, profile-current-scene, profile-current-scene-visible, profile-current-scene-fullscreen, profile-current-scene-presets, profile-current-scene-visible-presets, profile-current-scene-fullscreen-presets, profile-current-scene-<144|240|480|720|1080|1440|2160>, profile-current-scene-visible-<144|240|480|720|1080|1440|2160>, profile-current-scene-fullscreen-<144|240|480|720|1080|1440|2160>, profile-current-scene-interaction, pacing-current-scene-visible-presets, pacing-current-scene-fullscreen-presets, pacing-current-scene-interaction, pacing-current-scene-overlay-fullscreen-144, pacing-current-scene-suite, frame-pump-thread-safety, gpu-benchmark, gpu-handoff, gpu-rgb-threshold, gpu-passthrough-signed-model, passthrough-underlay-only, gpu-frequency-hue, simulation-reactive-mappings, simulation-reactive-persistence, simulation-reactive-legacy-migration, simulation-reactive-removal, simulation-reactive-editor-isolation, gpu-injection-mode, gpu-file-injection-mode, gpu-sim, gpu-source, source-reset, gpu-render, profile-mainloop, dimensions, shutdown, startup, startup-recovery, or all.")
             };
         }
         catch (Exception ex)
@@ -92,6 +104,7 @@ internal static class SmokeTestRunner
             App.SuppressErrorDialogs = false;
             App.IsSmokeTestMode = false;
             App.LoadUserConfigInSmokeTest = false;
+            App.CaptureGpuFallbackBuffersInSmokeTest = true;
         }
 
         return true;
@@ -632,6 +645,55 @@ internal static class SmokeTestRunner
         return exitCode;
     }
 
+    private static int RunGpuPassthroughSignedModelSmokeTest()
+    {
+        Logger.Info("Running GPU passthrough signed-model smoke test.");
+        Exception? failure = null;
+
+        var app = new App();
+        app.InitializeComponent();
+        app.ShutdownMode = ShutdownMode.OnExplicitShutdown;
+        app.DispatcherUnhandledException += (_, args) =>
+        {
+            failure ??= args.Exception;
+            args.Handled = true;
+            app.Shutdown(1);
+        };
+
+        app.Startup += (_, _) =>
+        {
+            var window = new MainWindow
+            {
+                Width = 160,
+                Height = 120,
+                ShowInTaskbar = false,
+                ShowActivated = false,
+                WindowStartupLocation = WindowStartupLocation.Manual,
+                Left = -10000,
+                Top = -10000,
+                Opacity = 0.0
+            };
+            bool ok = window.RunGpuPassthroughSignedModelSmoke();
+            if (!ok)
+            {
+                failure ??= new InvalidOperationException("GPU passthrough signed-model smoke did not complete successfully.");
+                app.Shutdown(1);
+                return;
+            }
+
+            app.Shutdown(0);
+        };
+
+        int exitCode = app.Run();
+        if (failure != null)
+        {
+            throw new InvalidOperationException("GPU passthrough signed-model smoke test failed.", failure);
+        }
+
+        Logger.Info("GPU passthrough signed-model smoke test passed.");
+        return exitCode;
+    }
+
     private static int RunGpuFrequencyHueSmokeTest()
     {
         Logger.Info("Running GPU frequency-hue smoke test.");
@@ -678,6 +740,204 @@ internal static class SmokeTestRunner
         }
 
         Logger.Info("GPU frequency-hue smoke test passed.");
+        return exitCode;
+    }
+
+    private static int RunPassthroughUnderlayOnlySmokeTest()
+    {
+        Logger.Info("Running passthrough underlay-only smoke test.");
+        Exception? failure = null;
+
+        var app = new App();
+        app.InitializeComponent();
+        app.ShutdownMode = ShutdownMode.OnExplicitShutdown;
+        app.DispatcherUnhandledException += (_, args) =>
+        {
+            failure ??= args.Exception;
+            args.Handled = true;
+            app.Shutdown(1);
+        };
+
+        app.Startup += (_, _) =>
+        {
+            var window = new MainWindow
+            {
+                Width = 160,
+                Height = 120,
+                ShowInTaskbar = false,
+                ShowActivated = false,
+                WindowStartupLocation = WindowStartupLocation.Manual,
+                Left = -10000,
+                Top = -10000,
+                Opacity = 0.0
+            };
+            bool ok = window.RunPassthroughUnderlayOnlySmoke();
+            if (!ok)
+            {
+                failure ??= new InvalidOperationException("Passthrough underlay-only smoke did not complete successfully.");
+                app.Shutdown(1);
+                return;
+            }
+
+            app.Shutdown(0);
+        };
+
+        int exitCode = app.Run();
+        if (failure != null)
+        {
+            throw new InvalidOperationException("Passthrough underlay-only smoke test failed.", failure);
+        }
+
+        Logger.Info("Passthrough underlay-only smoke test passed.");
+        return exitCode;
+    }
+
+    private static int RunSimulationReactiveMappingsSmokeTest()
+    {
+        int exitCode = 0;
+        var thread = new Thread(() =>
+        {
+            try
+            {
+                var app = new App();
+                app.InitializeComponent();
+                var window = new MainWindow();
+                bool ok = window.RunSimulationReactiveMappingsSmoke();
+                window.Close();
+                app.Shutdown();
+                exitCode = ok ? 0 : 1;
+            }
+            catch (Exception ex)
+            {
+                Logger.Error("Simulation reactive mappings smoke failed.", ex);
+                Console.Error.WriteLine(ex);
+                exitCode = 1;
+            }
+        });
+
+        thread.SetApartmentState(ApartmentState.STA);
+        thread.Start();
+        thread.Join();
+        return exitCode;
+    }
+
+    private static int RunSimulationReactiveMappingsPersistenceSmokeTest()
+    {
+        int exitCode = 0;
+        var thread = new Thread(() =>
+        {
+            try
+            {
+                var app = new App();
+                app.InitializeComponent();
+                var window = new MainWindow();
+                bool ok = window.RunSimulationReactiveMappingsPersistenceSmoke();
+                window.Close();
+                app.Shutdown();
+                exitCode = ok ? 0 : 1;
+            }
+            catch (Exception ex)
+            {
+                Logger.Error("Simulation reactive persistence smoke failed.", ex);
+                Console.Error.WriteLine(ex);
+                exitCode = 1;
+            }
+        });
+
+        thread.SetApartmentState(ApartmentState.STA);
+        thread.Start();
+        thread.Join();
+        return exitCode;
+    }
+
+    private static int RunSimulationReactiveLegacyMigrationSmokeTest()
+    {
+        int exitCode = 0;
+        var thread = new Thread(() =>
+        {
+            try
+            {
+                var app = new App();
+                app.InitializeComponent();
+                var window = new MainWindow();
+                bool ok = window.RunSimulationReactiveLegacyMigrationSmoke();
+                window.Close();
+                app.Shutdown();
+                exitCode = ok ? 0 : 1;
+            }
+            catch (Exception ex)
+            {
+                Logger.Error("Simulation reactive legacy migration smoke failed.", ex);
+                Console.Error.WriteLine(ex);
+                exitCode = 1;
+            }
+        });
+
+        thread.SetApartmentState(ApartmentState.STA);
+        thread.Start();
+        thread.Join();
+        return exitCode;
+    }
+
+    private static int RunSimulationReactiveRemovalSmokeTest()
+    {
+        int exitCode = 0;
+        var thread = new Thread(() =>
+        {
+            try
+            {
+                var app = new App();
+                app.InitializeComponent();
+                var window = new MainWindow();
+                bool ok = window.RunSimulationReactiveRemovalSmoke();
+                window.Close();
+                app.Shutdown();
+                exitCode = ok ? 0 : 1;
+            }
+            catch (Exception ex)
+            {
+                Logger.Error("Simulation reactive removal smoke failed.", ex);
+                Console.Error.WriteLine(ex);
+                exitCode = 1;
+            }
+        });
+
+        thread.SetApartmentState(ApartmentState.STA);
+        thread.Start();
+        thread.Join();
+        return exitCode;
+    }
+
+    private static int RunSimulationReactiveEditorIsolationSmokeTest()
+    {
+        int exitCode = 0;
+        var thread = new Thread(() =>
+        {
+            try
+            {
+                var app = new App();
+                app.InitializeComponent();
+                var window = new MainWindow();
+                window.Show();
+                window.Hide();
+                var editor = new LayerEditorWindow(window);
+                bool ok = editor.RunSimulationLayerReactiveIsolationSmoke();
+                editor.Close();
+                window.Close();
+                app.Shutdown();
+                exitCode = ok ? 0 : 1;
+            }
+            catch (Exception ex)
+            {
+                Logger.Error("Simulation reactive editor isolation smoke failed.", ex);
+                Console.Error.WriteLine(ex);
+                exitCode = 1;
+            }
+        });
+
+        thread.SetApartmentState(ApartmentState.STA);
+        thread.Start();
+        thread.Join();
         return exitCode;
     }
 
@@ -1079,6 +1339,8 @@ internal static class SmokeTestRunner
                             }
                         }
 
+                        await Task.Delay(CurrentSceneProfileWarmupDuration);
+
                         string sessionName = forcedRows.HasValue
                             ? (fullscreen
                                 ? $"smoke-current-scene-fullscreen-{forcedRows.Value}p"
@@ -1088,44 +1350,26 @@ internal static class SmokeTestRunner
                                 : (visibleWindow ? "smoke-current-scene-visible" : "smoke-current-scene"));
                         window.StartProfilingSession(sessionName);
 
-                        var timer = new DispatcherTimer(DispatcherPriority.ApplicationIdle)
-                        {
-                            Interval = TimeSpan.FromSeconds(10)
-                        };
-                        timer.Tick += (_, _) =>
-                        {
-                            timer.Stop();
-                            try
-                            {
-                                var (report, path) = window.StopProfilingSessionAndExport();
-                                var frameMetric = report.Metrics.FirstOrDefault(metric => metric.Name == "frame_total_ms");
-                                if (frameMetric == null || frameMetric.Count < 20)
-                                {
-                                    failure ??= new InvalidOperationException("Current-scene profiler did not collect enough frame samples.");
-                                    app.Shutdown(1);
-                                    return;
-                                }
+                        await Task.Delay(CurrentScenePresetProfileDuration);
 
-                                Logger.Info($"Current-scene profile report written to {path}");
-                                foreach (var metric in report.Metrics
-                                             .Where(metric => metric.Name.EndsWith("_ms", StringComparison.Ordinal))
-                                             .OrderByDescending(metric => metric.Average)
-                                             .Take(16))
-                                {
-                                    Logger.Info($"Profile metric {metric.Name}: avg={metric.Average:F3} ms, p95={metric.P95:F3} ms, max={metric.Maximum:F3} ms, count={metric.Count}.");
-                                }
+                        var (report, path) = window.StopProfilingSessionAndExport();
+                        ValidateSettledCurrentSceneProfile(
+                            report,
+                            forcedRows.HasValue
+                                ? $"{forcedRows.Value}p {(fullscreen ? "fullscreen" : (visibleWindow ? "visible" : "hidden"))}"
+                                : $"current-scene {(fullscreen ? "fullscreen" : (visibleWindow ? "visible" : "hidden"))}");
 
-                                window.Close();
-                                app.Shutdown(0);
-                            }
-                            catch (Exception ex)
-                            {
-                                failure ??= ex;
-                                window.Close();
-                                app.Shutdown(1);
-                            }
-                        };
-                        timer.Start();
+                        Logger.Info($"Current-scene profile report written to {path}");
+                        foreach (var metric in report.Metrics
+                                     .Where(metric => metric.Name.EndsWith("_ms", StringComparison.Ordinal))
+                                     .OrderByDescending(metric => metric.Average)
+                                     .Take(16))
+                        {
+                            Logger.Info($"Profile metric {metric.Name}: avg={metric.Average:F3} ms, p95={metric.P95:F3} ms, max={metric.Maximum:F3} ms, count={metric.Count}.");
+                        }
+
+                        window.Close();
+                        app.Shutdown(0);
                     }
                     catch (Exception ex)
                     {
@@ -1216,15 +1460,12 @@ internal static class SmokeTestRunner
                             string sessionName = fullscreen
                                 ? $"smoke-current-scene-fullscreen-{rows}p"
                                 : (visibleWindow ? $"smoke-current-scene-visible-{rows}p" : $"smoke-current-scene-{rows}p");
+                            await Task.Delay(CurrentSceneProfileWarmupDuration);
                             window.StartProfilingSession(sessionName);
                             await Task.Delay(CurrentScenePresetProfileDuration);
 
                             var (report, path) = window.StopProfilingSessionAndExport();
-                            var frameMetric = report.Metrics.FirstOrDefault(metric => metric.Name == "frame_total_ms");
-                            if (frameMetric == null || frameMetric.Count < 20)
-                            {
-                                throw new InvalidOperationException($"Current-scene preset profiler did not collect enough samples for {rows}p.");
-                            }
+                            ValidateSettledCurrentSceneProfile(report, $"{rows}p {(fullscreen ? "fullscreen" : (visibleWindow ? "visible" : "hidden"))}");
 
                             Logger.Info($"Current-scene preset profile report written to {path}");
                             foreach (var metric in report.Metrics
@@ -1694,6 +1935,55 @@ internal static class SmokeTestRunner
     {
         return report.Metrics.FirstOrDefault(metric => string.Equals(metric.Name, name, StringComparison.Ordinal))
             ?? throw new InvalidOperationException($"Expected profile metric '{name}' was not collected.");
+    }
+
+    private static void ValidateSettledCurrentSceneProfile(FrameProfileReport report, string label)
+    {
+        var frameMetric = RequireMetric(report, "frame_total_ms");
+        if (frameMetric.Count < 60)
+        {
+            throw new InvalidOperationException($"{label}: current-scene profile did not collect enough settled frame samples ({frameMetric.Count}).");
+        }
+
+        var frameGap = RequireMetric(report, "frame_tick_gap_ms");
+        var over50 = RequireMetric(report, "frame_gap_over_50ms");
+        if (frameGap.P95 > 75.0)
+        {
+            throw new InvalidOperationException($"{label}: settled p95 frame gap {frameGap.P95:F3} ms is too high.");
+        }
+
+        if (over50.Average > 0.05)
+        {
+            throw new InvalidOperationException($"{label}: settled ratio of frame gaps over 50 ms was {over50.Average:P1}, expected <= 5.0%.");
+        }
+
+        var presentFps = report.Metrics.FirstOrDefault(metric => string.Equals(metric.Name, "presentation_draw_fps", StringComparison.Ordinal));
+        if (presentFps != null && presentFps.Count > 0 && presentFps.Average < 45.0)
+        {
+            throw new InvalidOperationException($"{label}: present cadence regressed; average present fps was only {presentFps.Average:F2}.");
+        }
+
+        foreach (var ageMetric in report.Metrics.Where(metric =>
+                     (metric.Name.StartsWith("capture_file_frame_age_ms", StringComparison.Ordinal) ||
+                      metric.Name.StartsWith("capture_sequence_frame_age_ms", StringComparison.Ordinal)) &&
+                     metric.Count >= 30))
+        {
+            if (ageMetric.P95 > 250.0)
+            {
+                throw new InvalidOperationException($"{label}: source freshness regressed for {ageMetric.Name}; p95 frame age was {ageMetric.P95:F3} ms.");
+            }
+        }
+
+        foreach (var ratioMetric in report.Metrics.Where(metric =>
+                     (metric.Name.StartsWith("capture_file_fresh_frame_ratio", StringComparison.Ordinal) ||
+                      metric.Name.StartsWith("capture_sequence_fresh_frame_ratio", StringComparison.Ordinal)) &&
+                     metric.Count >= 30))
+        {
+            if (ratioMetric.Average < 0.10)
+            {
+                throw new InvalidOperationException($"{label}: source freshness regressed for {ratioMetric.Name}; fresh-frame ratio averaged only {ratioMetric.Average:P1}.");
+            }
+        }
     }
 
     private static void ValidateRealtimePacing(FrameProfileReport report, string label, double targetFps)

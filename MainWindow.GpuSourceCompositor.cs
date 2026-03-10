@@ -255,7 +255,6 @@ public partial class MainWindow
                 Interlocked.Increment(ref _buildCount);
 
                 IntPtr currentSharedHandle = currentIsA ? _compositeSharedHandleA : _compositeSharedHandleB;
-                _context.Flush();
                 return new CompositeFrame(
                     includeCpuReadback && downscaledBuffer != null ? downscaledBuffer : Array.Empty<byte>(),
                     downscaledWidth,

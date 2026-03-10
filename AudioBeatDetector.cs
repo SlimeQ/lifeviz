@@ -56,6 +56,8 @@ internal sealed class AudioBeatDetector : IDisposable
     private const double EnvelopeNormalizationCeilingDb = -6.0;
     private const double PeakNormalizationFloorDb = -42.0;
     private const double PeakNormalizationCeilingDb = -6.0;
+    private const double BandNormalizationFloorDb = -60.0;
+    private const double BandNormalizationCeilingDb = -18.0;
     private const string RenderSelectionPrefix = "render:";
     private const string DefaultRenderSelectionId = "render:default";
     private const double EnergyBaselineFollow = 0.22;
@@ -97,6 +99,13 @@ internal sealed class AudioBeatDetector : IDisposable
     public double MidFrequency { get; private set; }
     public double HighFrequency { get; private set; }
     public double BassEnergy { get; private set; }
+    public double BassNormalizedLevel { get; private set; }
+    public double MidNormalizedLevel { get; private set; }
+    public double HighNormalizedLevel { get; private set; }
+    public double MainFrequencyNormalized { get; private set; }
+    public double BassFrequencyNormalized { get; private set; }
+    public double MidFrequencyNormalized { get; private set; }
+    public double HighFrequencyNormalized { get; private set; }
     public bool IsRunning => (_graph != null && _inputNode != null) || _wasapiLoopbackCapture != null;
 
     public double InputGain
@@ -484,6 +493,13 @@ internal sealed class AudioBeatDetector : IDisposable
         BassFrequency = 0;
         MidFrequency = 0;
         HighFrequency = 0;
+        BassNormalizedLevel = 0;
+        MidNormalizedLevel = 0;
+        HighNormalizedLevel = 0;
+        MainFrequencyNormalized = 0;
+        BassFrequencyNormalized = 0;
+        MidFrequencyNormalized = 0;
+        HighFrequencyNormalized = 0;
         _energyBaseline = 0;
         BeatCount = 0;
         lock (_waveformLock)
@@ -623,6 +639,13 @@ internal sealed class AudioBeatDetector : IDisposable
             MidFrequency = 0;
             HighFrequency = 0;
             BassEnergy = 0;
+            BassNormalizedLevel = 0;
+            MidNormalizedLevel = 0;
+            HighNormalizedLevel = 0;
+            MainFrequencyNormalized = 0;
+            BassFrequencyNormalized = 0;
+            MidFrequencyNormalized = 0;
+            HighFrequencyNormalized = 0;
         }
 
         ProcessEnergy(meanAbsolute, rms, peakAmplitude);
@@ -702,6 +725,8 @@ internal sealed class AudioBeatDetector : IDisposable
         double maxMagnitude = 0;
         int maxIndex = 0;
         double bassSum = 0;
+        double midSum = 0;
+        double highSum = 0;
         double bassMaxMagnitude = 0;
         int bassMaxIndex = 0;
         double midMaxMagnitude = 0;
@@ -737,6 +762,14 @@ internal sealed class AudioBeatDetector : IDisposable
             {
                 bassSum += magnitude;
             }
+            else if (i >= midStartBin && i <= midEndBin)
+            {
+                midSum += magnitude;
+            }
+            else if (i >= highStartBin && i <= highEndBin)
+            {
+                highSum += magnitude;
+            }
 
             if (i >= bassStartBin && i <= bassEndBin && magnitude > bassMaxMagnitude)
             {
@@ -761,20 +794,23 @@ internal sealed class AudioBeatDetector : IDisposable
         BassFrequency = bassMaxIndex > 0 ? bassMaxIndex * binRes : 0;
         MidFrequency = midMaxIndex > 0 ? midMaxIndex * binRes : 0;
         HighFrequency = highMaxIndex > 0 ? highMaxIndex * binRes : 0;
-        
-        int bassBins = bassEndBin - bassStartBin + 1;
-        if (bassBins > 0)
-        {
-            // Calculate average magnitude in bass range and normalize it
-            // For a 1024 FFT, magnitude can be up to ~256-512.
-            // Let's normalize it so 1.0 is a very strong bass.
-            double avgBassMag = bassSum / bassBins;
-            BassEnergy = Math.Clamp(avgBassMag / 50.0, 0, 10); 
-        }
-        else
-        {
-            BassEnergy = 0;
-        }
+
+        int bassBins = Math.Max(1, bassEndBin - bassStartBin + 1);
+        int midBins = Math.Max(1, midEndBin - midStartBin + 1);
+        int highBins = Math.Max(1, highEndBin - highStartBin + 1);
+        double avgBassMag = bassSum / bassBins;
+        double avgMidMag = midSum / midBins;
+        double avgHighMag = highSum / highBins;
+
+        BassEnergy = Math.Clamp(avgBassMag / 50.0, 0, 10);
+        BassNormalizedLevel = NormalizeAmplitude(avgBassMag / Math.Max(1.0, fftSize), BandNormalizationFloorDb, BandNormalizationCeilingDb);
+        MidNormalizedLevel = NormalizeAmplitude(avgMidMag / Math.Max(1.0, fftSize), BandNormalizationFloorDb, BandNormalizationCeilingDb);
+        HighNormalizedLevel = NormalizeAmplitude(avgHighMag / Math.Max(1.0, fftSize), BandNormalizationFloorDb, BandNormalizationCeilingDb);
+
+        MainFrequencyNormalized = maxMagnitude > 0 ? NormalizeLogFrequencyWithinBand(MainFrequency, 20.0, 8000.0) : 0;
+        BassFrequencyNormalized = bassMaxMagnitude > 0 && BassNormalizedLevel > 0.001 ? NormalizeLogFrequencyWithinBand(BassFrequency, 20.0, 250.0) : 0;
+        MidFrequencyNormalized = midMaxMagnitude > 0 && MidNormalizedLevel > 0.001 ? NormalizeLogFrequencyWithinBand(MidFrequency, 250.0, 2000.0) : 0;
+        HighFrequencyNormalized = highMaxMagnitude > 0 && HighNormalizedLevel > 0.001 ? NormalizeLogFrequencyWithinBand(HighFrequency, 2000.0, 8000.0) : 0;
     }
 
     private static void CalculateFFT(Complex[] buffer)
@@ -911,6 +947,20 @@ internal sealed class AudioBeatDetector : IDisposable
         return Math.Clamp((db - floorDb) / normalizationRange, 0, 1);
     }
 
+    private static double NormalizeLogFrequencyWithinBand(double frequencyHz, double minHz, double maxHz)
+    {
+        if (frequencyHz <= 0 || maxHz <= minHz)
+        {
+            return 0;
+        }
+
+        double clamped = Math.Clamp(frequencyHz, minHz, maxHz);
+        double minLog = Math.Log(minHz);
+        double maxLog = Math.Log(maxHz);
+        double range = Math.Max(0.000001, maxLog - minLog);
+        return Math.Clamp((Math.Log(clamped) - minLog) / range, 0, 1);
+    }
+
     public void Stop()
     {
         _lock.Wait();
@@ -923,6 +973,29 @@ internal sealed class AudioBeatDetector : IDisposable
         {
             _lock.Release();
         }
+    }
+
+    internal void SetSmokeReactiveState(
+        double level,
+        double bass,
+        double mid,
+        double high,
+        double frequency,
+        double bassFrequency,
+        double midFrequency,
+        double highFrequency)
+    {
+        NormalizedEnergy = Math.Clamp(level, 0, 1);
+        EnvelopeEnergy = Math.Clamp(level, 0, 1);
+        PeakNormalizedEnergy = Math.Clamp(level, 0, 1);
+        TransientEnergy = Math.Clamp(level, 0, 1);
+        BassNormalizedLevel = Math.Clamp(bass, 0, 1);
+        MidNormalizedLevel = Math.Clamp(mid, 0, 1);
+        HighNormalizedLevel = Math.Clamp(high, 0, 1);
+        MainFrequencyNormalized = Math.Clamp(frequency, 0, 1);
+        BassFrequencyNormalized = Math.Clamp(bassFrequency, 0, 1);
+        MidFrequencyNormalized = Math.Clamp(midFrequency, 0, 1);
+        HighFrequencyNormalized = Math.Clamp(highFrequency, 0, 1);
     }
 
     public void Dispose()

@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
+using System.ComponentModel;
 using System.IO;
 using System.Linq;
 using System.Text.Json;
@@ -32,7 +33,10 @@ public partial class LayerEditorWindow : Window
     {
         InitializeComponent();
         _owner = owner;
-        Owner = owner;
+        if (owner.IsLoaded || owner.IsVisible)
+        {
+            Owner = owner;
+        }
         _viewModel = new LayerEditorViewModel();
         DataContext = _viewModel;
         RefreshMasterAudioState();
@@ -80,6 +84,48 @@ public partial class LayerEditorWindow : Window
         {
             ApplyButton_Click(ApplyButton, new RoutedEventArgs(Button.ClickEvent, ApplyButton));
         }
+    }
+
+    internal bool RunSimulationLayerReactiveIsolationSmoke()
+    {
+        RefreshSimulationLayerState();
+        var first = _viewModel.SimulationLayers.FirstOrDefault();
+        if (first == null)
+        {
+            return false;
+        }
+
+        first.ReactiveMappings.Clear();
+        first.ReactiveMappings.Add(new LayerEditorSimulationReactiveMapping
+        {
+            Id = Guid.NewGuid(),
+            Input = nameof(SimulationReactiveInput.Level),
+            Output = nameof(SimulationReactiveOutput.Opacity),
+            Amount = 1.0
+        });
+        first.AudioFrequencyHueShiftDegrees = 90;
+        SetSelectedSimulationLayer(first);
+
+        AddSimulationLayer("Direct");
+        var second = _viewModel.SelectedSimulationLayer;
+        if (second == null || ReferenceEquals(second, first))
+        {
+            return false;
+        }
+
+        bool newLayerDidNotInherit = second.ReactiveMappings.Count == 0 &&
+                                     second.AudioFrequencyHueShiftDegrees == 0 &&
+                                     first.ReactiveMappings.Count == 1;
+
+        SetSelectedSimulationLayer(first);
+        first.ReactiveMappings.Clear();
+        _owner.ApplySimulationLayerSettingsFromEditor(_viewModel.SimulationLayers.ToList());
+        _owner.GetSimulationLayerSettingsForEditor(out var roundTripLayers);
+        bool removalCleared = first.ReactiveMappings.Count == 0 &&
+                              roundTripLayers.Count > 0 &&
+                              roundTripLayers[0].ReactiveMappings.Count == 0;
+
+        return newLayerDidNotInherit && removalCleared;
     }
 
     private void RefreshFromSources(Guid? preferredSelectionId = null)
@@ -132,8 +178,12 @@ public partial class LayerEditorWindow : Window
     private void RefreshSimulationLayerState()
     {
         _owner.GetSimulationLayerSettingsForEditor(out var simulationLayers);
-        _viewModel.SimulationLayers = new ObservableCollection<LayerEditorSimulationLayer>(
-            simulationLayers.Select(CloneSimulationLayer));
+        var clones = simulationLayers.Select(CloneSimulationLayer).ToList();
+        foreach (var clone in clones)
+        {
+            AttachReactiveMappingHandlers(clone);
+        }
+        _viewModel.SimulationLayers = new ObservableCollection<LayerEditorSimulationLayer>(clones);
         SetSelectedSimulationLayer(_viewModel.SimulationLayers.FirstOrDefault());
     }
 
@@ -204,7 +254,7 @@ public partial class LayerEditorWindow : Window
 
     private static LayerEditorSimulationLayer CloneSimulationLayer(LayerEditorSimulationLayer source)
     {
-        return new LayerEditorSimulationLayer
+        var clone = new LayerEditorSimulationLayer
         {
             Id = source.Id,
             Name = source.Name,
@@ -219,10 +269,39 @@ public partial class LayerEditorWindow : Window
             RgbHueShiftDegrees = source.RgbHueShiftDegrees,
             RgbHueShiftSpeedDegreesPerSecond = source.RgbHueShiftSpeedDegreesPerSecond,
             AudioFrequencyHueShiftDegrees = source.AudioFrequencyHueShiftDegrees,
+            ReactiveMappings = new ObservableCollection<LayerEditorSimulationReactiveMapping>(
+                source.ReactiveMappings.Select(CloneReactiveMapping)),
             ThresholdMin = source.ThresholdMin,
             ThresholdMax = source.ThresholdMax,
             InvertThreshold = source.InvertThreshold
         };
+
+        return clone;
+    }
+
+    private static LayerEditorSimulationReactiveMapping CloneReactiveMapping(LayerEditorSimulationReactiveMapping source)
+    {
+        return new LayerEditorSimulationReactiveMapping
+        {
+            Id = source.Id,
+            Input = source.Input,
+            Output = source.Output,
+            Amount = source.Amount
+        };
+    }
+
+    private void AttachReactiveMappingHandlers(LayerEditorSimulationLayer layer)
+    {
+        foreach (var mapping in layer.ReactiveMappings)
+        {
+            mapping.PropertyChanged -= ReactiveMapping_PropertyChanged;
+            mapping.PropertyChanged += ReactiveMapping_PropertyChanged;
+        }
+    }
+
+    private void ReactiveMapping_PropertyChanged(object? sender, PropertyChangedEventArgs e)
+    {
+        _viewModel.SelectedSimulationLayer?.NotifyDetailsChanged();
     }
 
     private void SetSelectedSimulationLayer(LayerEditorSimulationLayer? layer)
@@ -454,8 +533,12 @@ public partial class LayerEditorWindow : Window
                 _viewModel.Sources = new ObservableCollection<LayerEditorSource>(sources);
                 SetSelectedSource(_viewModel.Sources.FirstOrDefault());
                 RefreshProjectSettingsState();
-                _viewModel.SimulationLayers = new ObservableCollection<LayerEditorSimulationLayer>(
-                    simulationLayers.Select(CloneSimulationLayer));
+                var clones = simulationLayers.Select(CloneSimulationLayer).ToList();
+                foreach (var clone in clones)
+                {
+                    AttachReactiveMappingHandlers(clone);
+                }
+                _viewModel.SimulationLayers = new ObservableCollection<LayerEditorSimulationLayer>(clones);
                 SetSelectedSimulationLayer(_viewModel.SimulationLayers.FirstOrDefault());
             }
         }
@@ -644,11 +727,13 @@ public partial class LayerEditorWindow : Window
             LifeOpacity = _viewModel.SelectedSimulationLayer?.LifeOpacity ?? 1.0,
             RgbHueShiftDegrees = _viewModel.SelectedSimulationLayer?.RgbHueShiftDegrees ?? 0.0,
             RgbHueShiftSpeedDegreesPerSecond = _viewModel.SelectedSimulationLayer?.RgbHueShiftSpeedDegreesPerSecond ?? 0.0,
-            AudioFrequencyHueShiftDegrees = _viewModel.SelectedSimulationLayer?.AudioFrequencyHueShiftDegrees ?? 0.0,
+            AudioFrequencyHueShiftDegrees = 0.0,
+            ReactiveMappings = new ObservableCollection<LayerEditorSimulationReactiveMapping>(),
             ThresholdMin = _viewModel.SelectedSimulationLayer?.ThresholdMin ?? 0.35,
             ThresholdMax = _viewModel.SelectedSimulationLayer?.ThresholdMax ?? 0.75,
             InvertThreshold = _viewModel.SelectedSimulationLayer?.InvertThreshold ?? false
         };
+        AttachReactiveMappingHandlers(newLayer);
 
         int insertIndex = _viewModel.SelectedSimulationLayer != null
             ? _viewModel.SimulationLayers.IndexOf(_viewModel.SelectedSimulationLayer) + 1
@@ -904,6 +989,65 @@ public partial class LayerEditorWindow : Window
 
     private void SimulationLayerHue_Changed(object sender, RoutedPropertyChangedEventArgs<double> e)
     {
+        if (ShouldApplyLive())
+        {
+            ApplySimulationLayerSettingsLive();
+        }
+    }
+
+    private void AddSimulationReactiveMapping_Click(object sender, RoutedEventArgs e)
+    {
+        var layer = _viewModel.SelectedSimulationLayer;
+        if (layer == null)
+        {
+            return;
+        }
+
+        var mapping = new LayerEditorSimulationReactiveMapping
+        {
+            Id = Guid.NewGuid(),
+            Input = nameof(SimulationReactiveInput.Level),
+            Output = nameof(SimulationReactiveOutput.Opacity),
+            Amount = 1.0
+        };
+        mapping.PropertyChanged += ReactiveMapping_PropertyChanged;
+        layer.ReactiveMappings.Add(mapping);
+        layer.NotifyDetailsChanged();
+        if (ShouldApplyLive())
+        {
+            ApplySimulationLayerSettingsLive();
+        }
+    }
+
+    private void RemoveSimulationReactiveMapping_Click(object sender, RoutedEventArgs e)
+    {
+        var layer = _viewModel.SelectedSimulationLayer;
+        if (layer == null || sender is not FrameworkElement { DataContext: LayerEditorSimulationReactiveMapping mapping })
+        {
+            return;
+        }
+
+        mapping.PropertyChanged -= ReactiveMapping_PropertyChanged;
+        layer.ReactiveMappings.Remove(mapping);
+        layer.NotifyDetailsChanged();
+        if (ShouldApplyLive())
+        {
+            ApplySimulationLayerSettingsLive();
+        }
+    }
+
+    private void SimulationReactiveMappingSelection_Changed(object sender, SelectionChangedEventArgs e)
+    {
+        _viewModel.SelectedSimulationLayer?.NotifyDetailsChanged();
+        if (ShouldApplyLive())
+        {
+            ApplySimulationLayerSettingsLive();
+        }
+    }
+
+    private void SimulationReactiveMappingAmount_Changed(object sender, RoutedPropertyChangedEventArgs<double> e)
+    {
+        _viewModel.SelectedSimulationLayer?.NotifyDetailsChanged();
         if (ShouldApplyLive())
         {
             ApplySimulationLayerSettingsLive();

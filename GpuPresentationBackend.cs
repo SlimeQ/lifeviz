@@ -301,7 +301,8 @@ internal sealed class GpuPresentationBackend : IDisposable
         bool useMixedAddSubPassthroughModel,
         bool invertComposite)
     {
-        if (layers.Count == 0 || layers.Count > MaxSimulationLayers || _surfaceWidth <= 0 || _surfaceHeight <= 0)
+        bool hasUnderlay = underlayBuffer != null || underlaySurface != null;
+        if ((layers.Count == 0 && !hasUnderlay) || layers.Count > MaxSimulationLayers || _surfaceWidth <= 0 || _surfaceHeight <= 0)
         {
             return false;
         }
@@ -421,12 +422,19 @@ internal sealed class GpuPresentationBackend : IDisposable
         _drawingSurface.Draw -= DrawingSurface_OnDraw;
         _drawingSurface.UnloadContent -= DrawingSurface_OnUnloadContent;
 
-        DisposeDeviceResources();
-
+        bool removedDrawingSurface = false;
         if (_host.Children.Contains(_drawingSurface))
         {
             _host.Children.Clear();
             _host.Children.Add(_fallbackImage);
+            _host.UpdateLayout();
+            _host.Dispatcher.Invoke(() => { }, System.Windows.Threading.DispatcherPriority.Background);
+            removedDrawingSurface = true;
+        }
+
+        if (!removedDrawingSurface)
+        {
+            DisposeDeviceResources();
         }
     }
 
@@ -818,9 +826,24 @@ internal sealed class GpuPresentationBackend : IDisposable
 
     private bool AreSimulationLayerTexturesReady()
     {
-        if (_simulationLayerCount <= 0 || _simulationLayerCount > MaxSimulationLayers)
+        if (_simulationLayerCount > MaxSimulationLayers)
         {
             return false;
+        }
+
+        if (_simulationLayerCount <= 0)
+        {
+            if (_finalCompositeParameters.UseUnderlay == 0)
+            {
+                return false;
+            }
+
+            if (_underlayUsesSharedTexture)
+            {
+                return _sharedUnderlayTextureView != null;
+            }
+
+            return _underlayTextureView != null;
         }
 
         if (_finalCompositeParameters.UseUnderlay != 0)

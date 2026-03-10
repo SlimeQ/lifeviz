@@ -28,6 +28,9 @@ dotnet bin\Debug\net9.0-windows-sbx\lifeviz.dll --smoke-test gpu-benchmark
 dotnet bin\Debug\net9.0-windows-sbx\lifeviz.dll --smoke-test gpu-handoff
 dotnet bin\Debug\net9.0-windows-sbx\lifeviz.dll --smoke-test gpu-rgb-threshold
 dotnet bin\Debug\net9.0-windows-sbx\lifeviz.dll --smoke-test gpu-frequency-hue
+dotnet bin\Debug\net9.0-windows-sbx\lifeviz.dll --smoke-test simulation-reactive-mappings
+dotnet bin\Debug\net9.0-windows-sbx\lifeviz.dll --smoke-test simulation-reactive-persistence
+dotnet bin\Debug\net9.0-windows-sbx\lifeviz.dll --smoke-test simulation-reactive-legacy-migration
 dotnet bin\Debug\net9.0-windows-sbx\lifeviz.dll --smoke-test gpu-injection-mode
 dotnet bin\Debug\net9.0-windows-sbx\lifeviz.dll --smoke-test gpu-file-injection-mode C:\path\to\video.mp4
 dotnet bin\Debug\net9.0-windows-sbx\lifeviz.dll --smoke-test gpu-sim
@@ -68,7 +71,11 @@ dotnet bin\Debug\net9.0-windows-sbx\lifeviz.dll --smoke-test all
 - `gpu-benchmark` logs average GPU sim inject/step/fill timings plus GPU source-composite upload/draw/readback timings using synthetic workloads so you can see whether readback is still dominating.
 - `gpu-handoff` instantiates `MainWindow` without showing it and verifies that a GPU-built composite can inject directly into the GPU simulation backend with zero CPU composite readback bytes.
 - `gpu-rgb-threshold` drives the RGB composite-injection threshold path with a pure-white source and fails if white pixels stop injecting into all three channels.
-- `gpu-frequency-hue` verifies that a simulation layer's per-layer `Freq -> Hue` setting changes the resolved presentation hue numerically while the underlying RGB simulation buffer remains unchanged in the live GPU path.
+- `gpu-frequency-hue` verifies that a simulation layer's per-layer frequency-driven hue mapping changes the resolved presentation hue numerically while the underlying RGB simulation buffer remains unchanged in the live GPU path.
+- `passthrough-underlay-only` now drives the real frame tick and verifies that with zero active simulation layers, source capture/composite refresh still happens and passthrough still presents the source composite instead of falling to black.
+- `simulation-reactive-mappings` validates the modular per-layer simulation mapping system (`Level -> Opacity`, `Level -> Framerate`, `Frequency -> Hue Shift`) against known normalized audio inputs, with the legacy global audio-reactivity master toggle forced off so the new mapping path cannot accidentally depend on it.
+- `simulation-reactive-persistence` round-trips those per-layer reactive mappings through both scene-project persistence and app-config normalization so save/load regressions are caught automatically.
+- `simulation-reactive-legacy-migration` verifies that old whole-scene `Level -> Framerate` / `Level -> Life Opacity` settings are converted into per-layer mappings and then cleared, so the runtime does not keep both systems active.
 - `gpu-injection-mode` drives the GPU composite-injection path with a mid-gray source and fails unless `Threshold`, `Random Pulse`, and `Pulse Width Modulation` still produce distinct output densities.
 - `gpu-file-injection-mode <video>` runs that same density comparison against a real decoded file frame, which is the right tool when a report reproduces only on actual media.
 - `gpu-sim` verifies the D3D11 simulation backend end to end in both `Naive Grayscale` and `RGB Channel Bins`.
@@ -82,10 +89,13 @@ dotnet bin\Debug\net9.0-windows-sbx\lifeviz.dll --smoke-test all
 - `profile-file-rgb-240` / `profile-file-rgb-480` do the same with the reference simulation layer pinned to `RGB Channel Bins`, which is the right target when file-video playback performance only collapses once RGB layers are enabled.
 - `profile-current-scene` loads the persisted user config/scene and profiles it headlessly, which is the fastest way to capture real-stage timings from the current setup without manually reading the on-screen overlay.
 - `profile-current-scene-visible` does the same in a visible window so display/presentation pacing regressions can be measured against the actual desktop composition path. It now also logs file-video freshness/age metrics (`capture_file_fresh_frame_ratio`, `capture_file_frame_age_ms`) so "smooth life, slideshow underlay" regressions can be diagnosed directly.
+- Current-scene profile smokes now include an explicit warmup window before profiling begins, then validate the settled run against source freshness thresholds (`capture_*_frame_age_ms`, `capture_*_fresh_frame_ratio`) instead of relying on startup-skewed averages. That makes them much better at catching real slideshow regressions after the scene has fully settled.
 - `profile-current-scene-fullscreen` does the same after forcing the main output window into fullscreen, and now also fails if the presented image collapses into the old tiny centered/top-centered rectangle instead of occupying the expected fullscreen display rect.
 - `profile-current-scene-<144|240|480|720|1080|1440|2160>`, `profile-current-scene-visible-<...>`, and `profile-current-scene-fullscreen-<...>` force the real saved scene to that exact preset height before profiling, which is the right tool when a regression only appears at a specific output size.
 - `profile-current-scene-presets`, `profile-current-scene-visible-presets`, and `profile-current-scene-fullscreen-presets` sweep the full preset ladder (`144/240/480/720/1080/1440/2160`) automatically so resolution cliffs are caught without manually relaunching the app seven times. The preset suite uses a shorter per-preset dwell than the single-target profiles so the full ladder remains practical to run as a routine smoke.
 - `profile-current-scene-interaction` performs that same real-scene visible run, opens the Scene Editor, verifies that the main output does not remain interaction-throttled while the editor is open, then cycles the root context menu and fails unless post-interaction frame pacing recovers to the pre-interaction baseline.
+- `gpu-passthrough-signed-model` verifies that passthrough uses the signed additive/subtractive composition model whenever a passthrough baseline is present, including the shared-GPU underlay path, so layer-opacity modulation cannot incorrectly fade the underlay.
+- Profile and pacing smokes now disable smoke-only CPU fallback color-buffer capture for GPU simulation layers, so their render timings reflect the live shared-texture presentation path instead of the validation path used by correctness smokes.
 - `pacing-current-scene-visible-presets` and `pacing-current-scene-fullscreen-presets` are the hard pacing/underrun suites. They take the real saved scene, force a stable `60 fps` target, walk the realtime preset ladder (`144/240/480`), and fail on explicit frame-gap budgets plus underrun ratios (`>25ms`, `>33ms`, `>50ms`) instead of merely exporting a profile.
 - `pacing-current-scene-interaction` runs the same hard pacing assertions around the `480p` interaction case with the Scene Editor and root context menu.
 - `pacing-current-scene-overlay-fullscreen-144` enables `Show FPS` in fullscreen at `144p` and fails if the diagnostic overlay itself causes pacing regressions.
@@ -96,6 +106,24 @@ dotnet bin\Debug\net9.0-windows-sbx\lifeviz.dll --smoke-test all
 - `shutdown` opens the real `MainWindow`, opens the Scene Editor, then closes the main window and fails if close-time teardown captures any exception or if the owned editor-close path throws.
 - `startup` launches `MainWindow` in a dedicated smoke-test mode that skips loading the persisted project plus file/video/audio capture pipelines, so WPF/render startup can be validated in isolation and should exit quickly.
 - `all` runs `gpu-sim` plus the combined GPU handoff/passthrough-render/source/render UI smoke suite.
+
+## Normal-Startup Diagnostics
+
+Use `--diagnostic-test` when smoke mode looks healthy but the normal saved-scene startup path still misbehaves:
+
+```powershell
+dotnet bin\Debug\net9.0-windows-sbx\lifeviz.dll --diagnostic-test profile-current-scene-visible-144
+dotnet bin\Debug\net9.0-windows-sbx\lifeviz.dll --diagnostic-test profile-current-scene-visible-480
+dotnet bin\Debug\net9.0-windows-sbx\lifeviz.dll --diagnostic-test profile-current-scene-visible-720
+dotnet bin\Debug\net9.0-windows-sbx\lifeviz.dll --diagnostic-test profile-current-scene-interaction
+dotnet bin\Debug\net9.0-windows-sbx\lifeviz.dll --diagnostic-test profile-current-scene-soak-720
+```
+
+- Diagnostic tests run the normal persisted scene/config startup path instead of `App.IsSmokeTestMode`.
+- Reports are written under the current build output's `profiles\` directory so the artifact and its traces stay together.
+- The visible/fullscreen preset targets are for launch-time and desktop-composition divergences; the soak target is for stalls that appear only after the scene has been running for a while.
+- Settled validation now checks actual presented cadence too (`presentation_draw_fps`), not just frame-loop gap metrics.
+- If the saved-scene diagnostics look clean but the currently loaded live session does not, use **Export Live Profile...** from the root context menu. That writes a six-second profile of the current in-memory session to the normal profiles directory and copies the path to the clipboard.
 
 ## Local Smoke Test Install
 

@@ -23,6 +23,8 @@ public partial class MainWindow
 
         int PixelHeight { get; }
 
+        int PresentationDrawCount { get; }
+
         byte[]? EnsureSurface(int width, int height, bool force);
 
         CompositeFrame? BuildCompositeFrame(List<CaptureSource> sources, ref byte[]? downscaledBuffer, bool useEngineDimensions, double animationTime, bool includeCpuReadback = true);
@@ -83,6 +85,8 @@ public partial class MainWindow
             bool useMixedAddSubPassthroughModel,
             bool invertComposite) => false;
 
+        public int PresentationDrawCount => 0;
+
         public void Dispose()
         {
         }
@@ -126,6 +130,8 @@ public partial class MainWindow
             bool useSignedAddSubPassthrough,
             bool useMixedAddSubPassthroughModel,
             bool invertComposite) => false;
+
+        public int PresentationDrawCount => _presentationBackend.PresentCount;
 
         public void Dispose() => _presentationBackend.Dispose();
     }
@@ -199,6 +205,8 @@ public partial class MainWindow
                 useSignedAddSubPassthrough,
                 useMixedAddSubPassthroughModel,
                 invertComposite);
+
+        public int PresentationDrawCount => _presentationBackend.DrawCount;
 
         public void Dispose()
         {

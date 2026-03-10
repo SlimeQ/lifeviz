@@ -14,6 +14,7 @@ internal sealed class WpfPresentationBackend : IDisposable
     private ImageBrush? _overlayBrush;
     private ImageBrush? _inputBrush;
     private byte[]? _pixelBuffer;
+    private int _presentCount;
 
     public WpfPresentationBackend(Image targetImage)
     {
@@ -23,6 +24,8 @@ internal sealed class WpfPresentationBackend : IDisposable
     public int PixelWidth => _bitmap?.PixelWidth ?? 0;
 
     public int PixelHeight => _bitmap?.PixelHeight ?? 0;
+
+    public int PresentCount => _presentCount;
 
     public byte[]? EnsureSurface(int width, int height, bool force)
     {
@@ -68,6 +71,7 @@ internal sealed class WpfPresentationBackend : IDisposable
         }
 
         _bitmap.WritePixels(new System.Windows.Int32Rect(0, 0, _bitmap.PixelWidth, _bitmap.PixelHeight), pixelBuffer, stride, 0);
+        _presentCount++;
     }
 
     public void PresentUnderlay(byte[]? underlayBuffer, int stride)
@@ -137,5 +141,6 @@ internal sealed class WpfPresentationBackend : IDisposable
         _bitmap = null;
         _underlayBitmap = null;
         _pixelBuffer = null;
+        _presentCount = 0;
     }
 }

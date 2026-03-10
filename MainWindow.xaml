@@ -100,15 +100,17 @@
                 <MenuItem Header="Audio Reactivity"
                           StaysOpenOnClick="True">
                     <MenuItem x:Name="AudioReactiveEnabledMenuItem"
-                              Header="Enable Audio Reactivity"
+                              Header="Enable Global Seeders"
                               IsCheckable="True"
                               Click="AudioReactiveEnabled_OnChecked" />
                     <MenuItem x:Name="AudioReactiveLevelToFpsMenuItem"
                               Header="Level -> Framerate"
+                              Visibility="Collapsed"
                               IsCheckable="True"
                               Click="AudioReactiveLevelToFps_OnChecked" />
                     <MenuItem x:Name="AudioReactiveLevelToLifeOpacityMenuItem"
                               Header="Level -> Life Opacity"
+                              Visibility="Collapsed"
                               IsCheckable="True"
                               Click="AudioReactiveLevelToLifeOpacity_OnChecked" />
                     <MenuItem x:Name="AudioReactiveLevelSeedMenuItem"
@@ -171,6 +173,7 @@
                         </DockPanel>
                     </MenuItem>
                     <MenuItem Header="Framerate Boost" StaysOpenOnClick="True">
+                        <MenuItem.Visibility>Collapsed</MenuItem.Visibility>
                         <DockPanel Margin="8,4" Width="220">
                             <TextBlock Text="Boost:" DockPanel.Dock="Left"/>
                             <TextBlock x:Name="AudioReactiveFpsBoostText"
@@ -188,6 +191,7 @@
                         </DockPanel>
                     </MenuItem>
                     <MenuItem Header="Framerate Minimum" StaysOpenOnClick="True">
+                        <MenuItem.Visibility>Collapsed</MenuItem.Visibility>
                         <DockPanel Margin="8,4" Width="220">
                             <TextBlock Text="Min:" DockPanel.Dock="Left"/>
                             <TextBlock x:Name="AudioReactiveFpsMinText"
@@ -207,6 +211,7 @@
                         </DockPanel>
                     </MenuItem>
                     <MenuItem Header="Opacity Min Scalar" StaysOpenOnClick="True">
+                        <MenuItem.Visibility>Collapsed</MenuItem.Visibility>
                         <DockPanel Margin="8,4" Width="220">
                             <TextBlock Text="Min:" DockPanel.Dock="Left"/>
                             <TextBlock x:Name="AudioReactiveOpacityMinScalarText"
@@ -292,6 +297,8 @@
                           Header="Show FPS"
                           IsCheckable="True"
                           Click="ToggleFps_Click" />
+                <MenuItem Header="Export Live Profile..."
+                          Click="ExportLiveProfile_Click" />
                 <MenuItem x:Name="FullscreenMenuItem"
                           Header="Fullscreen"
                           IsCheckable="True"
