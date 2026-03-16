@@ -106,7 +106,7 @@ public partial class MainWindow : Window
         (0, 1), (0, 2), (1, 0), (1, 1), (2, 1)
     };
 
-    private readonly ISimulationBackend _engine = new GpuSimulationBackend();
+    private readonly ISimulationBackend _engine;
     private readonly List<SimulationLayerState> _simulationLayers = new();
     private readonly WindowCaptureService _windowCapture = new();
     private readonly WebcamCaptureService _webcamCapture = new();
@@ -265,6 +265,7 @@ public partial class MainWindow : Window
     public MainWindow()
     {
         Logger.Initialize();
+        _engine = new GpuSimulationBackend();
         _startupRecoveryTriggered = TryConsumeStartupRecoveryFlag();
         MarkStartupPending();
 
@@ -7082,7 +7083,7 @@ public partial class MainWindow : Window
         public double EffectiveThresholdMin { get; set; } = 0.35;
         public double EffectiveThresholdMax { get; set; } = 0.75;
         public double TimeSinceLastStep { get; set; }
-        public ISimulationBackend Engine { get; set; } = new GpuSimulationBackend();
+        public ISimulationBackend Engine { get; set; } = null!;
         public byte[]? ColorBuffer { get; set; }
         public bool[,]? GrayMask { get; set; }
         public bool[,]? RedMask { get; set; }

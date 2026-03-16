@@ -1,5 +1,4 @@
 using System;
-using System.Collections.Generic;
 using System.IO;
 using System.Runtime.InteropServices;
 using System.Windows;
@@ -48,7 +47,6 @@ internal sealed class GpuSimulationBackend : ISimulationBackend
         public float Padding2;
     }
 
-    private readonly CpuSimulationBackend _fallback = new();
     private readonly Random _random = new();
     private object _sync = new();
     private GpuSharedDevice? _sharedDevice;
@@ -80,7 +78,6 @@ internal sealed class GpuSimulationBackend : ISimulationBackend
     private ID3D11Texture2D? _colorStagingTexture;
     private IntPtr _colorSharedHandle;
 
-    private bool _gpuAvailable;
     private bool _historyAIsSource = true;
     private bool _colorTextureDirty = true;
     private int _columns = 256;
@@ -115,24 +112,21 @@ internal sealed class GpuSimulationBackend : ISimulationBackend
 
     public GpuSimulationBackend()
     {
-        TryInitializeGpu();
+        InitializeGpu();
     }
 
-    public int Columns => UseGpu ? _columns : _fallback.Columns;
-    public int Rows => UseGpu ? _rows : _fallback.Rows;
-    public int Depth => UseGpu ? _depth : _fallback.Depth;
-    public double AspectRatio => UseGpu ? _aspectRatio : _fallback.AspectRatio;
-    public GameOfLifeEngine.LifeMode Mode => UseGpu ? _mode : _fallback.Mode;
-    public GameOfLifeEngine.BinningMode BinMode => UseGpu ? _binningMode : _fallback.BinMode;
-    public int RDepth => UseGpu ? _rDepth : _fallback.RDepth;
-    public int GDepth => UseGpu ? _gDepth : _fallback.GDepth;
-    public int BDepth => UseGpu ? _bDepth : _fallback.BDepth;
-    public GameOfLifeEngine.InjectionMode InjectMode => UseGpu ? _injectionMode : _fallback.InjectMode;
-    public IReadOnlyList<bool[,]> Frames => UseGpu ? Array.Empty<bool[,]>() : _fallback.Frames;
-    internal bool IsGpuAvailable => _gpuAvailable;
-    internal bool IsGpuActive => UseGpu;
-
-    private bool UseGpu => _gpuAvailable;
+    public int Columns => _columns;
+    public int Rows => _rows;
+    public int Depth => _depth;
+    public double AspectRatio => _aspectRatio;
+    public GameOfLifeEngine.LifeMode Mode => _mode;
+    public GameOfLifeEngine.BinningMode BinMode => _binningMode;
+    public int RDepth => _rDepth;
+    public int GDepth => _gDepth;
+    public int BDepth => _bDepth;
+    public GameOfLifeEngine.InjectionMode InjectMode => _injectionMode;
+    internal bool IsGpuAvailable => true;
+    internal bool IsGpuActive => true;
 
     public void Configure(int requestedRows, int requestedDepth, double? aspectRatio = null)
     {
@@ -146,12 +140,6 @@ internal sealed class GpuSimulationBackend : ISimulationBackend
         _columns = Math.Clamp((int)Math.Round(_rows * _aspectRatio), 32, 4096);
         _rows = Math.Max(72, Math.Min(2160, (int)Math.Round(_columns / _aspectRatio)));
         (_rDepth, _gDepth, _bDepth) = CalculateChannelDepths(_depth);
-        _fallback.Configure(_rows, _depth, _aspectRatio);
-
-        if (!UseGpu)
-        {
-            return;
-        }
 
         lock (_sync)
         {
@@ -164,13 +152,11 @@ internal sealed class GpuSimulationBackend : ISimulationBackend
     public void SetBinningMode(GameOfLifeEngine.BinningMode mode)
     {
         _binningMode = mode;
-        _fallback.SetBinningMode(mode);
     }
 
     public void SetInjectionMode(GameOfLifeEngine.InjectionMode mode)
     {
         _injectionMode = mode;
-        _fallback.SetInjectionMode(mode);
     }
 
     public void SetMode(GameOfLifeEngine.LifeMode mode)
@@ -181,29 +167,16 @@ internal sealed class GpuSimulationBackend : ISimulationBackend
         }
 
         _mode = mode;
-        _fallback.Configure(_rows, _depth, _aspectRatio);
-        _fallback.SetBinningMode(_binningMode);
-        _fallback.SetInjectionMode(_injectionMode);
-        _fallback.SetMode(mode);
-        if (UseGpu)
+        lock (_sync)
         {
-            lock (_sync)
-            {
-                EnsureResources();
-                ClearHistory();
-                _colorTextureDirty = true;
-            }
+            EnsureResources();
+            ClearHistory();
+            _colorTextureDirty = true;
         }
     }
 
     public void Randomize()
     {
-        if (!UseGpu)
-        {
-            _fallback.Randomize();
-            return;
-        }
-
         lock (_sync)
         {
             EnsureResources();
@@ -231,12 +204,6 @@ internal sealed class GpuSimulationBackend : ISimulationBackend
 
     public void Step()
     {
-        if (!UseGpu)
-        {
-            _fallback.Step();
-            return;
-        }
-
         lock (_sync)
         {
             EnsureResources();
@@ -251,28 +218,8 @@ internal sealed class GpuSimulationBackend : ISimulationBackend
         }
     }
 
-    public (byte r, byte g, byte b) GetColor(int row, int col)
-    {
-        if (!UseGpu)
-        {
-            return _fallback.GetColor(row, col);
-        }
-
-        int requiredLength = _columns * _rows * 4;
-        _cpuReadbackBuffer ??= new byte[requiredLength];
-        FillColorBuffer(_cpuReadbackBuffer);
-        int index = (row * _columns + col) * 4;
-        return (_cpuReadbackBuffer[index], _cpuReadbackBuffer[index + 1], _cpuReadbackBuffer[index + 2]);
-    }
-
     public void FillColorBuffer(byte[] targetBuffer)
     {
-        if (!UseGpu)
-        {
-            _fallback.FillColorBuffer(targetBuffer);
-            return;
-        }
-
         lock (_sync)
         {
             if (!RenderColorTexture())
@@ -300,12 +247,6 @@ internal sealed class GpuSimulationBackend : ISimulationBackend
 
     public void InjectFrame(bool[,] frame)
     {
-        if (!UseGpu)
-        {
-            _fallback.InjectFrame(frame);
-            return;
-        }
-
         if (frame.GetLength(0) != _rows || frame.GetLength(1) != _columns)
         {
             return;
@@ -338,12 +279,6 @@ internal sealed class GpuSimulationBackend : ISimulationBackend
 
     public void InjectRgbFrame(bool[,] red, bool[,] green, bool[,] blue)
     {
-        if (!UseGpu)
-        {
-            _fallback.InjectRgbFrame(red, green, blue);
-            return;
-        }
-
         if (red.GetLength(0) != _rows || red.GetLength(1) != _columns ||
             green.GetLength(0) != _rows || green.GetLength(1) != _columns ||
             blue.GetLength(0) != _rows || blue.GetLength(1) != _columns)
@@ -393,15 +328,6 @@ internal sealed class GpuSimulationBackend : ISimulationBackend
         bool invertInput,
         double hueShiftDegrees = 0.0)
     {
-        if (!UseGpu)
-        {
-            if (App.IsSmokeTestMode)
-            {
-                Logger.Info($"GPU composite inject rejected: UseGpu=false, mode={_mode}, gpuAvailable={_gpuAvailable}.");
-            }
-            return false;
-        }
-
         if (compositeSurface == null)
         {
             if (App.IsSmokeTestMode)
@@ -460,11 +386,6 @@ internal sealed class GpuSimulationBackend : ISimulationBackend
         width = 0;
         height = 0;
 
-        if (!UseGpu)
-        {
-            return false;
-        }
-
         lock (_sync)
         {
             if (!RenderColorTexture() || _colorSharedHandle == IntPtr.Zero)
@@ -482,10 +403,9 @@ internal sealed class GpuSimulationBackend : ISimulationBackend
     public void Dispose()
     {
         DisposeResources();
-        _fallback.Dispose();
     }
 
-    private void TryInitializeGpu()
+    private void InitializeGpu()
     {
         try
         {
@@ -508,14 +428,12 @@ internal sealed class GpuSimulationBackend : ISimulationBackend
                 CpuAccessFlags.None,
                 ResourceOptionFlags.None,
                 0));
-            _gpuAvailable = true;
             Logger.Info("GPU simulation backend initialized.");
         }
         catch (Exception ex)
         {
-            Logger.Warn($"GPU simulation backend unavailable, using CPU simulation fallback. {ex.Message}");
-            _gpuAvailable = false;
             DisposeResources();
+            throw new InvalidOperationException("GPU simulation backend initialization failed. LifeViz now requires GPU simulation support.", ex);
         }
     }
 
@@ -533,9 +451,9 @@ internal sealed class GpuSimulationBackend : ISimulationBackend
 
     private void EnsureResources()
     {
-        if (!UseGpu || _device == null)
+        if (_device == null)
         {
-            return;
+            throw new InvalidOperationException("GPU simulation device was unavailable after initialization.");
         }
 
         if (HistoryResourcesMatch())
