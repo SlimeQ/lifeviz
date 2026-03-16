@@ -33,9 +33,20 @@ internal sealed class GpuSharedDevice
 
     public static void FlushIfCreated()
     {
+        GpuSharedDevice? instance;
         lock (InstanceLock)
         {
-            _instance?.Context.Flush();
+            instance = _instance;
+        }
+
+        if (instance == null)
+        {
+            return;
+        }
+
+        lock (instance.SyncRoot)
+        {
+            instance.Context.Flush();
         }
     }
 

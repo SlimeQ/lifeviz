@@ -1,0 +1,61 @@
+2026-03-16T16:39:52.7993642Z [INFO] GPU simulation device created at feature level Level_11_1.
+2026-03-16T16:39:52.8262606Z [INFO] GPU simulation backend initialized.
+2026-03-16T16:39:52.8333379Z [INFO] GPU source compositor device created at feature level Level_11_1.
+2026-03-16T16:39:52.8355242Z [INFO] GPU source compositor initialized.
+2026-03-16T16:39:52.8423171Z [WARN] Failed to write startup recovery flag. Access to the path 'C:\Users\quinc\AppData\Roaming\lifeviz\startup-recovery.flag' is denied.
+2026-03-16T16:39:53.0626683Z [INFO] Life opacity set to 1.00
+2026-03-16T16:39:53.1009518Z [INFO] Initializing GPU render backend.
+2026-03-16T16:39:53.1033042Z [INFO] GPU source compositor device created at feature level Level_11_1.
+2026-03-16T16:39:53.1038886Z [INFO] GPU source compositor initialized.
+2026-03-16T16:39:53.7652818Z [INFO] Main window loaded in smoke test mode.
+2026-03-16T16:39:53.8479884Z [INFO] GPU composite pass initialized.
+2026-03-16T16:39:53.9434721Z [INFO] [LayerEditorSelection] SetSelectedSource noop <null>
+2026-03-16T16:39:53.9437372Z [INFO] [LayerEditorSelection] RefreshFromSources selected=<null> preferred=
+2026-03-16T16:39:53.9453144Z [INFO] [LayerEditorSelection] SetSelectedSource noop <null>
+2026-03-16T16:39:53.9453403Z [INFO] [LayerEditorSelection] RefreshFromSources selected=<null> preferred=
+2026-03-16T16:39:53.9467911Z [INFO] Inserted new layer group.
+2026-03-16T16:39:53.9514454Z [INFO] [LayerEditorSelection] SetSelectedSource -> Group:Layer Group (32f52e9f-ad26-4a1e-9577-846e838f7759)
+2026-03-16T16:39:53.9517737Z [INFO] [LayerEditorSelection] RefreshFromSources selected=Group:Layer Group (32f52e9f-ad26-4a1e-9577-846e838f7759) preferred=
+2026-03-16T16:39:53.9580004Z [INFO] GPU simulation device created at feature level Level_11_1.
+2026-03-16T16:39:53.9589386Z [INFO] GPU simulation backend initialized.
+2026-03-16T16:39:53.9889424Z [INFO] GPU simulation device created at feature level Level_11_1.
+2026-03-16T16:39:53.9898720Z [INFO] GPU simulation backend initialized.
+2026-03-16T16:39:54.0474133Z [INFO] Inserted new simulation group.
+2026-03-16T16:39:54.0516283Z [INFO] [LayerEditorSelection] SetSelectedSource -> Group:Layer Group (32f52e9f-ad26-4a1e-9577-846e838f7759)
+2026-03-16T16:39:54.0516655Z [INFO] [LayerEditorSelection] RefreshFromSources selected=Group:Layer Group (32f52e9f-ad26-4a1e-9577-846e838f7759) preferred=
+2026-03-16T16:39:54.0527900Z [INFO] [LayerEditorSelection] SetSelectedSource -> SimGroup:Sim Group (b08dd3d9-6810-43ef-b241-d703960d0f9c)
+2026-03-16T16:39:54.0542341Z [INFO] [LayerEditorSelection] SetSelectedSimulationLayer source=SimGroup:Sim Group (b08dd3d9-6810-43ef-b241-d703960d0f9c) layer=Layer:Positive (9cc4c25b-c04c-4ce9-bcf8-2799c385f44a)
+2026-03-16T16:39:54.0597993Z [INFO] GPU simulation device created at feature level Level_11_1.
+2026-03-16T16:39:54.0607651Z [INFO] GPU simulation backend initialized.
+2026-03-16T16:39:54.0607999Z [INFO] GPU source compositor device created at feature level Level_11_1.
+2026-03-16T16:39:54.0611155Z [INFO] GPU source compositor initialized.
+2026-03-16T16:39:54.0622483Z [WARN] Failed to write startup recovery flag. Access to the path 'C:\Users\quinc\AppData\Roaming\lifeviz\startup-recovery.flag' is denied.
+2026-03-16T16:39:54.0723683Z [INFO] Life opacity set to 1.00
+2026-03-16T16:39:54.0854410Z [INFO] Initializing GPU render backend.
+2026-03-16T16:39:54.0856134Z [INFO] GPU source compositor device created at feature level Level_11_1.
+2026-03-16T16:39:54.0859692Z [INFO] GPU source compositor initialized.
+2026-03-16T16:39:54.1170806Z [INFO] [LayerEditorSelection] SetSelectedSource -> SimGroup:Sim Group (b08dd3d9-6810-43ef-b241-d703960d0f9c)
+2026-03-16T16:39:54.1171311Z [INFO] [LayerEditorSelection] RefreshFromSources selected=SimGroup:Sim Group (b08dd3d9-6810-43ef-b241-d703960d0f9c) preferred=
+2026-03-16T16:39:54.1451356Z [INFO] [LayerEditorSelection] ApplySimulationLayerSettingsLive suppressed during sim-layer selection bind.
+2026-03-16T16:39:54.1453846Z [INFO] [LayerEditorSelection] ApplySimulationLayerSettingsLive suppressed during sim-layer selection bind.
+2026-03-16T16:39:54.1462285Z [INFO] [LayerEditorSelection] ApplySimulationLayerSettingsLive suppressed during sim-layer selection bind.
+2026-03-16T16:39:54.1469334Z [INFO] [LayerEditorSelection] ApplySimulationLayerSettingsLive suppressed during sim-layer selection bind.
+2026-03-16T16:39:54.1475144Z [INFO] [LayerEditorSelection] ApplySimulationLayerSettingsLive suppressed during sim-layer selection bind.
+2026-03-16T16:39:54.1481059Z [INFO] [LayerEditorSelection] ApplySimulationLayerSettingsLive suppressed during sim-layer selection bind.
+2026-03-16T16:39:54.1487761Z [INFO] [LayerEditorSelection] ApplySimulationLayerSettingsLive suppressed during sim-layer selection bind.
+2026-03-16T16:39:54.1490802Z [INFO] [LayerEditorSelection] ApplySimulationLayerSettingsLive suppressed during sim-layer selection bind.
+2026-03-16T16:39:54.1499240Z [INFO] [LayerEditorSelection] ApplySimulationLayerSettingsLive suppressed during sim-layer selection bind.
+2026-03-16T16:39:54.1500648Z [INFO] [LayerEditorSelection] ApplySimulationLayerSettingsLive suppressed during sim-layer selection bind.
+2026-03-16T16:39:54.1770995Z [INFO] Main window loaded in smoke test mode.
+2026-03-16T16:39:54.2169685Z [INFO] GPU composite pass initialized.
+2026-03-16T16:39:54.2536574Z [INFO] [LayerEditorSelection] ApplySimulationLayerSettingsLive suppressed during sim-layer selection bind.
+2026-03-16T16:39:54.2558886Z [INFO] [LayerEditorSelection] SetSelectedSimulationLayer source=SimGroup:Sim Group (b08dd3d9-6810-43ef-b241-d703960d0f9c) layer=Layer:Simulation Layer (543f7629-0346-47cd-9a20-478d7aebd44c)
+2026-03-16T16:39:54.2559302Z [INFO] [LayerEditorSelection] ApplySimulationLayerSettingsLive suppressed during sim-layer selection bind.
+2026-03-16T16:39:54.2561754Z [INFO] [LayerEditorSelection] ApplySimulationLayerSettingsLive suppressed during sim-layer selection bind.
+2026-03-16T16:39:54.2570166Z [INFO] [LayerEditorSelection] SetSelectedSimulationLayer source=SimGroup:Sim Group (b08dd3d9-6810-43ef-b241-d703960d0f9c) layer=Layer:Positive (9cc4c25b-c04c-4ce9-bcf8-2799c385f44a)
+2026-03-16T16:39:54.2937193Z [ERROR] Failed to enumerate webcams.
+2026-03-16T16:39:54.2992577Z [INFO] GPU simulation device created at feature level Level_11_1.
+2026-03-16T16:39:54.3000236Z [INFO] GPU simulation backend initialized.
+2026-03-16T16:39:54.3462025Z [INFO] [LayerEditorSelection] SetSelectedSource -> SimGroup:Sim Group (b08dd3d9-6810-43ef-b241-d703960d0f9c)
+2026-03-16T16:39:54.3463191Z [INFO] [LayerEditorSelection] RefreshFromSources selected=SimGroup:Sim Group (b08dd3d9-6810-43ef-b241-d703960d0f9c) preferred=b08dd3d9-6810-43ef-b241-d703960d0f9c
+2026-03-16T16:39:54.3632023Z [ERROR] Unhandled UI exception.

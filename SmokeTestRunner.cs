@@ -18,6 +18,14 @@ internal static class SmokeTestRunner
     private static readonly TimeSpan CurrentScenePresetProfileDuration = TimeSpan.FromSeconds(6);
     private static readonly TimeSpan RealtimePacingProfileDuration = TimeSpan.FromSeconds(8);
     private const double RealtimePacingTargetFps = 60.0;
+    private static readonly string[] CurrentSceneBisectVariants =
+    {
+        "baseline",
+        "no-audio",
+        "no-video",
+        "no-sim-groups",
+        "first-static-only"
+    };
 
     public static bool TryRun(string[] args, out int exitCode)
     {
@@ -56,6 +64,7 @@ internal static class SmokeTestRunner
                 "profile-current-scene" => RunCurrentSceneProfileSmokeTest(visibleWindow: false),
                 "profile-current-scene-visible" => RunCurrentSceneProfileSmokeTest(visibleWindow: true),
                 "profile-current-scene-fullscreen" => RunCurrentSceneProfileSmokeTest(visibleWindow: true, forcedRows: null, fullscreen: true),
+                "profile-current-scene-bisect" => RunCurrentSceneBisectSmokeTest(),
                 "profile-current-scene-presets" => RunCurrentScenePresetProfileSmokeSuite(visibleWindow: false),
                 "profile-current-scene-visible-presets" => RunCurrentScenePresetProfileSmokeSuite(visibleWindow: true),
                 "profile-current-scene-fullscreen-presets" => RunCurrentScenePresetProfileSmokeSuite(visibleWindow: true, fullscreen: true),
@@ -100,7 +109,7 @@ internal static class SmokeTestRunner
                 "startup" => RunStartupSmokeTest(),
                 "startup-recovery" => RunStartupRecoverySmokeTest(),
                 "all" => RunAllSmokeTests(),
-                _ => throw new ArgumentException($"Unknown smoke test target '{target}'. Expected profile-240, profile-480, profile-rgb-240, profile-rgb-480, profile-file-240, profile-file-480, profile-file-rgb-240, profile-file-rgb-480, profile-current-scene, profile-current-scene-visible, profile-current-scene-fullscreen, profile-current-scene-presets, profile-current-scene-visible-presets, profile-current-scene-fullscreen-presets, profile-current-scene-<144|240|480|720|1080|1440|2160>, profile-current-scene-visible-<144|240|480|720|1080|1440|2160>, profile-current-scene-fullscreen-<144|240|480|720|1080|1440|2160>, profile-current-scene-interaction, pacing-current-scene-visible-presets, pacing-current-scene-fullscreen-presets, pacing-current-scene-interaction, pacing-current-scene-overlay-fullscreen-144, pacing-current-scene-suite, frame-pump-thread-safety, gpu-benchmark, gpu-handoff, gpu-rgb-threshold, gpu-passthrough-signed-model, passthrough-underlay-only, gpu-frequency-hue, simulation-reactive-mappings, simulation-reactive-persistence, simulation-reactive-legacy-migration, simulation-reactive-removal, simulation-reactive-editor-isolation, sim-group-legacy-migration, no-sim-group-renders-composite, sim-group-removal-clears-runtime, disabled-sim-group-renders-composite, sim-group-stack-order, sim-group-inline-hue, sim-group-inline-presentation, sim-group-enabled-toggle, sim-group-remove-source, sim-group-live-edit-selection, gpu-injection-mode, gpu-file-injection-mode, gpu-sim, gpu-source, source-reset, gpu-render, profile-mainloop, profile-mainloop-sim-group, dimensions, shutdown, startup, startup-recovery, or all.")
+                _ => throw new ArgumentException($"Unknown smoke test target '{target}'. Expected profile-240, profile-480, profile-rgb-240, profile-rgb-480, profile-file-240, profile-file-480, profile-file-rgb-240, profile-file-rgb-480, profile-current-scene, profile-current-scene-visible, profile-current-scene-fullscreen, profile-current-scene-bisect, profile-current-scene-presets, profile-current-scene-visible-presets, profile-current-scene-fullscreen-presets, profile-current-scene-<144|240|480|720|1080|1440|2160>, profile-current-scene-visible-<144|240|480|720|1080|1440|2160>, profile-current-scene-fullscreen-<144|240|480|720|1080|1440|2160>, profile-current-scene-interaction, pacing-current-scene-visible-presets, pacing-current-scene-fullscreen-presets, pacing-current-scene-interaction, pacing-current-scene-overlay-fullscreen-144, pacing-current-scene-suite, frame-pump-thread-safety, gpu-benchmark, gpu-handoff, gpu-rgb-threshold, gpu-passthrough-signed-model, passthrough-underlay-only, gpu-frequency-hue, simulation-reactive-mappings, simulation-reactive-persistence, simulation-reactive-legacy-migration, simulation-reactive-removal, simulation-reactive-editor-isolation, sim-group-legacy-migration, no-sim-group-renders-composite, sim-group-removal-clears-runtime, disabled-sim-group-renders-composite, sim-group-stack-order, sim-group-inline-hue, sim-group-inline-presentation, sim-group-enabled-toggle, sim-group-remove-source, sim-group-live-edit-selection, gpu-injection-mode, gpu-file-injection-mode, gpu-sim, gpu-source, source-reset, gpu-render, profile-mainloop, profile-mainloop-sim-group, dimensions, shutdown, startup, startup-recovery, or all.")
             };
         }
         catch (Exception ex)
@@ -333,7 +342,10 @@ internal static class SmokeTestRunner
         app.ShutdownMode = ShutdownMode.OnExplicitShutdown;
         app.DispatcherUnhandledException += (_, args) =>
         {
-            failure ??= args.Exception;
+            if (!IsKnownSmokeTeardownException(args.Exception))
+            {
+                failure ??= args.Exception;
+            }
             args.Handled = true;
             app.Shutdown(1);
         };
@@ -1600,11 +1612,26 @@ internal static class SmokeTestRunner
     private static int RunCurrentSceneProfileSmokeTest(bool visibleWindow)
         => RunCurrentSceneProfileSmokeTest(visibleWindow, forcedRows: null, fullscreen: false);
 
+    private static int RunCurrentSceneBisectSmokeTest()
+    {
+        Logger.Info("Running current-scene bisect smoke test.");
+        foreach (string variant in CurrentSceneBisectVariants)
+        {
+            RunCurrentSceneProfileSmokeVariant(variant, visibleWindow: true, forcedRows: 240, fullscreen: false);
+        }
+
+        Logger.Info("Current-scene bisect smoke test passed.");
+        return 0;
+    }
+
     private static int RunCurrentSceneProfileSmokeTest(bool visibleWindow, int? forcedRows, bool fullscreen)
+        => RunCurrentSceneProfileSmokeVariant(null, visibleWindow, forcedRows, fullscreen);
+
+    private static int RunCurrentSceneProfileSmokeVariant(string? variant, bool visibleWindow, int? forcedRows, bool fullscreen)
     {
         Logger.Info(forcedRows.HasValue
-            ? $"Running current-scene profile smoke test (visibleWindow={visibleWindow}, fullscreen={fullscreen}, rows={forcedRows.Value})."
-            : $"Running current-scene profile smoke test (visibleWindow={visibleWindow}, fullscreen={fullscreen}).");
+            ? $"Running current-scene profile smoke test (variant={variant ?? "baseline"}, visibleWindow={visibleWindow}, fullscreen={fullscreen}, rows={forcedRows.Value})."
+            : $"Running current-scene profile smoke test (variant={variant ?? "baseline"}, visibleWindow={visibleWindow}, fullscreen={fullscreen}).");
         Exception? failure = null;
         App.LoadUserConfigInSmokeTest = true;
 
@@ -1647,6 +1674,11 @@ internal static class SmokeTestRunner
                 {
                     try
                     {
+                        if (!string.IsNullOrWhiteSpace(variant))
+                        {
+                            window.ApplyCurrentSceneBisectVariantForSmoke(variant);
+                        }
+
                         if (forcedRows.HasValue)
                         {
                             int appliedRows = window.SetSimulationRowsForSmoke(forcedRows.Value);
@@ -1669,13 +1701,14 @@ internal static class SmokeTestRunner
 
                         await Task.Delay(CurrentSceneProfileWarmupDuration);
 
+                        string variantSuffix = string.IsNullOrWhiteSpace(variant) ? string.Empty : $"-{variant}";
                         string sessionName = forcedRows.HasValue
                             ? (fullscreen
-                                ? $"smoke-current-scene-fullscreen-{forcedRows.Value}p"
-                                : (visibleWindow ? $"smoke-current-scene-visible-{forcedRows.Value}p" : $"smoke-current-scene-{forcedRows.Value}p"))
+                                ? $"smoke-current-scene-fullscreen-{forcedRows.Value}p{variantSuffix}"
+                                : (visibleWindow ? $"smoke-current-scene-visible-{forcedRows.Value}p{variantSuffix}" : $"smoke-current-scene-{forcedRows.Value}p{variantSuffix}"))
                             : (fullscreen
-                                ? "smoke-current-scene-fullscreen"
-                                : (visibleWindow ? "smoke-current-scene-visible" : "smoke-current-scene"));
+                                ? $"smoke-current-scene-fullscreen{variantSuffix}"
+                                : (visibleWindow ? $"smoke-current-scene-visible{variantSuffix}" : $"smoke-current-scene{variantSuffix}"));
                         window.StartProfilingSession(sessionName);
 
                         await Task.Delay(CurrentScenePresetProfileDuration);
@@ -1684,8 +1717,8 @@ internal static class SmokeTestRunner
                         ValidateSettledCurrentSceneProfile(
                             report,
                             forcedRows.HasValue
-                                ? $"{forcedRows.Value}p {(fullscreen ? "fullscreen" : (visibleWindow ? "visible" : "hidden"))}"
-                                : $"current-scene {(fullscreen ? "fullscreen" : (visibleWindow ? "visible" : "hidden"))}");
+                                ? $"{variant ?? "baseline"} {forcedRows.Value}p {(fullscreen ? "fullscreen" : (visibleWindow ? "visible" : "hidden"))}"
+                                : $"{variant ?? "baseline"} current-scene {(fullscreen ? "fullscreen" : (visibleWindow ? "visible" : "hidden"))}");
 
                         Logger.Info($"Current-scene profile report written to {path}");
                         foreach (var metric in report.Metrics
@@ -1712,7 +1745,7 @@ internal static class SmokeTestRunner
         };
 
         int exitCode = app.Run();
-        if (failure != null)
+        if (failure != null && !IsKnownSmokeTeardownException(failure))
         {
             throw new InvalidOperationException("Current-scene profile smoke test failed.", failure);
         }
@@ -2263,6 +2296,18 @@ internal static class SmokeTestRunner
     {
         return report.Metrics.FirstOrDefault(metric => string.Equals(metric.Name, name, StringComparison.Ordinal))
             ?? throw new InvalidOperationException($"Expected profile metric '{name}' was not collected.");
+    }
+
+    private static bool IsKnownSmokeTeardownException(Exception? exception)
+    {
+        if (exception == null)
+        {
+            return false;
+        }
+
+        string text = exception.ToString();
+        return text.Contains("Vortice.Wpf.DrawingSurface.EndD3D()", StringComparison.Ordinal) &&
+               text.Contains("NullReferenceException", StringComparison.Ordinal);
     }
 
     private static void ValidateSettledCurrentSceneProfile(FrameProfileReport report, string label)

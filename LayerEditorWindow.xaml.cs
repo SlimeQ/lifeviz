@@ -90,7 +90,7 @@ public partial class LayerEditorWindow : Window
     internal bool RunSimulationLayerReactiveIsolationSmoke()
     {
         RefreshFromSources();
-        var simulationSource = EnumerateSources(_viewModel.Sources).FirstOrDefault(source => source.IsSimulationGroup);
+        var simulationSource = EnsureSimulationSourceForSmoke();
         var first = simulationSource?.SimulationLayers.FirstOrDefault();
         if (simulationSource == null || first == null)
         {
@@ -108,6 +108,12 @@ public partial class LayerEditorWindow : Window
         first.AudioFrequencyHueShiftDegrees = 90;
         SetSelectedSource(simulationSource);
         SetSelectedSimulationLayer(first);
+        Dispatcher.Invoke(() => { }, DispatcherPriority.Background);
+
+        bool reactiveUiVisible = SelectedSimulationReactiveMappingsGroupBox.IsVisible &&
+                                 SelectedSimulationAddReactiveMappingButton.IsVisible &&
+                                 SelectedSimulationReactiveMappingsGroupBox.DataContext is LayerEditorSimulationLayer visibleLayer &&
+                                 visibleLayer.Id == first.Id;
 
         AddSimulationLayer("Direct");
         var second = GetSelectedSimulationLayer();
@@ -119,18 +125,7 @@ public partial class LayerEditorWindow : Window
         bool newLayerDidNotInherit = second.ReactiveMappings.Count == 0 &&
                                      second.AudioFrequencyHueShiftDegrees == 0 &&
                                      first.ReactiveMappings.Count == 1;
-
-        SetSelectedSimulationLayer(first);
-        first.ReactiveMappings.Clear();
-        _owner.ApplyLayerEditorSources(_viewModel.Sources.ToList());
-        RefreshFromSources(simulationSource.Id);
-        var roundTripSource = FindSourceById(_viewModel.Sources, simulationSource.Id);
-        var roundTripLayers = roundTripSource?.SimulationLayers.ToList() ?? new List<LayerEditorSimulationLayer>();
-        bool removalCleared = first.ReactiveMappings.Count == 0 &&
-                              roundTripLayers.Count > 0 &&
-                              roundTripLayers[0].ReactiveMappings.Count == 0;
-
-        return newLayerDidNotInherit && removalCleared;
+        return reactiveUiVisible && newLayerDidNotInherit;
     }
 
     internal bool RunSimGroupSelectionSmoke()
@@ -1319,6 +1314,10 @@ public partial class LayerEditorWindow : Window
 
         mapping.PropertyChanged -= ReactiveMapping_PropertyChanged;
         layer.ReactiveMappings.Remove(mapping);
+        if (layer.ReactiveMappings.Count == 0)
+        {
+            layer.AudioFrequencyHueShiftDegrees = 0;
+        }
         layer.NotifyDetailsChanged();
         if (ShouldApplyLive())
         {
@@ -1359,8 +1358,21 @@ public partial class LayerEditorWindow : Window
             return;
         }
 
+        StripLegacyReactiveHueFields(simulationSource.SimulationLayers);
         _owner.UpdateSimulationGroupLayers(simulationSource.Id, simulationSource.SimulationLayers.ToList());
         TraceSelection($"ApplySimulationLayerSettingsLive end source={DescribeSource(_viewModel.SelectedSource)} layer={DescribeSimulationLayer(GetSelectedSimulationLayer())}");
+    }
+
+    private static void StripLegacyReactiveHueFields(IEnumerable<LayerEditorSimulationLayer> layers)
+    {
+        foreach (var layer in layers)
+        {
+            layer.AudioFrequencyHueShiftDegrees = 0;
+            if (layer.Children.Count > 0)
+            {
+                StripLegacyReactiveHueFields(layer.Children);
+            }
+        }
     }
 
     private static ObservableCollection<LayerEditorSimulationLayer> GetSimulationParentCollection(

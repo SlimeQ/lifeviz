@@ -1062,6 +1062,112 @@
                                                             </StackPanel>
                                                         </WrapPanel>
 
+                                                        <GroupBox x:Name="SelectedSimulationReactiveMappingsGroupBox"
+                                                                  Header="Reactive Mappings"
+                                                                  Margin="0,10,0,10">
+                                                            <StackPanel Margin="8">
+                                                                <DockPanel LastChildFill="False"
+                                                                           Margin="0,0,0,8">
+                                                                    <TextBlock Text="Map audio inputs to per-layer outputs."
+                                                                               Foreground="#A0A0A0"
+                                                                               VerticalAlignment="Center"
+                                                                               DockPanel.Dock="Left" />
+                                                                    <Button x:Name="SelectedSimulationAddReactiveMappingButton"
+                                                                            Content="Add Mapping"
+                                                                            DockPanel.Dock="Right"
+                                                                            Click="AddSimulationReactiveMapping_Click" />
+                                                                </DockPanel>
+
+                                                                <TextBlock Text="No reactive mappings on this layer."
+                                                                           Foreground="#808080">
+                                                                    <TextBlock.Style>
+                                                                        <Style TargetType="TextBlock">
+                                                                            <Setter Property="Visibility" Value="Collapsed" />
+                                                                            <Style.Triggers>
+                                                                                <DataTrigger Binding="{Binding ReactiveMappings.Count}" Value="0">
+                                                                                    <Setter Property="Visibility" Value="Visible" />
+                                                                                </DataTrigger>
+                                                                            </Style.Triggers>
+                                                                        </Style>
+                                                                    </TextBlock.Style>
+                                                                </TextBlock>
+
+                                                                <ItemsControl ItemsSource="{Binding ReactiveMappings}">
+                                                                    <ItemsControl.ItemTemplate>
+                                                                        <DataTemplate>
+                                                                            <Border BorderBrush="#2A2A2A"
+                                                                                    BorderThickness="1"
+                                                                                    CornerRadius="4"
+                                                                                    Background="#141414"
+                                                                                    Margin="0,0,0,8"
+                                                                                    Padding="8">
+                                                                                <StackPanel>
+                                                                                    <DockPanel LastChildFill="False"
+                                                                                               Margin="0,0,0,6">
+                                                                                        <TextBlock Text="{Binding DisplayText}"
+                                                                                                   FontWeight="SemiBold"
+                                                                                                   VerticalAlignment="Center"
+                                                                                                   DockPanel.Dock="Left" />
+                                                                                        <Button Content="Remove"
+                                                                                                DockPanel.Dock="Right"
+                                                                                                Padding="8,2"
+                                                                                                Click="RemoveSimulationReactiveMapping_Click" />
+                                                                                    </DockPanel>
+
+                                                                                    <WrapPanel>
+                                                                                        <StackPanel Orientation="Horizontal"
+                                                                                                    Margin="0,0,12,6">
+                                                                                            <TextBlock Text="Input"
+                                                                                                       VerticalAlignment="Center" />
+                                                                                            <ComboBox ItemsSource="{Binding InputOptions}"
+                                                                                                      DisplayMemberPath="Label"
+                                                                                                      SelectedValuePath="Value"
+                                                                                                      SelectedValue="{Binding Input}"
+                                                                                                      Width="160"
+                                                                                                      Margin="8,0,0,0"
+                                                                                                      SelectionChanged="SimulationReactiveMappingSelection_Changed" />
+                                                                                        </StackPanel>
+
+                                                                                        <StackPanel Orientation="Horizontal"
+                                                                                                    Margin="0,0,12,6">
+                                                                                            <TextBlock Text="Output"
+                                                                                                       VerticalAlignment="Center" />
+                                                                                            <ComboBox ItemsSource="{Binding OutputOptions}"
+                                                                                                      DisplayMemberPath="Label"
+                                                                                                      SelectedValuePath="Value"
+                                                                                                      SelectedValue="{Binding Output}"
+                                                                                                      Width="160"
+                                                                                                      Margin="8,0,0,0"
+                                                                                                      SelectionChanged="SimulationReactiveMappingSelection_Changed" />
+                                                                                        </StackPanel>
+
+                                                                                        <StackPanel Orientation="Horizontal"
+                                                                                                    Margin="0,0,12,6">
+                                                                                            <TextBlock Text="{Binding AmountLabel}"
+                                                                                                       VerticalAlignment="Center" />
+                                                                                            <Slider Minimum="0"
+                                                                                                    Maximum="{Binding AmountMaximum}"
+                                                                                                    TickFrequency="{Binding AmountTickFrequency}"
+                                                                                                    SmallChange="{Binding AmountSmallChange}"
+                                                                                                    LargeChange="{Binding AmountLargeChange}"
+                                                                                                    IsSnapToTickEnabled="False"
+                                                                                                    Value="{Binding Amount}"
+                                                                                                    Width="180"
+                                                                                                    Margin="8,0,0,0"
+                                                                                                    ValueChanged="SimulationReactiveMappingAmount_Changed" />
+                                                                                            <TextBlock Text="{Binding AmountDisplay}"
+                                                                                                       Margin="8,0,0,0"
+                                                                                                       VerticalAlignment="Center" />
+                                                                                        </StackPanel>
+                                                                                    </WrapPanel>
+                                                                                </StackPanel>
+                                                                            </Border>
+                                                                        </DataTemplate>
+                                                                    </ItemsControl.ItemTemplate>
+                                                                </ItemsControl>
+                                                            </StackPanel>
+                                                        </GroupBox>
+
                                                         <WrapPanel>
                                                             <StackPanel Orientation="Horizontal" Margin="0,0,12,6">
                                                                 <TextBlock Text="Threshold Min" VerticalAlignment="Center" />

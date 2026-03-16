@@ -443,7 +443,7 @@ internal sealed class LayerConfigFile
             LifeOpacity = layer.LifeOpacity,
             RgbHueShiftDegrees = layer.RgbHueShiftDegrees,
             RgbHueShiftSpeedDegreesPerSecond = layer.RgbHueShiftSpeedDegreesPerSecond,
-            AudioFrequencyHueShiftDegrees = layer.AudioFrequencyHueShiftDegrees,
+            AudioFrequencyHueShiftDegrees = 0,
             ReactiveMappings = layer.ReactiveMappings.Select(mapping => new LayerConfigReactiveMapping
             {
                 Id = mapping.Id,

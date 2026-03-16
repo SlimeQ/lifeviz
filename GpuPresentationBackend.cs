@@ -440,18 +440,7 @@ internal sealed class GpuPresentationBackend : IDisposable
         _drawingSurface.LoadContent -= DrawingSurface_OnLoadContent;
         _drawingSurface.Draw -= DrawingSurface_OnDraw;
         _drawingSurface.UnloadContent -= DrawingSurface_OnUnloadContent;
-
-        bool removedDrawingSurface = false;
-        if (_host.Children.Contains(_drawingSurface))
-        {
-            _host.Children.Clear();
-            _host.Children.Add(_fallbackImage);
-            _host.UpdateLayout();
-            _host.Dispatcher.Invoke(() => { }, System.Windows.Threading.DispatcherPriority.Background);
-            removedDrawingSurface = true;
-        }
-
-        if (!removedDrawingSurface)
+        lock (_sync)
         {
             DisposeDeviceResources();
         }

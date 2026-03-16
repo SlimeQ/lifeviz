@@ -49,6 +49,7 @@ dotnet bin\Debug\net9.0-windows-sbx\lifeviz.dll --smoke-test profile-file-rgb-48
 dotnet bin\Debug\net9.0-windows-sbx\lifeviz.dll --smoke-test profile-current-scene
 dotnet bin\Debug\net9.0-windows-sbx\lifeviz.dll --smoke-test profile-current-scene-visible
 dotnet bin\Debug\net9.0-windows-sbx\lifeviz.dll --smoke-test profile-current-scene-fullscreen
+dotnet bin\Debug\net9.0-windows-sbx\lifeviz.dll --smoke-test profile-current-scene-bisect
 dotnet bin\Debug\net9.0-windows-sbx\lifeviz.dll --smoke-test profile-current-scene-720
 dotnet bin\Debug\net9.0-windows-sbx\lifeviz.dll --smoke-test profile-current-scene-visible-720
 dotnet bin\Debug\net9.0-windows-sbx\lifeviz.dll --smoke-test profile-current-scene-fullscreen-720
@@ -91,6 +92,7 @@ dotnet bin\Debug\net9.0-windows-sbx\lifeviz.dll --smoke-test all
 - `profile-file-rgb-240` / `profile-file-rgb-480` do the same with the reference simulation layer pinned to `RGB Channel Bins`, which is the right target when file-video playback performance only collapses once RGB layers are enabled.
 - `profile-current-scene` loads the persisted user config/scene and profiles it headlessly, which is the fastest way to capture real-stage timings from the current setup without manually reading the on-screen overlay.
 - `profile-current-scene-visible` does the same in a visible window so display/presentation pacing regressions can be measured against the actual desktop composition path. It now also logs file-video freshness/age metrics (`capture_file_fresh_frame_ratio`, `capture_file_frame_age_ms`) so "smooth life, slideshow underlay" regressions can be diagnosed directly.
+- `profile-current-scene-bisect` reruns that real-scene visible profile across fresh startup variants (`baseline`, `no-audio`, `no-video`, `no-sim-groups`, and `first-static-only`) so config-dependent regressions can be narrowed to audio loopback, video decode, sim-group work, or general source complexity.
 - Current-scene profile smokes now include an explicit warmup window before profiling begins, then validate the settled run against source freshness thresholds (`capture_*_frame_age_ms`, `capture_*_fresh_frame_ratio`) instead of relying on startup-skewed averages. That makes them much better at catching real slideshow regressions after the scene has fully settled.
 - `profile-current-scene-fullscreen` does the same after forcing the main output window into fullscreen, and now also fails if the presented image collapses into the old tiny centered/top-centered rectangle instead of occupying the expected fullscreen display rect.
 - `profile-current-scene-<144|240|480|720|1080|1440|2160>`, `profile-current-scene-visible-<...>`, and `profile-current-scene-fullscreen-<...>` force the real saved scene to that exact preset height before profiling, which is the right tool when a regression only appears at a specific output size.

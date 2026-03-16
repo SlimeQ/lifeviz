@@ -73,6 +73,7 @@ internal static class Logger
                 _writer?.WriteLine(line);
                 if (ex != null)
                 {
+                    Console.WriteLine(ex.ToString());
                     _writer?.WriteLine(ex.ToString());
                 }
             }

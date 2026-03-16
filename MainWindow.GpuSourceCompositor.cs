@@ -696,7 +696,7 @@ public partial class MainWindow
                     ResourceOptionFlags.None,
                     0);
                 _linearClampSampler = _device.CreateSamplerState(new SamplerDescription(
-                    Filter.MinMagMipLinear,
+                    Filter.MinMagMipPoint,
                     TextureAddressMode.Clamp,
                     TextureAddressMode.Clamp,
                     TextureAddressMode.Clamp,
@@ -706,7 +706,7 @@ public partial class MainWindow
                     0.0f,
                     float.MaxValue));
                 _linearWrapSampler = _device.CreateSamplerState(new SamplerDescription(
-                    Filter.MinMagMipLinear,
+                    Filter.MinMagMipPoint,
                     TextureAddressMode.Wrap,
                     TextureAddressMode.Wrap,
                     TextureAddressMode.Wrap,

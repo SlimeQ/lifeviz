@@ -108,6 +108,7 @@ public partial class MainWindow : Window
 
     private readonly ISimulationBackend _engine;
     private readonly List<SimulationLayerState> _simulationLayers = new();
+    private readonly List<ISimulationBackend> _retiredSimulationBackends = new();
     private readonly WindowCaptureService _windowCapture = new();
     private readonly WebcamCaptureService _webcamCapture = new();
     private readonly FileCaptureService _fileCapture = new();
@@ -350,6 +351,11 @@ public partial class MainWindow : Window
                 {
                     backend.Dispose();
                 }
+                foreach (var backend in _retiredSimulationBackends.Distinct())
+                {
+                    backend.Dispose();
+                }
+                _retiredSimulationBackends.Clear();
                 _webcamCapture.Reset();
                 _fileCapture.Dispose();
                 _audioBeatDetector.Dispose();
@@ -880,6 +886,76 @@ public partial class MainWindow : Window
         return true;
     }
 
+    internal void ApplyCurrentSceneBisectVariantForSmoke(string variant)
+    {
+        switch (variant)
+        {
+            case "baseline":
+                break;
+            case "no-audio":
+                ClearAudioDeviceSelection();
+                _audioSyncEnabled = false;
+                _animationAudioSyncEnabled = false;
+                _audioReactiveEnabled = false;
+                _audioReactiveLevelToFpsEnabled = false;
+                _audioReactiveLevelToLifeOpacityEnabled = false;
+                _audioReactiveLevelSeedEnabled = false;
+                _audioReactiveBeatSeedEnabled = false;
+                UpdateAudioReactiveMenuState();
+                break;
+            case "no-video":
+                foreach (var source in EnumerateSources(_sources))
+                {
+                    if (!IsVideoSource(source))
+                    {
+                        continue;
+                    }
+
+                    source.Enabled = false;
+                    SetSourceVideoPlaybackPaused(source, paused: true);
+                }
+                break;
+            case "no-sim-groups":
+                foreach (var source in EnumerateSources(_sources))
+                {
+                    if (source.Type == CaptureSource.SourceType.SimGroup)
+                    {
+                        source.Enabled = false;
+                    }
+                }
+                ApplySimulationLayersFromSourceStack(fallbackToDefault: false);
+                break;
+            case "first-static-only":
+            {
+                CaptureSource? kept = EnumerateSources(_sources)
+                    .FirstOrDefault(source => source.Type != CaptureSource.SourceType.SimGroup && !IsVideoSource(source));
+                foreach (var source in EnumerateSources(_sources))
+                {
+                    bool keep = kept != null && ReferenceEquals(source, kept);
+                    source.Enabled = keep;
+                    if (!keep && IsVideoSource(source))
+                    {
+                        SetSourceVideoPlaybackPaused(source, paused: true);
+                    }
+                }
+
+                foreach (var source in EnumerateSources(_sources))
+                {
+                    if (source.Type == CaptureSource.SourceType.SimGroup)
+                    {
+                        source.Enabled = false;
+                    }
+                }
+                ApplySimulationLayersFromSourceStack(fallbackToDefault: false);
+                break;
+            }
+            default:
+                throw new InvalidOperationException($"Unknown current-scene bisect variant '{variant}'.");
+        }
+
+        RenderFrame();
+    }
+
     internal (int totalLayers, int enabledLayers) GetSimulationLayerCountsForSmoke()
     {
         var leaves = EnumerateSimulationLeafLayers(_simulationLayers).ToArray();
@@ -1321,10 +1397,12 @@ public partial class MainWindow : Window
         int drawAdvances = 0;
         byte[]? previousComposite = null;
         byte[]? previousPresented = null;
+        int sustainedIterations = 96;
 
-        for (int i = 0; i < sourceFrames.Length; i++)
+        for (int i = 0; i < sustainedIterations; i++)
         {
-            source.LastFrame = new SourceFrame(sourceFrames[i], width, height, null, width, height);
+            byte[] frameBuffer = sourceFrames[i % sourceFrames.Length];
+            source.LastFrame = new SourceFrame(frameBuffer, width, height, null, width, height);
             foreach (var runtimeLayer in EnumerateSimulationLeafLayers(_simulationLayers))
             {
                 runtimeLayer.TimeSinceLastStep = 1.0;
@@ -1361,11 +1439,11 @@ public partial class MainWindow : Window
             previousPresented = presented;
         }
 
-        bool ok = drawAdvances == sourceFrames.Length &&
-                  compositeChanges >= 2 &&
-                  presentedChanges >= 2;
+        bool ok = drawAdvances == sustainedIterations &&
+                  compositeChanges >= sourceFrames.Length &&
+                  presentedChanges >= sourceFrames.Length;
         Logger.Info(
-            $"Sim-group inline-presentation smoke: drawAdvances={drawAdvances}/{sourceFrames.Length}, " +
+            $"Sim-group inline-presentation smoke: drawAdvances={drawAdvances}/{sustainedIterations}, " +
             $"compositeChanges={compositeChanges}, presentedChanges={presentedChanges}.");
         return ok;
     }
@@ -1705,9 +1783,10 @@ public partial class MainWindow : Window
             return;
         }
 
-        DispatcherPriority callbackPriority = IsUiInteractionThrottled()
-            ? DispatcherPriority.Background
-            : DispatcherPriority.Render;
+        // Keep the frame loop below WPF's own render/present work so DrawingSurface
+        // draw callbacks can continue to drain instead of getting starved by our
+        // own frame scheduling.
+        DispatcherPriority callbackPriority = DispatcherPriority.Background;
 
         Dispatcher.BeginInvoke(callbackPriority, new Action(() =>
         {
@@ -5574,13 +5653,23 @@ public partial class MainWindow : Window
     {
         foreach (var layer in EnumerateSimulationLeafLayers(_simulationLayers))
         {
-            if (layer.Engine != null && !ReferenceEquals(layer.Engine, _engine))
-            {
-                layer.Engine.Dispose();
-            }
+            RetireSimulationEngine(layer.Engine);
         }
 
         _simulationLayers.Clear();
+    }
+
+    private void RetireSimulationEngine(ISimulationBackend? backend)
+    {
+        if (backend == null || ReferenceEquals(backend, _engine))
+        {
+            return;
+        }
+
+        if (!_retiredSimulationBackends.Contains(backend))
+        {
+            _retiredSimulationBackends.Add(backend);
+        }
     }
 
     private static SimulationLayerSpec CloneSimulationLayerSpec(SimulationLayerSpec layer)
@@ -9470,9 +9559,9 @@ public partial class MainWindow : Window
 
         foreach (var orphan in existingById.Values)
         {
-            if (!orphan.IsGroup && orphan.Engine != null && !ReferenceEquals(orphan.Engine, _engine))
+            if (!orphan.IsGroup)
             {
-                orphan.Engine.Dispose();
+                RetireSimulationEngine(orphan.Engine);
             }
         }
 
@@ -9514,9 +9603,9 @@ public partial class MainWindow : Window
 
         if (existing != null && existing.Kind != spec.Kind)
         {
-            if (!existing.IsGroup && existing.Engine != null && !ReferenceEquals(existing.Engine, _engine))
+            if (!existing.IsGroup)
             {
-                existing.Engine.Dispose();
+                RetireSimulationEngine(existing.Engine);
             }
             existing = null;
         }
@@ -9604,7 +9693,7 @@ public partial class MainWindow : Window
 
         if (firstLeaf.Engine != null && !ReferenceEquals(firstLeaf.Engine, _engine))
         {
-            firstLeaf.Engine.Dispose();
+            RetireSimulationEngine(firstLeaf.Engine);
         }
 
         firstLeaf.Engine = _engine;
@@ -10432,26 +10521,33 @@ public partial class MainWindow : Window
             height = referenceEngine.Rows;
         }
 
+        var visibleLayers = new List<SimulationLayerState>(enabledLayers.Length);
         var activeLayerEntries = new List<SimulationPresentationLayerData>(enabledLayers.Length);
         foreach (var layer in enabledLayers)
         {
             if (TryBuildSimulationPresentationLayer(layer, Math.Clamp(_effectiveLifeOpacity * layer.EffectiveLifeOpacity, 0, 1), out var presentationLayer))
             {
+                visibleLayers.Add(layer);
                 activeLayerEntries.Add(presentationLayer);
             }
         }
 
-        if (activeLayerEntries.Count == 0 || activeLayerEntries.Count > 8)
+        if (activeLayerEntries.Count == 0)
+        {
+            return inputComposite;
+        }
+
+        if (activeLayerEntries.Count > 8)
         {
             return null;
         }
 
-        bool hasEnabledSubtractiveSimulationLayer = enabledLayers.Any(layer => layer.BlendMode == BlendMode.Subtractive);
-        bool hasEnabledNonSubtractiveSimulationLayer = enabledLayers.Any(layer => layer.BlendMode != BlendMode.Subtractive);
-        bool hasEnabledAdditiveSimulationLayer = enabledLayers.Any(layer => layer.BlendMode == BlendMode.Additive);
-        int additiveLayerCount = enabledLayers.Count(layer => layer.BlendMode == BlendMode.Additive);
-        int subtractiveLayerCount = enabledLayers.Count(layer => layer.BlendMode == BlendMode.Subtractive);
-        bool hasEnabledNonAddSubSimulationLayer = enabledLayers.Any(layer =>
+        bool hasEnabledSubtractiveSimulationLayer = visibleLayers.Any(layer => layer.BlendMode == BlendMode.Subtractive);
+        bool hasEnabledNonSubtractiveSimulationLayer = visibleLayers.Any(layer => layer.BlendMode != BlendMode.Subtractive);
+        bool hasEnabledAdditiveSimulationLayer = visibleLayers.Any(layer => layer.BlendMode == BlendMode.Additive);
+        int additiveLayerCount = visibleLayers.Count(layer => layer.BlendMode == BlendMode.Additive);
+        int subtractiveLayerCount = visibleLayers.Count(layer => layer.BlendMode == BlendMode.Subtractive);
+        bool hasEnabledNonAddSubSimulationLayer = visibleLayers.Any(layer =>
             layer.BlendMode != BlendMode.Additive &&
             layer.BlendMode != BlendMode.Subtractive);
 
@@ -10637,12 +10733,20 @@ public partial class MainWindow : Window
         }
         BuildMappings(width, height, engineCols, engineRows);
 
-        bool hasEnabledSubtractiveSimulationLayer = enabledLayers.Any(layer => layer.BlendMode == BlendMode.Subtractive);
-        bool hasEnabledNonSubtractiveSimulationLayer = enabledLayers.Any(layer => layer.BlendMode != BlendMode.Subtractive);
-        bool hasEnabledAdditiveSimulationLayer = enabledLayers.Any(layer => layer.BlendMode == BlendMode.Additive);
-        int additiveLayerCount = enabledLayers.Count(layer => layer.BlendMode == BlendMode.Additive);
-        int subtractiveLayerCount = enabledLayers.Count(layer => layer.BlendMode == BlendMode.Subtractive);
-        bool hasEnabledNonAddSubSimulationLayer = enabledLayers.Any(layer =>
+        double globalLifeOpacity = Math.Clamp(_effectiveLifeOpacity, 0, 1);
+        InlineSimulationBlendLayerData[] blendLayers = BuildInlineSimulationBlendLayers(enabledLayers, globalLifeOpacity);
+        if (blendLayers.Length == 0)
+        {
+            source.CompositeDownscaledBuffer = targetBuffer;
+            return inputComposite;
+        }
+
+        bool hasEnabledSubtractiveSimulationLayer = blendLayers.Any(layer => layer.BlendMode == BlendMode.Subtractive);
+        bool hasEnabledNonSubtractiveSimulationLayer = blendLayers.Any(layer => layer.BlendMode != BlendMode.Subtractive);
+        bool hasEnabledAdditiveSimulationLayer = blendLayers.Any(layer => layer.BlendMode == BlendMode.Additive);
+        int additiveLayerCount = blendLayers.Count(layer => layer.BlendMode == BlendMode.Additive);
+        int subtractiveLayerCount = blendLayers.Count(layer => layer.BlendMode == BlendMode.Subtractive);
+        bool hasEnabledNonAddSubSimulationLayer = blendLayers.Any(layer =>
             layer.BlendMode != BlendMode.Additive &&
             layer.BlendMode != BlendMode.Subtractive);
 
@@ -10666,9 +10770,6 @@ public partial class MainWindow : Window
         bool useMixedAddSubPassthroughModel = useSignedAddSubPassthrough &&
                                               additiveLayerCount > 0 &&
                                               subtractiveLayerCount > 0;
-        double globalLifeOpacity = Math.Clamp(_effectiveLifeOpacity, 0, 1);
-
-        InlineSimulationBlendLayerData[] blendLayers = BuildInlineSimulationBlendLayers(enabledLayers, globalLifeOpacity);
 
         Parallel.For(0, height, row =>
         {
