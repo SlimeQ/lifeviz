@@ -42,6 +42,96 @@ internal sealed class FileCaptureService : IDisposable
     private readonly object _lock = new();
     private bool _masterVideoAudioEnabled = true;
     private double _masterVideoAudioVolume = 1.0;
+    private bool _lowContentionMode;
+    private int _decoderThreadLimit;
+    private int _videoDecodeFpsLimit;
+
+    private static Task RunBackgroundLongRunning(Action action, string threadName)
+    {
+        var tcs = new TaskCompletionSource<object?>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var thread = new Thread(() =>
+        {
+            ConfigureBackgroundWorkerThread(threadName);
+            try
+            {
+                action();
+                tcs.TrySetResult(null);
+            }
+            catch (Exception ex)
+            {
+                tcs.TrySetException(ex);
+            }
+        })
+        {
+            IsBackground = true,
+            Name = threadName,
+            Priority = ThreadPriority.BelowNormal
+        };
+
+        thread.Start();
+        return tcs.Task;
+    }
+
+    private static Task<T> RunBackgroundLongRunning<T>(Func<T> action, string threadName)
+    {
+        var tcs = new TaskCompletionSource<T>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var thread = new Thread(() =>
+        {
+            ConfigureBackgroundWorkerThread(threadName);
+            try
+            {
+                tcs.TrySetResult(action());
+            }
+            catch (Exception ex)
+            {
+                tcs.TrySetException(ex);
+            }
+        })
+        {
+            IsBackground = true,
+            Name = threadName,
+            Priority = ThreadPriority.BelowNormal
+        };
+
+        thread.Start();
+        return tcs.Task;
+    }
+
+    private static void ConfigureBackgroundWorkerThread(string? threadName)
+    {
+        try
+        {
+            Thread.CurrentThread.Priority = ThreadPriority.BelowNormal;
+        }
+        catch
+        {
+        }
+
+        if (!string.IsNullOrWhiteSpace(threadName) && string.IsNullOrWhiteSpace(Thread.CurrentThread.Name))
+        {
+            try
+            {
+                Thread.CurrentThread.Name = threadName;
+            }
+            catch
+            {
+            }
+        }
+    }
+
+    private static void TryLowerChildProcessPriority(Process process, string label, bool lowContentionMode)
+    {
+        try
+        {
+            process.PriorityClass = lowContentionMode
+                ? ProcessPriorityClass.Idle
+                : ProcessPriorityClass.BelowNormal;
+        }
+        catch (Exception ex)
+        {
+            Logger.Warn($"Failed to lower priority for {label}: {ex.Message}");
+        }
+    }
 
     public void SetMasterVideoAudioEnabled(bool enabled)
     {
@@ -84,6 +174,32 @@ internal sealed class FileCaptureService : IDisposable
         }
     }
 
+    public void SetPerformanceSettings(bool lowContentionMode, int decoderThreadLimit, int videoDecodeFpsLimit)
+    {
+        decoderThreadLimit = Math.Clamp(decoderThreadLimit, 0, 8);
+        videoDecodeFpsLimit = videoDecodeFpsLimit == 15 || videoDecodeFpsLimit == 30 ? videoDecodeFpsLimit : 0;
+        List<FileSession>? sessionsToUpdate = null;
+        lock (_lock)
+        {
+            if (_lowContentionMode == lowContentionMode &&
+                _decoderThreadLimit == decoderThreadLimit &&
+                _videoDecodeFpsLimit == videoDecodeFpsLimit)
+            {
+                return;
+            }
+
+            _lowContentionMode = lowContentionMode;
+            _decoderThreadLimit = decoderThreadLimit;
+            _videoDecodeFpsLimit = videoDecodeFpsLimit;
+            sessionsToUpdate = _sessions.Values.ToList();
+        }
+
+        foreach (var session in sessionsToUpdate)
+        {
+            ApplyPerformanceSettingsToSession(session);
+        }
+    }
+
     private void ApplyMasterAudioSettingsToSession(object session)
     {
         if (session is VideoSession videoSession)
@@ -95,6 +211,20 @@ internal sealed class FileCaptureService : IDisposable
         if (session is VideoSequenceSession videoSequenceSession)
         {
             videoSequenceSession.SetAudioMaster(_masterVideoAudioEnabled, _masterVideoAudioVolume);
+        }
+    }
+
+    private void ApplyPerformanceSettingsToSession(object session)
+    {
+        if (session is VideoSession videoSession)
+        {
+            videoSession.SetPerformanceSettings(_lowContentionMode, _decoderThreadLimit, _videoDecodeFpsLimit);
+            return;
+        }
+
+        if (session is VideoSequenceSession videoSequenceSession)
+        {
+            videoSequenceSession.SetPerformanceSettings(_lowContentionMode, _decoderThreadLimit, _videoDecodeFpsLimit);
         }
     }
 
@@ -162,6 +292,7 @@ internal sealed class FileCaptureService : IDisposable
         {
             var session = CreateSession(fullPath);
             ApplyMasterAudioSettingsToSession(session);
+            ApplyPerformanceSettingsToSession(session);
             info = session.GetInfo();
             lock (_lock)
             {
@@ -219,6 +350,7 @@ internal sealed class FileCaptureService : IDisposable
             
             var session = new VideoSession(key, title, loopPlayback: true, resolver);
             ApplyMasterAudioSettingsToSession(session);
+            ApplyPerformanceSettingsToSession(session);
             
             lock (_lock)
             {
@@ -288,6 +420,7 @@ internal sealed class FileCaptureService : IDisposable
 
         session = new VideoSequenceSession(normalized);
         ApplyMasterAudioSettingsToSession(session);
+        ApplyPerformanceSettingsToSession(session);
         return true;
     }
 
@@ -944,6 +1077,9 @@ internal sealed class FileCaptureService : IDisposable
         private volatile bool _ended;
         private string? _errorMessage;
         private bool _preferNativeProcessFrames;
+        private bool _lowContentionMode;
+        private int _decoderThreadLimit;
+        private int _videoDecodeFpsLimit;
 
         private int _nativeWidth;
         private int _nativeHeight;
@@ -971,7 +1107,9 @@ internal sealed class FileCaptureService : IDisposable
             else
             {
                 // Remote/Async: Initialize background
-                Task.Run(InitializeAsync);
+                _ = RunBackgroundLongRunning(
+                    () => InitializeAsync().GetAwaiter().GetResult(),
+                    "LifeViz.VideoInitialize");
             }
         }
 
@@ -1113,6 +1251,44 @@ internal sealed class FileCaptureService : IDisposable
             _preferNativeProcessFrames = true;
 
             Logger.Info($"Video configured: Native={_nativeWidth}x{_nativeHeight}, Process={_processWidth}x{_processHeight}");
+        }
+
+        public void SetPerformanceSettings(bool lowContentionMode, int decoderThreadLimit, int videoDecodeFpsLimit)
+        {
+            decoderThreadLimit = Math.Clamp(decoderThreadLimit, 0, 8);
+            videoDecodeFpsLimit = videoDecodeFpsLimit == 15 || videoDecodeFpsLimit == 30 ? videoDecodeFpsLimit : 0;
+            if (_lowContentionMode == lowContentionMode &&
+                _decoderThreadLimit == decoderThreadLimit &&
+                _videoDecodeFpsLimit == videoDecodeFpsLimit)
+            {
+                return;
+            }
+
+            _lowContentionMode = lowContentionMode;
+            _decoderThreadLimit = decoderThreadLimit;
+            _videoDecodeFpsLimit = videoDecodeFpsLimit;
+
+            if (_isDisposed)
+            {
+                return;
+            }
+
+            double seekOffset;
+            bool shouldPause;
+            lock (_audioLock)
+            {
+                seekOffset = GetEstimatedPlaybackOffsetSecondsNoLock();
+                shouldPause = _playbackPaused;
+            }
+
+            if (_workerTask != null || _process != null || !string.IsNullOrWhiteSpace(_videoPlaybackUrl))
+            {
+                RestartVideoPipeline(seekOffset, shouldPause, forceReResolve: false);
+            }
+            else if (!shouldPause)
+            {
+                RefreshAudioPlayback();
+            }
         }
 
         public override FileSourceKind Kind => FileSourceKind.Video;
@@ -1332,6 +1508,45 @@ internal sealed class FileCaptureService : IDisposable
             };
         }
 
+        private string BuildDecoderThreadArgs()
+        {
+            int threadLimit = _decoderThreadLimit;
+            if (_lowContentionMode && threadLimit <= 0)
+            {
+                threadLimit = 1;
+            }
+
+            if (threadLimit <= 0)
+            {
+                return string.Empty;
+            }
+
+            return $" -threads {threadLimit}";
+        }
+
+        private string BuildVideoOutputFilter(bool produceExactTargetFrames, FitMode processOutputFitMode, int processWidth, int processHeight)
+        {
+            string? directFilter = produceExactTargetFrames
+                ? BuildDirectOutputVideoFilter(processOutputFitMode, processWidth, processHeight)
+                : null;
+
+            string? fpsFilter = _videoDecodeFpsLimit > 0
+                ? $"fps={_videoDecodeFpsLimit}"
+                : null;
+
+            if (string.IsNullOrWhiteSpace(directFilter))
+            {
+                return fpsFilter ?? string.Empty;
+            }
+
+            if (string.IsNullOrWhiteSpace(fpsFilter))
+            {
+                return directFilter;
+            }
+
+            return $"{directFilter},{fpsFilter}";
+        }
+
         private void EnsureProcessDimensionsForRequest(int targetWidth, int targetHeight, FitMode fitMode, bool includeSource)
         {
             if (_nativeWidth <= 0 || _nativeHeight <= 0 || _isDisposed)
@@ -1401,7 +1616,7 @@ internal sealed class FileCaptureService : IDisposable
                 int processHeight = _processHeight;
                 bool produceExactTargetFrames = _processProducesExactTargetFrames;
                 FitMode processOutputFitMode = _processOutputFitMode;
-                string args = $"-hide_banner -loglevel warning"; // increased verbosity for debug
+                string args = $"-hide_banner -loglevel warning{BuildDecoderThreadArgs()}"; // increased verbosity for debug
                 if (startOffsetSeconds > 0.05)
                 {
                     args += $" -ss {startOffsetSeconds.ToString("0.###", CultureInfo.InvariantCulture)}";
@@ -1409,10 +1624,10 @@ internal sealed class FileCaptureService : IDisposable
                 if (_loopPlayback) args += " -stream_loop -1";
                 args += " -re"; // Realtime reading
                 args += $" -i \"{url}\"";
-                if (produceExactTargetFrames)
+                string videoFilter = BuildVideoOutputFilter(produceExactTargetFrames, processOutputFitMode, processWidth, processHeight);
+                if (!string.IsNullOrWhiteSpace(videoFilter))
                 {
-                    string filter = BuildDirectOutputVideoFilter(processOutputFitMode, processWidth, processHeight);
-                    args += $" -vf \"{filter}\"";
+                    args += $" -vf \"{videoFilter}\"";
                 }
                 args += $" -f rawvideo -pix_fmt bgra -s {processWidth}x{processHeight} -";
 
@@ -1430,6 +1645,7 @@ internal sealed class FileCaptureService : IDisposable
 
                 var process = Process.Start(psi);
                 if (process == null) throw new InvalidOperationException("Failed to start ffmpeg.");
+                TryLowerChildProcessPriority(process, "ffmpeg video decode", _lowContentionMode);
                 _process = process;
 
                 process.ErrorDataReceived += (s, e) => 
@@ -1666,16 +1882,16 @@ internal sealed class FileCaptureService : IDisposable
             if (forceReResolve || string.IsNullOrWhiteSpace(_videoPlaybackUrl))
             {
                 _cts = new CancellationTokenSource();
-                _workerTask = Task.Run(InitializeAsync); // Re-initialize (and re-resolve URL if needed).
+                _workerTask = RunBackgroundLongRunning(
+                    () => InitializeAsync().GetAwaiter().GetResult(),
+                    "LifeViz.VideoInitialize"); // Re-initialize (and re-resolve URL if needed).
                 return;
             }
 
             _cts = new CancellationTokenSource();
-            _workerTask = Task.Factory.StartNew(
+            _workerTask = RunBackgroundLongRunning(
                 () => FfmpegWorker(_videoPlaybackUrl!, _cts.Token, startOffsetSeconds),
-                CancellationToken.None,
-                TaskCreationOptions.LongRunning,
-                TaskScheduler.Default);
+                "LifeViz.VideoDecode");
             RefreshAudioPlayback();
         }
 
@@ -1698,11 +1914,9 @@ internal sealed class FileCaptureService : IDisposable
             }
 
             _cts = new CancellationTokenSource();
-            _workerTask = Task.Factory.StartNew(
+            _workerTask = RunBackgroundLongRunning(
                 () => FfmpegWorker(_videoPlaybackUrl!, _cts.Token, startOffsetSeconds),
-                CancellationToken.None,
-                TaskCreationOptions.LongRunning,
-                TaskScheduler.Default);
+                "LifeViz.VideoDecode");
             RefreshAudioPlayback();
         }
 
@@ -1889,7 +2103,7 @@ internal sealed class FileCaptureService : IDisposable
             {
                 args += $" -ss {seekSeconds.ToString("0.###", CultureInfo.InvariantCulture)}";
             }
-            args += " -re";
+            args += $"{BuildDecoderThreadArgs()} -re";
             args += $" -i \"{playbackUrl}\"";
             args += " -map 0:a:0 -vn -ac 2 -ar 48000 -acodec pcm_s16le -f s16le -";
 
@@ -1913,6 +2127,8 @@ internal sealed class FileCaptureService : IDisposable
                     Logger.Warn($"Failed to start ffmpeg audio decode process for {DisplayName}.");
                     return;
                 }
+
+                TryLowerChildProcessPriority(process, $"ffmpeg audio decode for {DisplayName}", _lowContentionMode);
 
                 process.ErrorDataReceived += (_, e) =>
                 {
@@ -1945,11 +2161,9 @@ internal sealed class FileCaptureService : IDisposable
                 output.Play();
 
                 var audioCts = new CancellationTokenSource();
-                var decodeTask = Task.Factory.StartNew(
+                var decodeTask = RunBackgroundLongRunning(
                     () => AudioDecodeWorker(process, audioCts.Token, () => Volatile.Read(ref fatalAudioError) != 0),
-                    audioCts.Token,
-                    TaskCreationOptions.LongRunning,
-                    TaskScheduler.Default);
+                    "LifeViz.AudioDecode");
 
                 bool shouldAbort = false;
                 lock (_audioLock)
@@ -2330,6 +2544,9 @@ internal sealed class FileCaptureService : IDisposable
         private bool _masterAudioEnabled = true;
         private double _masterAudioVolume = 1.0;
         private bool _playbackPaused;
+        private bool _lowContentionMode;
+        private int _decoderThreadLimit;
+        private int _videoDecodeFpsLimit;
         private FileCaptureFrame? _lastFrame;
             
         public VideoSequenceSession(IReadOnlyList<string> paths)
@@ -2343,11 +2560,10 @@ internal sealed class FileCaptureService : IDisposable
             _current.SetAudioVolume(_audioVolume);
             _current.SetAudioEnabled(_audioEnabled);
             _current.SetPlaybackPaused(_playbackPaused);
-            _ = Task.Factory.StartNew(
+            _current.SetPerformanceSettings(_lowContentionMode, _decoderThreadLimit, _videoDecodeFpsLimit);
+            _ = RunBackgroundLongRunning(
                 PrimeProbeCache,
-                CancellationToken.None,
-                TaskCreationOptions.LongRunning,
-                TaskScheduler.Default);
+                "LifeViz.SequenceProbePrime");
         }
             
                     public IReadOnlyList<string> Paths => _paths;
@@ -2444,6 +2660,7 @@ internal sealed class FileCaptureService : IDisposable
             _current.SetAudioVolume(_audioVolume);
             _current.SetAudioEnabled(_audioEnabled);
             _current.SetPlaybackPaused(_playbackPaused);
+            _current.SetPerformanceSettings(_lowContentionMode, _decoderThreadLimit, _videoDecodeFpsLimit);
         }
 
         public void SetAudioEnabled(bool enabled)
@@ -2469,6 +2686,14 @@ internal sealed class FileCaptureService : IDisposable
         {
             _playbackPaused = paused;
             _current?.SetPlaybackPaused(paused);
+        }
+
+        public void SetPerformanceSettings(bool lowContentionMode, int decoderThreadLimit, int videoDecodeFpsLimit)
+        {
+            _lowContentionMode = lowContentionMode;
+            _decoderThreadLimit = Math.Clamp(decoderThreadLimit, 0, 8);
+            _videoDecodeFpsLimit = videoDecodeFpsLimit == 15 || videoDecodeFpsLimit == 30 ? videoDecodeFpsLimit : 0;
+            _current?.SetPerformanceSettings(_lowContentionMode, _decoderThreadLimit, _videoDecodeFpsLimit);
         }
 
         public void SeekNormalized(double normalizedPosition)
@@ -2529,20 +2754,16 @@ internal sealed class FileCaptureService : IDisposable
                 _current = null;
                 nextIndex = (_index + 1) % _paths.Count;
                 _pendingAdvanceIndex = nextIndex;
-                _pendingAdvanceTask = Task.Factory.StartNew<VideoSession?>(
+                _pendingAdvanceTask = RunBackgroundLongRunning<VideoSession?>(
                     () => CreateSequenceVideoSession(_paths[nextIndex]),
-                    CancellationToken.None,
-                    TaskCreationOptions.LongRunning,
-                    TaskScheduler.Default);
+                    "LifeViz.SequenceAdvance");
             }
 
             if (previous != null)
             {
-                _ = Task.Factory.StartNew(
+                _ = RunBackgroundLongRunning(
                     previous.Dispose,
-                    CancellationToken.None,
-                    TaskCreationOptions.LongRunning,
-                    TaskScheduler.Default);
+                    "LifeViz.SequenceDispose");
             }
 
             return true;
@@ -2597,6 +2818,7 @@ internal sealed class FileCaptureService : IDisposable
             session.SetAudioVolume(_audioVolume);
             session.SetAudioEnabled(_audioEnabled);
             session.SetPlaybackPaused(_playbackPaused);
+            session.SetPerformanceSettings(_lowContentionMode, _decoderThreadLimit, _videoDecodeFpsLimit);
             return session;
         }
 

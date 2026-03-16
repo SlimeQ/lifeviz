@@ -437,6 +437,47 @@
                     <MenuItem Header="60 fps" IsCheckable="True" Click="FramerateItem_Click" />
                     <MenuItem Header="144 fps" IsCheckable="True" Click="FramerateItem_Click" />
                 </MenuItem>
+                <MenuItem Header="Performance"
+                          x:Name="PerformanceMenu">
+                    <MenuItem x:Name="LowContentionModeMenuItem"
+                              Header="Low Contention Mode"
+                              IsCheckable="True"
+                              Click="LowContentionMode_Click" />
+                    <MenuItem Header="Decoder Threads"
+                              x:Name="DecoderThreadsMenu">
+                        <MenuItem Header="Auto"
+                                  Tag="0"
+                                  IsCheckable="True"
+                                  Click="DecoderThreadsItem_Click" />
+                        <MenuItem Header="1"
+                                  Tag="1"
+                                  IsCheckable="True"
+                                  Click="DecoderThreadsItem_Click" />
+                        <MenuItem Header="2"
+                                  Tag="2"
+                                  IsCheckable="True"
+                                  Click="DecoderThreadsItem_Click" />
+                        <MenuItem Header="4"
+                                  Tag="4"
+                                  IsCheckable="True"
+                                  Click="DecoderThreadsItem_Click" />
+                    </MenuItem>
+                    <MenuItem Header="Video Decode FPS"
+                              x:Name="VideoDecodeFpsMenu">
+                        <MenuItem Header="Full"
+                                  Tag="0"
+                                  IsCheckable="True"
+                                  Click="VideoDecodeFpsItem_Click" />
+                        <MenuItem Header="30"
+                                  Tag="30"
+                                  IsCheckable="True"
+                                  Click="VideoDecodeFpsItem_Click" />
+                        <MenuItem Header="15"
+                                  Tag="15"
+                                  IsCheckable="True"
+                                  Click="VideoDecodeFpsItem_Click" />
+                    </MenuItem>
+                </MenuItem>
                 <MenuItem Header="Animation BPM" StaysOpenOnClick="True">
                     <StackPanel Margin="8,4" Width="220">
                         <DockPanel>

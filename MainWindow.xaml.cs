@@ -82,6 +82,8 @@ public partial class MainWindow : Window
     private const int MaxAudioReactiveSeedBurstsPerStep = 64;
     private const int MaxSimulationStepsPerRender = 8;
     private const double MaxRgbHueShiftSpeedDegreesPerSecond = 180.0;
+    private const int DefaultDecoderThreadLimit = 0;
+    private const int DefaultVideoDecodeFpsLimit = 0;
     private const double MinReactiveHueFrequencyHz = 27.5;
     private const double MaxReactiveHueFrequencyHz = 4186.01;
     private const double MaxColorDistance = 441.6729559300637;
@@ -247,6 +249,9 @@ public partial class MainWindow : Window
     private double _effectiveLifeOpacity = 1.0;
     private long _lastProfileFrameTimestamp;
     private bool _liveProfileExportInProgress;
+    private bool _lowContentionMode;
+    private int _decoderThreadLimit = DefaultDecoderThreadLimit;
+    private int _videoDecodeFpsLimit = DefaultVideoDecodeFpsLimit;
     private bool _highResolutionTimerEnabled;
     private bool _isChromeDragging;
     private Point _chromeDragStartScreen;
@@ -262,7 +267,6 @@ public partial class MainWindow : Window
         Logger.Initialize();
         _startupRecoveryTriggered = TryConsumeStartupRecoveryFlag();
         MarkStartupPending();
-        EnableHighResolutionTimer();
 
         _uiThreadLatencyProbe = new UiThreadLatencyProbe(Dispatcher, _frameProfiler);
         InitializeComponent();
@@ -284,6 +288,8 @@ public partial class MainWindow : Window
                     EnterFullscreen(applyConfig: true);
                 }
             }
+
+            ApplyPerformancePreferences();
             _lastWindowSize = new Size(ActualWidth, ActualHeight);
             _lastClientSize = new Size(Root.ActualWidth, Root.ActualHeight);
             UpdateChromeUi();
@@ -711,6 +717,89 @@ public partial class MainWindow : Window
         _uiThreadLatencyProbe.Start(TimeSpan.FromMilliseconds(50));
     }
 
+    private void ApplyPerformancePreferences()
+    {
+        if (_lowContentionMode)
+        {
+            DisableHighResolutionTimer();
+        }
+        else
+        {
+            EnableHighResolutionTimer();
+        }
+
+        try
+        {
+            using var process = Process.GetCurrentProcess();
+            process.PriorityClass = _lowContentionMode
+                ? ProcessPriorityClass.BelowNormal
+                : ProcessPriorityClass.Normal;
+        }
+        catch (Exception ex)
+        {
+            Logger.Warn($"Failed to apply process priority preference: {ex.Message}");
+        }
+
+        try
+        {
+            _fileCapture.SetPerformanceSettings(_lowContentionMode, _decoderThreadLimit, _videoDecodeFpsLimit);
+        }
+        catch (Exception ex)
+        {
+            Logger.Warn($"Failed to apply file-capture performance settings: {ex.Message}");
+        }
+
+        try
+        {
+            if (_framePumpThread != null && _framePumpThread.IsAlive)
+            {
+                _framePumpThread.Priority = _lowContentionMode ? ThreadPriority.BelowNormal : ThreadPriority.Normal;
+            }
+        }
+        catch (Exception ex)
+        {
+            Logger.Warn($"Failed to apply frame pump priority preference: {ex.Message}");
+        }
+    }
+
+    private void UpdatePerformanceMenuState()
+    {
+        if (LowContentionModeMenuItem != null)
+        {
+            LowContentionModeMenuItem.IsChecked = _lowContentionMode;
+        }
+
+        if (DecoderThreadsMenu == null)
+        {
+            return;
+        }
+
+        string selectedTag = _decoderThreadLimit.ToString(CultureInfo.InvariantCulture);
+        foreach (var item in DecoderThreadsMenu.Items)
+        {
+            if (item is MenuItem menuItem)
+            {
+                string? tag = menuItem.Tag as string;
+                menuItem.IsChecked = string.Equals(tag, selectedTag, StringComparison.Ordinal);
+            }
+        }
+
+        if (VideoDecodeFpsMenu == null)
+        {
+            return;
+        }
+
+        string selectedVideoDecodeTag = _videoDecodeFpsLimit.ToString(CultureInfo.InvariantCulture);
+        foreach (var item in VideoDecodeFpsMenu.Items)
+        {
+            if (item is MenuItem menuItem)
+            {
+                string? tag = menuItem.Tag as string;
+                menuItem.IsChecked = string.Equals(tag, selectedVideoDecodeTag, StringComparison.Ordinal);
+            }
+        }
+    }
+
     internal (FrameProfileReport report, string path) StopProfilingSessionAndExport()
     {
         string outputDirectory = App.IsSmokeTestMode || App.IsDiagnosticTestMode
@@ -839,7 +928,8 @@ public partial class MainWindow : Window
         _framePumpThread = new Thread(FramePumpThreadMain)
         {
             IsBackground = true,
-            Name = "LifeViz.FramePump"
+            Name = "LifeViz.FramePump",
+            Priority = _lowContentionMode ? ThreadPriority.BelowNormal : ThreadPriority.Normal
         };
         _renderLoopAttached = true;
         _stepStopwatch.Restart();
@@ -2839,6 +2929,7 @@ public partial class MainWindow : Window
         }
         UpdateAudioReactivePatternChecks();
         UpdateAudioReactiveMenuState();
+        UpdatePerformanceMenuState();
 
         UpdateUpdateMenuItem();
     }
@@ -11099,6 +11190,46 @@ public partial class MainWindow : Window
         SaveConfig();
     }
 
+    private void LowContentionMode_Click(object sender, RoutedEventArgs e)
+    {
+        _lowContentionMode = LowContentionModeMenuItem?.IsChecked == true;
+        ApplyPerformancePreferences();
+        UpdatePerformanceMenuState();
+        SaveConfig();
+    }
+
+    private void DecoderThreadsItem_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is not MenuItem { Tag: string tag } || !int.TryParse(tag, NumberStyles.Integer, CultureInfo.InvariantCulture, out int threads))
+        {
+            return;
+        }
+
+        _decoderThreadLimit = Math.Clamp(threads, 0, 8);
+        ApplyPerformancePreferences();
+        UpdatePerformanceMenuState();
+        SaveConfig();
+    }
+
+    private void VideoDecodeFpsItem_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is not MenuItem { Tag: string tag } || !int.TryParse(tag, NumberStyles.Integer, CultureInfo.InvariantCulture, out int fps))
+        {
+            return;
+        }
+
+        _videoDecodeFpsLimit = fps switch
+        {
+            15 => 15,
+            30 => 30,
+            _ => DefaultVideoDecodeFpsLimit
+        };
+
+        ApplyPerformancePreferences();
+        UpdatePerformanceMenuState();
+        SaveConfig();
+    }
+
     private async void ExportLiveProfile_Click(object sender, RoutedEventArgs e)
     {
         if (_liveProfileExportInProgress || _isShuttingDown)
@@ -11956,8 +12087,14 @@ public partial class MainWindow : Window
             _selectedAudioDeviceId = config.AudioDeviceId;
             _sourceAudioMasterEnabled = config.SourceAudioMasterEnabled;
             _sourceAudioMasterVolume = Math.Clamp(config.SourceAudioMasterVolume, 0, 1);
+            _lowContentionMode = config.LowContentionMode;
+            _decoderThreadLimit = Math.Clamp(config.DecoderThreadLimit, 0, 8);
+            _videoDecodeFpsLimit = config.VideoDecodeFpsLimit == 15 || config.VideoDecodeFpsLimit == 30
+                ? config.VideoDecodeFpsLimit
+                : DefaultVideoDecodeFpsLimit;
             _fileCapture.SetMasterVideoAudioEnabled(_sourceAudioMasterEnabled);
             _fileCapture.SetMasterVideoAudioVolume(_sourceAudioMasterVolume);
+            ApplyPerformancePreferences();
             ApplyAudioInputGainForSelection();
             _aspectRatioLocked = config.AspectRatioLocked;
             _lockedAspectRatio = config.LockedAspectRatio > 0 ? config.LockedAspectRatio : DefaultAspectRatio;
@@ -12155,6 +12292,9 @@ public partial class MainWindow : Window
                 AudioDeviceId = _selectedAudioDeviceId,
                 SourceAudioMasterEnabled = _sourceAudioMasterEnabled,
                 SourceAudioMasterVolume = _sourceAudioMasterVolume,
+                LowContentionMode = _lowContentionMode,
+                DecoderThreadLimit = _decoderThreadLimit,
+                VideoDecodeFpsLimit = _videoDecodeFpsLimit,
                 BlendMode = _blendMode.ToString(),
                 SimulationLayers = BuildSimulationLayerConfigs(),
                 PositiveLayerBlendMode = BuildLegacyPositiveLayerBlendMode(),
@@ -13010,6 +13150,9 @@ public partial class MainWindow : Window
         public string? AudioDeviceId { get; set; }
         public bool SourceAudioMasterEnabled { get; set; } = true;
         public double SourceAudioMasterVolume { get; set; } = 1.0;
+        public bool LowContentionMode { get; set; }
+        public int DecoderThreadLimit { get; set; } = DefaultDecoderThreadLimit;
+        public int VideoDecodeFpsLimit { get; set; } = DefaultVideoDecodeFpsLimit;
         public string BlendMode { get; set; } = MainWindow.BlendMode.Additive.ToString();
         public List<SimulationLayerConfig> SimulationLayers { get; set; } = new();
         public string PositiveLayerBlendMode { get; set; } = MainWindow.BlendMode.Additive.ToString();
