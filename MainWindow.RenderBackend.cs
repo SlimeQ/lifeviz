@@ -7,6 +7,7 @@ namespace lifeviz;
 internal sealed class SimulationPresentationLayerData
 {
     public byte[]? Buffer { get; init; }
+    public GpuCompositeSurface? Surface { get; init; }
     public IntPtr SharedTextureHandle { get; init; }
     public int Width { get; init; }
     public int Height { get; init; }
@@ -47,6 +48,8 @@ public partial class MainWindow
             bool useSignedAddSubPassthrough,
             bool useMixedAddSubPassthroughModel,
             bool invertComposite);
+
+        byte[]? GetPresentedFrameCopyForSmoke();
     }
 
     private sealed class NullRenderBackend : IRenderBackend
@@ -84,6 +87,8 @@ public partial class MainWindow
             bool useSignedAddSubPassthrough,
             bool useMixedAddSubPassthroughModel,
             bool invertComposite) => false;
+
+        public byte[]? GetPresentedFrameCopyForSmoke() => null;
 
         public int PresentationDrawCount => 0;
 
@@ -130,6 +135,8 @@ public partial class MainWindow
             bool useSignedAddSubPassthrough,
             bool useMixedAddSubPassthroughModel,
             bool invertComposite) => false;
+
+        public byte[]? GetPresentedFrameCopyForSmoke() => _presentationBackend.GetPresentedFrameCopyForSmoke();
 
         public int PresentationDrawCount => _presentationBackend.PresentCount;
 
@@ -205,6 +212,8 @@ public partial class MainWindow
                 useSignedAddSubPassthrough,
                 useMixedAddSubPassthroughModel,
                 invertComposite);
+
+        public byte[]? GetPresentedFrameCopyForSmoke() => _presentationBackend.GetPresentedFrameCopyForSmoke();
 
         public int PresentationDrawCount => _presentationBackend.DrawCount;
 

@@ -13,7 +13,14 @@ internal enum LayerEditorSourceKind
     File,
     VideoSequence,
     Group,
+    SimGroup,
     Youtube
+}
+
+internal enum LayerEditorSimulationItemKind
+{
+    Layer,
+    Group
 }
 
 internal sealed class LayerEditorOption
@@ -337,6 +344,8 @@ internal sealed class LayerEditorSource : LayerEditorNotify
     private double _keyTolerance = 0.1;
     private string _pendingTranslateDirection = "Right";
     private string _pendingRotationDirection = "Clockwise";
+    private bool _enabled = true;
+    private LayerEditorSimulationLayer? _selectedSimulationLayer;
     private bool _isExpanded = true;
     private bool _isSelected;
 
@@ -354,6 +363,8 @@ internal sealed class LayerEditorSource : LayerEditorNotify
             if (SetField(ref _kind, value))
             {
                 OnPropertyChanged(nameof(IsGroup));
+                OnPropertyChanged(nameof(IsSimulationGroup));
+                OnPropertyChanged(nameof(IsContainerGroup));
                 OnPropertyChanged(nameof(IsWebcam));
                 OnPropertyChanged(nameof(IsWindow));
                 OnPropertyChanged(nameof(IsVideo));
@@ -538,11 +549,30 @@ internal sealed class LayerEditorSource : LayerEditorNotify
         set => SetField(ref _pendingRotationDirection, value);
     }
 
+    public bool Enabled
+    {
+        get => _enabled;
+        set
+        {
+            if (SetField(ref _enabled, value))
+            {
+                OnPropertyChanged(nameof(Details));
+            }
+        }
+    }
+
     public LayerEditorSource? Parent { get; set; }
 
     public ObservableCollection<LayerEditorSource> Children { get; } = new();
+    public ObservableCollection<LayerEditorSimulationLayer> SimulationLayers { get; } = new();
 
     public ObservableCollection<LayerEditorAnimation> Animations { get; } = new();
+
+    public LayerEditorSimulationLayer? SelectedSimulationLayer
+    {
+        get => _selectedSimulationLayer;
+        set => SetField(ref _selectedSimulationLayer, value);
+    }
 
     public bool IsExpanded
     {
@@ -557,6 +587,8 @@ internal sealed class LayerEditorSource : LayerEditorNotify
     }
 
     public bool IsGroup => Kind == LayerEditorSourceKind.Group;
+    public bool IsSimulationGroup => Kind == LayerEditorSourceKind.SimGroup;
+    public bool IsContainerGroup => IsGroup || IsSimulationGroup;
     public bool IsWebcam => Kind == LayerEditorSourceKind.Webcam;
     public bool IsWindow => Kind == LayerEditorSourceKind.Window;
     public bool IsNormalBlend => string.Equals(BlendMode, "Normal", StringComparison.OrdinalIgnoreCase);
@@ -576,6 +608,7 @@ internal sealed class LayerEditorSource : LayerEditorNotify
         LayerEditorSourceKind.Youtube => "YouTube",
         LayerEditorSourceKind.VideoSequence => "Video Sequence",
         LayerEditorSourceKind.Group => "Group",
+        LayerEditorSourceKind.SimGroup => "Sim Group",
         LayerEditorSourceKind.Window => "Window",
         _ => "Source"
     };
@@ -592,6 +625,7 @@ internal sealed class LayerEditorSource : LayerEditorNotify
         LayerEditorSourceKind.Youtube => string.IsNullOrWhiteSpace(FilePath) ? "YouTube source" : FilePath,
         LayerEditorSourceKind.VideoSequence => FilePaths.Count > 0 ? $"{FilePaths.Count} files" : "Video sequence",
         LayerEditorSourceKind.Group => "Layer group",
+        LayerEditorSourceKind.SimGroup => $"{(Enabled ? "Enabled" : "Disabled")} | {SimulationLayers.Count} sim layer{(SimulationLayers.Count == 1 ? string.Empty : "s")}",
         _ => string.Empty
     };
 
@@ -841,6 +875,7 @@ internal sealed class LayerEditorSimulationReactiveMapping : LayerEditorNotify
 internal sealed class LayerEditorSimulationLayer : LayerEditorNotify
 {
     private Guid _id;
+    private LayerEditorSimulationItemKind _kind = LayerEditorSimulationItemKind.Layer;
     private string _name = "Simulation Layer";
     private bool _enabled = true;
     private string _inputFunction = "Direct";
@@ -857,13 +892,30 @@ internal sealed class LayerEditorSimulationLayer : LayerEditorNotify
     private double _rgbHueShiftSpeedDegreesPerSecond;
     private double _audioFrequencyHueShiftDegrees;
     private ObservableCollection<LayerEditorSimulationReactiveMapping> _reactiveMappings = new();
+    private ObservableCollection<LayerEditorSimulationLayer> _children = new();
     private bool _isExpanded = true;
     private bool _isSelected;
+    private LayerEditorSimulationLayer? _parent;
 
     public Guid Id
     {
         get => _id;
         set => SetField(ref _id, value);
+    }
+
+    public LayerEditorSimulationItemKind Kind
+    {
+        get => _kind;
+        set
+        {
+            if (SetField(ref _kind, value))
+            {
+                OnPropertyChanged(nameof(IsGroup));
+                OnPropertyChanged(nameof(KindLabel));
+                OnPropertyChanged(nameof(TreeLabel));
+                OnPropertyChanged(nameof(Details));
+            }
+        }
     }
 
     public string Name
@@ -874,6 +926,7 @@ internal sealed class LayerEditorSimulationLayer : LayerEditorNotify
             if (SetField(ref _name, value))
             {
                 OnPropertyChanged(nameof(TreeLabel));
+                Parent?.NotifyDetailsChanged();
             }
         }
     }
@@ -886,6 +939,7 @@ internal sealed class LayerEditorSimulationLayer : LayerEditorNotify
             if (SetField(ref _enabled, value))
             {
                 OnPropertyChanged(nameof(Details));
+                Parent?.NotifyDetailsChanged();
             }
         }
     }
@@ -1060,6 +1114,26 @@ internal sealed class LayerEditorSimulationLayer : LayerEditorNotify
         }
     }
 
+    public LayerEditorSimulationLayer? Parent
+    {
+        get => _parent;
+        set => SetField(ref _parent, value);
+    }
+
+    public ObservableCollection<LayerEditorSimulationLayer> Children
+    {
+        get => _children;
+        set
+        {
+            if (!ReferenceEquals(_children, value))
+            {
+                _children = value ?? new ObservableCollection<LayerEditorSimulationLayer>();
+                OnPropertyChanged();
+                OnPropertyChanged(nameof(Details));
+            }
+        }
+    }
+
     public bool IsExpanded
     {
         get => _isExpanded;
@@ -1072,9 +1146,17 @@ internal sealed class LayerEditorSimulationLayer : LayerEditorNotify
         set => SetField(ref _isSelected, value);
     }
 
-    public string TreeLabel => string.IsNullOrWhiteSpace(Name) ? "Simulation Layer" : Name;
+    public bool IsGroup => Kind == LayerEditorSimulationItemKind.Group;
 
-    public string Details => $"{(Enabled ? "Enabled" : "Disabled")} | {InputFunction} | {BlendMode} | {LifeMode} | {BinningMode} | Noise {InjectionNoise:P0} | Opacity {LifeOpacity:P0} | Hue {RgbHueShiftDegrees:0.#}deg {RgbHueShiftSpeedDegreesPerSecond:+0.#;-0.#;0}deg/s | Reactive {ReactiveMappings.Count} | {InjectionMode} | Th {ThresholdMin:P0}-{ThresholdMax:P0}{(InvertThreshold ? " inv" : string.Empty)}";
+    public string KindLabel => IsGroup ? "Sim Group" : "Simulation Layer";
+
+    public string TreeLabel => string.IsNullOrWhiteSpace(Name)
+        ? (IsGroup ? "Sim Group" : "Simulation Layer")
+        : Name;
+
+    public string Details => IsGroup
+        ? $"{(Enabled ? "Enabled" : "Disabled")} | {Children.Count} item{(Children.Count == 1 ? string.Empty : "s")}"
+        : $"{(Enabled ? "Enabled" : "Disabled")} | {InputFunction} | {BlendMode} | {LifeMode} | {BinningMode} | Noise {InjectionNoise:P0} | Opacity {LifeOpacity:P0} | Hue {RgbHueShiftDegrees:0.#}deg {RgbHueShiftSpeedDegreesPerSecond:+0.#;-0.#;0}deg/s | Reactive {ReactiveMappings.Count} | {InjectionMode} | Th {ThresholdMin:P0}-{ThresholdMax:P0}{(InvertThreshold ? " inv" : string.Empty)}";
 
     public IReadOnlyList<LayerEditorOption> BlendModeOptions => LayerEditorOptions.BlendModes;
     public IReadOnlyList<LayerEditorOption> InputFunctionOptions => LayerEditorOptions.SimulationInputFunctions;
@@ -1082,5 +1164,9 @@ internal sealed class LayerEditorSimulationLayer : LayerEditorNotify
     public IReadOnlyList<LayerEditorOption> LifeModeOptions => LayerEditorOptions.SimulationLifeModes;
     public IReadOnlyList<LayerEditorOption> BinningModeOptions => LayerEditorOptions.SimulationBinningModes;
 
-    public void NotifyDetailsChanged() => OnPropertyChanged(nameof(Details));
+    public void NotifyDetailsChanged()
+    {
+        OnPropertyChanged(nameof(Details));
+        Parent?.NotifyDetailsChanged();
+    }
 }

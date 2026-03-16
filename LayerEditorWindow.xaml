@@ -213,14 +213,21 @@
             </Border>
         </HierarchicalDataTemplate>
 
-        <DataTemplate x:Key="SimulationLayerTemplate">
+        <HierarchicalDataTemplate x:Key="SimulationLayerTemplate" ItemsSource="{Binding Children}">
             <Border Margin="0,1,0,1"
                     Padding="4"
                     Background="Transparent"
                     CornerRadius="3">
                 <StackPanel>
-                    <TextBlock Text="{Binding TreeLabel}"
-                               FontWeight="SemiBold" />
+                    <DockPanel LastChildFill="False">
+                        <TextBlock Text="{Binding TreeLabel}"
+                                   FontWeight="SemiBold"
+                                   DockPanel.Dock="Left" />
+                        <TextBlock Text="{Binding KindLabel}"
+                                   Foreground="#9EA4AE"
+                                   FontSize="11"
+                                   DockPanel.Dock="Right" />
+                    </DockPanel>
                     <TextBlock Text="{Binding Details}"
                                Foreground="#8E8E8E"
                                FontSize="11"
@@ -228,9 +235,17 @@
                                Margin="0,2,0,0" />
                 </StackPanel>
             </Border>
-        </DataTemplate>
+        </HierarchicalDataTemplate>
 
-        <Style TargetType="TreeViewItem">
+        <Style x:Key="SourceTreeViewItemStyle" TargetType="TreeViewItem">
+            <Setter Property="IsExpanded" Value="{Binding IsExpanded, Mode=TwoWay}" />
+            <Setter Property="IsSelected" Value="{Binding IsSelected, Mode=TwoWay}" />
+            <Setter Property="Foreground" Value="#F2F2F2" />
+            <Setter Property="Background" Value="Transparent" />
+            <Setter Property="Padding" Value="0" />
+        </Style>
+
+        <Style x:Key="SimulationTreeViewItemStyle" TargetType="TreeViewItem">
             <Setter Property="IsExpanded" Value="{Binding IsExpanded, Mode=TwoWay}" />
             <Setter Property="IsSelected" Value="{Binding IsSelected, Mode=TwoWay}" />
             <Setter Property="Foreground" Value="#F2F2F2" />
@@ -492,6 +507,7 @@
                                    VerticalAlignment="Center"
                                    Margin="0,0,8,6" />
                         <Button Content="Group" Click="AddRootGroup_Click" />
+                        <Button Content="Sim Group" Click="AddRootSimGroup_Click" />
                         <Button Content="Window" Click="AddRootWindow_Click" />
                         <Button Content="Webcam" Click="AddRootWebcam_Click" />
                         <Button Content="File" Click="AddRootFile_Click" />
@@ -504,6 +520,7 @@
                                    VerticalAlignment="Center"
                                    Margin="0,0,8,6" />
                         <Button Content="Group" Click="AddChildGroup_Click" />
+                        <Button Content="Sim Group" Click="AddChildSimGroup_Click" />
                         <Button Content="Window" Click="AddChildWindow_Click" />
                         <Button Content="Webcam" Click="AddChildWebcam_Click" />
                         <Button Content="File" Click="AddChildFile_Click" />
@@ -523,6 +540,7 @@
                         <TreeView x:Name="SceneTree"
                                   ItemsSource="{Binding Sources}"
                                   ItemTemplate="{StaticResource SourceTreeTemplate}"
+                                  ItemContainerStyle="{StaticResource SourceTreeViewItemStyle}"
                                   Background="Transparent"
                                   BorderThickness="0"
                                   SelectedItemChanged="SceneTree_SelectedItemChanged"
@@ -538,7 +556,8 @@
                                 Click="MoveUp_Click" />
                         <Button Content="Move Down"
                                 Click="MoveDown_Click" />
-                        <Button Content="Remove"
+                        <Button x:Name="SceneRemoveSourceButton"
+                                Content="Remove"
                                 Click="RemoveSource_Click" />
                         <Button Content="Restart"
                                 Click="RestartVideo_Click" />
@@ -614,6 +633,34 @@
 
                                 <GroupBox Header="Layer Settings">
                                     <StackPanel Margin="8">
+                                        <WrapPanel Margin="0,0,0,8"
+                                                   Visibility="{Binding IsSimulationGroup, Converter={StaticResource BoolToVisibility}}">
+                                            <CheckBox Content="Enabled"
+                                                      Margin="0,0,12,6"
+                                                      IsChecked="{Binding Enabled}"
+                                                      Checked="SimulationGroupEnabled_Changed"
+                                                      Unchecked="SimulationGroupEnabled_Changed" />
+                                            <TextBlock Text="Group Name"
+                                                       VerticalAlignment="Center"
+                                                       Margin="0,0,8,6" />
+                                            <TextBox Text="{Binding DisplayName}"
+                                                     Width="240"
+                                                     Margin="0,0,0,6"
+                                                     TextChanged="GroupName_Changed" />
+                                        </WrapPanel>
+
+                                        <StackPanel>
+                                            <StackPanel.Style>
+                                                <Style TargetType="StackPanel">
+                                                    <Setter Property="Visibility" Value="Visible" />
+                                                    <Style.Triggers>
+                                                        <DataTrigger Binding="{Binding IsSimulationGroup}" Value="True">
+                                                            <Setter Property="Visibility" Value="Collapsed" />
+                                                        </DataTrigger>
+                                                    </Style.Triggers>
+                                                </Style>
+                                            </StackPanel.Style>
+
                                         <WrapPanel Margin="0,0,0,4">
                                             <StackPanel Orientation="Horizontal" Margin="0,0,12,6">
                                                 <TextBlock Text="Blend"
@@ -712,12 +759,12 @@
                                             <TextBlock Text="Group Name"
                                                        VerticalAlignment="Center"
                                                        Margin="0,0,8,6"
-                                                       Visibility="{Binding IsGroup, Converter={StaticResource BoolToVisibility}}" />
+                                                       Visibility="{Binding IsContainerGroup, Converter={StaticResource BoolToVisibility}}" />
                                             <TextBox Text="{Binding DisplayName}"
                                                      Width="240"
                                                      Margin="0,0,0,6"
                                                      TextChanged="GroupName_Changed"
-                                                     Visibility="{Binding IsGroup, Converter={StaticResource BoolToVisibility}}" />
+                                                     Visibility="{Binding IsContainerGroup, Converter={StaticResource BoolToVisibility}}" />
                                         </WrapPanel>
 
                                         <WrapPanel Margin="0,0,0,0"
@@ -751,10 +798,21 @@
                                                            VerticalAlignment="Center" />
                                             </StackPanel>
                                         </WrapPanel>
+                                        </StackPanel>
                                     </StackPanel>
                                 </GroupBox>
 
                                 <GroupBox Header="Animations">
+                                    <GroupBox.Style>
+                                        <Style TargetType="GroupBox">
+                                            <Setter Property="Visibility" Value="Visible" />
+                                            <Style.Triggers>
+                                                <DataTrigger Binding="{Binding IsSimulationGroup}" Value="True">
+                                                    <Setter Property="Visibility" Value="Collapsed" />
+                                                </DataTrigger>
+                                            </Style.Triggers>
+                                        </Style>
+                                    </GroupBox.Style>
                                     <StackPanel Margin="8">
                                         <ItemsControl ItemsSource="{Binding Animations}"
                                                       ItemTemplate="{StaticResource AnimationTemplate}" />
@@ -806,6 +864,236 @@
                                         </WrapPanel>
                                     </StackPanel>
                                 </GroupBox>
+
+                                <GroupBox Header="Simulation Group">
+                                    <GroupBox.Style>
+                                        <Style TargetType="GroupBox">
+                                            <Setter Property="Visibility" Value="Collapsed" />
+                                            <Style.Triggers>
+                                                <DataTrigger Binding="{Binding IsSimulationGroup}" Value="True">
+                                                    <Setter Property="Visibility" Value="Visible" />
+                                                </DataTrigger>
+                                            </Style.Triggers>
+                                        </Style>
+                                    </GroupBox.Style>
+                                    <StackPanel Margin="8">
+                                        <TextBlock Text="Edit the simulation stack owned by this scene layer."
+                                                   Foreground="#A0A0A0"
+                                                   Margin="0,0,0,8" />
+                                        <WrapPanel Margin="0,0,0,8">
+                                            <Button Content="Add Direct Layer"
+                                                    Click="AddSimulationLayerDirect_Click" />
+                                            <Button Content="Add Inverse Layer"
+                                                    Click="AddSimulationLayerInverse_Click" />
+                                            <Button Content="Move Up"
+                                                    Click="MoveSimulationLayerUp_Click" />
+                                            <Button Content="Move Down"
+                                                    Click="MoveSimulationLayerDown_Click" />
+                                            <Button Content="Remove"
+                                                    Click="RemoveSimulationLayer_Click" />
+                                        </WrapPanel>
+                                        <Border BorderBrush="#2A2A2A"
+                                                BorderThickness="1"
+                                                CornerRadius="4"
+                                                Padding="4"
+                                                Background="#141414">
+                                            <TreeView ItemsSource="{Binding SimulationLayers}"
+                                                      ItemTemplate="{StaticResource SimulationLayerTemplate}"
+                                                      ItemContainerStyle="{StaticResource SimulationTreeViewItemStyle}"
+                                                      Background="Transparent"
+                                                      BorderThickness="0"
+                                                      SelectedItemChanged="SimulationLayerTree_SelectedItemChanged" />
+                                        </Border>
+
+                                        <StackPanel DataContext="{Binding SelectedSimulationLayer}"
+                                                    Margin="0,10,0,0">
+                                            <TextBlock Text="Select a simulation layer to edit settings."
+                                                       Foreground="#A0A0A0"
+                                                       Margin="0,0,0,8">
+                                                <TextBlock.Style>
+                                                    <Style TargetType="TextBlock">
+                                                        <Setter Property="Visibility" Value="Collapsed" />
+                                                        <Style.Triggers>
+                                                            <DataTrigger Binding="{Binding}" Value="{x:Null}">
+                                                                <Setter Property="Visibility" Value="Visible" />
+                                                            </DataTrigger>
+                                                        </Style.Triggers>
+                                                    </Style>
+                                                </TextBlock.Style>
+                                            </TextBlock>
+
+                                            <GroupBox Header="Simulation Layer Settings">
+                                                <StackPanel Margin="8">
+                                                    <StackPanel.Style>
+                                                        <Style TargetType="StackPanel">
+                                                            <Setter Property="Visibility" Value="Visible" />
+                                                            <Style.Triggers>
+                                                                <DataTrigger Binding="{Binding}" Value="{x:Null}">
+                                                                    <Setter Property="Visibility" Value="Collapsed" />
+                                                                </DataTrigger>
+                                                            </Style.Triggers>
+                                                        </Style>
+                                                    </StackPanel.Style>
+
+                                                    <TextBlock Text="Name" />
+                                                    <TextBox Text="{Binding Name, UpdateSourceTrigger=PropertyChanged}"
+                                                             Margin="0,4,0,8"
+                                                             TextChanged="SimulationLayerName_Changed" />
+
+                                                    <CheckBox x:Name="SelectedSimulationEnabledCheckBox"
+                                                              Content="Enabled"
+                                                              IsChecked="{Binding Enabled}"
+                                                              Margin="0,0,0,8"
+                                                              Checked="SimulationLayerEnabled_Changed"
+                                                              Unchecked="SimulationLayerEnabled_Changed" />
+
+                                                    <TextBlock Text="Groups chain their children in order."
+                                                               Foreground="#A0A0A0"
+                                                               Margin="0,0,0,8"
+                                                               Visibility="{Binding IsGroup, Converter={StaticResource BoolToVisibility}}" />
+
+                                                    <StackPanel>
+                                                        <StackPanel.Style>
+                                                            <Style TargetType="StackPanel">
+                                                                <Setter Property="Visibility" Value="Visible" />
+                                                                <Style.Triggers>
+                                                                    <DataTrigger Binding="{Binding IsGroup}" Value="True">
+                                                                        <Setter Property="Visibility" Value="Collapsed" />
+                                                                    </DataTrigger>
+                                                                </Style.Triggers>
+                                                            </Style>
+                                                        </StackPanel.Style>
+
+                                                        <WrapPanel>
+                                                            <StackPanel Orientation="Horizontal" Margin="0,0,12,6">
+                                                                <TextBlock Text="Input" VerticalAlignment="Center" />
+                                                                <ComboBox ItemsSource="{Binding InputFunctionOptions}"
+                                                                          DisplayMemberPath="Label"
+                                                                          SelectedValuePath="Value"
+                                                                          SelectedValue="{Binding InputFunction}"
+                                                                          Margin="8,0,0,0"
+                                                                          Width="180"
+                                                                          SelectionChanged="SimulationLayerInputFunction_Changed" />
+                                                            </StackPanel>
+                                                            <StackPanel Orientation="Horizontal" Margin="0,0,12,6">
+                                                                <TextBlock Text="Blend" VerticalAlignment="Center" />
+                                                                <ComboBox ItemsSource="{Binding BlendModeOptions}"
+                                                                          DisplayMemberPath="Label"
+                                                                          SelectedValuePath="Value"
+                                                                          SelectedValue="{Binding BlendMode}"
+                                                                          Margin="8,0,0,0"
+                                                                          Width="180"
+                                                                          SelectionChanged="SimulationLayerBlendMode_Changed" />
+                                                            </StackPanel>
+                                                        </WrapPanel>
+
+                                                        <WrapPanel>
+                                                            <StackPanel Orientation="Horizontal" Margin="0,0,12,6">
+                                                                <TextBlock Text="Injection" VerticalAlignment="Center" />
+                                                                <ComboBox ItemsSource="{Binding InjectionModeOptions}"
+                                                                          DisplayMemberPath="Label"
+                                                                          SelectedValuePath="Value"
+                                                                          SelectedValue="{Binding InjectionMode}"
+                                                                          Margin="8,0,0,0"
+                                                                          Width="180"
+                                                                          SelectionChanged="SimulationLayerInjectionMode_Changed" />
+                                                            </StackPanel>
+                                                            <StackPanel Orientation="Horizontal" Margin="0,0,12,6">
+                                                                <TextBlock Text="Life Mode" VerticalAlignment="Center" />
+                                                                <ComboBox ItemsSource="{Binding LifeModeOptions}"
+                                                                          DisplayMemberPath="Label"
+                                                                          SelectedValuePath="Value"
+                                                                          SelectedValue="{Binding LifeMode}"
+                                                                          Margin="8,0,0,0"
+                                                                          Width="180"
+                                                                          SelectionChanged="SimulationLayerLifeMode_Changed" />
+                                                            </StackPanel>
+                                                            <StackPanel Orientation="Horizontal" Margin="0,0,12,6">
+                                                                <TextBlock Text="Binning" VerticalAlignment="Center" />
+                                                                <ComboBox ItemsSource="{Binding BinningModeOptions}"
+                                                                          DisplayMemberPath="Label"
+                                                                          SelectedValuePath="Value"
+                                                                          SelectedValue="{Binding BinningMode}"
+                                                                          Margin="8,0,0,0"
+                                                                          Width="180"
+                                                                          SelectionChanged="SimulationLayerBinningMode_Changed" />
+                                                            </StackPanel>
+                                                        </WrapPanel>
+
+                                                        <WrapPanel>
+                                                            <StackPanel Orientation="Horizontal" Margin="0,0,12,6">
+                                                                <TextBlock Text="Opacity" VerticalAlignment="Center" />
+                                                                <Slider Minimum="0"
+                                                                        Maximum="1"
+                                                                        Value="{Binding LifeOpacity}"
+                                                                        Width="150"
+                                                                        Margin="8,0,0,0"
+                                                                        ValueChanged="SimulationLayerLifeOpacity_Changed" />
+                                                            </StackPanel>
+                                                            <StackPanel Orientation="Horizontal" Margin="0,0,12,6">
+                                                                <TextBlock Text="Noise" VerticalAlignment="Center" />
+                                                                <Slider Minimum="0"
+                                                                        Maximum="1"
+                                                                        Value="{Binding InjectionNoise}"
+                                                                        Width="150"
+                                                                        Margin="8,0,0,0"
+                                                                        ValueChanged="SimulationLayerInjectionNoise_Changed" />
+                                                            </StackPanel>
+                                                        </WrapPanel>
+
+                                                        <WrapPanel>
+                                                            <StackPanel Orientation="Horizontal" Margin="0,0,12,6">
+                                                                <TextBlock Text="Hue Offset" VerticalAlignment="Center" />
+                                                                <Slider Minimum="0"
+                                                                        Maximum="360"
+                                                                        Value="{Binding RgbHueShiftDegrees}"
+                                                                        Width="150"
+                                                                        Margin="8,0,0,0"
+                                                                        ValueChanged="SimulationLayerHue_Changed" />
+                                                            </StackPanel>
+                                                            <StackPanel Orientation="Horizontal" Margin="0,0,12,6">
+                                                                <TextBlock Text="Hue Speed" VerticalAlignment="Center" />
+                                                                <Slider Minimum="-180"
+                                                                        Maximum="180"
+                                                                        Value="{Binding RgbHueShiftSpeedDegreesPerSecond}"
+                                                                        Width="150"
+                                                                        Margin="8,0,0,0"
+                                                                        ValueChanged="SimulationLayerHue_Changed" />
+                                                            </StackPanel>
+                                                        </WrapPanel>
+
+                                                        <WrapPanel>
+                                                            <StackPanel Orientation="Horizontal" Margin="0,0,12,6">
+                                                                <TextBlock Text="Threshold Min" VerticalAlignment="Center" />
+                                                                <Slider x:Name="SelectedSimulationThresholdMinSlider"
+                                                                        Minimum="0"
+                                                                        Maximum="1"
+                                                                        Value="{Binding ThresholdMin}"
+                                                                        Width="150"
+                                                                        Margin="8,0,0,0"
+                                                                        ValueChanged="SimulationLayerThreshold_Changed" />
+                                                            </StackPanel>
+                                                            <StackPanel Orientation="Horizontal" Margin="0,0,12,6">
+                                                                <TextBlock Text="Threshold Max" VerticalAlignment="Center" />
+                                                                <Slider Minimum="0"
+                                                                        Maximum="1"
+                                                                        Value="{Binding ThresholdMax}"
+                                                                        Width="150"
+                                                                        Margin="8,0,0,0"
+                                                                        ValueChanged="SimulationLayerThreshold_Changed" />
+                                                            </StackPanel>
+                                                            <CheckBox Content="Invert Threshold"
+                                                                      Margin="0,0,12,6"
+                                                                      IsChecked="{Binding InvertThreshold}"
+                                                                      Checked="SimulationLayerInvertThreshold_Changed"
+                                                                      Unchecked="SimulationLayerInvertThreshold_Changed" />
+                                                        </WrapPanel>
+                                                    </StackPanel>
+                                                </StackPanel>
+                                            </GroupBox>
+                                        </StackPanel>
+                                    </StackPanel>
+                                </GroupBox>
                             </StackPanel>
                         </ScrollViewer>
                             </StackPanel>
@@ -813,7 +1101,7 @@
                         <TabItem Header="Simulation Layers">
                             <ScrollViewer VerticalScrollBarVisibility="Auto">
                                 <StackPanel Margin="10">
-                                    <TextBlock Text="Each simulation layer injects from the final composite frame, runs its own Game of Life state, then blends over previous simulation layers."
+                                    <TextBlock Text="Project-wide simulation controls live here. Per-group simulation stacks are edited from the Selected Layer tab when a Sim Group is selected."
                                                Foreground="#A0A0A0"
                                                Margin="0,0,0,10" />
                                     <Grid>
@@ -823,12 +1111,15 @@
                                             <ColumnDefinition Width="3*" />
                                         </Grid.ColumnDefinitions>
 
-                                        <StackPanel Grid.Column="0">
+                                        <StackPanel Grid.Column="0"
+                                                    Visibility="Collapsed">
                                             <WrapPanel Margin="0,0,0,8">
                                                 <Button Content="Add Direct Layer"
                                                         Click="AddSimulationLayerDirect_Click" />
                                                 <Button Content="Add Inverse Layer"
                                                         Click="AddSimulationLayerInverse_Click" />
+                                                <Button Content="Add Sim Group"
+                                                        Click="AddSimulationGroup_Click" />
                                             </WrapPanel>
 
                                             <Border BorderBrush="#2A2A2A"
@@ -839,6 +1130,7 @@
                                                 <TreeView x:Name="SimulationLayerTree"
                                                           ItemsSource="{Binding SimulationLayers}"
                                                           ItemTemplate="{StaticResource SimulationLayerTemplate}"
+                                                          ItemContainerStyle="{StaticResource SimulationTreeViewItemStyle}"
                                                           Background="Transparent"
                                                           BorderThickness="0"
                                                           SelectedItemChanged="SimulationLayerTree_SelectedItemChanged" />
@@ -854,8 +1146,8 @@
                                             </WrapPanel>
                                         </StackPanel>
 
-                                        <StackPanel Grid.Column="2">
-                                            <GroupBox Header="Global Simulation Controls"
+                                            <StackPanel Grid.Column="2">
+                                                <GroupBox Header="Global Simulation Controls"
                                                       Margin="0,0,0,10">
                                                 <StackPanel Margin="8">
                                                     <StackPanel Orientation="Horizontal">
@@ -916,7 +1208,8 @@
                                                 </StackPanel>
                                             </GroupBox>
 
-                                            <StackPanel DataContext="{Binding SelectedSimulationLayer}">
+                                            <StackPanel DataContext="{Binding SelectedSimulationLayer}"
+                                                        Visibility="Collapsed">
                                             <TextBlock Text="Select a simulation layer to edit settings."
                                                        Foreground="#A0A0A0"
                                                        Margin="0,0,0,8">
@@ -955,6 +1248,24 @@
                                                               Margin="0,0,0,8"
                                                               Checked="SimulationLayerEnabled_Changed"
                                                               Unchecked="SimulationLayerEnabled_Changed" />
+
+                                                    <TextBlock Text="Groups chain their children in order. The first child samples the incoming surface, and each later child samples the previous child output."
+                                                               TextWrapping="Wrap"
+                                                               Foreground="#A0A0A0"
+                                                               Margin="0,0,0,8"
+                                                               Visibility="{Binding IsGroup, Converter={StaticResource BoolToVisibility}}" />
+
+                                                    <StackPanel>
+                                                        <StackPanel.Style>
+                                                            <Style TargetType="StackPanel">
+                                                                <Setter Property="Visibility" Value="Visible" />
+                                                                <Style.Triggers>
+                                                                    <DataTrigger Binding="{Binding IsGroup}" Value="True">
+                                                                        <Setter Property="Visibility" Value="Collapsed" />
+                                                                    </DataTrigger>
+                                                                </Style.Triggers>
+                                                            </Style>
+                                                        </StackPanel.Style>
 
                                                     <StackPanel Orientation="Horizontal"
                                                                 Margin="0,0,0,8">
@@ -1231,6 +1542,7 @@
                                                               Margin="0,8,0,0"
                                                               Checked="SimulationLayerInvertThreshold_Changed"
                                                               Unchecked="SimulationLayerInvertThreshold_Changed" />
+                                                    </StackPanel>
                                                 </StackPanel>
                                             </GroupBox>
                                             </StackPanel>

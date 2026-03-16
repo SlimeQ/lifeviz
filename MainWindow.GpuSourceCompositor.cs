@@ -114,6 +114,24 @@ public partial class MainWindow
                 _readbackTicks * tickScale);
         }
 
+        internal readonly struct PreparedLayerInput
+        {
+            public PreparedLayerInput(CaptureSource source, byte[]? sourcePixels, ID3D11ShaderResourceView? sourceShaderResourceView, int width, int height)
+            {
+                Source = source;
+                SourcePixels = sourcePixels;
+                SourceShaderResourceView = sourceShaderResourceView;
+                Width = width;
+                Height = height;
+            }
+
+            public CaptureSource Source { get; }
+            public byte[]? SourcePixels { get; }
+            public ID3D11ShaderResourceView? SourceShaderResourceView { get; }
+            public int Width { get; }
+            public int Height { get; }
+        }
+
         public GpuSourceCompositor(MainWindow owner)
         {
             _owner = owner;
@@ -205,6 +223,9 @@ public partial class MainWindow
 
                     long drawStart = Stopwatch.GetTimestamp();
                     DrawSourceIntoComposite(
+                        currentIsA ? _compositeSrvA : _compositeSrvB,
+                        currentIsA ? _compositeRtvB : _compositeRtvA,
+                        _sourceSrv,
                         sourceWidth,
                         sourceHeight,
                         downscaledWidth,
@@ -215,8 +236,7 @@ public partial class MainWindow
                         source.FitMode,
                         downscaledTransform,
                         keying,
-                        isFirstLayer: !wroteDownscaled,
-                        currentIsA);
+                        isFirstLayer: !wroteDownscaled);
                     Interlocked.Add(ref _drawTicks, Stopwatch.GetTimestamp() - drawStart);
 
                     currentIsA = !currentIsA;
@@ -235,21 +255,7 @@ public partial class MainWindow
                 if (includeCpuReadback && downscaledBuffer != null)
                 {
                     long readbackStart = Stopwatch.GetTimestamp();
-                    _context.CopyResource(_stagingTexture, currentTexture);
-                    var mapped = _context.Map(_stagingTexture, 0, MapMode.Read, Vortice.Direct3D11.MapFlags.None);
-                    try
-                    {
-                        int rowSize = downscaledWidth * 4;
-                        for (int row = 0; row < downscaledHeight; row++)
-                        {
-                            IntPtr sourcePtr = IntPtr.Add(mapped.DataPointer, checked((int)(row * mapped.RowPitch)));
-                            Marshal.Copy(sourcePtr, downscaledBuffer, row * rowSize, rowSize);
-                        }
-                    }
-                    finally
-                    {
-                        _context.Unmap(_stagingTexture, 0);
-                    }
+                    ReadbackTexture(currentTexture, downscaledBuffer, downscaledWidth, downscaledHeight);
                     Interlocked.Add(ref _readbackTicks, Stopwatch.GetTimestamp() - readbackStart);
                 }
                 Interlocked.Increment(ref _buildCount);
@@ -260,6 +266,238 @@ public partial class MainWindow
                     downscaledWidth,
                     downscaledHeight,
                     new GpuCompositeSurface(currentTexture, currentSrv, currentSharedHandle, downscaledWidth, downscaledHeight));
+            }
+        }
+
+        public CompositeFrame? ComposeSourceFrameOntoSurface(
+            GpuCompositeSurface? currentSurface,
+            SourceFrame frame,
+            CaptureSource source,
+            int destWidth,
+            int destHeight,
+            double animationTime,
+            bool firstLayer,
+            ref byte[]? downscaledBuffer,
+            bool includeCpuReadback = true)
+        {
+            int sourceWidth = frame.Source != null ? frame.SourceWidth : frame.DownscaledWidth;
+            int sourceHeight = frame.Source != null ? frame.SourceHeight : frame.DownscaledHeight;
+            byte[] sourcePixels = frame.Source ?? frame.Downscaled;
+            return ComposePixelBufferOntoSurface(
+                currentSurface,
+                sourcePixels,
+                sourceWidth,
+                sourceHeight,
+                source,
+                destWidth,
+                destHeight,
+                animationTime,
+                firstLayer,
+                ref downscaledBuffer,
+                includeCpuReadback);
+        }
+
+        public CompositeFrame? ComposeCompositeFrameOntoSurface(
+            GpuCompositeSurface? currentSurface,
+            CompositeFrame frame,
+            CaptureSource source,
+            int destWidth,
+            int destHeight,
+            double animationTime,
+            bool firstLayer,
+            ref byte[]? downscaledBuffer,
+            bool includeCpuReadback = true)
+        {
+            if (frame.GpuSurface != null)
+            {
+                return ComposeShaderResourceOntoSurface(
+                    currentSurface,
+                    frame.GpuSurface.ShaderResourceView,
+                    frame.DownscaledWidth,
+                    frame.DownscaledHeight,
+                    source,
+                    destWidth,
+                    destHeight,
+                    animationTime,
+                    firstLayer,
+                    ref downscaledBuffer,
+                    includeCpuReadback);
+            }
+
+            return ComposePixelBufferOntoSurface(
+                currentSurface,
+                frame.Downscaled,
+                frame.DownscaledWidth,
+                frame.DownscaledHeight,
+                source,
+                destWidth,
+                destHeight,
+                animationTime,
+                firstLayer,
+                ref downscaledBuffer,
+                includeCpuReadback);
+        }
+
+        public CompositeFrame? CreateCompositeFrameFromSurface(
+            GpuCompositeSurface surface,
+            ref byte[]? downscaledBuffer,
+            bool includeCpuReadback = true)
+        {
+            if (!_gpuAvailable || surface.Width <= 0 || surface.Height <= 0)
+            {
+                return null;
+            }
+
+            int requiredLength = surface.Width * surface.Height * 4;
+            if (includeCpuReadback && (downscaledBuffer == null || downscaledBuffer.Length != requiredLength))
+            {
+                downscaledBuffer = new byte[requiredLength];
+            }
+
+            lock (_sync)
+            {
+                EnsureCompositeResources(surface.Width, surface.Height);
+                if (_context == null || _stagingTexture == null)
+                {
+                    return null;
+                }
+
+                if (includeCpuReadback && downscaledBuffer != null)
+                {
+                    ReadbackTexture(surface.Texture, downscaledBuffer, surface.Width, surface.Height);
+                }
+
+                return new CompositeFrame(
+                    includeCpuReadback && downscaledBuffer != null ? downscaledBuffer : Array.Empty<byte>(),
+                    surface.Width,
+                    surface.Height,
+                    surface);
+            }
+        }
+
+        public CompositeFrame? ComposePreparedLayersOntoSurface(
+            GpuCompositeSurface? currentSurface,
+            IReadOnlyList<PreparedLayerInput> layers,
+            int destWidth,
+            int destHeight,
+            double animationTime,
+            bool firstLayer,
+            ref byte[]? downscaledBuffer,
+            bool includeCpuReadback = true)
+        {
+            if (!_gpuAvailable || layers.Count == 0 || destWidth <= 0 || destHeight <= 0)
+            {
+                return null;
+            }
+
+            int requiredLength = destWidth * destHeight * 4;
+            if (includeCpuReadback && (downscaledBuffer == null || downscaledBuffer.Length != requiredLength))
+            {
+                downscaledBuffer = new byte[requiredLength];
+            }
+
+            lock (_sync)
+            {
+                EnsureCompositeResources(destWidth, destHeight);
+                if (_context == null ||
+                    _compositeTextureA == null ||
+                    _compositeTextureB == null ||
+                    _compositeSrvA == null ||
+                    _compositeSrvB == null ||
+                    _compositeRtvA == null ||
+                    _compositeRtvB == null)
+                {
+                    return null;
+                }
+
+                bool useExistingSurface = currentSurface != null;
+                if (!useExistingSurface)
+                {
+                    _context.ClearRenderTargetView(_compositeRtvA, new Vortice.Mathematics.Color4(0f, 0f, 0f, 1f));
+                    _context.ClearRenderTargetView(_compositeRtvB, new Vortice.Mathematics.Color4(0f, 0f, 0f, 1f));
+                }
+
+                ID3D11Texture2D currentTexture = currentSurface?.Texture ?? _compositeTextureA;
+                ID3D11ShaderResourceView currentCompositeSrv = currentSurface?.ShaderResourceView ?? _compositeSrvA;
+                IntPtr currentSharedHandle = currentSurface?.SharedTextureHandle ?? _compositeSharedHandleA;
+
+                bool wroteAny = false;
+                foreach (var layer in layers)
+                {
+                    if (layer.Width <= 0 || layer.Height <= 0)
+                    {
+                        continue;
+                    }
+
+                    var sourceSrv = ResolvePreparedLayerShaderResource(layer);
+                    if (sourceSrv == null)
+                    {
+                        return null;
+                    }
+
+                    bool drawIntoA = currentTexture == _compositeTextureB;
+                    ID3D11Texture2D targetTexture = drawIntoA ? _compositeTextureA : _compositeTextureB;
+                    ID3D11ShaderResourceView targetSrv = drawIntoA ? _compositeSrvA : _compositeSrvB;
+                    ID3D11RenderTargetView targetRtv = drawIntoA ? _compositeRtvA : _compositeRtvB;
+                    IntPtr targetSharedHandle = drawIntoA ? _compositeSharedHandleA : _compositeSharedHandleB;
+
+                    var source = layer.Source;
+                    double animationOpacity = _owner.BuildAnimationOpacity(source, animationTime);
+                    double effectiveOpacity = Math.Clamp(source.Opacity * animationOpacity, 0.0, 1.0);
+                    DrawSourceIntoComposite(
+                        currentCompositeSrv,
+                        targetRtv,
+                        sourceSrv,
+                        layer.Width,
+                        layer.Height,
+                        destWidth,
+                        destHeight,
+                        source.BlendMode,
+                        effectiveOpacity,
+                        source.Mirror && source.Type == CaptureSource.SourceType.Webcam,
+                        source.FitMode,
+                        _owner.BuildAnimationTransform(source, destWidth, destHeight, animationTime),
+                        new KeyingSettings(
+                            source.KeyEnabled && source.BlendMode == BlendMode.Normal,
+                            source.BlendMode == BlendMode.Normal,
+                            source.KeyColorR,
+                            source.KeyColorG,
+                            source.KeyColorB,
+                            source.KeyTolerance),
+                        isFirstLayer: !wroteAny && (firstLayer || !useExistingSurface));
+
+                    currentTexture = targetTexture;
+                    currentCompositeSrv = targetSrv;
+                    currentSharedHandle = targetSharedHandle;
+                    wroteAny = true;
+                    Interlocked.Increment(ref _compositePassCount);
+                }
+
+                if (!wroteAny)
+                {
+                    return currentSurface == null
+                        ? null
+                        : new CompositeFrame(
+                            includeCpuReadback && downscaledBuffer != null ? downscaledBuffer : Array.Empty<byte>(),
+                            destWidth,
+                            destHeight,
+                            currentSurface);
+                }
+
+                _context.OMSetRenderTargets(new ID3D11RenderTargetView[] { null! }, null);
+                if (includeCpuReadback && downscaledBuffer != null)
+                {
+                    long readbackStart = Stopwatch.GetTimestamp();
+                    ReadbackTexture(currentTexture, downscaledBuffer, destWidth, destHeight);
+                    Interlocked.Add(ref _readbackTicks, Stopwatch.GetTimestamp() - readbackStart);
+                }
+
+                Interlocked.Increment(ref _buildCount);
+                return new CompositeFrame(
+                    includeCpuReadback && downscaledBuffer != null ? downscaledBuffer : Array.Empty<byte>(),
+                    destWidth,
+                    destHeight,
+                    new GpuCompositeSurface(currentTexture, currentCompositeSrv, currentSharedHandle, destWidth, destHeight));
             }
         }
 
@@ -280,6 +518,162 @@ public partial class MainWindow
             _context = null;
             _device = null;
             _sharedDevice = null;
+        }
+
+        private CompositeFrame? ComposePixelBufferOntoSurface(
+            GpuCompositeSurface? currentSurface,
+            byte[] sourcePixels,
+            int sourceWidth,
+            int sourceHeight,
+            CaptureSource source,
+            int destWidth,
+            int destHeight,
+            double animationTime,
+            bool firstLayer,
+            ref byte[]? downscaledBuffer,
+            bool includeCpuReadback)
+        {
+            if (!_gpuAvailable || sourceWidth <= 0 || sourceHeight <= 0 || destWidth <= 0 || destHeight <= 0)
+            {
+                return null;
+            }
+
+            lock (_sync)
+            {
+                EnsureCompositeResources(destWidth, destHeight);
+                EnsureSourceResource(sourceWidth, sourceHeight);
+                if (_context == null || _sourceTexture == null || _sourceSrv == null)
+                {
+                    return null;
+                }
+
+                UploadTexture(_context, _sourceTexture, sourcePixels, sourceWidth, sourceHeight);
+                return ComposeShaderResourceOntoSurface(
+                    currentSurface,
+                    _sourceSrv,
+                    sourceWidth,
+                    sourceHeight,
+                    source,
+                    destWidth,
+                    destHeight,
+                    animationTime,
+                    firstLayer,
+                    ref downscaledBuffer,
+                    includeCpuReadback);
+            }
+        }
+
+        private ID3D11ShaderResourceView? ResolvePreparedLayerShaderResource(PreparedLayerInput layer)
+        {
+            if (layer.SourceShaderResourceView != null)
+            {
+                return layer.SourceShaderResourceView;
+            }
+
+            if (layer.SourcePixels == null)
+            {
+                return null;
+            }
+
+            EnsureSourceResource(layer.Width, layer.Height);
+            if (_context == null || _sourceTexture == null || _sourceSrv == null)
+            {
+                return null;
+            }
+
+            long uploadStart = Stopwatch.GetTimestamp();
+            UploadTexture(_context, _sourceTexture, layer.SourcePixels, layer.Width, layer.Height);
+            Interlocked.Add(ref _uploadTicks, Stopwatch.GetTimestamp() - uploadStart);
+            return _sourceSrv;
+        }
+
+        private CompositeFrame? ComposeShaderResourceOntoSurface(
+            GpuCompositeSurface? currentSurface,
+            ID3D11ShaderResourceView sourceSrv,
+            int sourceWidth,
+            int sourceHeight,
+            CaptureSource source,
+            int destWidth,
+            int destHeight,
+            double animationTime,
+            bool firstLayer,
+            ref byte[]? downscaledBuffer,
+            bool includeCpuReadback)
+        {
+            if (!_gpuAvailable || destWidth <= 0 || destHeight <= 0)
+            {
+                return null;
+            }
+
+            int requiredLength = destWidth * destHeight * 4;
+            if (includeCpuReadback && (downscaledBuffer == null || downscaledBuffer.Length != requiredLength))
+            {
+                downscaledBuffer = new byte[requiredLength];
+            }
+
+            lock (_sync)
+            {
+                EnsureCompositeResources(destWidth, destHeight);
+                if (_context == null ||
+                    _compositeTextureA == null ||
+                    _compositeTextureB == null ||
+                    _compositeSrvA == null ||
+                    _compositeSrvB == null ||
+                    _compositeRtvA == null ||
+                    _compositeRtvB == null)
+                {
+                    return null;
+                }
+
+                bool useExistingSurface = currentSurface != null;
+                bool drawIntoA = currentSurface?.Texture == _compositeTextureB;
+                if (!useExistingSurface)
+                {
+                    _context.ClearRenderTargetView(_compositeRtvA, new Vortice.Mathematics.Color4(0f, 0f, 0f, 1f));
+                    _context.ClearRenderTargetView(_compositeRtvB, new Vortice.Mathematics.Color4(0f, 0f, 0f, 1f));
+                    drawIntoA = false;
+                }
+
+                ID3D11ShaderResourceView currentCompositeSrv = currentSurface?.ShaderResourceView ?? _compositeSrvA;
+                ID3D11Texture2D targetTexture = drawIntoA ? _compositeTextureA : _compositeTextureB;
+                ID3D11ShaderResourceView targetSrv = drawIntoA ? _compositeSrvA : _compositeSrvB;
+                ID3D11RenderTargetView targetRtv = drawIntoA ? _compositeRtvA : _compositeRtvB;
+                IntPtr targetSharedHandle = drawIntoA ? _compositeSharedHandleA : _compositeSharedHandleB;
+
+                DrawSourceIntoComposite(
+                    currentCompositeSrv,
+                    targetRtv,
+                    sourceSrv,
+                    sourceWidth,
+                    sourceHeight,
+                    destWidth,
+                    destHeight,
+                    source.BlendMode,
+                    source.Opacity * _owner.BuildAnimationOpacity(source, animationTime),
+                    source.Mirror && source.Type == CaptureSource.SourceType.Webcam,
+                    source.FitMode,
+                    _owner.BuildAnimationTransform(source, destWidth, destHeight, animationTime),
+                    new KeyingSettings(
+                        source.KeyEnabled && source.BlendMode == BlendMode.Normal,
+                        source.BlendMode == BlendMode.Normal,
+                        source.KeyColorR,
+                        source.KeyColorG,
+                        source.KeyColorB,
+                        source.KeyTolerance),
+                    isFirstLayer: firstLayer || !useExistingSurface);
+
+                _context.OMSetRenderTargets(new ID3D11RenderTargetView[] { null! }, null);
+                if (includeCpuReadback && downscaledBuffer != null)
+                {
+                    ReadbackTexture(targetTexture, downscaledBuffer, destWidth, destHeight);
+                }
+
+                return new CompositeFrame(
+                    includeCpuReadback && downscaledBuffer != null ? downscaledBuffer : Array.Empty<byte>(),
+                    destWidth,
+                    destHeight,
+                    new GpuCompositeSurface(targetTexture, targetSrv, targetSharedHandle, destWidth, destHeight));
+            }
         }
 
         private void TryInitializeGpu()
@@ -423,6 +817,9 @@ public partial class MainWindow
         }
 
         private void DrawSourceIntoComposite(
+            ID3D11ShaderResourceView currentCompositeSrv,
+            ID3D11RenderTargetView targetRtv,
+            ID3D11ShaderResourceView sourceSrv,
             int sourceWidth,
             int sourceHeight,
             int destWidth,
@@ -433,8 +830,7 @@ public partial class MainWindow
             FitMode fitMode,
             Transform2D transform,
             in KeyingSettings keying,
-            bool isFirstLayer,
-            bool currentIsA)
+            bool isFirstLayer)
         {
             if (_context == null ||
                 _vertexShader == null ||
@@ -442,11 +838,9 @@ public partial class MainWindow
                 _parameterBuffer == null ||
                 _linearClampSampler == null ||
                 _linearWrapSampler == null ||
-                _sourceSrv == null ||
-                _compositeSrvA == null ||
-                _compositeSrvB == null ||
-                _compositeRtvA == null ||
-                _compositeRtvB == null)
+                currentCompositeSrv == null ||
+                targetRtv == null ||
+                sourceSrv == null)
             {
                 return;
             }
@@ -501,8 +895,6 @@ public partial class MainWindow
                 Flags = flags
             };
 
-            ID3D11ShaderResourceView currentCompositeSrv = currentIsA ? _compositeSrvA : _compositeSrvB;
-            ID3D11RenderTargetView targetRtv = currentIsA ? _compositeRtvB : _compositeRtvA;
             UpdateConstants(_context, _parameterBuffer, parameters);
 
             _context.OMSetRenderTargets(targetRtv, null);
@@ -511,7 +903,7 @@ public partial class MainWindow
             _context.IASetInputLayout(null);
             _context.VSSetShader(_vertexShader);
             _context.PSSetShader(_pixelShader);
-            _context.PSSetShaderResources(0, new[] { currentCompositeSrv, _sourceSrv });
+            _context.PSSetShaderResources(0, new[] { currentCompositeSrv, sourceSrv });
             _context.PSSetSamplers(0, new[] { _linearClampSampler, _linearWrapSampler });
             _context.PSSetConstantBuffers(0, new[] { _parameterBuffer });
             _context.Draw(3, 0);
@@ -519,6 +911,30 @@ public partial class MainWindow
             _context.PSSetShader(null);
             _context.VSSetShader(null);
             _context.OMSetRenderTargets(new ID3D11RenderTargetView[] { null! }, null);
+        }
+
+        private void ReadbackTexture(ID3D11Texture2D texture, byte[] downscaledBuffer, int width, int height)
+        {
+            if (_context == null || _stagingTexture == null)
+            {
+                return;
+            }
+
+            _context.CopyResource(_stagingTexture, texture);
+            var mapped = _context.Map(_stagingTexture, 0, MapMode.Read, Vortice.Direct3D11.MapFlags.None);
+            try
+            {
+                int rowSize = width * 4;
+                for (int row = 0; row < height; row++)
+                {
+                    IntPtr sourcePtr = IntPtr.Add(mapped.DataPointer, checked((int)(row * mapped.RowPitch)));
+                    Marshal.Copy(sourcePtr, downscaledBuffer, row * rowSize, rowSize);
+                }
+            }
+            finally
+            {
+                _context.Unmap(_stagingTexture, 0);
+            }
         }
 
         private static void UploadTexture(ID3D11DeviceContext1 context, ID3D11Texture2D texture, byte[] data, int width, int height)

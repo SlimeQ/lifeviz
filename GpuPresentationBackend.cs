@@ -120,6 +120,10 @@ internal sealed class GpuPresentationBackend : IDisposable
     private readonly IntPtr[] _simulationLayerSharedHandles = new IntPtr[MaxSimulationLayers];
     private readonly IntPtr[] _openedSimulationLayerSharedHandles = new IntPtr[MaxSimulationLayers];
     private readonly bool[] _simulationLayerUsesSharedTexture = new bool[MaxSimulationLayers];
+    private ID3D11Texture2D? _smokeReadbackTexture;
+    private byte[]? _smokePresentedFrame;
+    private int _smokePresentedWidth;
+    private int _smokePresentedHeight;
     private ID3D11Texture2D? _sharedUnderlayTexture;
     private ID3D11ShaderResourceView? _sharedUnderlayTextureView;
     private IntPtr _underlaySharedHandle;
@@ -409,6 +413,21 @@ internal sealed class GpuPresentationBackend : IDisposable
         return true;
     }
 
+    public byte[]? GetPresentedFrameCopyForSmoke()
+    {
+        lock (_sync)
+        {
+            if (_smokePresentedFrame == null)
+            {
+                return null;
+            }
+
+            var copy = new byte[_smokePresentedFrame.Length];
+            Buffer.BlockCopy(_smokePresentedFrame, 0, copy, 0, copy.Length);
+            return copy;
+        }
+    }
+
     public void Dispose()
     {
         if (_disposed)
@@ -590,6 +609,11 @@ internal sealed class GpuPresentationBackend : IDisposable
                 e.Context.CopyResource(e.Surface.ColorTexture, _simulationTexture);
                 _drawCount++;
                 _cpuFallbackDrawCount++;
+            }
+
+            if (App.IsSmokeTestMode)
+            {
+                CapturePresentedFrameForSmoke(e);
             }
         }
     }
@@ -1042,6 +1066,11 @@ internal sealed class GpuPresentationBackend : IDisposable
     private void DisposeTextureResources()
     {
         DisposeSharedUnderlayResource();
+        _smokeReadbackTexture?.Dispose();
+        _smokeReadbackTexture = null;
+        _smokePresentedFrame = null;
+        _smokePresentedWidth = 0;
+        _smokePresentedHeight = 0;
         _simulationTextureView?.Dispose();
         _simulationTextureView = null;
         _underlayTextureView?.Dispose();
@@ -1093,6 +1122,85 @@ internal sealed class GpuPresentationBackend : IDisposable
         _compositePixelShader = null;
         _finalCompositePixelShader?.Dispose();
         _finalCompositePixelShader = null;
+    }
+
+    private void CapturePresentedFrameForSmoke(DrawEventArgs e)
+    {
+        if (e.Surface.ColorTexture == null)
+        {
+            return;
+        }
+
+        var colorDescription = e.Surface.ColorTexture.Description;
+        int width = (int)colorDescription.Width;
+        int height = (int)colorDescription.Height;
+        if (width <= 0 || height <= 0)
+        {
+            return;
+        }
+
+        EnsureSmokeReadbackTexture(e.Device, width, height);
+        if (_smokeReadbackTexture == null)
+        {
+            return;
+        }
+
+        int requiredLength = width * height * 4;
+        if (_smokePresentedFrame == null || _smokePresentedFrame.Length != requiredLength)
+        {
+            _smokePresentedFrame = new byte[requiredLength];
+        }
+
+        e.Context.CopyResource(_smokeReadbackTexture, e.Surface.ColorTexture);
+        var mapped = e.Context.Map(_smokeReadbackTexture, 0, MapMode.Read, Vortice.Direct3D11.MapFlags.None);
+        try
+        {
+            int rowPitch = checked((int)mapped.RowPitch);
+            for (int row = 0; row < height; row++)
+            {
+                Marshal.Copy(
+                    IntPtr.Add(mapped.DataPointer, row * rowPitch),
+                    _smokePresentedFrame,
+                    row * width * 4,
+                    width * 4);
+            }
+        }
+        finally
+        {
+            e.Context.Unmap(_smokeReadbackTexture, 0);
+        }
+
+        _smokePresentedWidth = width;
+        _smokePresentedHeight = height;
+    }
+
+    private void EnsureSmokeReadbackTexture(ID3D11Device1 device, int width, int height)
+    {
+        if (_smokeReadbackTexture != null &&
+            _smokePresentedWidth == width &&
+            _smokePresentedHeight == height)
+        {
+            return;
+        }
+
+        _smokeReadbackTexture?.Dispose();
+        _smokeReadbackTexture = null;
+
+        var stagingDescription = new Texture2DDescription(
+            Format.B8G8R8A8_UNorm,
+            (uint)width,
+            (uint)height,
+            1,
+            1,
+            BindFlags.None,
+            ResourceUsage.Staging,
+            CpuAccessFlags.Read,
+            1,
+            0,
+            ResourceOptionFlags.None);
+        _smokeReadbackTexture = device.CreateTexture2D(stagingDescription);
+        _smokePresentedWidth = width;
+        _smokePresentedHeight = height;
     }
 
     private static void ApplyOverlayBlend(byte[] targetBuffer, byte[] overlayBuffer, PresentationBlendMode blendMode, int width, int height)

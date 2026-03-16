@@ -104,6 +104,63 @@ public partial class MainWindow
             return new CompositeFrame(downscaledBuffer, downscaledWidth, downscaledHeight);
         }
 
+        internal void CompositeSourceFrameIntoBuffer(
+            byte[] destination,
+            int destWidth,
+            int destHeight,
+            SourceFrame frame,
+            CaptureSource source,
+            double animationTime,
+            bool firstLayer)
+        {
+            if (destination.Length < destWidth * destHeight * 4)
+            {
+                return;
+            }
+
+            var transform = _owner.BuildAnimationTransform(source, destWidth, destHeight, animationTime);
+            double animationOpacity = _owner.BuildAnimationOpacity(source, animationTime);
+            double effectiveOpacity = Math.Clamp(source.Opacity * animationOpacity, 0.0, 1.0);
+            var keying = new KeyingSettings(
+                source.KeyEnabled && source.BlendMode == BlendMode.Normal,
+                source.BlendMode == BlendMode.Normal,
+                source.KeyColorR,
+                source.KeyColorG,
+                source.KeyColorB,
+                source.KeyTolerance);
+
+            if (firstLayer)
+            {
+                CopyIntoBuffer(
+                    destination,
+                    destWidth,
+                    destHeight,
+                    frame.Downscaled,
+                    frame.DownscaledWidth,
+                    frame.DownscaledHeight,
+                    effectiveOpacity,
+                    source.Mirror && source.Type == CaptureSource.SourceType.Webcam,
+                    source.FitMode,
+                    transform,
+                    keying);
+                return;
+            }
+
+            CompositeIntoBuffer(
+                destination,
+                destWidth,
+                destHeight,
+                frame.Downscaled,
+                frame.DownscaledWidth,
+                frame.DownscaledHeight,
+                source.BlendMode,
+                effectiveOpacity,
+                source.Mirror && source.Type == CaptureSource.SourceType.Webcam,
+                source.FitMode,
+                transform,
+                keying);
+        }
+
         private static double ComputeKeyAlpha(byte sb, byte sg, byte sr, in KeyingSettings keying)
         {
             if (!keying.Enabled)

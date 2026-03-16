@@ -143,6 +143,7 @@ public partial class MainWindow : Window
     private byte[]? _pixelBuffer;
     private byte[]? _compositeDownscaledBuffer;
     private byte[]? _invertScratchBuffer;
+    private bool _suppressSmokeIntermediateSimGroupReadback;
     private CompositeFrame? _lastCompositeFrame;
     private int _displayWidth;
     private int _displayHeight;
@@ -172,6 +173,7 @@ public partial class MainWindow : Window
     private double _renderDisplayFps;
     private double _presentationDisplayFps;
     private double _simulationDisplayFps;
+    private int _lastSimulationStepsThisFrame;
     private int _lastPresentationDrawCount;
     private GameOfLifeEngine.LifeMode _lifeMode = GameOfLifeEngine.LifeMode.NaiveGrayscale;
     private GameOfLifeEngine.BinningMode _binningMode = GameOfLifeEngine.BinningMode.Fill;
@@ -261,11 +263,18 @@ public partial class MainWindow : Window
     private Point _chromeResizeStartScreen;
     private Rect _chromeResizeStartBounds;
     private readonly bool _startupRecoveryTriggered;
+    private readonly CpuSourceCompositor _inlineSourceCompositor;
+    private readonly GpuSourceCompositor _inlineGpuSourceCompositor;
+    private readonly GpuSimulationGroupCompositor _gpuSimulationGroupCompositor;
+    private int _pendingInlineSimulationStepsThisFrame;
 
     public MainWindow()
     {
         Logger.Initialize();
         _engine = new GpuSimulationBackend();
+        _inlineSourceCompositor = new CpuSourceCompositor(this);
+        _inlineGpuSourceCompositor = new GpuSourceCompositor(this);
+        _gpuSimulationGroupCompositor = new GpuSimulationGroupCompositor();
         _startupRecoveryTriggered = TryConsumeStartupRecoveryFlag();
         MarkStartupPending();
 
@@ -335,7 +344,9 @@ public partial class MainWindow : Window
                 _renderBackend = new NullRenderBackend();
                 _pixelBuffer = null;
                 renderBackend.Dispose();
-                foreach (var backend in _simulationLayers.Select(layer => layer.Engine).Distinct())
+                _inlineGpuSourceCompositor.Dispose();
+                _gpuSimulationGroupCompositor.Dispose();
+                foreach (var backend in EnumerateSimulationLeafLayers(_simulationLayers).Select(layer => layer.Engine).OfType<ISimulationBackend>().Distinct())
                 {
                     backend.Dispose();
                 }
@@ -836,9 +847,10 @@ public partial class MainWindow : Window
         });
 
         var engine = GetReferenceSimulationEngine();
-        bool allLayerRowsMatch = _simulationLayers.All(layer => layer.Engine.Rows == engine.Rows);
-        bool allLayerColumnsMatch = _simulationLayers.All(layer => layer.Engine.Columns == engine.Columns);
-        return (_configuredRows, engine.Rows, engine.Columns, _renderBackend.PixelWidth, _renderBackend.PixelHeight, _simulationLayers.Count, allLayerRowsMatch, allLayerColumnsMatch);
+        var leaves = EnumerateSimulationLeafLayers(_simulationLayers).ToArray();
+        bool allLayerRowsMatch = leaves.All(layer => layer.Engine?.Rows == engine.Rows);
+        bool allLayerColumnsMatch = leaves.All(layer => layer.Engine?.Columns == engine.Columns);
+        return (_configuredRows, engine.Rows, engine.Columns, _renderBackend.PixelWidth, _renderBackend.PixelHeight, leaves.Length, allLayerRowsMatch, allLayerColumnsMatch);
     }
 
     internal (int configuredRows, int engineRows, int engineColumns, int surfaceWidth, int surfaceHeight, int layerCount, bool allLayerRowsMatch, bool allLayerColumnsMatch) RunSceneEditorDimensionSmoke(int rows, bool liveMode)
@@ -849,20 +861,525 @@ public partial class MainWindow : Window
         editor.ApplySimulationHeightForSmoke(rows, applyImmediately: !liveMode);
 
         var engine = GetReferenceSimulationEngine();
-        bool allLayerRowsMatch = _simulationLayers.All(layer => layer.Engine.Rows == engine.Rows);
-        bool allLayerColumnsMatch = _simulationLayers.All(layer => layer.Engine.Columns == engine.Columns);
-        return (_configuredRows, engine.Rows, engine.Columns, _renderBackend.PixelWidth, _renderBackend.PixelHeight, _simulationLayers.Count, allLayerRowsMatch, allLayerColumnsMatch);
+        var leaves = EnumerateSimulationLeafLayers(_simulationLayers).ToArray();
+        bool allLayerRowsMatch = leaves.All(layer => layer.Engine?.Rows == engine.Rows);
+        bool allLayerColumnsMatch = leaves.All(layer => layer.Engine?.Columns == engine.Columns);
+        return (_configuredRows, engine.Rows, engine.Columns, _renderBackend.PixelWidth, _renderBackend.PixelHeight, leaves.Length, allLayerRowsMatch, allLayerColumnsMatch);
+    }
+
+    internal bool TryGetSimulationLayerThresholdMinForSmoke(Guid layerId, out double thresholdMin)
+    {
+        var layer = EnumerateSimulationLeafLayers(_simulationLayers).FirstOrDefault(candidate => candidate.Id == layerId);
+        if (layer == null)
+        {
+            thresholdMin = 0;
+            return false;
+        }
+
+        thresholdMin = layer.ThresholdMin;
+        return true;
+    }
+
+    internal (int totalLayers, int enabledLayers) GetSimulationLayerCountsForSmoke()
+    {
+        var leaves = EnumerateSimulationLeafLayers(_simulationLayers).ToArray();
+        return (leaves.Length, leaves.Count(layer => layer.Enabled));
+    }
+
+    internal bool RunLegacySimulationGroupSourceMigrationSmoke()
+    {
+        _sources.Clear();
+
+        var specs = new List<SimulationLayerSpec>
+        {
+            new()
+            {
+                Id = Guid.NewGuid(),
+                Kind = LayerEditorSimulationItemKind.Group,
+                Name = "Outer",
+                Enabled = true,
+                Children = new List<SimulationLayerSpec>
+                {
+                    new()
+                    {
+                        Id = Guid.NewGuid(),
+                        Kind = LayerEditorSimulationItemKind.Group,
+                        Name = "Inner Disabled",
+                        Enabled = false,
+                        Children = new List<SimulationLayerSpec>
+                        {
+                            new()
+                            {
+                                Id = Guid.NewGuid(),
+                                Kind = LayerEditorSimulationItemKind.Layer,
+                                Name = "Disabled Child",
+                                Enabled = true,
+                                InputFunction = SimulationInputFunction.Direct,
+                                BlendMode = BlendMode.Additive,
+                                InjectionMode = GameOfLifeEngine.InjectionMode.Threshold,
+                                LifeMode = GameOfLifeEngine.LifeMode.NaiveGrayscale,
+                                BinningMode = GameOfLifeEngine.BinningMode.Fill,
+                                ThresholdMin = 0.22,
+                                ThresholdMax = 0.66
+                            }
+                        }
+                    },
+                    new()
+                    {
+                        Id = Guid.NewGuid(),
+                        Kind = LayerEditorSimulationItemKind.Layer,
+                        Name = "Enabled Child",
+                        Enabled = true,
+                        InputFunction = SimulationInputFunction.Inverse,
+                        BlendMode = BlendMode.Subtractive,
+                        InjectionMode = GameOfLifeEngine.InjectionMode.Threshold,
+                        LifeMode = GameOfLifeEngine.LifeMode.NaiveGrayscale,
+                        BinningMode = GameOfLifeEngine.BinningMode.Fill,
+                        ThresholdMin = 0.31,
+                        ThresholdMax = 0.74
+                    }
+                }
+            }
+        };
+
+        if (!TryAddLegacySimulationGroupSource(specs))
+        {
+            return false;
+        }
+
+        var source = _sources.SingleOrDefault(candidate => candidate.Type == CaptureSource.SourceType.SimGroup);
+        if (source == null || source.SimulationLayers.Count != 2)
+        {
+            return false;
+        }
+
+        bool flattened = source.SimulationLayers.All(layer => layer.Kind == LayerEditorSimulationItemKind.Layer);
+        var disabledChild = source.SimulationLayers.FirstOrDefault(layer => layer.Name == "Disabled Child");
+        var enabledChild = source.SimulationLayers.FirstOrDefault(layer => layer.Name == "Enabled Child");
+        return flattened &&
+               disabledChild is { Enabled: false } &&
+               enabledChild is { Enabled: true } &&
+               Math.Abs(enabledChild.ThresholdMin - 0.31) < 0.0001;
+    }
+
+    internal bool RunSimGroupRemovalClearsRuntimeSmoke()
+    {
+        _sources.Clear();
+        ClearSimulationLayers();
+
+        var source = CaptureSource.CreateSimulationGroup("Simulation");
+        foreach (var spec in BuildDefaultSimulationLayerSpecs())
+        {
+            source.SimulationLayers.Add(spec);
+        }
+
+        _sources.Add(source);
+        ApplySimulationLayersFromSourceStack(fallbackToDefault: false);
+        bool hadRuntimeLayers = EnumerateSimulationLeafLayers(_simulationLayers).Any();
+
+        _sources.Clear();
+        ApplySimulationLayersFromSourceStack(fallbackToDefault: false);
+        bool clearedRuntimeLayers = !EnumerateSimulationLeafLayers(_simulationLayers).Any();
+
+        Logger.Info(
+            $"Sim-group removal smoke: hadRuntimeLayers={hadRuntimeLayers}, clearedRuntimeLayers={clearedRuntimeLayers}.");
+        return hadRuntimeLayers && clearedRuntimeLayers;
+    }
+
+    internal bool RunNoSimGroupRendersCompositeSmoke()
+    {
+        if (!_renderLoopAttached)
+        {
+            InitializeVisualizer();
+        }
+
+        _sources.Clear();
+        ClearSimulationLayers();
+        _passthroughEnabled = false;
+        _passthroughCompositedInPixelBuffer = false;
+
+        ApplyDimensions(144, 24, DefaultAspectRatio, persist: false);
+        int width = GetReferenceSimulationEngine().Columns;
+        int height = GetReferenceSimulationEngine().Rows;
+        var source = CaptureSource.CreateFile("no-sim-group", "No Sim Group", width, height);
+        source.LastFrame = new SourceFrame(BuildSmokeGradientBgra(width, height), width, height, null, width, height);
+        source.BlendMode = BlendMode.Additive;
+        source.Opacity = 1.0;
+        _sources.Add(source);
+        UpdatePrimaryAspectIfNeeded();
+
+        _compositeDownscaledBuffer = null;
+        _lastCompositeFrame = null;
+        InjectCaptureFrames();
+        int priorPresentationDrawCount = _renderBackend.PresentationDrawCount;
+        RenderFrame();
+
+        bool outputVisible = BufferHasNonBlackPixel(_pixelBuffer);
+        bool gpuPresentedComposite = _renderBackend.PresentationDrawCount > priorPresentationDrawCount &&
+                                     _lastCompositeFrame?.GpuSurface != null;
+        bool compositedUnderlay = _passthroughCompositedInPixelBuffer && _lastCompositeFrame != null;
+        bool runtimeLayersEmpty = !EnumerateSimulationLeafLayers(_simulationLayers).Any();
+        Logger.Info(
+            $"No-sim-group composite smoke: outputVisible={outputVisible}, gpuPresentedComposite={gpuPresentedComposite}, " +
+            $"compositedUnderlay={compositedUnderlay}, runtimeLayersEmpty={runtimeLayersEmpty}.");
+        return (outputVisible || gpuPresentedComposite || compositedUnderlay) && runtimeLayersEmpty;
+    }
+
+    internal bool RunDisabledSimGroupRendersCompositeSmoke()
+    {
+        if (!_renderLoopAttached)
+        {
+            InitializeVisualizer();
+        }
+
+        _sources.Clear();
+        ClearSimulationLayers();
+        _passthroughEnabled = false;
+        _passthroughCompositedInPixelBuffer = false;
+
+        ApplyDimensions(144, 24, DefaultAspectRatio, persist: false);
+        int width = GetReferenceSimulationEngine().Columns;
+        int height = GetReferenceSimulationEngine().Rows;
+
+        var source = CaptureSource.CreateFile("disabled-sim-group", "Disabled Sim Group", width, height);
+        source.LastFrame = new SourceFrame(BuildSmokeGradientBgra(width, height), width, height, null, width, height);
+        source.BlendMode = BlendMode.Additive;
+        source.Opacity = 1.0;
+
+        var simulationGroup = CaptureSource.CreateSimulationGroup("Disabled Sim Group");
+        foreach (var spec in BuildDefaultSimulationLayerSpecs())
+        {
+            simulationGroup.SimulationLayers.Add(spec);
+        }
+
+        _sources.Add(source);
+        _sources.Add(simulationGroup);
+        ApplySimulationLayersFromSourceStack(fallbackToDefault: false);
+        foreach (var layer in EnumerateSimulationLeafLayers(_simulationLayers))
+        {
+            layer.Enabled = false;
+        }
+
+        UpdatePrimaryAspectIfNeeded();
+        _compositeDownscaledBuffer = null;
+        _lastCompositeFrame = null;
+        InjectCaptureFrames();
+        RenderFrame();
+
+        bool hasRuntimeLayers = EnumerateSimulationLeafLayers(_simulationLayers).Any();
+        bool anyEnabledLayers = EnumerateSimulationLeafLayers(_simulationLayers).Any(layer => layer.Enabled);
+        bool compositeVisible = BufferHasNonBlackPixel(_lastCompositeFrame?.Downscaled);
+        bool outputMatchesComposite =
+            _pixelBuffer != null &&
+            _lastCompositeFrame != null &&
+            _pixelBuffer.Length == _lastCompositeFrame.Downscaled.Length &&
+            _pixelBuffer.AsSpan().SequenceEqual(_lastCompositeFrame.Downscaled);
+        bool gpuPresentedComposite = _lastCompositeFrame?.GpuSurface != null && !_passthroughCompositedInPixelBuffer;
+
+        Logger.Info(
+            $"Disabled-sim-group composite smoke: hasRuntimeLayers={hasRuntimeLayers}, anyEnabledLayers={anyEnabledLayers}, " +
+            $"compositeVisible={compositeVisible}, outputMatchesComposite={outputMatchesComposite}, gpuPresentedComposite={gpuPresentedComposite}.");
+        return hasRuntimeLayers && !anyEnabledLayers && compositeVisible && (outputMatchesComposite || gpuPresentedComposite);
+    }
+
+    internal bool RunSimGroupStackOrderSmoke()
+    {
+        if (!_renderLoopAttached)
+        {
+            InitializeVisualizer();
+        }
+
+        _sources.Clear();
+        ClearSimulationLayers();
+        _passthroughEnabled = false;
+        _passthroughCompositedInPixelBuffer = false;
+
+        ApplyDimensions(144, 24, DefaultAspectRatio, persist: false);
+        int width = GetReferenceSimulationEngine().Columns;
+        int height = GetReferenceSimulationEngine().Rows;
+
+        var graySource = CaptureSource.CreateFile("stack-order-gray", "Gray", width, height);
+        graySource.LastFrame = new SourceFrame(BuildSmokeSolidBgra(width, height, 128, 128, 128), width, height, null, width, height);
+        graySource.BlendMode = BlendMode.Additive;
+
+        var whiteSource = CaptureSource.CreateFile("stack-order-white", "White", width, height);
+        whiteSource.LastFrame = new SourceFrame(BuildSmokeSolidBgra(width, height, 255, 255, 255), width, height, null, width, height);
+        whiteSource.BlendMode = BlendMode.Additive;
+
+        var simulationGroup = CaptureSource.CreateSimulationGroup("Stack Order");
+        simulationGroup.SimulationLayers.Add(new SimulationLayerSpec
+        {
+            Id = Guid.NewGuid(),
+            Kind = LayerEditorSimulationItemKind.Layer,
+            Name = "Positive",
+            Enabled = true,
+            InputFunction = SimulationInputFunction.Direct,
+            BlendMode = BlendMode.Additive,
+            InjectionMode = GameOfLifeEngine.InjectionMode.Threshold,
+            LifeMode = GameOfLifeEngine.LifeMode.NaiveGrayscale,
+            BinningMode = GameOfLifeEngine.BinningMode.Fill,
+            InjectionNoise = 0.0,
+            LifeOpacity = 1.0,
+            ThresholdMin = 0.40,
+            ThresholdMax = 0.60,
+            InvertThreshold = false
+        });
+
+        byte[]? firstOutput = null;
+        byte[]? secondOutput = null;
+        bool firstGpuBacked = false;
+        bool secondGpuBacked = false;
+
+        void RenderCurrentOrder()
+        {
+            ApplySimulationLayersFromSourceStack(fallbackToDefault: false);
+            ConfigureSimulationLayerEngines(_configuredRows, _configuredDepth, _currentAspectRatio, randomize: false);
+            foreach (var layer in EnumerateSimulationLeafLayers(_simulationLayers))
+            {
+                layer.TimeSinceLastStep = 1.0;
+            }
+
+            _pendingInlineSimulationStepsThisFrame = 1;
+            InjectCaptureFrames(injectLayers: true);
+            _pendingInlineSimulationStepsThisFrame = 0;
+        }
+
+        _sources.Add(graySource);
+        _sources.Add(simulationGroup);
+        _sources.Add(whiteSource);
+        RenderCurrentOrder();
+        firstGpuBacked = _lastCompositeFrame?.GpuSurface != null;
+        if (simulationGroup.LastFrame?.Downscaled != null)
+        {
+            firstOutput = simulationGroup.LastFrame.Downscaled.ToArray();
+        }
+
+        _sources.Clear();
+        _sources.Add(whiteSource);
+        _sources.Add(simulationGroup);
+        _sources.Add(graySource);
+        RenderCurrentOrder();
+        secondGpuBacked = _lastCompositeFrame?.GpuSurface != null;
+        if (simulationGroup.LastFrame?.Downscaled != null)
+        {
+            secondOutput = simulationGroup.LastFrame.Downscaled.ToArray();
+        }
+
+        bool changed = firstOutput != null &&
+                       secondOutput != null &&
+                       !firstOutput.AsSpan().SequenceEqual(secondOutput);
+        bool gpuBacked = firstGpuBacked && secondGpuBacked;
+        Logger.Info($"Sim-group stack-order smoke: outputChanged={changed}, gpuBacked={gpuBacked}.");
+        return changed && gpuBacked;
+    }
+
+    internal bool RunSimGroupInlineHueSmoke()
+    {
+        if (!_renderLoopAttached)
+        {
+            InitializeVisualizer();
+        }
+
+        _sources.Clear();
+        ClearSimulationLayers();
+        _passthroughEnabled = false;
+        _passthroughCompositedInPixelBuffer = false;
+
+        ApplyDimensions(144, 24, DefaultAspectRatio, persist: false);
+        int width = GetReferenceSimulationEngine().Columns;
+        int height = GetReferenceSimulationEngine().Rows;
+
+        var source = CaptureSource.CreateFile("sim-group-inline-hue-source", "Inline Hue Source", width, height);
+        source.LastFrame = new SourceFrame(BuildSmokeSolidBgra(width, height, 0, 0, 255), width, height, null, width, height);
+        source.BlendMode = BlendMode.Additive;
+        source.Opacity = 1.0;
+
+        var simulationGroup = CaptureSource.CreateSimulationGroup("Inline Hue Group");
+
+        SimulationLayerSpec BuildHueSpec(double hueShiftDegrees) => new()
+        {
+            Id = Guid.NewGuid(),
+            Kind = LayerEditorSimulationItemKind.Layer,
+            Name = "Hue Test",
+            Enabled = true,
+            InputFunction = SimulationInputFunction.Direct,
+            BlendMode = BlendMode.Additive,
+            InjectionMode = GameOfLifeEngine.InjectionMode.Threshold,
+            LifeMode = GameOfLifeEngine.LifeMode.RgbChannels,
+            BinningMode = GameOfLifeEngine.BinningMode.Fill,
+            InjectionNoise = 0.0,
+            LifeOpacity = 1.0,
+            ThresholdMin = 0.1,
+            ThresholdMax = 1.0,
+            InvertThreshold = false,
+            RgbHueShiftDegrees = hueShiftDegrees
+        };
+        simulationGroup.SimulationLayers.Add(BuildHueSpec(0.0));
+
+        byte[]? zeroHueOutput = null;
+        byte[]? shiftedHueOutput = null;
+        bool zeroHueGpuBacked = false;
+        bool shiftedHueGpuBacked = false;
+
+        void RenderCurrentHue()
+        {
+            ApplySimulationLayersFromSourceStack(fallbackToDefault: false);
+            ConfigureSimulationLayerEngines(_configuredRows, _configuredDepth, _currentAspectRatio, randomize: false);
+            foreach (var runtimeLayer in EnumerateSimulationLeafLayers(_simulationLayers))
+            {
+                runtimeLayer.TimeSinceLastStep = 1.0;
+            }
+
+            _pendingInlineSimulationStepsThisFrame = 1;
+            InjectCaptureFrames(injectLayers: true);
+            _pendingInlineSimulationStepsThisFrame = 0;
+        }
+
+        _sources.Add(source);
+        _sources.Add(simulationGroup);
+
+        RenderCurrentHue();
+        zeroHueGpuBacked = _lastCompositeFrame?.GpuSurface != null;
+        if (simulationGroup.LastFrame?.Downscaled != null)
+        {
+            zeroHueOutput = simulationGroup.LastFrame.Downscaled.ToArray();
+        }
+
+        simulationGroup.SimulationLayers[0] = BuildHueSpec(120.0);
+        RenderCurrentHue();
+        shiftedHueGpuBacked = _lastCompositeFrame?.GpuSurface != null;
+        if (simulationGroup.LastFrame?.Downscaled != null)
+        {
+            shiftedHueOutput = simulationGroup.LastFrame.Downscaled.ToArray();
+        }
+
+        bool changed = zeroHueOutput != null &&
+                       shiftedHueOutput != null &&
+                       !zeroHueOutput.AsSpan().SequenceEqual(shiftedHueOutput);
+        bool gpuBacked = zeroHueGpuBacked && shiftedHueGpuBacked;
+        Logger.Info($"Sim-group inline-hue smoke: outputChanged={changed}, gpuBacked={gpuBacked}.");
+        return changed && gpuBacked;
+    }
+
+    internal bool RunSimGroupInlinePresentationFreshnessSmoke()
+    {
+        if (!_renderLoopAttached)
+        {
+            InitializeVisualizer();
+        }
+
+        _sources.Clear();
+        ClearSimulationLayers();
+        _passthroughEnabled = false;
+        _passthroughCompositedInPixelBuffer = false;
+        _invertComposite = false;
+        _isPaused = false;
+
+        ApplyDimensions(144, 24, DefaultAspectRatio, persist: false);
+        int width = GetReferenceSimulationEngine().Columns;
+        int height = GetReferenceSimulationEngine().Rows;
+
+        var source = CaptureSource.CreateFile("sim-group-inline-present", "Inline Present Source", width, height);
+        source.BlendMode = BlendMode.Additive;
+        source.Opacity = 1.0;
+
+        var simulationGroup = CaptureSource.CreateSimulationGroup("Inline Present Group");
+        simulationGroup.SimulationLayers.Add(new SimulationLayerSpec
+        {
+            Id = Guid.NewGuid(),
+            Kind = LayerEditorSimulationItemKind.Layer,
+            Name = "Positive",
+            Enabled = true,
+            InputFunction = SimulationInputFunction.Direct,
+            BlendMode = BlendMode.Additive,
+            InjectionMode = GameOfLifeEngine.InjectionMode.Threshold,
+            LifeMode = GameOfLifeEngine.LifeMode.RgbChannels,
+            BinningMode = GameOfLifeEngine.BinningMode.Fill,
+            InjectionNoise = 0.0,
+            LifeOpacity = 1.0,
+            ThresholdMin = 0.25,
+            ThresholdMax = 0.85,
+            InvertThreshold = false
+        });
+
+        _sources.Add(source);
+        _sources.Add(simulationGroup);
+        UpdatePrimaryAspectIfNeeded();
+        ApplySimulationLayersFromSourceStack(fallbackToDefault: false);
+        ConfigureSimulationLayerEngines(_configuredRows, _configuredDepth, _currentAspectRatio, randomize: false);
+
+        byte[][] sourceFrames =
+        {
+            BuildSmokeSolidBgra(width, height, 255, 255, 255),
+            BuildSmokeSolidBgra(width, height, 0, 0, 255),
+            BuildSmokeCheckerBgra(width, height, 0, 0, 0, 255, 255, 255),
+            BuildSmokeGradientBgra(width, height)
+        };
+
+        int compositeChanges = 0;
+        int presentedChanges = 0;
+        int drawAdvances = 0;
+        byte[]? previousComposite = null;
+        byte[]? previousPresented = null;
+
+        for (int i = 0; i < sourceFrames.Length; i++)
+        {
+            source.LastFrame = new SourceFrame(sourceFrames[i], width, height, null, width, height);
+            foreach (var runtimeLayer in EnumerateSimulationLeafLayers(_simulationLayers))
+            {
+                runtimeLayer.TimeSinceLastStep = 1.0;
+            }
+
+            _pendingInlineSimulationStepsThisFrame = 1;
+            int priorDrawCount = _renderBackend.PresentationDrawCount;
+            InjectCaptureFrames(injectLayers: true);
+            _pendingInlineSimulationStepsThisFrame = 0;
+            RenderFrame();
+
+            if (WaitForPresentationDrawForSmoke(priorDrawCount))
+            {
+                drawAdvances++;
+            }
+
+            var composite = _lastCompositeFrame?.Downscaled;
+            var presented = _renderBackend.GetPresentedFrameCopyForSmoke();
+            if (previousPresented != null &&
+                presented != null &&
+                !previousPresented.AsSpan().SequenceEqual(presented))
+            {
+                presentedChanges++;
+            }
+
+            if (previousComposite != null &&
+                composite != null &&
+                !previousComposite.AsSpan().SequenceEqual(composite))
+            {
+                compositeChanges++;
+            }
+
+            previousComposite = composite?.ToArray();
+            previousPresented = presented;
+        }
+
+        bool ok = drawAdvances == sourceFrames.Length &&
+                  compositeChanges >= 2 &&
+                  presentedChanges >= 2;
+        Logger.Info(
+            $"Sim-group inline-presentation smoke: drawAdvances={drawAdvances}/{sourceFrames.Length}, " +
+            $"compositeChanges={compositeChanges}, presentedChanges={presentedChanges}.");
+        return ok;
     }
 
     internal void SetReferenceSimulationLayerLifeModeForSmoke(GameOfLifeEngine.LifeMode mode)
     {
         EnsureSimulationLayersInitialized();
-        if (_simulationLayers.Count == 0)
+        var firstLayer = EnumerateSimulationLeafLayers(_simulationLayers).FirstOrDefault();
+        if (firstLayer == null)
         {
             return;
         }
 
-        _simulationLayers[0].LifeMode = mode;
+        firstLayer.LifeMode = mode;
         ConfigureSimulationLayerEngines(_configuredRows, _configuredDepth, _currentAspectRatio, randomize: false);
         RenderFrame();
     }
@@ -901,9 +1418,34 @@ public partial class MainWindow : Window
         UpdateFpsOverlay();
     }
 
+    private bool WaitForPresentationDrawForSmoke(int priorDrawCount, int maxIdlePasses = 8)
+    {
+        for (int pass = 0; pass < maxIdlePasses; pass++)
+        {
+            if (_renderBackend.PresentationDrawCount > priorDrawCount)
+            {
+                return true;
+            }
+
+            var frame = new DispatcherFrame();
+            Dispatcher.BeginInvoke(DispatcherPriority.Render, new Action(() => frame.Continue = false));
+            Dispatcher.PushFrame(frame);
+
+            if (_renderBackend.PresentationDrawCount > priorDrawCount)
+            {
+                return true;
+            }
+
+            frame = new DispatcherFrame();
+            Dispatcher.BeginInvoke(DispatcherPriority.ApplicationIdle, new Action(() => frame.Continue = false));
+            Dispatcher.PushFrame(frame);
+        }
+
+        return _renderBackend.PresentationDrawCount > priorDrawCount;
+    }
+
     private void InitializeVisualizer()
     {
-        EnsureSimulationLayersInitialized();
         _currentAspectRatio = _aspectRatioLocked
             ? _lockedAspectRatio
             : (_sources.Count > 0 ? _sources[0].AspectRatio : DefaultAspectRatio);
@@ -1320,9 +1862,10 @@ public partial class MainWindow : Window
         _audioReactiveBeatSeedBurstsLastStep = 0;
         EndProfileStamp("audio_update_ms", audioUpdateStamp);
 
+        var simulationLeaves = EnumerateSimulationLeafLayers(_simulationLayers).ToArray();
         int maxStepsThisFrame = 0;
         bool anyLayerNeedsInject = false;
-        foreach (var layer in _simulationLayers)
+        foreach (var layer in simulationLeaves)
         {
             if (!layer.Enabled)
             {
@@ -1354,23 +1897,61 @@ public partial class MainWindow : Window
             }
         }
 
-        _timeSinceLastStep = _simulationLayers.Count == 0 ? 0 : _simulationLayers.Max(layer => layer.TimeSinceLastStep);
+        _timeSinceLastStep = simulationLeaves.Length == 0 ? 0 : simulationLeaves.Max(layer => layer.TimeSinceLastStep);
+        bool hasInlineSceneSimulation = HasEmbeddedSimulationGroups(_sources);
+        _lastSimulationStepsThisFrame = 0;
 
         if (_sources.Count > 0)
         {
             long injectStamp = BeginProfileStamp();
-            InjectCaptureFrames(injectLayers: !_isPaused && maxStepsThisFrame > 0 && anyLayerNeedsInject);
+            if (hasInlineSceneSimulation)
+            {
+                if (maxStepsThisFrame == 0)
+                {
+                    if (!_isPaused && simulationLeaves.Any(layer => layer.Enabled))
+                    {
+                        _audioReactiveLevelSeedBurstsLastStep = ApplyAudioReactiveLevelSeeding(1);
+                    }
+
+                    _pendingInlineSimulationStepsThisFrame = 0;
+                }
+                else if (!_isPaused && anyLayerNeedsInject)
+                {
+                    long seedingStamp = BeginProfileStamp();
+                    _audioReactiveBeatSeedBurstsLastStep = ApplyAudioReactiveBeatSeeding();
+                    _audioReactiveLevelSeedBurstsLastStep = ApplyAudioReactiveLevelSeeding(maxStepsThisFrame);
+                    EndProfileStamp("audio_reactive_seeding_ms", seedingStamp);
+                    _pendingInlineSimulationStepsThisFrame = maxStepsThisFrame;
+                }
+                else
+                {
+                    _pendingInlineSimulationStepsThisFrame = 0;
+                }
+
+                InjectCaptureFrames(injectLayers: true);
+                if (_pendingInlineSimulationStepsThisFrame > 0)
+                {
+                    _lastSimulationStepsThisFrame = _pendingInlineSimulationStepsThisFrame;
+                    _frameProfiler.RecordSample("simulation_steps_per_frame", _pendingInlineSimulationStepsThisFrame);
+                }
+
+                _pendingInlineSimulationStepsThisFrame = 0;
+            }
+            else
+            {
+                InjectCaptureFrames(injectLayers: false);
+            }
             EndProfileStamp("inject_capture_ms", injectStamp);
         }
 
-        if (maxStepsThisFrame == 0)
+        if (!hasInlineSceneSimulation && maxStepsThisFrame == 0)
         {
-            if (!_isPaused && _simulationLayers.Any(layer => layer.Enabled))
+            if (!_isPaused && simulationLeaves.Any(layer => layer.Enabled))
             {
                 _audioReactiveLevelSeedBurstsLastStep = ApplyAudioReactiveLevelSeeding(1);
             }
         }
-        else if (!_isPaused && anyLayerNeedsInject)
+        else if (!hasInlineSceneSimulation && !_isPaused && anyLayerNeedsInject)
         {
             long simulationStageStamp = BeginProfileStamp();
             long seedingStamp = BeginProfileStamp();
@@ -1379,53 +1960,31 @@ public partial class MainWindow : Window
             EndProfileStamp("audio_reactive_seeding_ms", seedingStamp);
 
             long stepStamp = BeginProfileStamp();
-            for (int i = 0; i < maxStepsThisFrame; i++)
-            {
-                bool stepped = false;
-                foreach (var layer in _simulationLayers)
-                {
-                    if (!layer.Enabled || i >= maxStepsThisFrame)
-                    {
-                        continue;
-                    }
-
-                    double targetFps = Math.Max(layer.EffectiveSimulationTargetFps, 0);
-                    if (targetFps < 0.01)
-                    {
-                        layer.TimeSinceLastStep = 0;
-                        continue;
-                    }
-
-                    double desiredInterval = 1.0 / targetFps;
-                    if (layer.TimeSinceLastStep + 0.0000001 < desiredInterval)
-                    {
-                        continue;
-                    }
-
-                    layer.Engine.Step();
-                    layer.TimeSinceLastStep -= desiredInterval;
-                    if (layer.TimeSinceLastStep > desiredInterval * MaxSimulationStepsPerRender)
-                    {
-                        layer.TimeSinceLastStep = desiredInterval;
-                    }
-                    stepped = true;
-                }
-
-                if (stepped)
-                {
-                    _simulationFrames++;
-                }
-            }
+            RunSimulationStepPasses(maxStepsThisFrame, simulationLeaves);
             EndProfileStamp("simulation_step_ms", stepStamp);
             if (simulationStageStamp != 0)
             {
+                _lastSimulationStepsThisFrame = maxStepsThisFrame;
                 _frameProfiler.RecordSample("simulation_steps_per_frame", maxStepsThisFrame);
             }
             EndProfileStamp("simulation_total_ms", simulationStageStamp);
         }
-        else if (_isPaused)
+        else if (!hasInlineSceneSimulation && _isPaused)
         {
-            foreach (var layer in _simulationLayers)
+            foreach (var layer in simulationLeaves)
+            {
+                if (!layer.Enabled || layer.EffectiveSimulationTargetFps < 0.01)
+                {
+                    continue;
+                }
+
+                double desiredInterval = 1.0 / layer.EffectiveSimulationTargetFps;
+                layer.TimeSinceLastStep = Math.Min(layer.TimeSinceLastStep, desiredInterval);
+            }
+        }
+        else if (hasInlineSceneSimulation && _isPaused)
+        {
+            foreach (var layer in simulationLeaves)
             {
                 if (!layer.Enabled || layer.EffectiveSimulationTargetFps < 0.01)
                 {
@@ -1517,9 +2076,77 @@ public partial class MainWindow : Window
         BuildMappings(width, height, engineCols, engineRows);
 
         var composite = _lastCompositeFrame;
+        if (HasEmbeddedSimulationGroups(_sources) &&
+            composite != null)
+        {
+            bool presentedInlineGpu = false;
+            if (!_isRecording &&
+                _renderBackend.SupportsGpuSimulationComposition &&
+                composite.GpuSurface != null &&
+                composite.GpuSurface.Width == width &&
+                composite.GpuSurface.Height == height)
+            {
+                if (composite.GpuSurface.SharedTextureHandle != IntPtr.Zero)
+                {
+                    GpuSharedDevice.FlushIfCreated();
+                }
+
+                long presentInlineStamp = BeginProfileStamp();
+                presentedInlineGpu = _renderBackend.PresentSimulationComposition(
+                    Array.Empty<SimulationPresentationLayerData>(),
+                    null,
+                    composite.GpuSurface,
+                    simulationBaseline: 0,
+                    useSignedAddSubPassthrough: false,
+                    useMixedAddSubPassthroughModel: false,
+                    invertComposite: _invertComposite);
+                EndProfileStamp("present_frame_ms", presentInlineStamp);
+            }
+
+            if (presentedInlineGpu)
+            {
+                _passthroughCompositedInPixelBuffer = false;
+
+                long inlineEffectStamp = BeginProfileStamp();
+                UpdateEffectInput();
+                EndProfileStamp("underlay_effect_ms", inlineEffectStamp);
+
+                long inlineRecordStamp = BeginProfileStamp();
+                TryRecordFrame(requiredLength);
+                EndProfileStamp("record_frame_ms", inlineRecordStamp);
+                return;
+            }
+
+            if (composite.DownscaledWidth == width &&
+                composite.DownscaledHeight == height &&
+                composite.Downscaled.Length >= requiredLength)
+            {
+                Buffer.BlockCopy(composite.Downscaled, 0, _pixelBuffer, 0, requiredLength);
+                if (_invertComposite)
+                {
+                    InvertBuffer(_pixelBuffer);
+                }
+
+                _passthroughCompositedInPixelBuffer = true;
+
+                long presentInlineStamp = BeginProfileStamp();
+                _renderBackend.PresentFrame(_pixelBuffer, stride);
+                EndProfileStamp("present_frame_ms", presentInlineStamp);
+
+                long inlineEffectStamp = BeginProfileStamp();
+                UpdateEffectInput();
+                EndProfileStamp("underlay_effect_ms", inlineEffectStamp);
+
+                long inlineRecordStamp = BeginProfileStamp();
+                TryRecordFrame(requiredLength);
+                EndProfileStamp("record_frame_ms", inlineRecordStamp);
+                return;
+            }
+        }
+
         byte[]? passthroughBuffer = null;
         bool compositePassthroughInPixelBuffer = false;
-        if (_passthroughEnabled &&
+        if ((_passthroughEnabled || !EnumerateSimulationLeafLayers(_simulationLayers).Any(layer => layer.Enabled)) &&
             composite != null &&
             composite.DownscaledWidth == engineCols &&
             composite.DownscaledHeight == engineRows &&
@@ -1531,7 +2158,7 @@ public partial class MainWindow : Window
         }
 
         long colorBuffersStamp = BeginProfileStamp();
-        var enabledLayers = _simulationLayers
+        var enabledLayers = EnumerateSimulationLeafLayers(_simulationLayers)
             .Where(layer => layer.Enabled)
             .ToArray();
         var activeLayerEntries = new List<(SimulationLayerState Layer, SimulationPresentationLayerData Data)>(enabledLayers.Length);
@@ -1550,7 +2177,9 @@ public partial class MainWindow : Window
 
         long blendStamp = BeginProfileStamp();
 
-        if (_passthroughEnabled &&
+        bool renderCompositeDirect = presentationLayers.Length == 0 && composite != null;
+
+        if (renderCompositeDirect &&
             presentationLayers.Length == 0 &&
             composite != null &&
             composite.DownscaledWidth == width &&
@@ -1588,8 +2217,9 @@ public partial class MainWindow : Window
         bool hasEnabledNonAddSubSimulationLayer = activeLayers.Any(layer =>
             layer.BlendMode != BlendMode.Additive &&
             layer.BlendMode != BlendMode.Subtractive);
+        bool useCompositeUnderlay = _passthroughEnabled || presentationLayers.Length == 0;
         GpuCompositeSurface? passthroughSurface =
-            _passthroughEnabled && !compositePassthroughInPixelBuffer ? composite?.GpuSurface : null;
+            useCompositeUnderlay && !compositePassthroughInPixelBuffer ? composite?.GpuSurface : null;
         bool hasPassthroughBaseline = (compositePassthroughInPixelBuffer && passthroughBuffer != null) || passthroughSurface != null;
         bool useSignedAddSubPassthrough = ShouldUseSignedAddSubPassthrough(
             hasPassthroughBaseline,
@@ -2074,9 +2704,9 @@ public partial class MainWindow : Window
 
     private void Randomize_Click(object sender, RoutedEventArgs e)
     {
-        foreach (var layer in _simulationLayers)
+        foreach (var layer in EnumerateSimulationLeafLayers(_simulationLayers))
         {
-            layer.Engine.Randomize();
+            layer.Engine?.Randomize();
         }
         RenderFrame();
     }
@@ -4601,6 +5231,23 @@ public partial class MainWindow : Window
         NotifyLayerEditorSourcesChanged();
     }
 
+    private void AddSimulationGroup(List<CaptureSource> targetList)
+    {
+        var source = CaptureSource.CreateSimulationGroup();
+        foreach (var spec in BuildDefaultSimulationLayerSpecs())
+        {
+            source.SimulationLayers.Add(spec);
+        }
+
+        targetList.Add(source);
+        ApplySimulationLayersFromSourceStack(fallbackToDefault: true);
+        Logger.Info("Inserted new simulation group.");
+        UpdatePrimaryAspectIfNeeded();
+        RenderFrame();
+        SaveConfig();
+        NotifyLayerEditorSourcesChanged();
+    }
+
     private void RenameLayerGroup(CaptureSource source)
     {
         if (source.Type != CaptureSource.SourceType.Group)
@@ -4887,6 +5534,89 @@ public partial class MainWindow : Window
     private CaptureSource? FindSourceById(Guid id) =>
         FindSource(source => source.Id == id);
 
+    private void ApplySimulationLayersFromSourceStack(bool fallbackToDefault)
+    {
+        var specs = new List<SimulationLayerSpec>();
+        foreach (var source in EnumerateSources(_sources))
+        {
+            if (source.Type != CaptureSource.SourceType.SimGroup)
+            {
+                continue;
+            }
+
+            specs.Add(new SimulationLayerSpec
+            {
+                Id = source.Id,
+                Kind = LayerEditorSimulationItemKind.Group,
+                Name = source.DisplayName,
+                Enabled = source.Enabled,
+                Children = source.SimulationLayers
+                    .Select(CloneSimulationLayerSpec)
+                    .ToList()
+            });
+        }
+
+        if (specs.Count == 0)
+        {
+            if (!fallbackToDefault)
+            {
+                ClearSimulationLayers();
+                return;
+            }
+
+            specs = BuildDefaultSimulationLayerSpecs();
+        }
+
+        ApplySimulationLayerSpecs(specs);
+    }
+
+    private void ClearSimulationLayers()
+    {
+        foreach (var layer in EnumerateSimulationLeafLayers(_simulationLayers))
+        {
+            if (layer.Engine != null && !ReferenceEquals(layer.Engine, _engine))
+            {
+                layer.Engine.Dispose();
+            }
+        }
+
+        _simulationLayers.Clear();
+    }
+
+    private static SimulationLayerSpec CloneSimulationLayerSpec(SimulationLayerSpec layer)
+    {
+        return new SimulationLayerSpec
+        {
+            Id = layer.Id,
+            Kind = layer.Kind,
+            Name = layer.Name,
+            Enabled = layer.Enabled,
+            InputFunction = layer.InputFunction,
+            BlendMode = layer.BlendMode,
+            InjectionMode = layer.InjectionMode,
+            LifeMode = layer.LifeMode,
+            BinningMode = layer.BinningMode,
+            InjectionNoise = layer.InjectionNoise,
+            LifeOpacity = layer.LifeOpacity,
+            RgbHueShiftDegrees = layer.RgbHueShiftDegrees,
+            RgbHueShiftSpeedDegreesPerSecond = layer.RgbHueShiftSpeedDegreesPerSecond,
+            AudioFrequencyHueShiftDegrees = layer.AudioFrequencyHueShiftDegrees,
+            ReactiveMappings = layer.ReactiveMappings
+                .Select(mapping => new SimulationReactiveMapping
+                {
+                    Id = mapping.Id,
+                    Input = mapping.Input,
+                    Output = mapping.Output,
+                    Amount = mapping.Amount
+                })
+                .ToList(),
+            ThresholdMin = layer.ThresholdMin,
+            ThresholdMax = layer.ThresholdMax,
+            InvertThreshold = layer.InvertThreshold,
+            Children = layer.Children.Select(CloneSimulationLayerSpec).ToList()
+        };
+    }
+
     private bool ContainsWindowSource(IntPtr handle) =>
         FindSource(s => s.Type == CaptureSource.SourceType.Window && s.Window != null && s.Window.Handle == handle) != null;
 
@@ -4930,6 +5660,17 @@ public partial class MainWindow : Window
         }
 
         RunWithoutLayerEditorRefresh(() => AddLayerGroup(targetList));
+    }
+
+    internal void AddSimulationGroupFromEditor(Guid? parentId)
+    {
+        var targetList = ResolveTargetList(parentId);
+        if (targetList == null)
+        {
+            return;
+        }
+
+        RunWithoutLayerEditorRefresh(() => AddSimulationGroup(targetList));
     }
 
     internal void AddWindowSourceFromEditor(WindowHandleInfo info, Guid? parentId)
@@ -5173,8 +5914,6 @@ public partial class MainWindow : Window
 
         RunWithoutLayerEditorRefresh(() =>
         {
-            EnsureSimulationLayersInitialized();
-
             int nextRows = Math.Clamp(settings.Height, MinRows, MaxRows);
             int nextDepth = Math.Clamp(settings.Depth, 3, 96);
             bool dimensionsChanged = nextRows != _configuredRows || nextDepth != _configuredDepth;
@@ -5211,7 +5950,6 @@ public partial class MainWindow : Window
 
     internal void GetSimulationLayerSettingsForEditor(out IReadOnlyList<LayerEditorSimulationLayer> simulationLayers)
     {
-        EnsureSimulationLayersInitialized();
         simulationLayers = _simulationLayers
             .Select(ToEditorSimulationLayer)
             .ToList();
@@ -5221,16 +5959,24 @@ public partial class MainWindow : Window
     {
         RunWithoutLayerEditorRefresh(() =>
         {
-            EnsureSimulationLayersInitialized();
+            if (simulationLayers == null || simulationLayers.Count == 0)
+            {
+                ClearSimulationLayers();
+                _pulseStep = 0;
+                RenderFrame();
+                SaveConfig();
+                return;
+            }
+
             var specs = NormalizeSimulationLayerSpecs(simulationLayers);
             if (!ApplySimulationLayerSpecs(specs))
             {
                 return;
             }
 
-            if (_simulationLayers.Count > 0)
+            var first = EnumerateSimulationLeafLayers(_simulationLayers).FirstOrDefault();
+            if (first != null)
             {
-                var first = _simulationLayers[0];
                 _injectionMode = first.InjectionMode;
                 _lifeMode = first.LifeMode;
                 _binningMode = first.BinningMode;
@@ -5347,6 +6093,80 @@ public partial class MainWindow : Window
             }
 
             source.SetDisplayName(string.IsNullOrWhiteSpace(displayName) ? "Layer Group" : displayName);
+            SaveConfig();
+        });
+    }
+
+    internal void UpdateSourceDisplayName(Guid sourceId, string displayName)
+    {
+        RunWithoutLayerEditorRefresh(() =>
+        {
+            var source = FindSourceById(sourceId);
+            if (source == null)
+            {
+                return;
+            }
+
+            string fallbackName = source.Type switch
+            {
+                CaptureSource.SourceType.Group => "Layer Group",
+                CaptureSource.SourceType.SimGroup => "Sim Group",
+                _ => source.DisplayName
+            };
+
+            source.SetDisplayName(string.IsNullOrWhiteSpace(displayName) ? fallbackName : displayName);
+            if (source.Type == CaptureSource.SourceType.SimGroup)
+            {
+                ApplySimulationLayersFromSourceStack(fallbackToDefault: false);
+                RenderFrame();
+            }
+
+            SaveConfig();
+        });
+    }
+
+    internal void UpdateSourceEnabled(Guid sourceId, bool enabled)
+    {
+        RunWithoutLayerEditorRefresh(() =>
+        {
+            var source = FindSourceById(sourceId);
+            if (source == null)
+            {
+                return;
+            }
+
+            source.Enabled = enabled;
+            if (source.Type == CaptureSource.SourceType.SimGroup)
+            {
+                ApplySimulationLayersFromSourceStack(fallbackToDefault: false);
+            }
+
+            RenderFrame();
+            SaveConfig();
+        });
+    }
+
+    internal void UpdateSimulationGroupLayers(Guid sourceId, IReadOnlyList<LayerEditorSimulationLayer>? simulationLayers)
+    {
+        RunWithoutLayerEditorRefresh(() =>
+        {
+            var source = FindSourceById(sourceId);
+            if (source == null || source.Type != CaptureSource.SourceType.SimGroup)
+            {
+                return;
+            }
+
+            source.SimulationLayers.Clear();
+            foreach (var simulationLayer in FlattenSourceSimulationLayerSpecs(NormalizeSimulationLayerSpecs(simulationLayers)))
+            {
+                source.SimulationLayers.Add(simulationLayer);
+            }
+
+            int enabledLayerCount = source.SimulationLayers.Count(layer => layer.Enabled);
+            Logger.Info($"Updated sim group '{source.DisplayName}' with {source.SimulationLayers.Count} layer(s), enabled={enabledLayerCount}.");
+
+            ApplySimulationLayersFromSourceStack(fallbackToDefault: false);
+            RenderFrame();
             SaveConfig();
         });
     }
@@ -5646,6 +6466,7 @@ public partial class MainWindow : Window
         parentList.Remove(source);
         Logger.Info($"Removed source: {source.DisplayName} ({source.Type})");
         CleanupSource(source);
+        ApplySimulationLayersFromSourceStack(fallbackToDefault: false);
 
         if (_sources.Count == 0)
         {
@@ -5672,6 +6493,7 @@ public partial class MainWindow : Window
         _fileCapture.Clear();
         
         _sources.Clear();
+        ClearSimulationLayers();
         _lastCompositeFrame = null;
         _passthroughEnabled = preservePassthrough;
         
@@ -5723,10 +6545,51 @@ public partial class MainWindow : Window
             return;
         }
 
-        bool hasEnabledSimulationLayers = _simulationLayers.Any(layer => layer.Enabled);
+        if (HasEmbeddedSimulationGroups(_sources))
+        {
+            bool injectedAnyInlineLayer = false;
+            int steppedInlinePassCount = 0;
+            int inlineStepsThisFrame = injectLayers ? _pendingInlineSimulationStepsThisFrame : 0;
+
+            long compositeBuildStampInline = BeginProfileStamp();
+            var inlineComposite = BuildInlineCompositeFrame(
+                _sources,
+                ref _compositeDownscaledBuffer,
+                useEngineDimensions: true,
+                animationTime,
+                inlineStepsThisFrame,
+                ref injectedAnyInlineLayer,
+                ref steppedInlinePassCount);
+            EndProfileStamp("build_composite_ms", compositeBuildStampInline);
+
+            if (inlineComposite == null)
+            {
+                _lastCompositeFrame = null;
+                return;
+            }
+
+            if (injectedAnyInlineLayer)
+            {
+                _pulseStep++;
+            }
+
+            if (steppedInlinePassCount > 0)
+            {
+                _simulationFrames += steppedInlinePassCount;
+            }
+
+            _lastCompositeFrame = inlineComposite;
+            long inlineSurfaceStamp = BeginProfileStamp();
+            UpdateDisplaySurface();
+            EndProfileStamp("update_display_surface_ms", inlineSurfaceStamp);
+            return;
+        }
+
+        bool hasEnabledSimulationLayers = EnumerateSimulationLeafLayers(_simulationLayers).Any(layer => layer.Enabled);
         bool requireCompositeCpuReadback =
             _isRecording ||
-            (_passthroughEnabled && (!_renderBackend.SupportsGpuSimulationComposition || !hasEnabledSimulationLayers));
+            !hasEnabledSimulationLayers ||
+            (_passthroughEnabled && !_renderBackend.SupportsGpuSimulationComposition);
         long compositeBuildStamp = BeginProfileStamp();
         var composite = BuildCompositeFrame(_sources, ref _compositeDownscaledBuffer, useEngineDimensions: true, animationTime,
             includeCpuReadback: requireCompositeCpuReadback);
@@ -5791,16 +6654,22 @@ public partial class MainWindow : Window
         int cpuGrayInjectLayerCount = 0;
         int cpuRgbInjectLayerCount = 0;
         long injectLayersStamp = BeginProfileStamp();
-        foreach (var layer in _simulationLayers)
+        foreach (var layer in EnumerateSimulationLeafLayers(_simulationLayers))
         {
             if (!layer.Enabled)
             {
                 continue;
             }
 
+            var engine = layer.Engine;
+            if (engine == null)
+            {
+                continue;
+            }
+
             bool invertInput = layer.InputFunction == SimulationInputFunction.Inverse;
             double currentHueShiftDegrees = CurrentRgbHueShiftDegrees(layer);
-            if (layer.Engine is GpuSimulationBackend gpuEngine &&
+            if (engine is GpuSimulationBackend gpuEngine &&
                 composite.GpuSurface != null &&
                 gpuEngine.TryInjectCompositeSurface(
                     composite.GpuSurface,
@@ -5809,7 +6678,7 @@ public partial class MainWindow : Window
                     layer.InvertThreshold,
                     layer.InjectionMode,
                     layer.EffectiveInjectionNoise,
-                    layer.Engine.Depth,
+                    gpuEngine.Depth,
                     _pulseStep,
                     invertInput,
                     currentHueShiftDegrees))
@@ -5837,11 +6706,11 @@ public partial class MainWindow : Window
                     layer.InvertThreshold,
                     layer.InjectionMode,
                     layer.EffectiveInjectionNoise,
-                    layer.Engine.Depth,
+                    engine.Depth,
                     _pulseStep,
                     grayMask,
                     invertInput);
-                layer.Engine.InjectFrame(grayMask);
+                engine.InjectFrame(grayMask);
                 cpuGrayInjectLayerCount++;
                 injectedAnyLayer = true;
             }
@@ -5868,15 +6737,15 @@ public partial class MainWindow : Window
                     layer.InvertThreshold,
                     layer.InjectionMode,
                     layer.EffectiveInjectionNoise,
-                    layer.Engine.RDepth,
-                    layer.Engine.GDepth,
-                    layer.Engine.BDepth,
+                    engine.RDepth,
+                    engine.GDepth,
+                    engine.BDepth,
                     _pulseStep,
                     rMask,
                     gMask,
                     bMask,
                     invertInput);
-                layer.Engine.InjectRgbFrame(rMask, gMask, bMask);
+                engine.InjectRgbFrame(rMask, gMask, bMask);
                 cpuRgbInjectLayerCount++;
                 injectedAnyLayer = true;
             }
@@ -5893,6 +6762,425 @@ public partial class MainWindow : Window
         {
             _pulseStep++;
         }
+    }
+
+    private void RunSimulationStepPasses(int maxStepsThisFrame, IReadOnlyList<SimulationLayerState> simulationLeaves)
+    {
+        if (maxStepsThisFrame <= 0)
+        {
+            return;
+        }
+
+        if (RunSimulationInjectionAndStepPass())
+        {
+            _simulationFrames++;
+        }
+
+        for (int i = 1; i < maxStepsThisFrame; i++)
+        {
+            if (RunSimulationStepOnlyPass(simulationLeaves))
+            {
+                _simulationFrames++;
+            }
+        }
+    }
+
+    private bool RunSimulationInjectionAndStepPass()
+    {
+        CompositeFrame? composite = _lastCompositeFrame;
+        bool compositeHasCpuReadback = composite != null &&
+                                       composite.DownscaledWidth > 0 &&
+                                       composite.DownscaledHeight > 0 &&
+                                       composite.Downscaled.Length >= composite.DownscaledWidth * composite.DownscaledHeight * 4;
+        bool attemptedCpuCompositeFallback = false;
+        bool injectedAnyLayer = false;
+        bool steppedAnyLayer = false;
+        GpuCompositeSurface? previousTopLevelSurface = null;
+
+        foreach (var layer in _simulationLayers)
+        {
+            previousTopLevelSurface = ExecuteSimulationNodeInjectionAndStep(
+                layer,
+                ref composite,
+                ref compositeHasCpuReadback,
+                ref attemptedCpuCompositeFallback,
+                previousTopLevelSurface,
+                ref injectedAnyLayer,
+                ref steppedAnyLayer);
+        }
+
+        if (injectedAnyLayer)
+        {
+            _pulseStep++;
+        }
+
+        return steppedAnyLayer;
+    }
+
+    private GpuCompositeSurface? ExecuteSimulationNodeInjectionAndStep(
+        SimulationLayerState layer,
+        ref CompositeFrame? composite,
+        ref bool compositeHasCpuReadback,
+        ref bool attemptedCpuCompositeFallback,
+        GpuCompositeSurface? upstreamSurface,
+        ref bool injectedAnyLayer,
+        ref bool steppedAnyLayer)
+    {
+        if (layer.IsGroup)
+        {
+            if (!layer.Enabled)
+            {
+                return upstreamSurface;
+            }
+
+            GpuCompositeSurface? published = upstreamSurface ?? composite?.GpuSurface;
+            foreach (var child in layer.Children)
+            {
+                published = ExecuteSimulationGroupChildInjectionAndStep(
+                    child,
+                    ref composite,
+                    ref compositeHasCpuReadback,
+                    ref attemptedCpuCompositeFallback,
+                    published,
+                    ref injectedAnyLayer,
+                    ref steppedAnyLayer);
+            }
+
+            return published ?? upstreamSurface;
+        }
+
+        bool stepped = TryInjectAndStepLayerFromSceneComposite(
+            layer,
+            ref composite,
+            ref compositeHasCpuReadback,
+            ref attemptedCpuCompositeFallback,
+            ref injectedAnyLayer);
+        steppedAnyLayer |= stepped;
+
+        return layer.Enabled ? GetPublishedSimulationSurface(layer) ?? upstreamSurface : upstreamSurface;
+    }
+
+    private GpuCompositeSurface? ExecuteSimulationGroupChildInjectionAndStep(
+        SimulationLayerState layer,
+        ref CompositeFrame? composite,
+        ref bool compositeHasCpuReadback,
+        ref bool attemptedCpuCompositeFallback,
+        GpuCompositeSurface? inputSurface,
+        ref bool injectedAnyLayer,
+        ref bool steppedAnyLayer)
+    {
+        if (layer.IsGroup)
+        {
+            if (!layer.Enabled)
+            {
+                return inputSurface;
+            }
+
+            GpuCompositeSurface? published = inputSurface;
+            foreach (var child in layer.Children)
+            {
+                published = ExecuteSimulationGroupChildInjectionAndStep(
+                    child,
+                    ref composite,
+                    ref compositeHasCpuReadback,
+                    ref attemptedCpuCompositeFallback,
+                    published,
+                    ref injectedAnyLayer,
+                    ref steppedAnyLayer);
+            }
+
+            return published ?? inputSurface;
+        }
+
+        bool stepped = TryInjectAndStepLayer(
+            layer,
+            ref composite,
+            ref compositeHasCpuReadback,
+            ref attemptedCpuCompositeFallback,
+            inputSurface,
+            ref injectedAnyLayer,
+            useSceneCompositeFallbackWhenGpuSurfaceUnavailable: inputSurface == null);
+        steppedAnyLayer |= stepped;
+
+        return layer.Enabled ? GetPublishedSimulationSurface(layer) ?? inputSurface : inputSurface;
+    }
+
+    private bool RunSimulationStepOnlyPass(IReadOnlyList<SimulationLayerState> simulationLeaves)
+    {
+        bool stepped = false;
+        foreach (var layer in simulationLeaves)
+        {
+            stepped |= TryStepLayerOnceIfDue(layer);
+        }
+
+        return stepped;
+    }
+
+    private bool TryInjectAndStepLayerFromSceneComposite(
+        SimulationLayerState layer,
+        ref CompositeFrame? composite,
+        ref bool compositeHasCpuReadback,
+        ref bool attemptedCpuCompositeFallback,
+        ref bool injectedAnyLayer)
+    {
+        return TryInjectAndStepLayer(
+            layer,
+            ref composite,
+            ref compositeHasCpuReadback,
+            ref attemptedCpuCompositeFallback,
+            inputSurface: null,
+            ref injectedAnyLayer,
+            useSceneCompositeFallbackWhenGpuSurfaceUnavailable: true);
+    }
+
+    private bool TryInjectAndStepLayer(
+        SimulationLayerState layer,
+        ref CompositeFrame? composite,
+        ref bool compositeHasCpuReadback,
+        ref bool attemptedCpuCompositeFallback,
+        GpuCompositeSurface? inputSurface,
+        ref bool injectedAnyLayer,
+        bool useSceneCompositeFallbackWhenGpuSurfaceUnavailable)
+    {
+        bool shouldStep = LayerNeedsStep(layer);
+        if (!shouldStep)
+        {
+            return false;
+        }
+
+        bool injected = false;
+        if (inputSurface != null)
+        {
+            injected = TryInjectLayerFromGpuSurface(layer, inputSurface);
+        }
+        else if (composite != null)
+        {
+            injected = TryInjectLayerFromComposite(
+                layer,
+                ref composite,
+                ref compositeHasCpuReadback,
+                ref attemptedCpuCompositeFallback,
+                useSceneCompositeFallbackWhenGpuSurfaceUnavailable);
+        }
+
+        if (injected)
+        {
+            injectedAnyLayer = true;
+        }
+
+        return TryStepLayerOnceIfDue(layer);
+    }
+
+    private bool LayerNeedsStep(SimulationLayerState layer)
+    {
+        if (layer.IsGroup || !layer.Enabled)
+        {
+            return false;
+        }
+
+        double targetFps = Math.Max(layer.EffectiveSimulationTargetFps, 0);
+        if (targetFps < 0.01)
+        {
+            layer.TimeSinceLastStep = 0;
+            return false;
+        }
+
+        double desiredInterval = 1.0 / targetFps;
+        return layer.TimeSinceLastStep + 0.0000001 >= desiredInterval;
+    }
+
+    private bool TryStepLayerOnceIfDue(SimulationLayerState layer)
+    {
+        if (layer.IsGroup || !layer.Enabled || layer.Engine == null)
+        {
+            return false;
+        }
+
+        double targetFps = Math.Max(layer.EffectiveSimulationTargetFps, 0);
+        if (targetFps < 0.01)
+        {
+            layer.TimeSinceLastStep = 0;
+            return false;
+        }
+
+        double desiredInterval = 1.0 / targetFps;
+        if (layer.TimeSinceLastStep + 0.0000001 < desiredInterval)
+        {
+            return false;
+        }
+
+        layer.Engine.Step();
+        layer.TimeSinceLastStep -= desiredInterval;
+        if (layer.TimeSinceLastStep > desiredInterval * MaxSimulationStepsPerRender)
+        {
+            layer.TimeSinceLastStep = desiredInterval;
+        }
+
+        return true;
+    }
+
+    private bool TryInjectLayerFromGpuSurface(SimulationLayerState layer, GpuCompositeSurface inputSurface)
+    {
+        if (layer.Engine is not GpuSimulationBackend gpuEngine)
+        {
+            return false;
+        }
+
+        bool invertInput = layer.InputFunction == SimulationInputFunction.Inverse;
+        double currentHueShiftDegrees = CurrentRgbHueShiftDegrees(layer);
+        return gpuEngine.TryInjectCompositeSurface(
+            inputSurface,
+            layer.EffectiveThresholdMin,
+            layer.EffectiveThresholdMax,
+            layer.InvertThreshold,
+            layer.InjectionMode,
+            layer.EffectiveInjectionNoise,
+            layer.Engine!.Depth,
+            _pulseStep,
+            invertInput,
+            currentHueShiftDegrees);
+    }
+
+    private bool TryInjectLayerFromComposite(
+        SimulationLayerState layer,
+        ref CompositeFrame? composite,
+        ref bool compositeHasCpuReadback,
+        ref bool attemptedCpuCompositeFallback,
+        bool allowCpuFallback)
+    {
+        var currentComposite = composite;
+        var engine = layer.Engine;
+        if (currentComposite == null || engine == null)
+        {
+            return false;
+        }
+
+        bool invertInput = layer.InputFunction == SimulationInputFunction.Inverse;
+        double currentHueShiftDegrees = CurrentRgbHueShiftDegrees(layer);
+        if (engine is GpuSimulationBackend gpuEngine &&
+            currentComposite.GpuSurface != null &&
+            gpuEngine.TryInjectCompositeSurface(
+                currentComposite.GpuSurface,
+                layer.EffectiveThresholdMin,
+                layer.EffectiveThresholdMax,
+                layer.InvertThreshold,
+                layer.InjectionMode,
+                layer.EffectiveInjectionNoise,
+                gpuEngine.Depth,
+                _pulseStep,
+                invertInput,
+                currentHueShiftDegrees))
+        {
+            return true;
+        }
+
+        if (!allowCpuFallback)
+        {
+            return false;
+        }
+
+        if (!EnsureCompositeCpuReadback(ref composite, ref compositeHasCpuReadback, ref attemptedCpuCompositeFallback))
+        {
+            return false;
+        }
+
+        currentComposite = composite;
+        if (currentComposite == null)
+        {
+            return false;
+        }
+
+        invertInput = layer.InputFunction == SimulationInputFunction.Inverse;
+        currentHueShiftDegrees = CurrentRgbHueShiftDegrees(layer);
+
+        if (layer.LifeMode == GameOfLifeEngine.LifeMode.NaiveGrayscale)
+        {
+            var grayMask = layer.GrayMask = EnsureLayerMask(layer.GrayMask, currentComposite.DownscaledHeight, currentComposite.DownscaledWidth);
+            FillLuminanceMask(
+                currentComposite.Downscaled,
+                currentComposite.DownscaledWidth,
+                currentComposite.DownscaledHeight,
+                layer.EffectiveThresholdMin,
+                layer.EffectiveThresholdMax,
+                layer.InvertThreshold,
+                layer.InjectionMode,
+                layer.EffectiveInjectionNoise,
+                engine.Depth,
+                _pulseStep,
+                grayMask,
+                invertInput);
+            engine.InjectFrame(grayMask);
+            return true;
+        }
+
+        var rMask = layer.RedMask = EnsureLayerMask(layer.RedMask, currentComposite.DownscaledHeight, currentComposite.DownscaledWidth);
+        var gMask = layer.GreenMask = EnsureLayerMask(layer.GreenMask, currentComposite.DownscaledHeight, currentComposite.DownscaledWidth);
+        var bMask = layer.BlueMask = EnsureLayerMask(layer.BlueMask, currentComposite.DownscaledHeight, currentComposite.DownscaledWidth);
+        FillChannelMasks(
+            currentComposite.Downscaled,
+            currentComposite.DownscaledWidth,
+            currentComposite.DownscaledHeight,
+            currentHueShiftDegrees,
+            layer.EffectiveThresholdMin,
+            layer.EffectiveThresholdMax,
+            layer.InvertThreshold,
+            layer.InjectionMode,
+            layer.EffectiveInjectionNoise,
+            engine.RDepth,
+            engine.GDepth,
+            engine.BDepth,
+            _pulseStep,
+            rMask,
+            gMask,
+            bMask,
+            invertInput);
+        engine.InjectRgbFrame(rMask, gMask, bMask);
+        return true;
+    }
+
+    private bool EnsureCompositeCpuReadback(
+        ref CompositeFrame? composite,
+        ref bool compositeHasCpuReadback,
+        ref bool attemptedCpuCompositeFallback)
+    {
+        if (compositeHasCpuReadback)
+        {
+            return true;
+        }
+
+        if (attemptedCpuCompositeFallback)
+        {
+            return false;
+        }
+
+        attemptedCpuCompositeFallback = true;
+        long fallbackCompositeStamp = BeginProfileStamp();
+        var cpuComposite = BuildCompositeFrame(
+            _sources,
+            ref _compositeDownscaledBuffer,
+            useEngineDimensions: true,
+            _lifetimeStopwatch.Elapsed.TotalSeconds,
+            includeCpuReadback: true);
+        EndProfileStamp("build_composite_fallback_ms", fallbackCompositeStamp);
+        if (cpuComposite == null)
+        {
+            return false;
+        }
+
+        composite = cpuComposite;
+        _lastCompositeFrame = cpuComposite;
+        compositeHasCpuReadback = composite.DownscaledWidth > 0 &&
+                                  composite.DownscaledHeight > 0 &&
+                                  composite.Downscaled.Length >= composite.DownscaledWidth * composite.DownscaledHeight * 4;
+        return compositeHasCpuReadback;
+    }
+
+    private GpuCompositeSurface? GetPublishedSimulationSurface(SimulationLayerState layer)
+    {
+        return layer.Engine is GpuSimulationBackend gpuBackend &&
+               gpuBackend.TryGetColorSurface(out var surface)
+            ? surface
+            : null;
     }
 
     private void ApplyAudioReactiveFps()
@@ -5939,7 +7227,7 @@ public partial class MainWindow : Window
             return true;
         }
 
-        if (_simulationLayers.Any(layer =>
+        if (EnumerateSimulationLeafLayers(_simulationLayers).Any(layer =>
                 layer.Enabled &&
                 layer.ReactiveMappings.Any(mapping => SimulationReactivity.RequiresSpectrum(mapping.Input))))
         {
@@ -6054,7 +7342,7 @@ public partial class MainWindow : Window
 
     private void ApplySimulationLayerReactiveState()
     {
-        foreach (var layer in _simulationLayers)
+        foreach (var layer in EnumerateSimulationLeafLayers(_simulationLayers))
         {
             layer.EffectiveLifeOpacity = Math.Clamp(layer.LifeOpacity, 0, 1);
             layer.EffectiveSimulationTargetFps = Math.Max(_currentSimulationTargetFps, 0);
@@ -6195,14 +7483,14 @@ public partial class MainWindow : Window
             InjectAudioReactivePattern(mask, centerRow, centerCol);
         }
 
-        foreach (var layer in _simulationLayers)
+        foreach (var layer in EnumerateSimulationLeafLayers(_simulationLayers))
         {
             if (!layer.Enabled)
             {
                 continue;
             }
 
-            layer.Engine.InjectFrame(mask);
+            layer.Engine?.InjectFrame(mask);
         }
     }
 
@@ -6282,6 +7570,14 @@ public partial class MainWindow : Window
         foreach (var source in sources.ToList())
         {
             bool includeNativeSource = ShouldPreferNativeSourceFrame(source);
+
+            if (source.Type == CaptureSource.SourceType.SimGroup)
+            {
+                source.LastFrame = null;
+                source.HasError = false;
+                source.MissedFrames = 0;
+                continue;
+            }
 
             if (source.Type == CaptureSource.SourceType.Group)
             {
@@ -6838,7 +8134,7 @@ public partial class MainWindow : Window
             }
         }
 
-        foreach (var layer in _simulationLayers)
+        foreach (var layer in EnumerateSimulationLeafLayers(_simulationLayers))
         {
             layer.ThresholdMin = _captureThresholdMin;
             layer.ThresholdMax = _captureThresholdMax;
@@ -6887,7 +8183,7 @@ public partial class MainWindow : Window
         }
 
         _invertThreshold = InvertThresholdCheckBox?.IsChecked == true;
-        foreach (var layer in _simulationLayers)
+        foreach (var layer in EnumerateSimulationLeafLayers(_simulationLayers))
         {
             layer.InvertThreshold = _invertThreshold;
         }
@@ -7059,6 +8355,7 @@ public partial class MainWindow : Window
     private sealed class SimulationLayerState
     {
         public Guid Id { get; set; }
+        public LayerEditorSimulationItemKind Kind { get; set; } = LayerEditorSimulationItemKind.Layer;
         public string Name { get; set; } = "Simulation Layer";
         public bool Enabled { get; set; } = true;
         public SimulationInputFunction InputFunction { get; set; } = SimulationInputFunction.Direct;
@@ -7083,17 +8380,21 @@ public partial class MainWindow : Window
         public double EffectiveThresholdMin { get; set; } = 0.35;
         public double EffectiveThresholdMax { get; set; } = 0.75;
         public double TimeSinceLastStep { get; set; }
-        public ISimulationBackend Engine { get; set; } = null!;
+        public SimulationLayerState? Parent { get; set; }
+        public List<SimulationLayerState> Children { get; } = new();
+        public ISimulationBackend? Engine { get; set; }
         public byte[]? ColorBuffer { get; set; }
         public bool[,]? GrayMask { get; set; }
         public bool[,]? RedMask { get; set; }
         public bool[,]? GreenMask { get; set; }
         public bool[,]? BlueMask { get; set; }
+        public bool IsGroup => Kind == LayerEditorSimulationItemKind.Group;
     }
 
     private sealed class SimulationLayerSpec
     {
         public Guid Id { get; init; }
+        public LayerEditorSimulationItemKind Kind { get; init; } = LayerEditorSimulationItemKind.Layer;
         public string Name { get; init; } = "Simulation Layer";
         public bool Enabled { get; init; } = true;
         public SimulationInputFunction InputFunction { get; init; } = SimulationInputFunction.Direct;
@@ -7110,6 +8411,7 @@ public partial class MainWindow : Window
         public double ThresholdMin { get; init; } = 0.35;
         public double ThresholdMax { get; init; } = 0.75;
         public bool InvertThreshold { get; init; }
+        public List<SimulationLayerSpec> Children { get; init; } = new();
     }
 
     private static bool TryParseBlendMode(string? value, BlendMode fallback, out BlendMode mode)
@@ -7283,11 +8585,19 @@ public partial class MainWindow : Window
         return fallback;
     }
 
+    private static LayerEditorSimulationItemKind ParseSimulationItemKind(string? value)
+    {
+        return Enum.TryParse<LayerEditorSimulationItemKind>(value, true, out var parsed)
+            ? parsed
+            : LayerEditorSimulationItemKind.Layer;
+    }
+
     private LayerEditorSimulationLayer ToEditorSimulationLayer(SimulationLayerState layer)
     {
-        return new LayerEditorSimulationLayer
+        var editorLayer = new LayerEditorSimulationLayer
         {
             Id = layer.Id,
+            Kind = layer.Kind,
             Name = layer.Name,
             Enabled = layer.Enabled,
             InputFunction = layer.InputFunction.ToString(),
@@ -7312,6 +8622,56 @@ public partial class MainWindow : Window
             ThresholdMax = layer.ThresholdMax,
             InvertThreshold = layer.InvertThreshold
         };
+
+        foreach (var child in layer.Children)
+        {
+            var editorChild = ToEditorSimulationLayer(child);
+            editorChild.Parent = editorLayer;
+            editorLayer.Children.Add(editorChild);
+        }
+
+        return editorLayer;
+    }
+
+    private LayerEditorSimulationLayer ToEditorSimulationLayer(SimulationLayerSpec layer)
+    {
+        var editorLayer = new LayerEditorSimulationLayer
+        {
+            Id = layer.Id,
+            Kind = layer.Kind,
+            Name = layer.Name,
+            Enabled = layer.Enabled,
+            InputFunction = layer.InputFunction.ToString(),
+            BlendMode = layer.BlendMode.ToString(),
+            InjectionMode = layer.InjectionMode.ToString(),
+            LifeMode = layer.LifeMode.ToString(),
+            BinningMode = layer.BinningMode.ToString(),
+            InjectionNoise = layer.InjectionNoise,
+            LifeOpacity = layer.LifeOpacity,
+            RgbHueShiftDegrees = layer.RgbHueShiftDegrees,
+            RgbHueShiftSpeedDegreesPerSecond = layer.RgbHueShiftSpeedDegreesPerSecond,
+            AudioFrequencyHueShiftDegrees = 0,
+            ReactiveMappings = new ObservableCollection<LayerEditorSimulationReactiveMapping>(
+                layer.ReactiveMappings.Select(mapping => new LayerEditorSimulationReactiveMapping
+                {
+                    Id = mapping.Id,
+                    Input = mapping.Input.ToString(),
+                    Output = mapping.Output.ToString(),
+                    Amount = mapping.Amount
+                })),
+            ThresholdMin = layer.ThresholdMin,
+            ThresholdMax = layer.ThresholdMax,
+            InvertThreshold = layer.InvertThreshold
+        };
+
+        foreach (var child in layer.Children)
+        {
+            var editorChild = ToEditorSimulationLayer(child);
+            editorChild.Parent = editorLayer;
+            editorLayer.Children.Add(editorChild);
+        }
+
+        return editorLayer;
     }
 
     private void EnsureSimulationLayersInitialized()
@@ -7377,7 +8737,7 @@ public partial class MainWindow : Window
             Engine = CreateConfiguredSimulationEngine(randomize: true)
         });
         ConfigureSimulationEngine(_engine, _configuredRows, _configuredDepth, _currentAspectRatio, randomize: true);
-        foreach (var layer in _simulationLayers)
+        foreach (var layer in EnumerateSimulationLeafLayers(_simulationLayers))
         {
             ApplySimulationLayerEngineSettings(layer);
         }
@@ -7385,9 +8745,10 @@ public partial class MainWindow : Window
 
     private ISimulationBackend GetReferenceSimulationEngine()
     {
-        if (_simulationLayers.Count > 0)
+        var firstLayer = EnumerateSimulationLeafLayers(_simulationLayers).FirstOrDefault();
+        if (firstLayer?.Engine != null)
         {
-            return _simulationLayers[0].Engine;
+            return firstLayer.Engine;
         }
 
         return _engine;
@@ -7395,9 +8756,19 @@ public partial class MainWindow : Window
 
     private void ConfigureSimulationLayerEngines(int rows, int depth, double aspectRatio, bool randomize)
     {
-        EnsureSimulationLayersInitialized();
-        foreach (var layer in _simulationLayers)
+        if (_simulationLayers.Count == 0)
         {
+            ConfigureSimulationEngine(_engine, rows, depth, aspectRatio, randomize);
+            return;
+        }
+
+        foreach (var layer in EnumerateSimulationLeafLayers(_simulationLayers))
+        {
+            if (layer.Engine == null)
+            {
+                continue;
+            }
+
             ConfigureSimulationEngine(layer.Engine, rows, depth, aspectRatio, randomize);
             ApplySimulationLayerEngineSettings(layer);
         }
@@ -7422,6 +8793,11 @@ public partial class MainWindow : Window
 
     private static void ApplySimulationLayerEngineSettings(SimulationLayerState layer)
     {
+        if (layer.IsGroup || layer.Engine == null)
+        {
+            return;
+        }
+
         if (layer.Engine.Mode != layer.LifeMode)
         {
             layer.Engine.SetMode(layer.LifeMode);
@@ -7435,6 +8811,34 @@ public partial class MainWindow : Window
         if (layer.Engine.InjectMode != layer.InjectionMode)
         {
             layer.Engine.SetInjectionMode(layer.InjectionMode);
+        }
+    }
+
+    private static IEnumerable<SimulationLayerState> EnumerateSimulationLayers(IEnumerable<SimulationLayerState> roots)
+    {
+        foreach (var layer in roots)
+        {
+            yield return layer;
+            foreach (var child in EnumerateSimulationLayers(layer.Children))
+            {
+                yield return child;
+            }
+        }
+    }
+
+    private static IEnumerable<SimulationLayerState> EnumerateSimulationLeafLayers(IEnumerable<SimulationLayerState> roots)
+    {
+        foreach (var layer in roots)
+        {
+            if (!layer.IsGroup)
+            {
+                yield return layer;
+            }
+
+            foreach (var child in EnumerateSimulationLeafLayers(layer.Children))
+            {
+                yield return child;
+            }
         }
     }
 
@@ -7746,14 +9150,16 @@ public partial class MainWindow : Window
         return true;
     }
 
-    private static string NormalizeSimulationLayerName(string? value, int index)
+    private static string NormalizeSimulationLayerName(string? value, int index, LayerEditorSimulationItemKind kind = LayerEditorSimulationItemKind.Layer)
     {
         if (!string.IsNullOrWhiteSpace(value))
         {
             return value.Trim();
         }
 
-        return $"Simulation Layer {index + 1}";
+        return kind == LayerEditorSimulationItemKind.Group
+            ? $"Sim Group {index + 1}"
+            : $"Simulation Layer {index + 1}";
     }
 
     private List<SimulationLayerSpec> NormalizeSimulationLayerSpecs(IReadOnlyList<LayerEditorSimulationLayer>? simulationLayers)
@@ -7765,45 +9171,7 @@ public partial class MainWindow : Window
         {
             for (int i = 0; i < simulationLayers.Count; i++)
             {
-                var layer = simulationLayers[i];
-                Guid id = layer.Id;
-                if (id == Guid.Empty || !seenIds.Add(id))
-                {
-                    do
-                    {
-                        id = Guid.NewGuid();
-                    } while (!seenIds.Add(id));
-                }
-
-                var inputFunction = ParseSimulationInputFunctionOrDefault(layer.InputFunction, SimulationInputFunction.Direct);
-                var defaultBlend = inputFunction == SimulationInputFunction.Inverse ? BlendMode.Subtractive : BlendMode.Additive;
-                var blendMode = ParseBlendModeOrDefault(layer.BlendMode, defaultBlend);
-                var injectionMode = ParseSimulationInjectionModeOrDefault(layer.InjectionMode, _injectionMode);
-                var lifeMode = ParseSimulationLifeModeOrDefault(layer.LifeMode, _lifeMode);
-                var binningMode = ParseSimulationBinningModeOrDefault(layer.BinningMode, _binningMode);
-                var (thresholdMin, thresholdMax, invertThreshold) =
-                    NormalizeLayerThresholds(layer.ThresholdMin, layer.ThresholdMax, layer.InvertThreshold);
-                normalized.Add(new SimulationLayerSpec
-                {
-                    Id = id,
-                    Name = NormalizeSimulationLayerName(layer.Name, i),
-                    Enabled = layer.Enabled,
-                    InputFunction = inputFunction,
-                    BlendMode = blendMode,
-                    InjectionMode = injectionMode,
-                    LifeMode = lifeMode,
-                    BinningMode = binningMode,
-                    InjectionNoise = Math.Clamp(layer.InjectionNoise, 0, 1),
-                    LifeOpacity = Math.Clamp(layer.LifeOpacity, 0, 1),
-                    RgbHueShiftDegrees = NormalizeHueDegrees(layer.RgbHueShiftDegrees),
-                    RgbHueShiftSpeedDegreesPerSecond = Math.Clamp(layer.RgbHueShiftSpeedDegreesPerSecond, -MaxRgbHueShiftSpeedDegreesPerSecond, MaxRgbHueShiftSpeedDegreesPerSecond),
-                    // Editor-owned reactive mappings are canonical. Do not resurrect legacy frequency->hue data here.
-                    AudioFrequencyHueShiftDegrees = 0,
-                    ReactiveMappings = NormalizeReactiveMappings(layer.ReactiveMappings, 0),
-                    ThresholdMin = thresholdMin,
-                    ThresholdMax = thresholdMax,
-                    InvertThreshold = invertThreshold
-                });
+                normalized.Add(NormalizeSimulationLayerSpec(simulationLayers[i], i, seenIds));
             }
         }
 
@@ -7815,6 +9183,59 @@ public partial class MainWindow : Window
         return normalized;
     }
 
+    private static List<SimulationLayerSpec> FlattenSourceSimulationLayerSpecs(IEnumerable<SimulationLayerSpec> specs)
+    {
+        var flattened = new List<SimulationLayerSpec>();
+        foreach (var spec in specs)
+        {
+            FlattenSourceSimulationLayerSpec(spec, flattened, ancestorEnabled: true);
+        }
+
+        return flattened;
+    }
+
+    private static void FlattenSourceSimulationLayerSpec(SimulationLayerSpec spec, ICollection<SimulationLayerSpec> target, bool ancestorEnabled)
+    {
+        bool enabled = ancestorEnabled && spec.Enabled;
+        if (spec.Kind == LayerEditorSimulationItemKind.Group)
+        {
+            foreach (var child in spec.Children)
+            {
+                FlattenSourceSimulationLayerSpec(child, target, enabled);
+            }
+
+            return;
+        }
+
+        target.Add(new SimulationLayerSpec
+        {
+            Id = spec.Id,
+            Kind = LayerEditorSimulationItemKind.Layer,
+            Name = spec.Name,
+            Enabled = enabled,
+            InputFunction = spec.InputFunction,
+            BlendMode = spec.BlendMode,
+            InjectionMode = spec.InjectionMode,
+            LifeMode = spec.LifeMode,
+            BinningMode = spec.BinningMode,
+            InjectionNoise = spec.InjectionNoise,
+            LifeOpacity = spec.LifeOpacity,
+            RgbHueShiftDegrees = spec.RgbHueShiftDegrees,
+            RgbHueShiftSpeedDegreesPerSecond = spec.RgbHueShiftSpeedDegreesPerSecond,
+            AudioFrequencyHueShiftDegrees = spec.AudioFrequencyHueShiftDegrees,
+            ReactiveMappings = spec.ReactiveMappings.Select(mapping => new SimulationReactiveMapping
+            {
+                Id = mapping.Id,
+                Input = mapping.Input,
+                Output = mapping.Output,
+                Amount = mapping.Amount
+            }).ToList(),
+            ThresholdMin = spec.ThresholdMin,
+            ThresholdMax = spec.ThresholdMax,
+            InvertThreshold = spec.InvertThreshold
+        });
+    }
+
     private List<SimulationLayerSpec> NormalizeSimulationLayerSpecs(IReadOnlyList<AppConfig.SimulationLayerConfig>? simulationLayers)
     {
         var normalized = new List<SimulationLayerSpec>();
@@ -7824,45 +9245,7 @@ public partial class MainWindow : Window
         {
             for (int i = 0; i < simulationLayers.Count; i++)
             {
-                var layer = simulationLayers[i];
-                Guid id = layer.Id;
-                if (id == Guid.Empty || !seenIds.Add(id))
-                {
-                    do
-                    {
-                        id = Guid.NewGuid();
-                    } while (!seenIds.Add(id));
-                }
-
-                var inputFunction = ParseSimulationInputFunctionOrDefault(layer.InputFunction, SimulationInputFunction.Direct);
-                var defaultBlend = inputFunction == SimulationInputFunction.Inverse ? BlendMode.Subtractive : BlendMode.Additive;
-                var blendMode = ParseBlendModeOrDefault(layer.BlendMode, defaultBlend);
-                var injectionMode = ParseSimulationInjectionModeOrDefault(layer.InjectionMode, _injectionMode);
-                var lifeMode = ParseSimulationLifeModeOrDefault(layer.LifeMode, _lifeMode);
-                var binningMode = ParseSimulationBinningModeOrDefault(layer.BinningMode, _binningMode);
-                var (thresholdMin, thresholdMax, invertThreshold) =
-                    NormalizeLayerThresholds(layer.ThresholdMin, layer.ThresholdMax, layer.InvertThreshold, _captureThresholdMin, _captureThresholdMax, _invertThreshold);
-                normalized.Add(new SimulationLayerSpec
-                {
-                    Id = id,
-                    Name = NormalizeSimulationLayerName(layer.Name, i),
-                    Enabled = layer.Enabled,
-                    InputFunction = inputFunction,
-                    BlendMode = blendMode,
-                    InjectionMode = injectionMode,
-                    LifeMode = lifeMode,
-                    BinningMode = binningMode,
-                    InjectionNoise = Math.Clamp(layer.InjectionNoise, 0, 1),
-                    LifeOpacity = Math.Clamp(layer.LifeOpacity, 0, 1),
-                    RgbHueShiftDegrees = NormalizeHueDegrees(layer.RgbHueShiftDegrees != 0 ? layer.RgbHueShiftDegrees : _rgbHueShiftDegrees),
-                    RgbHueShiftSpeedDegreesPerSecond = Math.Clamp(layer.RgbHueShiftSpeedDegreesPerSecond != 0 ? layer.RgbHueShiftSpeedDegreesPerSecond : _rgbHueShiftSpeedDegreesPerSecond, -MaxRgbHueShiftSpeedDegreesPerSecond, MaxRgbHueShiftSpeedDegreesPerSecond),
-                    // Legacy field is migration-only. Fold it into the mapping list and clear it in runtime state.
-                    AudioFrequencyHueShiftDegrees = 0,
-                    ReactiveMappings = NormalizeReactiveMappings(layer.ReactiveMappings, layer.AudioFrequencyHueShiftDegrees),
-                    ThresholdMin = thresholdMin,
-                    ThresholdMax = thresholdMax,
-                    InvertThreshold = invertThreshold
-                });
+                normalized.Add(NormalizeSimulationLayerSpec(simulationLayers[i], i, seenIds));
             }
         }
 
@@ -7872,6 +9255,115 @@ public partial class MainWindow : Window
         }
 
         return normalized;
+    }
+
+    private SimulationLayerSpec NormalizeSimulationLayerSpec(LayerEditorSimulationLayer layer, int index, ISet<Guid> seenIds)
+    {
+        Guid id = layer.Id;
+        if (id == Guid.Empty || !seenIds.Add(id))
+        {
+            do
+            {
+                id = Guid.NewGuid();
+            } while (!seenIds.Add(id));
+        }
+
+        if (layer.IsGroup)
+        {
+            return new SimulationLayerSpec
+            {
+                Id = id,
+                Kind = LayerEditorSimulationItemKind.Group,
+                Name = NormalizeSimulationLayerName(layer.Name, index, LayerEditorSimulationItemKind.Group),
+                Enabled = layer.Enabled,
+                Children = layer.Children.Select((child, childIndex) => NormalizeSimulationLayerSpec(child, childIndex, seenIds)).ToList()
+            };
+        }
+
+        var inputFunction = ParseSimulationInputFunctionOrDefault(layer.InputFunction, SimulationInputFunction.Direct);
+        var defaultBlend = inputFunction == SimulationInputFunction.Inverse ? BlendMode.Subtractive : BlendMode.Additive;
+        var blendMode = ParseBlendModeOrDefault(layer.BlendMode, defaultBlend);
+        var injectionMode = ParseSimulationInjectionModeOrDefault(layer.InjectionMode, _injectionMode);
+        var lifeMode = ParseSimulationLifeModeOrDefault(layer.LifeMode, _lifeMode);
+        var binningMode = ParseSimulationBinningModeOrDefault(layer.BinningMode, _binningMode);
+        var (thresholdMin, thresholdMax, invertThreshold) =
+            NormalizeLayerThresholds(layer.ThresholdMin, layer.ThresholdMax, layer.InvertThreshold);
+        return new SimulationLayerSpec
+        {
+            Id = id,
+            Kind = LayerEditorSimulationItemKind.Layer,
+            Name = NormalizeSimulationLayerName(layer.Name, index),
+            Enabled = layer.Enabled,
+            InputFunction = inputFunction,
+            BlendMode = blendMode,
+            InjectionMode = injectionMode,
+            LifeMode = lifeMode,
+            BinningMode = binningMode,
+            InjectionNoise = Math.Clamp(layer.InjectionNoise, 0, 1),
+            LifeOpacity = Math.Clamp(layer.LifeOpacity, 0, 1),
+            RgbHueShiftDegrees = NormalizeHueDegrees(layer.RgbHueShiftDegrees),
+            RgbHueShiftSpeedDegreesPerSecond = Math.Clamp(layer.RgbHueShiftSpeedDegreesPerSecond, -MaxRgbHueShiftSpeedDegreesPerSecond, MaxRgbHueShiftSpeedDegreesPerSecond),
+            AudioFrequencyHueShiftDegrees = 0,
+            ReactiveMappings = NormalizeReactiveMappings(layer.ReactiveMappings, 0),
+            ThresholdMin = thresholdMin,
+            ThresholdMax = thresholdMax,
+            InvertThreshold = invertThreshold
+        };
+    }
+
+    private SimulationLayerSpec NormalizeSimulationLayerSpec(AppConfig.SimulationLayerConfig layer, int index, ISet<Guid> seenIds)
+    {
+        Guid id = layer.Id;
+        if (id == Guid.Empty || !seenIds.Add(id))
+        {
+            do
+            {
+                id = Guid.NewGuid();
+            } while (!seenIds.Add(id));
+        }
+
+        LayerEditorSimulationItemKind kind = ParseSimulationItemKind(layer.Kind);
+        if (kind == LayerEditorSimulationItemKind.Group)
+        {
+            return new SimulationLayerSpec
+            {
+                Id = id,
+                Kind = LayerEditorSimulationItemKind.Group,
+                Name = NormalizeSimulationLayerName(layer.Name, index, LayerEditorSimulationItemKind.Group),
+                Enabled = layer.Enabled,
+                Children = layer.Children.Select((child, childIndex) => NormalizeSimulationLayerSpec(child, childIndex, seenIds)).ToList()
+            };
+        }
+
+        var inputFunction = ParseSimulationInputFunctionOrDefault(layer.InputFunction, SimulationInputFunction.Direct);
+        var defaultBlend = inputFunction == SimulationInputFunction.Inverse ? BlendMode.Subtractive : BlendMode.Additive;
+        var blendMode = ParseBlendModeOrDefault(layer.BlendMode, defaultBlend);
+        var injectionMode = ParseSimulationInjectionModeOrDefault(layer.InjectionMode, _injectionMode);
+        var lifeMode = ParseSimulationLifeModeOrDefault(layer.LifeMode, _lifeMode);
+        var binningMode = ParseSimulationBinningModeOrDefault(layer.BinningMode, _binningMode);
+        var (thresholdMin, thresholdMax, invertThreshold) =
+            NormalizeLayerThresholds(layer.ThresholdMin, layer.ThresholdMax, layer.InvertThreshold, _captureThresholdMin, _captureThresholdMax, _invertThreshold);
+        return new SimulationLayerSpec
+        {
+            Id = id,
+            Kind = LayerEditorSimulationItemKind.Layer,
+            Name = NormalizeSimulationLayerName(layer.Name, index),
+            Enabled = layer.Enabled,
+            InputFunction = inputFunction,
+            BlendMode = blendMode,
+            InjectionMode = injectionMode,
+            LifeMode = lifeMode,
+            BinningMode = binningMode,
+            InjectionNoise = Math.Clamp(layer.InjectionNoise, 0, 1),
+            LifeOpacity = Math.Clamp(layer.LifeOpacity, 0, 1),
+            RgbHueShiftDegrees = NormalizeHueDegrees(layer.RgbHueShiftDegrees != 0 ? layer.RgbHueShiftDegrees : _rgbHueShiftDegrees),
+            RgbHueShiftSpeedDegreesPerSecond = Math.Clamp(layer.RgbHueShiftSpeedDegreesPerSecond != 0 ? layer.RgbHueShiftSpeedDegreesPerSecond : _rgbHueShiftSpeedDegreesPerSecond, -MaxRgbHueShiftSpeedDegreesPerSecond, MaxRgbHueShiftSpeedDegreesPerSecond),
+            AudioFrequencyHueShiftDegrees = 0,
+            ReactiveMappings = NormalizeReactiveMappings(layer.ReactiveMappings, layer.AudioFrequencyHueShiftDegrees),
+            ThresholdMin = thresholdMin,
+            ThresholdMax = thresholdMax,
+            InvertThreshold = invertThreshold
+        };
     }
 
     private static List<SimulationLayerSpec> BuildLegacySimulationLayerSpecs(
@@ -7969,164 +9461,156 @@ public partial class MainWindow : Window
 
     private bool ApplySimulationLayerSpecs(IReadOnlyList<SimulationLayerSpec> specs)
     {
-        var existingById = _simulationLayers.ToDictionary(layer => layer.Id);
-        var nextLayers = new List<SimulationLayerState>(specs.Count);
-        bool changed = _simulationLayers.Count != specs.Count;
+        var existingById = EnumerateSimulationLayers(_simulationLayers).ToDictionary(layer => layer.Id);
+        Guid? currentPrimaryId = EnumerateSimulationLeafLayers(_simulationLayers)
+            .FirstOrDefault(layer => ReferenceEquals(layer.Engine, _engine))?.Id;
+        bool primaryAssigned = false;
+        var nextLayers = BuildSimulationLayerStates(specs, null, existingById, currentPrimaryId, ref primaryAssigned);
+        EnsurePrimarySimulationEngineAssigned(nextLayers, ref primaryAssigned);
 
-        for (int index = 0; index < specs.Count; index++)
+        foreach (var orphan in existingById.Values)
         {
-            var spec = specs[index];
-            SimulationLayerState layer;
-            if (!existingById.TryGetValue(spec.Id, out layer!))
+            if (!orphan.IsGroup && orphan.Engine != null && !ReferenceEquals(orphan.Engine, _engine))
             {
-                ISimulationBackend engine;
-                if (_simulationLayers.Count == 0 && index == 0)
-                {
-                    engine = _engine;
-                    ConfigureSimulationEngine(engine, _configuredRows, _configuredDepth, _currentAspectRatio, randomize: true);
-                }
-                else
-                {
-                    engine = CreateConfiguredSimulationEngine(randomize: true);
-                }
-
-                layer = new SimulationLayerState
-                {
-                    Id = spec.Id,
-                    Engine = engine,
-                    ReactiveMappings = CloneReactiveMappings(spec.ReactiveMappings),
-                    EffectiveLifeOpacity = spec.LifeOpacity,
-                    EffectiveSimulationTargetFps = _currentSimulationTargetFps,
-                    EffectiveRgbHueShiftSpeedDegreesPerSecond = spec.RgbHueShiftSpeedDegreesPerSecond,
-                    EffectiveInjectionNoise = spec.InjectionNoise,
-                    EffectiveThresholdMin = spec.ThresholdMin,
-                    EffectiveThresholdMax = spec.ThresholdMax
-                };
-                changed = true;
+                orphan.Engine.Dispose();
             }
-            else
-            {
-                existingById.Remove(spec.Id);
-                if (index >= _simulationLayers.Count || _simulationLayers[index].Id != spec.Id)
-                {
-                    changed = true;
-                }
-            }
-
-            if (!string.Equals(layer.Name, spec.Name, StringComparison.Ordinal))
-            {
-                layer.Name = spec.Name;
-                changed = true;
-            }
-            if (layer.Enabled != spec.Enabled)
-            {
-                layer.Enabled = spec.Enabled;
-                changed = true;
-            }
-            if (layer.InputFunction != spec.InputFunction)
-            {
-                layer.InputFunction = spec.InputFunction;
-                changed = true;
-            }
-            if (layer.BlendMode != spec.BlendMode)
-            {
-                layer.BlendMode = spec.BlendMode;
-                changed = true;
-            }
-            if (layer.InjectionMode != spec.InjectionMode)
-            {
-                layer.InjectionMode = spec.InjectionMode;
-                changed = true;
-            }
-            if (layer.LifeMode != spec.LifeMode)
-            {
-                layer.LifeMode = spec.LifeMode;
-                changed = true;
-            }
-            if (layer.BinningMode != spec.BinningMode)
-            {
-                layer.BinningMode = spec.BinningMode;
-                changed = true;
-            }
-            if (Math.Abs(layer.InjectionNoise - spec.InjectionNoise) > 0.000001)
-            {
-                layer.InjectionNoise = spec.InjectionNoise;
-                changed = true;
-            }
-            if (Math.Abs(layer.LifeOpacity - spec.LifeOpacity) > 0.000001)
-            {
-                layer.LifeOpacity = spec.LifeOpacity;
-                changed = true;
-            }
-            if (Math.Abs(layer.RgbHueShiftDegrees - spec.RgbHueShiftDegrees) > 0.000001)
-            {
-                layer.RgbHueShiftDegrees = spec.RgbHueShiftDegrees;
-                changed = true;
-            }
-            if (Math.Abs(layer.RgbHueShiftSpeedDegreesPerSecond - spec.RgbHueShiftSpeedDegreesPerSecond) > 0.000001)
-            {
-                layer.RgbHueShiftSpeedDegreesPerSecond = spec.RgbHueShiftSpeedDegreesPerSecond;
-                changed = true;
-            }
-            if (Math.Abs(layer.AudioFrequencyHueShiftDegrees - spec.AudioFrequencyHueShiftDegrees) > 0.000001)
-            {
-                layer.AudioFrequencyHueShiftDegrees = spec.AudioFrequencyHueShiftDegrees;
-                changed = true;
-            }
-            if (!ReactiveMappingsEqual(layer.ReactiveMappings, spec.ReactiveMappings))
-            {
-                layer.ReactiveMappings = CloneReactiveMappings(spec.ReactiveMappings);
-                changed = true;
-            }
-            if (Math.Abs(layer.ThresholdMin - spec.ThresholdMin) > 0.000001)
-            {
-                layer.ThresholdMin = spec.ThresholdMin;
-                changed = true;
-            }
-            if (Math.Abs(layer.ThresholdMax - spec.ThresholdMax) > 0.000001)
-            {
-                layer.ThresholdMax = spec.ThresholdMax;
-                changed = true;
-            }
-            if (layer.InvertThreshold != spec.InvertThreshold)
-            {
-                layer.InvertThreshold = spec.InvertThreshold;
-                changed = true;
-            }
-
-            layer.EffectiveLifeOpacity = layer.LifeOpacity;
-            layer.EffectiveSimulationTargetFps = _currentSimulationTargetFps;
-            layer.ReactiveHueShiftDegrees = 0;
-            layer.EffectiveRgbHueShiftSpeedDegreesPerSecond = layer.RgbHueShiftSpeedDegreesPerSecond;
-            layer.EffectiveInjectionNoise = layer.InjectionNoise;
-            layer.EffectiveThresholdMin = layer.ThresholdMin;
-            layer.EffectiveThresholdMax = layer.ThresholdMax;
-            layer.TimeSinceLastStep = 0;
-
-            ApplySimulationLayerEngineSettings(layer);
-            nextLayers.Add(layer);
-        }
-
-        if (existingById.Count > 0)
-        {
-            foreach (var orphan in existingById.Values)
-            {
-                if (!ReferenceEquals(orphan.Engine, _engine))
-                {
-                    orphan.Engine.Dispose();
-                }
-            }
-            changed = true;
-        }
-
-        if (!changed)
-        {
-            return false;
         }
 
         _simulationLayers.Clear();
         _simulationLayers.AddRange(nextLayers);
         return true;
+    }
+
+    private List<SimulationLayerState> BuildSimulationLayerStates(
+        IReadOnlyList<SimulationLayerSpec> specs,
+        SimulationLayerState? parent,
+        IDictionary<Guid, SimulationLayerState> existingById,
+        Guid? currentPrimaryId,
+        ref bool primaryAssigned)
+    {
+        var list = new List<SimulationLayerState>(specs.Count);
+        for (int index = 0; index < specs.Count; index++)
+        {
+            list.Add(BuildSimulationLayerState(specs[index], index, parent, existingById, currentPrimaryId, ref primaryAssigned));
+        }
+
+        return list;
+    }
+
+    private SimulationLayerState BuildSimulationLayerState(
+        SimulationLayerSpec spec,
+        int index,
+        SimulationLayerState? parent,
+        IDictionary<Guid, SimulationLayerState> existingById,
+        Guid? currentPrimaryId,
+        ref bool primaryAssigned)
+    {
+        SimulationLayerState? existing = null;
+        if (existingById.TryGetValue(spec.Id, out var found))
+        {
+            existing = found;
+            existingById.Remove(spec.Id);
+        }
+
+        if (existing != null && existing.Kind != spec.Kind)
+        {
+            if (!existing.IsGroup && existing.Engine != null && !ReferenceEquals(existing.Engine, _engine))
+            {
+                existing.Engine.Dispose();
+            }
+            existing = null;
+        }
+
+        var layer = existing ?? new SimulationLayerState { Id = spec.Id };
+        layer.Kind = spec.Kind;
+        layer.Parent = parent;
+        layer.Name = spec.Name;
+        layer.Enabled = spec.Enabled;
+
+        if (spec.Kind == LayerEditorSimulationItemKind.Group)
+        {
+            layer.Engine = null;
+            layer.ColorBuffer = null;
+            layer.GrayMask = null;
+            layer.RedMask = null;
+            layer.GreenMask = null;
+            layer.BlueMask = null;
+            layer.Children.Clear();
+            foreach (var child in BuildSimulationLayerStates(spec.Children, layer, existingById, currentPrimaryId, ref primaryAssigned))
+            {
+                layer.Children.Add(child);
+            }
+            return layer;
+        }
+
+        if (layer.Engine == null)
+        {
+            if (!primaryAssigned && currentPrimaryId == spec.Id)
+            {
+                layer.Engine = _engine;
+                primaryAssigned = true;
+                ConfigureSimulationEngine(layer.Engine, _configuredRows, _configuredDepth, _currentAspectRatio, randomize: true);
+            }
+            else
+            {
+                layer.Engine = CreateConfiguredSimulationEngine(randomize: true);
+            }
+        }
+        else if (ReferenceEquals(layer.Engine, _engine))
+        {
+            primaryAssigned = true;
+        }
+
+        layer.Children.Clear();
+        layer.InputFunction = spec.InputFunction;
+        layer.BlendMode = spec.BlendMode;
+        layer.InjectionMode = spec.InjectionMode;
+        layer.LifeMode = spec.LifeMode;
+        layer.BinningMode = spec.BinningMode;
+        layer.InjectionNoise = spec.InjectionNoise;
+        layer.LifeOpacity = spec.LifeOpacity;
+        layer.RgbHueShiftDegrees = spec.RgbHueShiftDegrees;
+        layer.RgbHueShiftSpeedDegreesPerSecond = spec.RgbHueShiftSpeedDegreesPerSecond;
+        layer.AudioFrequencyHueShiftDegrees = spec.AudioFrequencyHueShiftDegrees;
+        layer.ReactiveMappings = CloneReactiveMappings(spec.ReactiveMappings);
+        layer.ThresholdMin = spec.ThresholdMin;
+        layer.ThresholdMax = spec.ThresholdMax;
+        layer.InvertThreshold = spec.InvertThreshold;
+        layer.EffectiveLifeOpacity = layer.LifeOpacity;
+        layer.EffectiveSimulationTargetFps = _currentSimulationTargetFps;
+        layer.ReactiveHueShiftDegrees = 0;
+        layer.EffectiveRgbHueShiftSpeedDegreesPerSecond = layer.RgbHueShiftSpeedDegreesPerSecond;
+        layer.EffectiveInjectionNoise = layer.InjectionNoise;
+        layer.EffectiveThresholdMin = layer.ThresholdMin;
+        layer.EffectiveThresholdMax = layer.ThresholdMax;
+        layer.TimeSinceLastStep = 0;
+
+        ApplySimulationLayerEngineSettings(layer);
+        return layer;
+    }
+
+    private void EnsurePrimarySimulationEngineAssigned(IReadOnlyList<SimulationLayerState> layers, ref bool primaryAssigned)
+    {
+        if (primaryAssigned)
+        {
+            return;
+        }
+
+        var firstLeaf = EnumerateSimulationLeafLayers(layers).FirstOrDefault();
+        if (firstLeaf == null)
+        {
+            return;
+        }
+
+        if (firstLeaf.Engine != null && !ReferenceEquals(firstLeaf.Engine, _engine))
+        {
+            firstLeaf.Engine.Dispose();
+        }
+
+        firstLeaf.Engine = _engine;
+        ConfigureSimulationEngine(firstLeaf.Engine, _configuredRows, _configuredDepth, _currentAspectRatio, randomize: true);
+        ApplySimulationLayerEngineSettings(firstLeaf);
+        primaryAssigned = true;
     }
 
     private static string FormatHexColor(byte r, byte g, byte b) => $"#{r:X2}{g:X2}{b:X2}";
@@ -8493,6 +9977,796 @@ public partial class MainWindow : Window
     private CompositeFrame? BuildCompositeFrame(List<CaptureSource> sources, ref byte[]? downscaledBuffer, bool useEngineDimensions, double animationTime, bool includeCpuReadback = true)
         => _renderBackend.BuildCompositeFrame(sources, ref downscaledBuffer, useEngineDimensions, animationTime, includeCpuReadback);
 
+    private bool HasEmbeddedSimulationGroups(IEnumerable<CaptureSource> sources)
+    {
+        foreach (var source in sources)
+        {
+            if (source.Type == CaptureSource.SourceType.SimGroup)
+            {
+                return true;
+            }
+
+            if (source.Children.Count > 0 && HasEmbeddedSimulationGroups(source.Children))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private SimulationLayerState? FindSimulationNode(Guid id) =>
+        EnumerateSimulationLayers(_simulationLayers).FirstOrDefault(layer => layer.Id == id);
+
+    private CompositeFrame? BuildInlineCompositeFrame(
+        List<CaptureSource> sources,
+        ref byte[]? downscaledBuffer,
+        bool useEngineDimensions,
+        double animationTime,
+        int simulationStepsThisFrame,
+        ref bool injectedAnyLayer,
+        ref int steppedPassCount)
+    {
+        bool includeCpuReadback = _isRecording || App.IsSmokeTestMode;
+        if (_inlineGpuSourceCompositor.IsAvailable &&
+            _gpuSimulationGroupCompositor.IsAvailable)
+        {
+            var gpuComposite = BuildInlineCompositeFrameGpu(
+                sources,
+                ref downscaledBuffer,
+                useEngineDimensions,
+                animationTime,
+                simulationStepsThisFrame,
+                ref injectedAnyLayer,
+                ref steppedPassCount,
+                includeCpuReadback);
+            if (gpuComposite != null)
+            {
+                return gpuComposite;
+            }
+        }
+
+        return BuildInlineCompositeFrameCpu(
+            sources,
+            ref downscaledBuffer,
+            useEngineDimensions,
+            animationTime,
+            simulationStepsThisFrame,
+            ref injectedAnyLayer,
+            ref steppedPassCount);
+    }
+
+    private CompositeFrame? BuildInlineCompositeFrameGpu(
+        List<CaptureSource> sources,
+        ref byte[]? downscaledBuffer,
+        bool useEngineDimensions,
+        double animationTime,
+        int simulationStepsThisFrame,
+        ref bool injectedAnyLayer,
+        ref int steppedPassCount,
+        bool includeCpuReadback)
+    {
+        if (sources.Count == 0)
+        {
+            return null;
+        }
+
+        if (!TryGetDownscaledDimensions(sources, useEngineDimensions, out int downscaledWidth, out int downscaledHeight))
+        {
+            return null;
+        }
+
+        bool wroteAny = false;
+        CompositeFrame? currentComposite = null;
+        byte[]? scratchBuffer = null;
+        int sourceIndex = 0;
+        while (sourceIndex < sources.Count)
+        {
+            var source = sources[sourceIndex];
+            if (!source.Enabled)
+            {
+                sourceIndex++;
+                continue;
+            }
+
+            if (source.Type == CaptureSource.SourceType.SimGroup)
+            {
+                var simulationComposite = BuildInlineSimulationGroupCompositeFrameGpu(
+                    source,
+                    currentComposite,
+                    simulationStepsThisFrame,
+                    ref injectedAnyLayer,
+                    ref steppedPassCount);
+                if (simulationComposite == null)
+                {
+                    if (!source.SimulationLayers.Any(layer => layer.Enabled))
+                    {
+                        continue;
+                    }
+
+                    return null;
+                }
+
+                currentComposite = simulationComposite;
+                wroteAny = true;
+                sourceIndex++;
+                continue;
+            }
+
+            var segmentInputs = new List<GpuSourceCompositor.PreparedLayerInput>();
+            while (sourceIndex < sources.Count)
+            {
+                source = sources[sourceIndex];
+                if (!source.Enabled)
+                {
+                    sourceIndex++;
+                    continue;
+                }
+
+                if (source.Type == CaptureSource.SourceType.SimGroup)
+                {
+                    break;
+                }
+
+                if (TryBuildInlineGpuPreparedLayer(
+                    source,
+                    animationTime,
+                    simulationStepsThisFrame,
+                    ref injectedAnyLayer,
+                    ref steppedPassCount,
+                    out var preparedLayer))
+                {
+                    segmentInputs.Add(preparedLayer);
+                }
+
+                sourceIndex++;
+            }
+
+            if (segmentInputs.Count == 0)
+            {
+                continue;
+            }
+
+            var nextComposite = _inlineGpuSourceCompositor.ComposePreparedLayersOntoSurface(
+                currentComposite?.GpuSurface,
+                segmentInputs,
+                downscaledWidth,
+                downscaledHeight,
+                animationTime,
+                firstLayer: !wroteAny,
+                ref scratchBuffer,
+                includeCpuReadback: false);
+            if (nextComposite == null)
+            {
+                return null;
+            }
+
+            currentComposite = nextComposite;
+            wroteAny = true;
+        }
+
+        if (!wroteAny || currentComposite?.GpuSurface == null)
+        {
+            return null;
+        }
+
+        var finalComposite = _inlineGpuSourceCompositor.CreateCompositeFrameFromSurface(
+            currentComposite.GpuSurface,
+            ref downscaledBuffer,
+            includeCpuReadback);
+        return finalComposite;
+    }
+
+    private bool TryBuildInlineGpuPreparedLayer(
+        CaptureSource source,
+        double animationTime,
+        int simulationStepsThisFrame,
+        ref bool injectedAnyLayer,
+        ref int steppedPassCount,
+        out GpuSourceCompositor.PreparedLayerInput preparedLayer)
+    {
+        preparedLayer = default;
+
+        if (!source.Enabled || source.Type == CaptureSource.SourceType.SimGroup)
+        {
+            return false;
+        }
+
+        if (source.Type == CaptureSource.SourceType.Group)
+        {
+            var groupBuffer = source.CompositeDownscaledBuffer;
+            var groupComposite = HasEmbeddedSimulationGroups(source.Children)
+                ? BuildInlineCompositeFrameGpu(
+                    source.Children,
+                    ref groupBuffer,
+                    useEngineDimensions: false,
+                    animationTime,
+                    simulationStepsThisFrame,
+                    ref injectedAnyLayer,
+                    ref steppedPassCount,
+                    includeCpuReadback: false)
+                : BuildCompositeFrame(source.Children, ref groupBuffer, useEngineDimensions: false, animationTime, includeCpuReadback: false);
+            source.CompositeDownscaledBuffer = groupBuffer;
+            if (groupComposite == null)
+            {
+                return false;
+            }
+
+            preparedLayer = groupComposite.GpuSurface != null
+                ? new GpuSourceCompositor.PreparedLayerInput(
+                    source,
+                    sourcePixels: null,
+                    sourceShaderResourceView: groupComposite.GpuSurface.ShaderResourceView,
+                    groupComposite.DownscaledWidth,
+                    groupComposite.DownscaledHeight)
+                : new GpuSourceCompositor.PreparedLayerInput(
+                    source,
+                    groupComposite.Downscaled,
+                    sourceShaderResourceView: null,
+                    groupComposite.DownscaledWidth,
+                    groupComposite.DownscaledHeight);
+            return true;
+        }
+
+        var frame = source.LastFrame;
+        if (frame == null)
+        {
+            return false;
+        }
+
+        if (source.Type == CaptureSource.SourceType.Window && source.Window != null)
+        {
+            source.Window = source.Window.WithDimensions(frame.SourceWidth, frame.SourceHeight);
+        }
+
+        int sourceWidth = frame.Source != null ? frame.SourceWidth : frame.DownscaledWidth;
+        int sourceHeight = frame.Source != null ? frame.SourceHeight : frame.DownscaledHeight;
+        preparedLayer = new GpuSourceCompositor.PreparedLayerInput(
+            source,
+            frame.Source ?? frame.Downscaled,
+            sourceShaderResourceView: null,
+            sourceWidth,
+            sourceHeight);
+        return true;
+    }
+
+    private CompositeFrame? BuildInlineCompositeFrameCpu(
+        List<CaptureSource> sources,
+        ref byte[]? downscaledBuffer,
+        bool useEngineDimensions,
+        double animationTime,
+        int simulationStepsThisFrame,
+        ref bool injectedAnyLayer,
+        ref int steppedPassCount)
+    {
+        if (sources.Count == 0)
+        {
+            return null;
+        }
+
+        if (!TryGetDownscaledDimensions(sources, useEngineDimensions, out int downscaledWidth, out int downscaledHeight))
+        {
+            return null;
+        }
+
+        int requiredLength = downscaledWidth * downscaledHeight * 4;
+        if (downscaledBuffer == null || downscaledBuffer.Length != requiredLength)
+        {
+            downscaledBuffer = new byte[requiredLength];
+        }
+
+        bool wroteAny = false;
+        CompositeFrame? currentComposite = null;
+
+        foreach (var source in sources)
+        {
+            if (!source.Enabled)
+            {
+                continue;
+            }
+
+            if (source.Type == CaptureSource.SourceType.SimGroup)
+            {
+                var simulationComposite = BuildInlineSimulationGroupCompositeFrameCpu(
+                    source,
+                    currentComposite,
+                    simulationStepsThisFrame,
+                    ref injectedAnyLayer,
+                    ref steppedPassCount);
+                if (simulationComposite == null)
+                {
+                    continue;
+                }
+
+                if (simulationComposite.DownscaledWidth != downscaledWidth ||
+                    simulationComposite.DownscaledHeight != downscaledHeight ||
+                    simulationComposite.Downscaled.Length < requiredLength)
+                {
+                    continue;
+                }
+
+                Buffer.BlockCopy(simulationComposite.Downscaled, 0, downscaledBuffer, 0, requiredLength);
+                currentComposite = new CompositeFrame(downscaledBuffer, downscaledWidth, downscaledHeight);
+                wroteAny = true;
+                continue;
+            }
+
+            SourceFrame? frame = null;
+            if (source.Type == CaptureSource.SourceType.Group)
+            {
+                var groupBuffer = source.CompositeDownscaledBuffer;
+                var groupComposite = HasEmbeddedSimulationGroups(source.Children)
+                    ? BuildInlineCompositeFrameCpu(
+                        source.Children,
+                        ref groupBuffer,
+                        useEngineDimensions: false,
+                        animationTime,
+                        simulationStepsThisFrame,
+                        ref injectedAnyLayer,
+                        ref steppedPassCount)
+                    : BuildCompositeFrame(source.Children, ref groupBuffer, useEngineDimensions: false, animationTime);
+                source.CompositeDownscaledBuffer = groupBuffer;
+                if (groupComposite != null)
+                {
+                    frame = new SourceFrame(
+                        groupComposite.Downscaled,
+                        groupComposite.DownscaledWidth,
+                        groupComposite.DownscaledHeight,
+                        null,
+                        groupComposite.DownscaledWidth,
+                        groupComposite.DownscaledHeight);
+                }
+            }
+            else
+            {
+                frame = source.LastFrame;
+            }
+
+            if (frame == null)
+            {
+                continue;
+            }
+
+            _inlineSourceCompositor.CompositeSourceFrameIntoBuffer(
+                downscaledBuffer,
+                downscaledWidth,
+                downscaledHeight,
+                frame,
+                source,
+                animationTime,
+                firstLayer: !wroteAny);
+
+            currentComposite = new CompositeFrame(downscaledBuffer, downscaledWidth, downscaledHeight);
+            wroteAny = true;
+        }
+
+        return wroteAny
+            ? new CompositeFrame(downscaledBuffer, downscaledWidth, downscaledHeight)
+            : null;
+    }
+
+    private CompositeFrame? BuildInlineSimulationGroupCompositeFrameGpu(
+        CaptureSource source,
+        CompositeFrame? inputComposite,
+        int simulationStepsThisFrame,
+        ref bool injectedAnyLayer,
+        ref int steppedPassCount)
+    {
+        if (!source.Enabled)
+        {
+            return inputComposite;
+        }
+
+        var runtimeGroup = FindSimulationNode(source.Id);
+        if (runtimeGroup == null || !runtimeGroup.IsGroup)
+        {
+            return inputComposite;
+        }
+
+        int groupSteppedPassCount = 0;
+        if (!_isPaused && simulationStepsThisFrame > 0 && runtimeGroup.Enabled)
+        {
+            CompositeFrame? groupInputComposite = inputComposite;
+            bool compositeHasCpuReadback = groupInputComposite != null &&
+                                           groupInputComposite.DownscaledWidth > 0 &&
+                                           groupInputComposite.DownscaledHeight > 0 &&
+                                           groupInputComposite.Downscaled.Length >= groupInputComposite.DownscaledWidth * groupInputComposite.DownscaledHeight * 4;
+            bool attemptedCpuCompositeFallback = false;
+            bool injectedInGroup = false;
+            bool steppedInPass = false;
+            GpuCompositeSurface? published = groupInputComposite?.GpuSurface;
+
+            foreach (var child in runtimeGroup.Children)
+            {
+                published = ExecuteSimulationGroupChildInjectionAndStep(
+                    child,
+                    ref groupInputComposite,
+                    ref compositeHasCpuReadback,
+                    ref attemptedCpuCompositeFallback,
+                    published,
+                    ref injectedInGroup,
+                    ref steppedInPass);
+            }
+
+            if (injectedInGroup)
+            {
+                injectedAnyLayer = true;
+            }
+
+            if (steppedInPass)
+            {
+                groupSteppedPassCount = 1;
+            }
+
+            var groupLeaves = EnumerateSimulationLeafLayers(runtimeGroup.Children).ToArray();
+            for (int pass = 1; pass < simulationStepsThisFrame; pass++)
+            {
+                if (RunSimulationStepOnlyPass(groupLeaves))
+                {
+                    groupSteppedPassCount++;
+                }
+            }
+        }
+
+        steppedPassCount = Math.Max(steppedPassCount, groupSteppedPassCount);
+
+        var enabledLayers = EnumerateSimulationLeafLayers(runtimeGroup.Children)
+            .Where(layer => layer.Enabled)
+            .ToArray();
+        if (enabledLayers.Length == 0)
+        {
+            return inputComposite;
+        }
+
+        int width;
+        int height;
+        if (inputComposite != null)
+        {
+            width = inputComposite.DownscaledWidth;
+            height = inputComposite.DownscaledHeight;
+        }
+        else
+        {
+            var referenceEngine = GetReferenceSimulationEngine();
+            width = referenceEngine.Columns;
+            height = referenceEngine.Rows;
+        }
+
+        var activeLayerEntries = new List<SimulationPresentationLayerData>(enabledLayers.Length);
+        foreach (var layer in enabledLayers)
+        {
+            if (TryBuildSimulationPresentationLayer(layer, Math.Clamp(_effectiveLifeOpacity * layer.EffectiveLifeOpacity, 0, 1), out var presentationLayer))
+            {
+                activeLayerEntries.Add(presentationLayer);
+            }
+        }
+
+        if (activeLayerEntries.Count == 0 || activeLayerEntries.Count > 8)
+        {
+            return null;
+        }
+
+        bool hasEnabledSubtractiveSimulationLayer = enabledLayers.Any(layer => layer.BlendMode == BlendMode.Subtractive);
+        bool hasEnabledNonSubtractiveSimulationLayer = enabledLayers.Any(layer => layer.BlendMode != BlendMode.Subtractive);
+        bool hasEnabledAdditiveSimulationLayer = enabledLayers.Any(layer => layer.BlendMode == BlendMode.Additive);
+        int additiveLayerCount = enabledLayers.Count(layer => layer.BlendMode == BlendMode.Additive);
+        int subtractiveLayerCount = enabledLayers.Count(layer => layer.BlendMode == BlendMode.Subtractive);
+        bool hasEnabledNonAddSubSimulationLayer = enabledLayers.Any(layer =>
+            layer.BlendMode != BlendMode.Additive &&
+            layer.BlendMode != BlendMode.Subtractive);
+
+        int simulationBaseline;
+        if (hasEnabledSubtractiveSimulationLayer && !hasEnabledNonSubtractiveSimulationLayer)
+        {
+            simulationBaseline = 255;
+        }
+        else if (hasEnabledAdditiveSimulationLayer &&
+                 hasEnabledSubtractiveSimulationLayer &&
+                 !hasEnabledNonAddSubSimulationLayer)
+        {
+            simulationBaseline = 128;
+        }
+        else
+        {
+            simulationBaseline = 0;
+        }
+
+        bool useSignedAddSubPassthrough = inputComposite != null && !hasEnabledNonAddSubSimulationLayer;
+        bool useMixedAddSubPassthroughModel = useSignedAddSubPassthrough &&
+                                              additiveLayerCount > 0 &&
+                                              subtractiveLayerCount > 0;
+
+        byte[]? underlayBuffer = null;
+        int underlayWidth = 0;
+        int underlayHeight = 0;
+        if (inputComposite != null && inputComposite.GpuSurface == null)
+        {
+            underlayBuffer = inputComposite.Downscaled;
+            underlayWidth = inputComposite.DownscaledWidth;
+            underlayHeight = inputComposite.DownscaledHeight;
+        }
+
+        byte[]? groupBuffer = source.CompositeDownscaledBuffer;
+        var composite = _gpuSimulationGroupCompositor.Compose(
+            activeLayerEntries,
+            inputComposite?.GpuSurface,
+            underlayBuffer,
+            underlayWidth,
+            underlayHeight,
+            simulationBaseline,
+            useSignedAddSubPassthrough,
+            useMixedAddSubPassthroughModel,
+            invertComposite: false,
+            width,
+            height,
+            ref groupBuffer,
+            includeCpuReadback: _isRecording || (App.IsSmokeTestMode && !_suppressSmokeIntermediateSimGroupReadback));
+        source.CompositeDownscaledBuffer = groupBuffer;
+        if (composite != null &&
+            composite.Downscaled.Length >= composite.DownscaledWidth * composite.DownscaledHeight * 4)
+        {
+            source.LastFrame = new SourceFrame(
+                composite.Downscaled,
+                composite.DownscaledWidth,
+                composite.DownscaledHeight,
+                null,
+                composite.DownscaledWidth,
+                composite.DownscaledHeight);
+        }
+        else
+        {
+            source.LastFrame = null;
+        }
+
+        return composite;
+    }
+
+    private CompositeFrame? BuildInlineSimulationGroupCompositeFrameCpu(
+        CaptureSource source,
+        CompositeFrame? inputComposite,
+        int simulationStepsThisFrame,
+        ref bool injectedAnyLayer,
+        ref int steppedPassCount)
+    {
+        if (!source.Enabled)
+        {
+            return inputComposite;
+        }
+
+        var runtimeGroup = FindSimulationNode(source.Id);
+        if (runtimeGroup == null || !runtimeGroup.IsGroup)
+        {
+            return inputComposite;
+        }
+
+        int groupSteppedPassCount = 0;
+        if (!_isPaused && simulationStepsThisFrame > 0 && runtimeGroup.Enabled)
+        {
+            CompositeFrame? groupInputComposite = inputComposite;
+            bool compositeHasCpuReadback = groupInputComposite != null &&
+                                           groupInputComposite.DownscaledWidth > 0 &&
+                                           groupInputComposite.DownscaledHeight > 0 &&
+                                           groupInputComposite.Downscaled.Length >= groupInputComposite.DownscaledWidth * groupInputComposite.DownscaledHeight * 4;
+            bool attemptedCpuCompositeFallback = false;
+            bool injectedInGroup = false;
+            bool steppedInPass = false;
+            GpuCompositeSurface? published = groupInputComposite?.GpuSurface;
+
+            foreach (var child in runtimeGroup.Children)
+            {
+                published = ExecuteSimulationGroupChildInjectionAndStep(
+                    child,
+                    ref groupInputComposite,
+                    ref compositeHasCpuReadback,
+                    ref attemptedCpuCompositeFallback,
+                    published,
+                    ref injectedInGroup,
+                    ref steppedInPass);
+            }
+
+            if (injectedInGroup)
+            {
+                injectedAnyLayer = true;
+            }
+
+            if (steppedInPass)
+            {
+                groupSteppedPassCount = 1;
+            }
+
+            var groupLeaves = EnumerateSimulationLeafLayers(runtimeGroup.Children).ToArray();
+            for (int pass = 1; pass < simulationStepsThisFrame; pass++)
+            {
+                if (RunSimulationStepOnlyPass(groupLeaves))
+                {
+                    groupSteppedPassCount++;
+                }
+            }
+        }
+
+        steppedPassCount = Math.Max(steppedPassCount, groupSteppedPassCount);
+
+        var enabledLayers = EnumerateSimulationLeafLayers(runtimeGroup.Children)
+            .Where(layer => layer.Enabled)
+            .ToArray();
+        if (enabledLayers.Length == 0)
+        {
+            return inputComposite;
+        }
+
+        int width;
+        int height;
+        byte[]? targetBuffer = source.CompositeDownscaledBuffer;
+        if (inputComposite != null)
+        {
+            width = inputComposite.DownscaledWidth;
+            height = inputComposite.DownscaledHeight;
+        }
+        else
+        {
+            var referenceEngine = GetReferenceSimulationEngine();
+            width = referenceEngine.Columns;
+            height = referenceEngine.Rows;
+        }
+
+        int requiredLength = width * height * 4;
+        if (targetBuffer == null || targetBuffer.Length != requiredLength)
+        {
+            targetBuffer = new byte[requiredLength];
+        }
+
+        if (inputComposite != null && inputComposite.Downscaled.Length >= requiredLength)
+        {
+            Buffer.BlockCopy(inputComposite.Downscaled, 0, targetBuffer, 0, requiredLength);
+        }
+        else
+        {
+            Array.Clear(targetBuffer, 0, requiredLength);
+        }
+
+        var referenceSimulationEngine = GetReferenceSimulationEngine();
+        int engineCols = referenceSimulationEngine.Columns;
+        int engineRows = referenceSimulationEngine.Rows;
+        if (_rowMap.Length < height)
+        {
+            _rowMap = new int[height];
+        }
+        if (_colMap.Length < width)
+        {
+            _colMap = new int[width];
+        }
+        BuildMappings(width, height, engineCols, engineRows);
+
+        bool hasEnabledSubtractiveSimulationLayer = enabledLayers.Any(layer => layer.BlendMode == BlendMode.Subtractive);
+        bool hasEnabledNonSubtractiveSimulationLayer = enabledLayers.Any(layer => layer.BlendMode != BlendMode.Subtractive);
+        bool hasEnabledAdditiveSimulationLayer = enabledLayers.Any(layer => layer.BlendMode == BlendMode.Additive);
+        int additiveLayerCount = enabledLayers.Count(layer => layer.BlendMode == BlendMode.Additive);
+        int subtractiveLayerCount = enabledLayers.Count(layer => layer.BlendMode == BlendMode.Subtractive);
+        bool hasEnabledNonAddSubSimulationLayer = enabledLayers.Any(layer =>
+            layer.BlendMode != BlendMode.Additive &&
+            layer.BlendMode != BlendMode.Subtractive);
+
+        int simulationBaseline;
+        if (hasEnabledSubtractiveSimulationLayer && !hasEnabledNonSubtractiveSimulationLayer)
+        {
+            simulationBaseline = 255;
+        }
+        else if (hasEnabledAdditiveSimulationLayer &&
+                 hasEnabledSubtractiveSimulationLayer &&
+                 !hasEnabledNonAddSubSimulationLayer)
+        {
+            simulationBaseline = 128;
+        }
+        else
+        {
+            simulationBaseline = 0;
+        }
+
+        bool useSignedAddSubPassthrough = inputComposite != null && !hasEnabledNonAddSubSimulationLayer;
+        bool useMixedAddSubPassthroughModel = useSignedAddSubPassthrough &&
+                                              additiveLayerCount > 0 &&
+                                              subtractiveLayerCount > 0;
+        double globalLifeOpacity = Math.Clamp(_effectiveLifeOpacity, 0, 1);
+
+        InlineSimulationBlendLayerData[] blendLayers = BuildInlineSimulationBlendLayers(enabledLayers, globalLifeOpacity);
+
+        Parallel.For(0, height, row =>
+        {
+            int sourceRow = _rowMap[row];
+            for (int col = 0; col < width; col++)
+            {
+                int sourceCol = _colMap[col];
+                int sourceIndex = (sourceRow * engineCols + sourceCol) * 4;
+                int index = (row * width + col) * 4;
+
+                int underlayB = simulationBaseline;
+                int underlayG = simulationBaseline;
+                int underlayR = simulationBaseline;
+                if (inputComposite != null && inputComposite.Downscaled.Length >= requiredLength)
+                {
+                    underlayB = targetBuffer[index];
+                    underlayG = targetBuffer[index + 1];
+                    underlayR = targetBuffer[index + 2];
+                }
+
+                if (useSignedAddSubPassthrough)
+                {
+                    int addB = 0;
+                    int addG = 0;
+                    int addR = 0;
+                    int subB = 0;
+                    int subG = 0;
+                    int subR = 0;
+                    foreach (var blendLayer in blendLayers)
+                    {
+                        SampleInlineSimulationLayerColor(blendLayer, sourceIndex, out byte sampleR, out byte sampleG, out byte sampleB);
+                        if (blendLayer.BlendMode == BlendMode.Subtractive)
+                        {
+                            subR += (int)Math.Round((255 - sampleR) * blendLayer.Opacity);
+                            subG += (int)Math.Round((255 - sampleG) * blendLayer.Opacity);
+                            subB += (int)Math.Round((255 - sampleB) * blendLayer.Opacity);
+                        }
+                        else
+                        {
+                            addR += (int)Math.Round(sampleR * blendLayer.Opacity);
+                            addG += (int)Math.Round(sampleG * blendLayer.Opacity);
+                            addB += (int)Math.Round(sampleB * blendLayer.Opacity);
+                        }
+                    }
+
+                    if (useMixedAddSubPassthroughModel)
+                    {
+                        double underlayB01 = underlayB / 255.0;
+                        double underlayG01 = underlayG / 255.0;
+                        double underlayR01 = underlayR / 255.0;
+
+                        double scaledSubB = Math.Clamp(subB * underlayB01, 0, 255);
+                        double scaledSubG = Math.Clamp(subG * underlayG01, 0, 255);
+                        double scaledSubR = Math.Clamp(subR * underlayR01, 0, 255);
+
+                        double scaledAddB = addB * (1.0 - underlayB01);
+                        double scaledAddG = addG * (1.0 - underlayG01);
+                        double scaledAddR = addR * (1.0 - underlayR01);
+
+                        targetBuffer[index] = (byte)ClampToByte((int)Math.Round(underlayB + scaledAddB - scaledSubB));
+                        targetBuffer[index + 1] = (byte)ClampToByte((int)Math.Round(underlayG + scaledAddG - scaledSubG));
+                        targetBuffer[index + 2] = (byte)ClampToByte((int)Math.Round(underlayR + scaledAddR - scaledSubR));
+                    }
+                    else
+                    {
+                        targetBuffer[index] = ClampToByte(underlayB + addB - subB);
+                        targetBuffer[index + 1] = ClampToByte(underlayG + addG - subG);
+                        targetBuffer[index + 2] = ClampToByte(underlayR + addR - subR);
+                    }
+
+                    targetBuffer[index + 3] = 255;
+                    continue;
+                }
+
+                int simB = simulationBaseline;
+                int simG = simulationBaseline;
+                int simR = simulationBaseline;
+                foreach (var blendLayer in blendLayers)
+                {
+                    SampleInlineSimulationLayerColor(blendLayer, sourceIndex, out byte sampleR, out byte sampleG, out byte sampleB);
+                    BlendSimulationLayerInto(ref simB, ref simG, ref simR, sampleR, sampleG, sampleB, blendLayer.BlendMode, blendLayer.Opacity);
+                }
+
+                int deltaB = simB - simulationBaseline;
+                int deltaG = simG - simulationBaseline;
+                int deltaR = simR - simulationBaseline;
+                targetBuffer[index] = ClampToByte(underlayB + deltaB);
+                targetBuffer[index + 1] = ClampToByte(underlayG + deltaG);
+                targetBuffer[index + 2] = ClampToByte(underlayR + deltaR);
+                targetBuffer[index + 3] = 255;
+            }
+        });
+
+        source.CompositeDownscaledBuffer = targetBuffer;
+        source.LastFrame = new SourceFrame(targetBuffer, width, height, null, width, height);
+        return new CompositeFrame(targetBuffer, width, height);
+    }
+
     internal static void ResetGpuSourceCompositeSmokeCounters() => GpuSourceCompositor.ResetSmokeCounters();
 
     internal static int GetGpuSourceCompositePassCount() => GpuSourceCompositor.CompositePassCount;
@@ -8546,12 +10820,13 @@ public partial class MainWindow : Window
         source.BlendMode = BlendMode.Additive;
         source.Opacity = 1.0;
 
-        bool[] priorLayerEnabled = _simulationLayers.Select(layer => layer.Enabled).ToArray();
+        var simulationLeaves = EnumerateSimulationLeafLayers(_simulationLayers).ToArray();
+        bool[] priorLayerEnabled = simulationLeaves.Select(layer => layer.Enabled).ToArray();
         bool priorPassthrough = _passthroughEnabled;
 
         try
         {
-            foreach (var layer in _simulationLayers)
+            foreach (var layer in simulationLeaves)
             {
                 layer.Enabled = false;
             }
@@ -8593,9 +10868,9 @@ public partial class MainWindow : Window
                 PassthroughMenuItem.IsChecked = priorPassthrough;
             }
 
-            for (int i = 0; i < _simulationLayers.Count && i < priorLayerEnabled.Length; i++)
+            for (int i = 0; i < simulationLeaves.Length && i < priorLayerEnabled.Length; i++)
             {
-                _simulationLayers[i].Enabled = priorLayerEnabled[i];
+                simulationLeaves[i].Enabled = priorLayerEnabled[i];
             }
         }
     }
@@ -9194,13 +11469,12 @@ public partial class MainWindow : Window
     internal bool RunSimulationReactiveMappingsSmoke()
     {
         EnsureSimulationLayersInitialized();
-        if (_simulationLayers.Count == 0)
+        var layer = EnumerateSimulationLeafLayers(_simulationLayers).FirstOrDefault();
+        if (layer == null)
         {
             Logger.Warn("Simulation reactive mappings smoke: no layers were initialized.");
             return false;
         }
-
-        var layer = _simulationLayers[0];
         double previousSimulationTargetFps = _currentSimulationTargetFps;
         double previousFastAudioLevel = _fastAudioLevel;
         bool previousAudioReactiveEnabled = _audioReactiveEnabled;
@@ -9514,13 +11788,12 @@ public partial class MainWindow : Window
     internal bool RunSimulationReactiveRemovalSmoke()
     {
         EnsureSimulationLayersInitialized();
-        if (_simulationLayers.Count == 0)
+        var layer = EnumerateSimulationLeafLayers(_simulationLayers).FirstOrDefault();
+        if (layer == null)
         {
             Logger.Warn("Simulation reactive removal smoke: no layers were initialized.");
             return false;
         }
-
-        var layer = _simulationLayers[0];
         double previousSimulationTargetFps = _currentSimulationTargetFps;
         double previousFastAudioLevel = _fastAudioLevel;
         string? previousAudioDeviceId = _selectedAudioDeviceId;
@@ -9661,7 +11934,7 @@ public partial class MainWindow : Window
         }
 
         EnsureSimulationLayersInitialized();
-        foreach (var layer in _simulationLayers)
+        foreach (var layer in EnumerateSimulationLeafLayers(_simulationLayers))
         {
             layer.Enabled = false;
         }
@@ -9696,7 +11969,7 @@ public partial class MainWindow : Window
         return outputVisible && compositedInFinalFrame && overlayDisabled;
     }
 
-    internal void ConfigureProfilingSmokeScene(int rows = 240, bool rgbMode = false, string? smokeVideoPath = null)
+    internal void ConfigureProfilingSmokeScene(int rows = 240, bool rgbMode = false, string? smokeVideoPath = null, bool includeSimGroup = false)
     {
         if (!_renderLoopAttached)
         {
@@ -9709,6 +11982,7 @@ public partial class MainWindow : Window
         }
 
         EnsureSimulationLayersInitialized();
+        _suppressSmokeIntermediateSimGroupReadback = includeSimGroup;
         _audioReactiveEnabled = false;
         _passthroughEnabled = true;
         _blendMode = BlendMode.Additive;
@@ -9765,9 +12039,55 @@ public partial class MainWindow : Window
         accent.Opacity = 0.45;
 
         _sources.Add(background);
+        if (includeSimGroup)
+        {
+            var simulationGroup = CaptureSource.CreateSimulationGroup("Profile Sim Group");
+            simulationGroup.SimulationLayers.Add(new SimulationLayerSpec
+            {
+                Id = Guid.NewGuid(),
+                Kind = LayerEditorSimulationItemKind.Layer,
+                Name = "Profile Positive",
+                Enabled = true,
+                InputFunction = SimulationInputFunction.Direct,
+                BlendMode = BlendMode.Additive,
+                InjectionMode = GameOfLifeEngine.InjectionMode.Threshold,
+                LifeMode = rgbMode ? GameOfLifeEngine.LifeMode.RgbChannels : GameOfLifeEngine.LifeMode.NaiveGrayscale,
+                BinningMode = GameOfLifeEngine.BinningMode.Fill,
+                InjectionNoise = 0.0,
+                LifeOpacity = 1.0,
+                ThresholdMin = 0.25,
+                ThresholdMax = 0.85,
+                InvertThreshold = false,
+                RgbHueShiftDegrees = rgbMode ? 60.0 : 0.0
+            });
+            simulationGroup.SimulationLayers.Add(new SimulationLayerSpec
+            {
+                Id = Guid.NewGuid(),
+                Kind = LayerEditorSimulationItemKind.Layer,
+                Name = "Profile Negative",
+                Enabled = true,
+                InputFunction = SimulationInputFunction.Inverse,
+                BlendMode = BlendMode.Subtractive,
+                InjectionMode = GameOfLifeEngine.InjectionMode.Threshold,
+                LifeMode = rgbMode ? GameOfLifeEngine.LifeMode.RgbChannels : GameOfLifeEngine.LifeMode.NaiveGrayscale,
+                BinningMode = GameOfLifeEngine.BinningMode.Fill,
+                InjectionNoise = 0.0,
+                LifeOpacity = 0.85,
+                ThresholdMin = 0.15,
+                ThresholdMax = 0.70,
+                InvertThreshold = false,
+                RgbHueShiftDegrees = rgbMode ? 180.0 : 0.0
+            });
+            _sources.Add(simulationGroup);
+        }
+
         _sources.Add(overlay);
         _sources.Add(accent);
         UpdatePrimaryAspectIfNeeded();
+        if (includeSimGroup)
+        {
+            ApplySimulationLayersFromSourceStack(fallbackToDefault: false);
+        }
         NotifyLayerEditorSourcesChanged();
         RenderFrame();
     }
@@ -10330,6 +12650,53 @@ public partial class MainWindow : Window
         destination[destIndex + 3] = 255;
     }
 
+    private readonly struct InlineSimulationBlendLayerData
+    {
+        public InlineSimulationBlendLayerData(
+            byte[] colorBuffer,
+            BlendMode blendMode,
+            double opacity,
+            bool applyHueShift,
+            double hueRr,
+            double hueRg,
+            double hueRb,
+            double hueGr,
+            double hueGg,
+            double hueGb,
+            double hueBr,
+            double hueBg,
+            double hueBb)
+        {
+            ColorBuffer = colorBuffer;
+            BlendMode = blendMode;
+            Opacity = opacity;
+            ApplyHueShift = applyHueShift;
+            HueRr = hueRr;
+            HueRg = hueRg;
+            HueRb = hueRb;
+            HueGr = hueGr;
+            HueGg = hueGg;
+            HueGb = hueGb;
+            HueBr = hueBr;
+            HueBg = hueBg;
+            HueBb = hueBb;
+        }
+
+        public byte[] ColorBuffer { get; }
+        public BlendMode BlendMode { get; }
+        public double Opacity { get; }
+        public bool ApplyHueShift { get; }
+        public double HueRr { get; }
+        public double HueRg { get; }
+        public double HueRb { get; }
+        public double HueGr { get; }
+        public double HueGg { get; }
+        public double HueGb { get; }
+        public double HueBr { get; }
+        public double HueBg { get; }
+        public double HueBb { get; }
+    }
+
     private static byte ClampToByte(int value) => (byte)(value < 0 ? 0 : value > 255 ? 255 : value);
 
     private static void BuildHueRotationMatrix(double hueShiftDegrees,
@@ -10356,7 +12723,7 @@ public partial class MainWindow : Window
 
     private void EnsureEngineColorBuffers()
     {
-        foreach (var layer in _simulationLayers)
+        foreach (var layer in EnumerateSimulationLeafLayers(_simulationLayers))
         {
             if (!layer.Enabled)
             {
@@ -10380,20 +12747,29 @@ public partial class MainWindow : Window
             return false;
         }
 
-        if (layer.Engine is GpuSimulationBackend gpuBackend &&
+        var engine = layer.Engine;
+        if (engine == null)
+        {
+            return false;
+        }
+
+        if (engine is GpuSimulationBackend gpuBackend &&
             gpuBackend.TryGetSharedColorTexture(out IntPtr sharedHandle, out int width, out int height))
         {
             float hueShiftDegrees = (float)CurrentRgbHueShiftDegrees(layer);
             byte[]? fallbackBuffer = null;
+            GpuCompositeSurface? surface = null;
             if (App.IsSmokeTestMode && App.CaptureGpuFallbackBuffersInSmokeTest)
             {
                 EnsureEngineColorBuffer(layer);
                 fallbackBuffer = layer.ColorBuffer;
             }
+            gpuBackend.TryGetColorSurface(out surface);
 
             presentationLayer = new SimulationPresentationLayerData
             {
                 Buffer = fallbackBuffer,
+                Surface = surface,
                 SharedTextureHandle = sharedHandle,
                 Width = width,
                 Height = height,
@@ -10413,8 +12789,9 @@ public partial class MainWindow : Window
         presentationLayer = new SimulationPresentationLayerData
         {
             Buffer = layer.ColorBuffer,
-            Width = layer.Engine.Columns,
-            Height = layer.Engine.Rows,
+            Surface = null,
+            Width = engine.Columns,
+            Height = engine.Rows,
             BlendMode = (int)layer.BlendMode,
             Opacity = opacity,
             HueShiftDegrees = (float)CurrentRgbHueShiftDegrees(layer)
@@ -10425,6 +12802,11 @@ public partial class MainWindow : Window
     private void EnsureEngineColorBuffer(SimulationLayerState layer)
     {
         var engine = layer.Engine;
+        if (engine == null)
+        {
+            return;
+        }
+
         int size = engine.Columns * engine.Rows * 4;
         if (layer.ColorBuffer == null || layer.ColorBuffer.Length != size)
         {
@@ -10464,6 +12846,100 @@ public partial class MainWindow : Window
                 targetBuffer[index + 3] = 255;
             }
         });
+    }
+
+    private InlineSimulationBlendLayerData[] BuildInlineSimulationBlendLayers(
+        IReadOnlyList<SimulationLayerState> enabledLayers,
+        double globalLifeOpacity)
+    {
+        var blendLayers = new List<InlineSimulationBlendLayerData>(enabledLayers.Count);
+        foreach (var layer in enabledLayers)
+        {
+            EnsureEngineColorBuffer(layer);
+            byte[]? colorBuffer = layer.ColorBuffer;
+            if (colorBuffer == null)
+            {
+                continue;
+            }
+
+            double opacity = Math.Clamp(globalLifeOpacity * layer.EffectiveLifeOpacity, 0, 1);
+            if (opacity <= 0.0001)
+            {
+                continue;
+            }
+
+            bool applyHueShift = false;
+            double hueRr = 1.0;
+            double hueRg = 0.0;
+            double hueRb = 0.0;
+            double hueGr = 0.0;
+            double hueGg = 1.0;
+            double hueGb = 0.0;
+            double hueBr = 0.0;
+            double hueBg = 0.0;
+            double hueBb = 1.0;
+
+            if (_renderBackend.SupportsGpuSimulationComposition && !_isRecording && layer.LifeMode == GameOfLifeEngine.LifeMode.RgbChannels)
+            {
+                double hueShiftDegrees = CurrentRgbHueShiftDegrees(layer);
+                if (Math.Abs(hueShiftDegrees) > 0.001)
+                {
+                    applyHueShift = true;
+                    BuildHueRotationMatrix(
+                        hueShiftDegrees,
+                        out hueRr,
+                        out hueRg,
+                        out hueRb,
+                        out hueGr,
+                        out hueGg,
+                        out hueGb,
+                        out hueBr,
+                        out hueBg,
+                        out hueBb);
+                }
+            }
+
+            blendLayers.Add(new InlineSimulationBlendLayerData(
+                colorBuffer,
+                layer.BlendMode,
+                opacity,
+                applyHueShift,
+                hueRr,
+                hueRg,
+                hueRb,
+                hueGr,
+                hueGg,
+                hueGb,
+                hueBr,
+                hueBg,
+                hueBb));
+        }
+
+        return blendLayers.ToArray();
+    }
+
+    private static void SampleInlineSimulationLayerColor(
+        InlineSimulationBlendLayerData layer,
+        int sourceIndex,
+        out byte sampleR,
+        out byte sampleG,
+        out byte sampleB)
+    {
+        byte[] colorBuffer = layer.ColorBuffer;
+        sampleR = colorBuffer[sourceIndex];
+        sampleG = colorBuffer[sourceIndex + 1];
+        sampleB = colorBuffer[sourceIndex + 2];
+        if (!layer.ApplyHueShift)
+        {
+            return;
+        }
+
+        byte originalR = sampleR;
+        byte originalG = sampleG;
+        byte originalB = sampleB;
+        sampleR = ClampToByte((int)Math.Round((layer.HueRr * originalR) + (layer.HueRg * originalG) + (layer.HueRb * originalB)));
+        sampleG = ClampToByte((int)Math.Round((layer.HueGr * originalR) + (layer.HueGg * originalG) + (layer.HueGb * originalB)));
+        sampleB = ClampToByte((int)Math.Round((layer.HueBr * originalR) + (layer.HueBg * originalG) + (layer.HueBb * originalB)));
     }
 
     private void UpdateUnderlayBitmap(int requiredLength)
@@ -10546,7 +13022,7 @@ public partial class MainWindow : Window
 
     private BlendMode GetEffectivePassthroughBlendMode()
     {
-        bool hasEnabledSubtractiveSimulationLayer = _simulationLayers.Any(layer =>
+        bool hasEnabledSubtractiveSimulationLayer = EnumerateSimulationLeafLayers(_simulationLayers).Any(layer =>
             layer.Enabled &&
             layer.BlendMode == BlendMode.Subtractive);
 
@@ -10606,7 +13082,7 @@ public partial class MainWindow : Window
                 reactiveStats = $"\nReactive: {deviceState} | InGain x{_audioInputGain:0.00} | FPS x{_audioReactiveFpsMultiplier:0.00} (min {_audioReactiveFpsMinPercent * 100.0:0}%) | Opacity {_effectiveLifeOpacity:0.00} | Beats: {_audioBeatDetector.BeatCount} | Seeds L:{_audioReactiveLevelSeedBurstsLastStep} B:{_audioReactiveBeatSeedBurstsLastStep}";
             }
 
-            FpsText.Text = $"Present {_presentationDisplayFps:0.0} fps (target {_currentFpsFromConfig:0.0}) | Loop {_renderDisplayFps:0.0} fps | Sim {_simulationDisplayFps:0.0} sps (target {_currentSimulationTargetFps:0.0}){pacingStatsText}{stageStatsText}{audioStats}{reactiveStats}";
+            FpsText.Text = $"Present {_presentationDisplayFps:0.0} fps (target {_currentFpsFromConfig:0.0}) | Loop {_renderDisplayFps:0.0} fps | Sim {_simulationDisplayFps:0.0} sps (target {_currentSimulationTargetFps:0.0}) | Steps/frame {_lastSimulationStepsThisFrame}{pacingStatsText}{stageStatsText}{audioStats}{reactiveStats}";
             FpsText.Visibility = Visibility.Visible;
 
             UpdateDebugOverlays(now);
@@ -10989,9 +13465,9 @@ public partial class MainWindow : Window
         }
 
         _binningMode = mode;
-        foreach (var layer in _simulationLayers)
+        foreach (var layer in EnumerateSimulationLeafLayers(_simulationLayers))
         {
-            layer.Engine.SetBinningMode(mode);
+            layer.Engine?.SetBinningMode(mode);
         }
         UpdateBinningModeMenuChecks();
         RenderFrame();
@@ -11021,17 +13497,16 @@ public partial class MainWindow : Window
 
     private void SetInjectionMode(GameOfLifeEngine.InjectionMode mode)
     {
-        EnsureSimulationLayersInitialized();
         bool changed = _injectionMode != mode;
         _injectionMode = mode;
-        foreach (var layer in _simulationLayers)
+        foreach (var layer in EnumerateSimulationLeafLayers(_simulationLayers))
         {
             if (layer.InjectionMode != mode)
             {
                 layer.InjectionMode = mode;
                 changed = true;
             }
-            layer.Engine.SetInjectionMode(mode);
+            layer.Engine?.SetInjectionMode(mode);
         }
         if (!changed)
         {
@@ -11321,9 +13796,9 @@ public partial class MainWindow : Window
         }
 
         _lifeMode = mode;
-        foreach (var layer in _simulationLayers)
+        foreach (var layer in EnumerateSimulationLeafLayers(_simulationLayers))
         {
-            layer.Engine.SetMode(mode);
+            layer.Engine?.SetMode(mode);
         }
         _pulseStep = 0;
         UpdateRgbHueShiftControls();
@@ -11996,8 +14471,7 @@ public partial class MainWindow : Window
 
     private void LoadConfig()
     {
-        bool migratedLegacyReactiveMappings = false;
-        bool sanitizedLegacyReactiveHueMappings = false;
+        bool clearedLegacyGlobalSimulationConfig = false;
         try
         {
             if (!File.Exists(ConfigPath))
@@ -12111,40 +14585,25 @@ public partial class MainWindow : Window
             _lastAudioReactiveBeatCount = _audioBeatDetector.BeatCount;
 
             _blendMode = ParseBlendModeOrDefault(config.BlendMode, _blendMode);
-            sanitizedLegacyReactiveHueMappings = config.SimulationLayers != null &&
-                                                 config.SimulationLayers.Any(layer => layer.AudioFrequencyHueShiftDegrees > 0.001);
-            var simulationSpecs = (config.SimulationLayers != null && config.SimulationLayers.Count > 0)
-                ? NormalizeSimulationLayerSpecs(config.SimulationLayers)
-                : BuildLegacySimulationLayerSpecs(
-                    config.PositiveLayerEnabled,
-                    config.PositiveLayerBlendMode,
-                    config.NegativeLayerEnabled,
-                    config.NegativeLayerBlendMode,
-                    config.SimulationLayerOrder,
-                    _injectionMode,
-                    _lifeMode,
-                    _binningMode,
-                    _injectionNoise,
-                    _rgbHueShiftDegrees,
-                    _rgbHueShiftSpeedDegreesPerSecond,
-                    _captureThresholdMin,
-                    _captureThresholdMax,
-                    _invertThreshold);
-            migratedLegacyReactiveMappings = MigrateLegacyGlobalReactiveMappings(simulationSpecs);
-            ApplySimulationLayerSpecs(simulationSpecs);
-            if (_simulationLayers.Count > 0)
+            bool hasEmbeddedSimulationGroups = ContainsSimulationGroupSource(config.Sources);
+            if (!hasEmbeddedSimulationGroups)
             {
-                var firstLayer = _simulationLayers[0];
-                _injectionMode = firstLayer.InjectionMode;
-                _lifeMode = firstLayer.LifeMode;
-                _binningMode = firstLayer.BinningMode;
-                _injectionNoise = firstLayer.InjectionNoise;
-                _captureThresholdMin = firstLayer.ThresholdMin;
-                _captureThresholdMax = firstLayer.ThresholdMax;
-                _invertThreshold = firstLayer.InvertThreshold;
+                bool hasLegacySimulationConfig =
+                    (config.SimulationLayers != null && config.SimulationLayers.Count > 0) ||
+                    config.PositiveLayerEnabled ||
+                    config.NegativeLayerEnabled ||
+                    (config.SimulationLayerOrder != null && config.SimulationLayerOrder.Count > 0);
+                if (hasLegacySimulationConfig)
+                {
+                    clearedLegacyGlobalSimulationConfig = true;
+                    Logger.Info("Ignoring legacy global simulation config because the scene stack has no Sim Group source.");
+                }
+
+                ClearSimulationLayers();
             }
 
             RestoreSources(config.Sources);
+
             ApplyMasterVideoAudioState();
             if (_pendingLegacyColumns.HasValue)
             {
@@ -12162,7 +14621,7 @@ public partial class MainWindow : Window
         {
             // Allow saves after the first load attempt so startup events don't clobber existing config.
             _configReady = true;
-            if (migratedLegacyReactiveMappings || sanitizedLegacyReactiveHueMappings)
+            if (clearedLegacyGlobalSimulationConfig)
             {
                 SaveConfig();
             }
@@ -12247,7 +14706,7 @@ public partial class MainWindow : Window
 
         try
         {
-            EnsureSimulationLayersInitialized();
+            bool hasEmbeddedSimulationGroups = EnumerateSources(_sources).Any(source => source.Type == CaptureSource.SourceType.SimGroup);
             var config = new AppConfig
             {
                 CaptureThresholdMin = _captureThresholdMin,
@@ -12297,7 +14756,7 @@ public partial class MainWindow : Window
                 DecoderThreadLimit = _decoderThreadLimit,
                 VideoDecodeFpsLimit = _videoDecodeFpsLimit,
                 BlendMode = _blendMode.ToString(),
-                SimulationLayers = BuildSimulationLayerConfigs(),
+                SimulationLayers = hasEmbeddedSimulationGroups ? new List<AppConfig.SimulationLayerConfig>() : BuildSimulationLayerConfigs(),
                 PositiveLayerBlendMode = BuildLegacyPositiveLayerBlendMode(),
                 NegativeLayerBlendMode = BuildLegacyNegativeLayerBlendMode(),
                 PositiveLayerEnabled = BuildLegacyPositiveLayerEnabled(),
@@ -12326,9 +14785,15 @@ public partial class MainWindow : Window
 
     private List<AppConfig.SimulationLayerConfig> BuildSimulationLayerConfigs()
     {
-        return _simulationLayers.Select(layer => new AppConfig.SimulationLayerConfig
+        return _simulationLayers.Select(BuildSimulationLayerConfig).ToList();
+    }
+
+    private static AppConfig.SimulationLayerConfig BuildSimulationLayerConfig(SimulationLayerState layer)
+    {
+        var config = new AppConfig.SimulationLayerConfig
         {
             Id = layer.Id,
+            Kind = layer.Kind.ToString(),
             Name = layer.Name,
             Enabled = layer.Enabled,
             InputFunction = layer.InputFunction.ToString(),
@@ -12340,7 +14805,6 @@ public partial class MainWindow : Window
             LifeOpacity = layer.LifeOpacity,
             RgbHueShiftDegrees = layer.RgbHueShiftDegrees,
             RgbHueShiftSpeedDegreesPerSecond = layer.RgbHueShiftSpeedDegreesPerSecond,
-            // Legacy field is load-only now. Persist the canonical mapping list instead.
             AudioFrequencyHueShiftDegrees = 0,
             ReactiveMappings = layer.ReactiveMappings.Select(mapping => new AppConfig.ReactiveMappingConfig
             {
@@ -12352,39 +14816,100 @@ public partial class MainWindow : Window
             ThresholdMin = layer.ThresholdMin,
             ThresholdMax = layer.ThresholdMax,
             InvertThreshold = layer.InvertThreshold
-        }).ToList();
+        };
+
+        foreach (var child in layer.Children)
+        {
+            config.Children.Add(BuildSimulationLayerConfig(child));
+        }
+
+        return config;
+    }
+
+    private static AppConfig.SimulationLayerConfig BuildSimulationLayerConfig(SimulationLayerSpec layer)
+    {
+        var config = new AppConfig.SimulationLayerConfig
+        {
+            Id = layer.Id,
+            Kind = layer.Kind.ToString(),
+            Name = layer.Name,
+            Enabled = layer.Enabled,
+            InputFunction = layer.InputFunction.ToString(),
+            BlendMode = layer.BlendMode.ToString(),
+            InjectionMode = layer.InjectionMode.ToString(),
+            LifeMode = layer.LifeMode.ToString(),
+            BinningMode = layer.BinningMode.ToString(),
+            InjectionNoise = layer.InjectionNoise,
+            LifeOpacity = layer.LifeOpacity,
+            RgbHueShiftDegrees = layer.RgbHueShiftDegrees,
+            RgbHueShiftSpeedDegreesPerSecond = layer.RgbHueShiftSpeedDegreesPerSecond,
+            AudioFrequencyHueShiftDegrees = 0,
+            ReactiveMappings = layer.ReactiveMappings.Select(mapping => new AppConfig.ReactiveMappingConfig
+            {
+                Id = mapping.Id,
+                Input = mapping.Input.ToString(),
+                Output = mapping.Output.ToString(),
+                Amount = mapping.Amount
+            }).ToList(),
+            ThresholdMin = layer.ThresholdMin,
+            ThresholdMax = layer.ThresholdMax,
+            InvertThreshold = layer.InvertThreshold
+        };
+
+        foreach (var child in layer.Children)
+        {
+            config.Children.Add(BuildSimulationLayerConfig(child));
+        }
+
+        return config;
     }
 
     private bool BuildLegacyPositiveLayerEnabled()
     {
-        var positive = _simulationLayers.FirstOrDefault(layer => layer.InputFunction == SimulationInputFunction.Direct);
+        if (!EnumerateSimulationLeafLayers(_simulationLayers).Any())
+        {
+            return false;
+        }
+
+        var positive = EnumerateSimulationLeafLayers(_simulationLayers).FirstOrDefault(layer => layer.InputFunction == SimulationInputFunction.Direct);
         return positive?.Enabled ?? true;
     }
 
     private bool BuildLegacyNegativeLayerEnabled()
     {
-        var negative = _simulationLayers.FirstOrDefault(layer => layer.InputFunction == SimulationInputFunction.Inverse);
+        if (!EnumerateSimulationLeafLayers(_simulationLayers).Any())
+        {
+            return false;
+        }
+
+        var negative = EnumerateSimulationLeafLayers(_simulationLayers).FirstOrDefault(layer => layer.InputFunction == SimulationInputFunction.Inverse);
         return negative?.Enabled ?? true;
     }
 
     private string BuildLegacyPositiveLayerBlendMode()
     {
-        var positive = _simulationLayers.FirstOrDefault(layer => layer.InputFunction == SimulationInputFunction.Direct);
+        var positive = EnumerateSimulationLeafLayers(_simulationLayers).FirstOrDefault(layer => layer.InputFunction == SimulationInputFunction.Direct);
         return (positive?.BlendMode ?? BlendMode.Additive).ToString();
     }
 
     private string BuildLegacyNegativeLayerBlendMode()
     {
-        var negative = _simulationLayers.FirstOrDefault(layer => layer.InputFunction == SimulationInputFunction.Inverse);
+        var negative = EnumerateSimulationLeafLayers(_simulationLayers).FirstOrDefault(layer => layer.InputFunction == SimulationInputFunction.Inverse);
         return (negative?.BlendMode ?? BlendMode.Subtractive).ToString();
     }
 
     private List<string> BuildLegacySimulationLayerOrder()
     {
-        var positive = _simulationLayers.FirstOrDefault(layer => layer.InputFunction == SimulationInputFunction.Direct);
-        var negative = _simulationLayers.FirstOrDefault(layer => layer.InputFunction == SimulationInputFunction.Inverse);
+        var simulationLeaves = EnumerateSimulationLeafLayers(_simulationLayers).ToArray();
+        if (simulationLeaves.Length == 0)
+        {
+            return new List<string>();
+        }
+
+        var positive = simulationLeaves.FirstOrDefault(layer => layer.InputFunction == SimulationInputFunction.Direct);
+        var negative = simulationLeaves.FirstOrDefault(layer => layer.InputFunction == SimulationInputFunction.Inverse);
         var order = new List<string>(2);
-        foreach (var layer in _simulationLayers)
+        foreach (var layer in simulationLeaves)
         {
             if (positive != null && ReferenceEquals(layer, positive) && !order.Contains("Positive", StringComparer.OrdinalIgnoreCase))
             {
@@ -12418,6 +14943,7 @@ public partial class MainWindow : Window
             var config = new AppConfig.SourceConfig
             {
                 Type = source.Type.ToString(),
+                Enabled = source.Enabled,
                 WindowTitle = source.Window?.Title,
                 WebcamId = source.WebcamId,
                 FilePath = source.FilePath,
@@ -12444,10 +14970,62 @@ public partial class MainWindow : Window
                 config.Children = BuildSourceConfigs(source.Children);
             }
 
+            if (source.Type == CaptureSource.SourceType.SimGroup && source.SimulationLayers.Count > 0)
+            {
+                config.SimulationLayers = source.SimulationLayers.Select(BuildSimulationLayerConfig).ToList();
+            }
+
             configs.Add(config);
         }
 
         return configs;
+    }
+
+    private static bool ContainsSimulationGroupSource(IReadOnlyList<AppConfig.SourceConfig>? sources)
+    {
+        if (sources == null)
+        {
+            return false;
+        }
+
+        foreach (var source in sources)
+        {
+            if (Enum.TryParse<CaptureSource.SourceType>(source.Type, true, out var type) &&
+                type == CaptureSource.SourceType.SimGroup)
+            {
+                return true;
+            }
+
+            if (ContainsSimulationGroupSource(source.Children))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private bool TryAddLegacySimulationGroupSource(IReadOnlyList<SimulationLayerSpec> simulationSpecs)
+    {
+        if (simulationSpecs.Count == 0 ||
+            EnumerateSources(_sources).Any(source => source.Type == CaptureSource.SourceType.SimGroup))
+        {
+            return false;
+        }
+
+        var source = CaptureSource.CreateSimulationGroup("Simulation");
+        foreach (var simulationLayer in FlattenSourceSimulationLayerSpecs(simulationSpecs))
+        {
+            source.SimulationLayers.Add(CloneSimulationLayerSpec(simulationLayer));
+        }
+
+        if (source.SimulationLayers.Count == 0)
+        {
+            return false;
+        }
+
+        _sources.Add(source);
+        return true;
     }
 
     private static List<AppConfig.AnimationConfig> BuildAnimationConfigs(List<LayerAnimation> animations)
@@ -12491,8 +15069,10 @@ public partial class MainWindow : Window
                     CaptureSource.SourceType.File => LayerEditorSourceKind.File,
                     CaptureSource.SourceType.VideoSequence => LayerEditorSourceKind.VideoSequence,
                     CaptureSource.SourceType.Group => LayerEditorSourceKind.Group,
+                    CaptureSource.SourceType.SimGroup => LayerEditorSourceKind.SimGroup,
                     _ => LayerEditorSourceKind.File
                 },
+                Enabled = source.Enabled,
                 DisplayName = source.DisplayName,
                 WindowTitle = source.Window?.Title,
                 WindowHandle = source.Window?.Handle,
@@ -12553,6 +15133,14 @@ public partial class MainWindow : Window
                 }
             }
 
+            if (source.Type == CaptureSource.SourceType.SimGroup && source.SimulationLayers.Count > 0)
+            {
+                foreach (var simulationLayer in FlattenSourceSimulationLayerSpecs(source.SimulationLayers))
+                {
+                    model.SimulationLayers.Add(ToEditorSimulationLayer(simulationLayer));
+                }
+            }
+
             list.Add(model);
         }
 
@@ -12584,6 +15172,7 @@ public partial class MainWindow : Window
 
         _sources.Clear();
         _sources.AddRange(rebuilt);
+        ApplySimulationLayersFromSourceStack(fallbackToDefault: false);
 
         UpdatePrimaryAspectIfNeeded();
         RenderFrame();
@@ -12655,6 +15244,9 @@ public partial class MainWindow : Window
         {
             case LayerEditorSourceKind.Group:
                 return CaptureSource.CreateGroup(string.IsNullOrWhiteSpace(model.DisplayName) ? null : model.DisplayName);
+
+            case LayerEditorSourceKind.SimGroup:
+                return CaptureSource.CreateSimulationGroup(string.IsNullOrWhiteSpace(model.DisplayName) ? null : model.DisplayName);
 
             case LayerEditorSourceKind.Window:
             {
@@ -12761,6 +15353,7 @@ public partial class MainWindow : Window
 
     private void ApplySourceModel(CaptureSource source, LayerEditorSource model)
     {
+        source.Enabled = model.Enabled;
         source.BlendMode = ParseBlendModeOrDefault(model.BlendMode, source.BlendMode);
 
         if (Enum.TryParse<FitMode>(model.FitMode, true, out var fitMode))
@@ -12782,9 +15375,24 @@ public partial class MainWindow : Window
         }
         ApplySourceVideoAudioState(source);
 
-        if (source.Type == CaptureSource.SourceType.Group)
+        if (source.Type == CaptureSource.SourceType.Group || source.Type == CaptureSource.SourceType.SimGroup)
         {
-            source.SetDisplayName(string.IsNullOrWhiteSpace(model.DisplayName) ? "Layer Group" : model.DisplayName);
+            source.SetDisplayName(string.IsNullOrWhiteSpace(model.DisplayName)
+                ? (source.Type == CaptureSource.SourceType.SimGroup ? "Sim Group" : "Layer Group")
+                : model.DisplayName);
+        }
+
+        if (source.Type == CaptureSource.SourceType.SimGroup)
+        {
+            source.SimulationLayers.Clear();
+            foreach (var simulationLayer in FlattenSourceSimulationLayerSpecs(NormalizeSimulationLayerSpecs(model.SimulationLayers)))
+            {
+                source.SimulationLayers.Add(simulationLayer);
+            }
+        }
+        else if (source.SimulationLayers.Count > 0)
+        {
+            source.SimulationLayers.Clear();
         }
 
         source.Animations.Clear();
@@ -12922,6 +15530,10 @@ public partial class MainWindow : Window
         var windows = _windowCapture.EnumerateWindows(_windowHandle);
         var webcams = _webcamCapture.EnumerateCameras();
         RestoreSourceList(configs, _sources, windows, webcams);
+        if (EnumerateSources(_sources).Any(source => source.Type == CaptureSource.SourceType.SimGroup))
+        {
+            ApplySimulationLayersFromSourceStack(fallbackToDefault: false);
+        }
 
         double targetAspect = _aspectRatioLocked ? _lockedAspectRatio
             : (_sources.Count > 0 ? _sources[0].AspectRatio : DefaultAspectRatio);
@@ -12954,6 +15566,10 @@ public partial class MainWindow : Window
             {
                 case CaptureSource.SourceType.Group:
                     restored = CaptureSource.CreateGroup(string.IsNullOrWhiteSpace(config.DisplayName) ? null : config.DisplayName);
+                    break;
+
+                case CaptureSource.SourceType.SimGroup:
+                    restored = CaptureSource.CreateSimulationGroup(string.IsNullOrWhiteSpace(config.DisplayName) ? null : config.DisplayName);
                     break;
 
                 case CaptureSource.SourceType.Window:
@@ -13036,6 +15652,7 @@ public partial class MainWindow : Window
 
     private void ApplySourceSettings(CaptureSource source, AppConfig.SourceConfig config)
     {
+        source.Enabled = config.Enabled;
         source.BlendMode = ParseBlendModeOrDefault(config.BlendMode, source.BlendMode);
 
         if (Enum.TryParse<FitMode>(config.FitMode, true, out var fitMode))
@@ -13056,6 +15673,15 @@ public partial class MainWindow : Window
             source.KeyColorB = keyB;
         }
         ApplySourceVideoAudioState(source);
+
+        source.SimulationLayers.Clear();
+        if (source.Type == CaptureSource.SourceType.SimGroup && config.SimulationLayers.Count > 0)
+        {
+            foreach (var simulationLayer in FlattenSourceSimulationLayerSpecs(NormalizeSimulationLayerSpecs(config.SimulationLayers)))
+            {
+                source.SimulationLayers.Add(simulationLayer);
+            }
+        }
 
         source.Animations.Clear();
         if (config.Animations != null && config.Animations.Count > 0)
@@ -13169,6 +15795,7 @@ public partial class MainWindow : Window
         public sealed class SimulationLayerConfig
         {
             public Guid Id { get; set; }
+            public string Kind { get; set; } = nameof(LayerEditorSimulationItemKind.Layer);
             public string Name { get; set; } = "Simulation Layer";
             public bool Enabled { get; set; } = true;
             public string InputFunction { get; set; } = SimulationInputFunction.Direct.ToString();
@@ -13185,6 +15812,7 @@ public partial class MainWindow : Window
             public double ThresholdMin { get; set; } = 0.35;
             public double ThresholdMax { get; set; } = 0.75;
             public bool InvertThreshold { get; set; }
+            public List<SimulationLayerConfig> Children { get; set; } = new();
         }
 
         public sealed class ReactiveMappingConfig
@@ -13198,6 +15826,7 @@ public partial class MainWindow : Window
         public sealed class SourceConfig
         {
             public string Type { get; set; } = CaptureSource.SourceType.Window.ToString();
+            public bool Enabled { get; set; } = true;
             public string? WindowTitle { get; set; }
             public string? WebcamId { get; set; }
             public string? FilePath { get; set; }
@@ -13213,6 +15842,7 @@ public partial class MainWindow : Window
             public string KeyColor { get; set; } = "#000000";
             public double KeyTolerance { get; set; } = DefaultKeyTolerance;
             public List<AnimationConfig> Animations { get; set; } = new();
+            public List<SimulationLayerConfig> SimulationLayers { get; set; } = new();
             public List<SourceConfig> Children { get; set; } = new();
         }
 
@@ -13272,7 +15902,8 @@ public partial class MainWindow : Window
             Webcam,
             File,
             VideoSequence,
-            Group
+            Group,
+            SimGroup
         }
 
         private CaptureSource(SourceType type, WindowHandleInfo? window, string? webcamId, string? filePath, string displayName, int? fileWidth, int? fileHeight)
@@ -13312,6 +15943,9 @@ public partial class MainWindow : Window
         public static CaptureSource CreateGroup(string? displayName = null) =>
             new(SourceType.Group, null, null, null, displayName ?? "Layer Group", null, null) { AddedUtc = DateTime.UtcNow };
 
+        public static CaptureSource CreateSimulationGroup(string? displayName = null) =>
+            new(SourceType.SimGroup, null, null, null, displayName ?? "Sim Group", null, null) { AddedUtc = DateTime.UtcNow };
+
         public Guid Id { get; } = Guid.NewGuid();
         public SourceType Type { get; }
         public WindowHandleInfo? Window { get; set; }
@@ -13321,9 +15955,11 @@ public partial class MainWindow : Window
         public FileCaptureService.VideoSequenceSession? VideoSequence { get; private set; }
         public string DisplayName { get; private set; }
         public List<CaptureSource> Children { get; } = new();
+        public List<SimulationLayerSpec> SimulationLayers { get; } = new();
         public List<LayerAnimation> Animations { get; } = new();
         public BlendMode BlendMode { get; set; } = BlendMode.Additive;
         public FitMode FitMode { get; set; } = FitMode.Fill;
+        public bool Enabled { get; set; } = true;
         public SourceFrame? LastFrame { get; set; }
         public bool HasError { get; set; }
         public int MissedFrames { get; set; }
@@ -13349,7 +15985,9 @@ public partial class MainWindow : Window
 
         public void SetDisplayName(string displayName)
         {
-            DisplayName = string.IsNullOrWhiteSpace(displayName) ? "Layer Group" : displayName.Trim();
+            DisplayName = string.IsNullOrWhiteSpace(displayName)
+                ? (Type == SourceType.SimGroup ? "Sim Group" : "Layer Group")
+                : displayName.Trim();
         }
 
         public void SetVideoSequence(FileCaptureService.VideoSequenceSession session)
@@ -13397,6 +16035,11 @@ public partial class MainWindow : Window
                     return DefaultAspectRatio;
                 }
 
+                if (Type == SourceType.SimGroup)
+                {
+                    return DefaultAspectRatio;
+                }
+
                 if (LastFrame != null && LastFrame.SourceHeight > 0)
                 {
                     return Math.Max(0.05, LastFrame.SourceWidth / (double)LastFrame.SourceHeight);
@@ -13427,6 +16070,7 @@ public partial class MainWindow : Window
             SourceType.File => FileWidth,
             SourceType.VideoSequence => FileWidth,
             SourceType.Group => Children.Count > 0 ? Children[0].FallbackWidth : null,
+            SourceType.SimGroup => null,
             _ => LastFrame?.SourceWidth
         };
 
@@ -13436,6 +16080,7 @@ public partial class MainWindow : Window
             SourceType.File => FileHeight,
             SourceType.VideoSequence => FileHeight,
             SourceType.Group => Children.Count > 0 ? Children[0].FallbackHeight : null,
+            SourceType.SimGroup => null,
             _ => LastFrame?.SourceHeight
         };
 

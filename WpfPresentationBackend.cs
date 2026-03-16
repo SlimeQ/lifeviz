@@ -97,6 +97,18 @@ internal sealed class WpfPresentationBackend : IDisposable
         }
     }
 
+    public byte[]? GetPresentedFrameCopyForSmoke()
+    {
+        if (_pixelBuffer == null)
+        {
+            return null;
+        }
+
+        var copy = new byte[_pixelBuffer.Length];
+        Buffer.BlockCopy(_pixelBuffer, 0, copy, 0, copy.Length);
+        return copy;
+    }
+
     private void EnsureEffectResources()
     {
         if (_overlayBrush == null)

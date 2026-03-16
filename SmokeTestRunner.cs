@@ -77,6 +77,16 @@ internal static class SmokeTestRunner
                 "simulation-reactive-legacy-migration" => RunSimulationReactiveLegacyMigrationSmokeTest(),
                 "simulation-reactive-removal" => RunSimulationReactiveRemovalSmokeTest(),
                 "simulation-reactive-editor-isolation" => RunSimulationReactiveEditorIsolationSmokeTest(),
+                "sim-group-legacy-migration" => RunSimGroupLegacyMigrationSmokeTest(),
+                "no-sim-group-renders-composite" => RunNoSimGroupRendersCompositeSmokeTest(),
+                "sim-group-removal-clears-runtime" => RunSimGroupRemovalClearsRuntimeSmokeTest(),
+                "disabled-sim-group-renders-composite" => RunDisabledSimGroupRendersCompositeSmokeTest(),
+                "sim-group-stack-order" => RunSimGroupStackOrderSmokeTest(),
+                "sim-group-inline-hue" => RunSimGroupInlineHueSmokeTest(),
+                "sim-group-inline-presentation" => RunSimGroupInlinePresentationSmokeTest(),
+                "sim-group-enabled-toggle" => RunSimGroupEnabledToggleSmokeTest(),
+                "sim-group-remove-source" => RunSimGroupRemoveSourceSmokeTest(),
+                "sim-group-live-edit-selection" => RunSimGroupLiveEditSelectionSmokeTest(),
                 "gpu-injection-mode" => RunGpuInjectionModeSmokeTest(),
                 "gpu-file-injection-mode" => RunGpuFileInjectionModeSmokeTest(smokeVideoPath),
                 "gpu-sim" => RunGpuSimulationSmokeTest(),
@@ -84,12 +94,13 @@ internal static class SmokeTestRunner
                 "source-reset" => RunSourceResetSmokeTest(),
                 "gpu-render" => RunGpuPresentationSmokeTest(),
                 "profile-mainloop" => RunFrameProfileSmokeTest(),
+                "profile-mainloop-sim-group" => RunFrameProfileSmokeTest(240, "smoke-mainloop-sim-group", rgbMode: false, smokeVideoPath: null, includeSimGroup: true),
                 "dimensions" => RunDimensionChangeSmokeTest(),
                 "shutdown" => RunShutdownSmokeTest(),
                 "startup" => RunStartupSmokeTest(),
                 "startup-recovery" => RunStartupRecoverySmokeTest(),
                 "all" => RunAllSmokeTests(),
-                _ => throw new ArgumentException($"Unknown smoke test target '{target}'. Expected profile-240, profile-480, profile-rgb-240, profile-rgb-480, profile-file-240, profile-file-480, profile-file-rgb-240, profile-file-rgb-480, profile-current-scene, profile-current-scene-visible, profile-current-scene-fullscreen, profile-current-scene-presets, profile-current-scene-visible-presets, profile-current-scene-fullscreen-presets, profile-current-scene-<144|240|480|720|1080|1440|2160>, profile-current-scene-visible-<144|240|480|720|1080|1440|2160>, profile-current-scene-fullscreen-<144|240|480|720|1080|1440|2160>, profile-current-scene-interaction, pacing-current-scene-visible-presets, pacing-current-scene-fullscreen-presets, pacing-current-scene-interaction, pacing-current-scene-overlay-fullscreen-144, pacing-current-scene-suite, frame-pump-thread-safety, gpu-benchmark, gpu-handoff, gpu-rgb-threshold, gpu-passthrough-signed-model, passthrough-underlay-only, gpu-frequency-hue, simulation-reactive-mappings, simulation-reactive-persistence, simulation-reactive-legacy-migration, simulation-reactive-removal, simulation-reactive-editor-isolation, gpu-injection-mode, gpu-file-injection-mode, gpu-sim, gpu-source, source-reset, gpu-render, profile-mainloop, dimensions, shutdown, startup, startup-recovery, or all.")
+                _ => throw new ArgumentException($"Unknown smoke test target '{target}'. Expected profile-240, profile-480, profile-rgb-240, profile-rgb-480, profile-file-240, profile-file-480, profile-file-rgb-240, profile-file-rgb-480, profile-current-scene, profile-current-scene-visible, profile-current-scene-fullscreen, profile-current-scene-presets, profile-current-scene-visible-presets, profile-current-scene-fullscreen-presets, profile-current-scene-<144|240|480|720|1080|1440|2160>, profile-current-scene-visible-<144|240|480|720|1080|1440|2160>, profile-current-scene-fullscreen-<144|240|480|720|1080|1440|2160>, profile-current-scene-interaction, pacing-current-scene-visible-presets, pacing-current-scene-fullscreen-presets, pacing-current-scene-interaction, pacing-current-scene-overlay-fullscreen-144, pacing-current-scene-suite, frame-pump-thread-safety, gpu-benchmark, gpu-handoff, gpu-rgb-threshold, gpu-passthrough-signed-model, passthrough-underlay-only, gpu-frequency-hue, simulation-reactive-mappings, simulation-reactive-persistence, simulation-reactive-legacy-migration, simulation-reactive-removal, simulation-reactive-editor-isolation, sim-group-legacy-migration, no-sim-group-renders-composite, sim-group-removal-clears-runtime, disabled-sim-group-renders-composite, sim-group-stack-order, sim-group-inline-hue, sim-group-inline-presentation, sim-group-enabled-toggle, sim-group-remove-source, sim-group-live-edit-selection, gpu-injection-mode, gpu-file-injection-mode, gpu-sim, gpu-source, source-reset, gpu-render, profile-mainloop, profile-mainloop-sim-group, dimensions, shutdown, startup, startup-recovery, or all.")
             };
         }
         catch (Exception ex)
@@ -319,7 +330,6 @@ internal static class SmokeTestRunner
         Exception? failure = null;
         var app = new App();
         app.InitializeComponent();
-        app.StartupUri = null;
         app.ShutdownMode = ShutdownMode.OnExplicitShutdown;
         app.DispatcherUnhandledException += (_, args) =>
         {
@@ -396,7 +406,6 @@ internal static class SmokeTestRunner
 
         var app = new App();
         app.InitializeComponent();
-        app.StartupUri = null;
         app.ShutdownMode = ShutdownMode.OnExplicitShutdown;
         app.DispatcherUnhandledException += (_, args) =>
         {
@@ -941,6 +950,322 @@ internal static class SmokeTestRunner
         return exitCode;
     }
 
+    private static int RunSimGroupLegacyMigrationSmokeTest()
+    {
+        int exitCode = 0;
+        var thread = new Thread(() =>
+        {
+            try
+            {
+                var app = new App();
+                app.InitializeComponent();
+                var window = new MainWindow();
+                window.Show();
+                window.Hide();
+                bool ok = window.RunLegacySimulationGroupSourceMigrationSmoke();
+                window.Close();
+                app.Shutdown();
+                exitCode = ok ? 0 : 1;
+            }
+            catch (Exception ex)
+            {
+                Logger.Error("Sim-group legacy migration smoke failed.", ex);
+                Console.Error.WriteLine(ex);
+                exitCode = 1;
+            }
+        });
+
+        thread.SetApartmentState(ApartmentState.STA);
+        thread.Start();
+        thread.Join();
+        return exitCode;
+    }
+
+    private static int RunNoSimGroupRendersCompositeSmokeTest()
+    {
+        int exitCode = 0;
+        var thread = new Thread(() =>
+        {
+            try
+            {
+                var app = new App();
+                app.InitializeComponent();
+                var window = new MainWindow();
+                window.Show();
+                window.Hide();
+                bool ok = window.RunNoSimGroupRendersCompositeSmoke();
+                window.Close();
+                app.Shutdown();
+                exitCode = ok ? 0 : 1;
+            }
+            catch (Exception ex)
+            {
+                Logger.Error("No-sim-group composite smoke failed.", ex);
+                Console.Error.WriteLine(ex);
+                exitCode = 1;
+            }
+        });
+
+        thread.SetApartmentState(ApartmentState.STA);
+        thread.Start();
+        thread.Join();
+        return exitCode;
+    }
+
+    private static int RunSimGroupRemovalClearsRuntimeSmokeTest()
+    {
+        int exitCode = 0;
+        var thread = new Thread(() =>
+        {
+            try
+            {
+                var app = new App();
+                app.InitializeComponent();
+                var window = new MainWindow();
+                window.Show();
+                window.Hide();
+                bool ok = window.RunSimGroupRemovalClearsRuntimeSmoke();
+                window.Close();
+                app.Shutdown();
+                exitCode = ok ? 0 : 1;
+            }
+            catch (Exception ex)
+            {
+                Logger.Error("Sim-group removal clear-runtime smoke failed.", ex);
+                Console.Error.WriteLine(ex);
+                exitCode = 1;
+            }
+        });
+
+        thread.SetApartmentState(ApartmentState.STA);
+        thread.Start();
+        thread.Join();
+        return exitCode;
+    }
+
+    private static int RunDisabledSimGroupRendersCompositeSmokeTest()
+    {
+        int exitCode = 0;
+        var thread = new Thread(() =>
+        {
+            try
+            {
+                var app = new App();
+                app.InitializeComponent();
+                var window = new MainWindow();
+                window.Show();
+                window.Hide();
+                bool ok = window.RunDisabledSimGroupRendersCompositeSmoke();
+                window.Close();
+                app.Shutdown();
+                exitCode = ok ? 0 : 1;
+            }
+            catch (Exception ex)
+            {
+                Logger.Error("Disabled-sim-group composite smoke failed.", ex);
+                Console.Error.WriteLine(ex);
+                exitCode = 1;
+            }
+        });
+
+        thread.SetApartmentState(ApartmentState.STA);
+        thread.Start();
+        thread.Join();
+        return exitCode;
+    }
+
+    private static int RunSimGroupStackOrderSmokeTest()
+    {
+        int exitCode = 0;
+        var thread = new Thread(() =>
+        {
+            try
+            {
+                var app = new App();
+                app.InitializeComponent();
+                var window = new MainWindow();
+                window.Show();
+                window.Hide();
+                bool ok = window.RunSimGroupStackOrderSmoke();
+                window.Close();
+                app.Shutdown();
+                exitCode = ok ? 0 : 1;
+            }
+            catch (Exception ex)
+            {
+                Logger.Error("Sim-group stack-order smoke failed.", ex);
+                Console.Error.WriteLine(ex);
+                exitCode = 1;
+            }
+        });
+
+        thread.SetApartmentState(ApartmentState.STA);
+        thread.Start();
+        thread.Join();
+        return exitCode;
+    }
+
+    private static int RunSimGroupInlineHueSmokeTest()
+    {
+        int exitCode = 0;
+        var thread = new Thread(() =>
+        {
+            try
+            {
+                var app = new App();
+                app.InitializeComponent();
+                var window = new MainWindow();
+                window.Show();
+                window.Hide();
+                bool ok = window.RunSimGroupInlineHueSmoke();
+                window.Close();
+                app.Shutdown();
+                exitCode = ok ? 0 : 1;
+            }
+            catch (Exception ex)
+            {
+                Logger.Error("Sim-group inline-hue smoke failed.", ex);
+                Console.Error.WriteLine(ex);
+                exitCode = 1;
+            }
+        });
+
+        thread.SetApartmentState(ApartmentState.STA);
+        thread.Start();
+        thread.Join();
+        return exitCode;
+    }
+
+    private static int RunSimGroupInlinePresentationSmokeTest()
+    {
+        int exitCode = 0;
+        var thread = new Thread(() =>
+        {
+            try
+            {
+                var app = new App();
+                app.InitializeComponent();
+                var window = new MainWindow();
+                window.Show();
+                window.Hide();
+                bool ok = window.RunSimGroupInlinePresentationFreshnessSmoke();
+                window.Close();
+                app.Shutdown();
+                exitCode = ok ? 0 : 1;
+            }
+            catch (Exception ex)
+            {
+                Logger.Error("Sim-group inline-presentation smoke failed.", ex);
+                Console.Error.WriteLine(ex);
+                exitCode = 1;
+            }
+        });
+
+        thread.SetApartmentState(ApartmentState.STA);
+        thread.Start();
+        thread.Join();
+        return exitCode;
+    }
+
+    private static int RunSimGroupEnabledToggleSmokeTest()
+    {
+        int exitCode = 0;
+        var thread = new Thread(() =>
+        {
+            try
+            {
+                var app = new App();
+                app.InitializeComponent();
+                var window = new MainWindow();
+                window.Show();
+                window.Hide();
+                var editor = new LayerEditorWindow(window);
+                bool ok = editor.RunSimGroupEnabledToggleSmoke();
+                editor.Close();
+                window.Close();
+                app.Shutdown();
+                exitCode = ok ? 0 : 1;
+            }
+            catch (Exception ex)
+            {
+                Logger.Error("Sim-group enabled-toggle smoke failed.", ex);
+                Console.Error.WriteLine(ex);
+                exitCode = 1;
+            }
+        });
+
+        thread.SetApartmentState(ApartmentState.STA);
+        thread.Start();
+        thread.Join();
+        return exitCode;
+    }
+
+    private static int RunSimGroupRemoveSourceSmokeTest()
+    {
+        int exitCode = 0;
+        var thread = new Thread(() =>
+        {
+            try
+            {
+                var app = new App();
+                app.InitializeComponent();
+                var window = new MainWindow();
+                window.Show();
+                window.Hide();
+                var editor = new LayerEditorWindow(window);
+                bool ok = editor.RunSimGroupRemoveSourceSmoke();
+                editor.Close();
+                window.Close();
+                app.Shutdown();
+                exitCode = ok ? 0 : 1;
+            }
+            catch (Exception ex)
+            {
+                Logger.Error("Sim-group remove-source smoke failed.", ex);
+                Console.Error.WriteLine(ex);
+                exitCode = 1;
+            }
+        });
+
+        thread.SetApartmentState(ApartmentState.STA);
+        thread.Start();
+        thread.Join();
+        return exitCode;
+    }
+
+    private static int RunSimGroupLiveEditSelectionSmokeTest()
+    {
+        int exitCode = 0;
+        var thread = new Thread(() =>
+        {
+            try
+            {
+                var app = new App();
+                app.InitializeComponent();
+                var window = new MainWindow();
+                window.Show();
+                window.Hide();
+                var editor = new LayerEditorWindow(window);
+                bool ok = editor.RunSimGroupLiveEditSelectionSmoke();
+                editor.Close();
+                window.Close();
+                app.Shutdown();
+                exitCode = ok ? 0 : 1;
+            }
+            catch (Exception ex)
+            {
+                Logger.Error("Sim-group live-edit selection smoke failed.", ex);
+                Console.Error.WriteLine(ex);
+                exitCode = 1;
+            }
+        });
+
+        thread.SetApartmentState(ApartmentState.STA);
+        thread.Start();
+        thread.Join();
+        return exitCode;
+    }
+
     private static int RunGpuFileInjectionModeSmokeTest(string? smokeVideoPath)
     {
         if (string.IsNullOrWhiteSpace(smokeVideoPath))
@@ -1169,6 +1494,9 @@ internal static class SmokeTestRunner
         => RunFrameProfileSmokeTest(rows, sessionName, rgbMode, null);
 
     private static int RunFrameProfileSmokeTest(int rows, string sessionName, bool rgbMode, string? smokeVideoPath)
+        => RunFrameProfileSmokeTest(rows, sessionName, rgbMode, smokeVideoPath, includeSimGroup: false);
+
+    private static int RunFrameProfileSmokeTest(int rows, string sessionName, bool rgbMode, string? smokeVideoPath, bool includeSimGroup)
     {
         Logger.Info("Running frame profile smoke test.");
         Exception? failure = null;
@@ -1201,7 +1529,7 @@ internal static class SmokeTestRunner
             {
                 window.Dispatcher.BeginInvoke(new Action(() =>
                 {
-                    window.ConfigureProfilingSmokeScene(rows, rgbMode, smokeVideoPath);
+                    window.ConfigureProfilingSmokeScene(rows, rgbMode, smokeVideoPath, includeSimGroup);
                     window.StartProfilingSession(sessionName);
 
                     var timer = new DispatcherTimer(DispatcherPriority.ApplicationIdle)

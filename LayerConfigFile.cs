@@ -7,7 +7,7 @@ namespace lifeviz;
 
 internal sealed class LayerConfigFile
 {
-    public int Version { get; set; } = 5;
+    public int Version { get; set; } = 7;
     public DateTime SavedUtc { get; set; } = DateTime.UtcNow;
     public LayerConfigProjectSettings ProjectSettings { get; set; } = new();
     public List<LayerConfigSimulationLayer> SimulationLayers { get; set; } = new();
@@ -23,6 +23,8 @@ internal sealed class LayerConfigFile
         IEnumerable<LayerEditorSimulationLayer> simulationLayers,
         LayerEditorProjectSettings projectSettings)
     {
+        var sourceList = sources.ToList();
+        bool hasEmbeddedSimulationGroups = EnumerateSources(sourceList).Any(source => source.Kind == LayerEditorSourceKind.SimGroup);
         var file = new LayerConfigFile
         {
             ProjectSettings = new LayerConfigProjectSettings
@@ -38,37 +40,11 @@ internal sealed class LayerConfigFile
                 Passthrough = projectSettings.Passthrough,
                 CompositeBlendMode = string.IsNullOrWhiteSpace(projectSettings.CompositeBlendMode) ? "Additive" : projectSettings.CompositeBlendMode
             },
-            SimulationLayers = simulationLayers.Select(layer => new LayerConfigSimulationLayer
-            {
-                Id = layer.Id,
-                Name = string.IsNullOrWhiteSpace(layer.Name) ? "Simulation Layer" : layer.Name,
-                Enabled = layer.Enabled,
-                InputFunction = string.IsNullOrWhiteSpace(layer.InputFunction) ? "Direct" : layer.InputFunction,
-                BlendMode = string.IsNullOrWhiteSpace(layer.BlendMode) ? "Subtractive" : layer.BlendMode,
-                InjectionMode = string.IsNullOrWhiteSpace(layer.InjectionMode) ? "Threshold" : layer.InjectionMode,
-                LifeMode = string.IsNullOrWhiteSpace(layer.LifeMode) ? "NaiveGrayscale" : layer.LifeMode,
-                BinningMode = string.IsNullOrWhiteSpace(layer.BinningMode) ? "Fill" : layer.BinningMode,
-                InjectionNoise = Math.Clamp(layer.InjectionNoise, 0, 1),
-                LifeOpacity = Math.Clamp(layer.LifeOpacity, 0, 1),
-                RgbHueShiftDegrees = layer.RgbHueShiftDegrees,
-                RgbHueShiftSpeedDegreesPerSecond = layer.RgbHueShiftSpeedDegreesPerSecond,
-                // Legacy field is load-only now. Persist the canonical mapping list instead.
-                AudioFrequencyHueShiftDegrees = 0,
-                ReactiveMappings = layer.ReactiveMappings
-                    .Select(mapping => new LayerConfigReactiveMapping
-                    {
-                        Id = mapping.Id,
-                        Input = string.IsNullOrWhiteSpace(mapping.Input) ? nameof(SimulationReactiveInput.Level) : mapping.Input,
-                        Output = string.IsNullOrWhiteSpace(mapping.Output) ? nameof(SimulationReactiveOutput.Opacity) : mapping.Output,
-                        Amount = mapping.Amount
-                    })
-                    .ToList(),
-                ThresholdMin = Math.Clamp(layer.ThresholdMin, 0, 1),
-                ThresholdMax = Math.Clamp(layer.ThresholdMax, 0, 1),
-                InvertThreshold = layer.InvertThreshold
-            }).ToList()
+            SimulationLayers = hasEmbeddedSimulationGroups
+                ? new List<LayerConfigSimulationLayer>()
+                : simulationLayers.Select(FromEditorSimulationLayer).ToList()
         };
-        if (file.SimulationLayers.Count == 0)
+        if (!hasEmbeddedSimulationGroups && file.SimulationLayers.Count == 0)
         {
             file.SimulationLayers = new List<LayerConfigSimulationLayer>
             {
@@ -114,7 +90,7 @@ internal sealed class LayerConfigFile
                 }
             };
         }
-        foreach (var source in sources)
+        foreach (var source in sourceList)
         {
             file.Sources.Add(FromEditorSource(source));
         }
@@ -128,6 +104,32 @@ internal sealed class LayerConfigFile
         {
             list.Add(ToEditorSource(source, null));
         }
+
+        if (!list.Any(source => source.Kind == LayerEditorSourceKind.SimGroup) &&
+            SimulationLayers != null &&
+            SimulationLayers.Count > 0)
+        {
+            var simGroup = new LayerEditorSource
+            {
+                Id = Guid.NewGuid(),
+                Kind = LayerEditorSourceKind.SimGroup,
+                DisplayName = "Simulation",
+                Enabled = true,
+                BlendMode = "Additive",
+                FitMode = "Fill",
+                Opacity = 1.0,
+                KeyColorHex = "#000000",
+                KeyTolerance = 0.1
+            };
+
+        foreach (var simulationLayer in ToEditorSimulationLayers())
+        {
+            simGroup.SimulationLayers.Add(simulationLayer);
+        }
+
+            list.Add(simGroup);
+        }
+
         return list;
     }
 
@@ -135,52 +137,9 @@ internal sealed class LayerConfigFile
     {
         if (SimulationLayers != null && SimulationLayers.Count > 0)
         {
-            return SimulationLayers.Select(layer =>
-            {
-                var reactiveMappings = (layer.ReactiveMappings ?? new List<LayerConfigReactiveMapping>())
-                    .Select(mapping => new LayerEditorSimulationReactiveMapping
-                    {
-                        Id = mapping.Id == Guid.Empty ? Guid.NewGuid() : mapping.Id,
-                        Input = string.IsNullOrWhiteSpace(mapping.Input) ? nameof(SimulationReactiveInput.Level) : mapping.Input,
-                        Output = string.IsNullOrWhiteSpace(mapping.Output) ? nameof(SimulationReactiveOutput.Opacity) : mapping.Output,
-                        Amount = SimulationReactivity.ClampAmount(
-                            ParseReactiveOutputOrDefault(mapping.Output, SimulationReactiveOutput.Opacity),
-                            mapping.Amount)
-                    })
-                    .ToList();
-
-                if (reactiveMappings.Count == 0 && layer.AudioFrequencyHueShiftDegrees > 0.001)
-                {
-                    reactiveMappings.Add(new LayerEditorSimulationReactiveMapping
-                    {
-                        Id = Guid.NewGuid(),
-                        Input = nameof(SimulationReactiveInput.Frequency),
-                        Output = nameof(SimulationReactiveOutput.HueShift),
-                        Amount = Math.Clamp(layer.AudioFrequencyHueShiftDegrees, 0, 360)
-                    });
-                }
-
-                return new LayerEditorSimulationLayer
-                {
-                    Id = layer.Id == Guid.Empty ? Guid.NewGuid() : layer.Id,
-                    Name = string.IsNullOrWhiteSpace(layer.Name) ? "Simulation Layer" : layer.Name,
-                    Enabled = layer.Enabled,
-                    InputFunction = string.IsNullOrWhiteSpace(layer.InputFunction) ? "Direct" : layer.InputFunction,
-                    BlendMode = string.IsNullOrWhiteSpace(layer.BlendMode) ? "Subtractive" : layer.BlendMode,
-                    InjectionMode = string.IsNullOrWhiteSpace(layer.InjectionMode) ? "Threshold" : layer.InjectionMode,
-                    LifeMode = string.IsNullOrWhiteSpace(layer.LifeMode) ? "NaiveGrayscale" : layer.LifeMode,
-                    BinningMode = string.IsNullOrWhiteSpace(layer.BinningMode) ? "Fill" : layer.BinningMode,
-                    InjectionNoise = Math.Clamp(layer.InjectionNoise, 0, 1),
-                    LifeOpacity = Math.Clamp(layer.LifeOpacity, 0, 1),
-                    RgbHueShiftDegrees = layer.RgbHueShiftDegrees,
-                    RgbHueShiftSpeedDegreesPerSecond = layer.RgbHueShiftSpeedDegreesPerSecond,
-                    AudioFrequencyHueShiftDegrees = 0,
-                    ReactiveMappings = new ObservableCollection<LayerEditorSimulationReactiveMapping>(reactiveMappings),
-                    ThresholdMin = Math.Clamp(layer.ThresholdMin, 0, 1),
-                    ThresholdMax = Math.Clamp(layer.ThresholdMax, 0, 1),
-                    InvertThreshold = layer.InvertThreshold
-                };
-            }).ToList();
+            return FlattenSimulationLayers(SimulationLayers)
+                .Select(layer => ToEditorSimulationLayer(layer, null))
+                .ToList();
         }
 
         return BuildLegacyEditorSimulationLayers();
@@ -208,6 +167,7 @@ internal sealed class LayerConfigFile
         var config = new LayerConfigSource
         {
             Type = source.Kind.ToString(),
+            Enabled = source.Enabled,
             WindowTitle = source.WindowTitle,
             WebcamId = source.WebcamId,
             FilePath = source.FilePath,
@@ -252,6 +212,53 @@ internal sealed class LayerConfigFile
             config.Children.Add(FromEditorSource(child));
         }
 
+        foreach (var simulationLayer in source.SimulationLayers)
+        {
+            config.SimulationLayers.Add(FromEditorSimulationLayer(simulationLayer));
+        }
+
+        return config;
+    }
+
+    private static LayerConfigSimulationLayer FromEditorSimulationLayer(LayerEditorSimulationLayer layer)
+    {
+        var config = new LayerConfigSimulationLayer
+        {
+            Id = layer.Id,
+            Kind = layer.Kind.ToString(),
+            Name = string.IsNullOrWhiteSpace(layer.Name)
+                ? (layer.IsGroup ? "Sim Group" : "Simulation Layer")
+                : layer.Name,
+            Enabled = layer.Enabled,
+            InputFunction = string.IsNullOrWhiteSpace(layer.InputFunction) ? "Direct" : layer.InputFunction,
+            BlendMode = string.IsNullOrWhiteSpace(layer.BlendMode) ? "Subtractive" : layer.BlendMode,
+            InjectionMode = string.IsNullOrWhiteSpace(layer.InjectionMode) ? "Threshold" : layer.InjectionMode,
+            LifeMode = string.IsNullOrWhiteSpace(layer.LifeMode) ? "NaiveGrayscale" : layer.LifeMode,
+            BinningMode = string.IsNullOrWhiteSpace(layer.BinningMode) ? "Fill" : layer.BinningMode,
+            InjectionNoise = Math.Clamp(layer.InjectionNoise, 0, 1),
+            LifeOpacity = Math.Clamp(layer.LifeOpacity, 0, 1),
+            RgbHueShiftDegrees = layer.RgbHueShiftDegrees,
+            RgbHueShiftSpeedDegreesPerSecond = layer.RgbHueShiftSpeedDegreesPerSecond,
+            AudioFrequencyHueShiftDegrees = 0,
+            ReactiveMappings = layer.ReactiveMappings
+                .Select(mapping => new LayerConfigReactiveMapping
+                {
+                    Id = mapping.Id,
+                    Input = string.IsNullOrWhiteSpace(mapping.Input) ? nameof(SimulationReactiveInput.Level) : mapping.Input,
+                    Output = string.IsNullOrWhiteSpace(mapping.Output) ? nameof(SimulationReactiveOutput.Opacity) : mapping.Output,
+                    Amount = mapping.Amount
+                })
+                .ToList(),
+            ThresholdMin = Math.Clamp(layer.ThresholdMin, 0, 1),
+            ThresholdMax = Math.Clamp(layer.ThresholdMax, 0, 1),
+            InvertThreshold = layer.InvertThreshold
+        };
+
+        foreach (var child in layer.Children)
+        {
+            config.Children.Add(FromEditorSimulationLayer(child));
+        }
+
         return config;
     }
 
@@ -262,6 +269,7 @@ internal sealed class LayerConfigFile
         {
             Id = Guid.NewGuid(),
             Kind = kind,
+            Enabled = config.Enabled,
             DisplayName = config.DisplayName ?? string.Empty,
             WindowTitle = config.WindowTitle,
             WebcamId = config.WebcamId,
@@ -316,7 +324,138 @@ internal sealed class LayerConfigFile
             model.Children.Add(ToEditorSource(child, model));
         }
 
+        foreach (var simulationLayer in FlattenSimulationLayers(config.SimulationLayers))
+        {
+            model.SimulationLayers.Add(ToEditorSimulationLayer(simulationLayer, null));
+        }
+
         return model;
+    }
+
+    private static LayerEditorSimulationLayer ToEditorSimulationLayer(LayerConfigSimulationLayer layer, LayerEditorSimulationLayer? parent)
+    {
+        var reactiveMappings = (layer.ReactiveMappings ?? new List<LayerConfigReactiveMapping>())
+            .Select(mapping => new LayerEditorSimulationReactiveMapping
+            {
+                Id = mapping.Id == Guid.Empty ? Guid.NewGuid() : mapping.Id,
+                Input = string.IsNullOrWhiteSpace(mapping.Input) ? nameof(SimulationReactiveInput.Level) : mapping.Input,
+                Output = string.IsNullOrWhiteSpace(mapping.Output) ? nameof(SimulationReactiveOutput.Opacity) : mapping.Output,
+                Amount = SimulationReactivity.ClampAmount(
+                    ParseReactiveOutputOrDefault(mapping.Output, SimulationReactiveOutput.Opacity),
+                    mapping.Amount)
+            })
+            .ToList();
+
+        if (reactiveMappings.Count == 0 && layer.AudioFrequencyHueShiftDegrees > 0.001)
+        {
+            reactiveMappings.Add(new LayerEditorSimulationReactiveMapping
+            {
+                Id = Guid.NewGuid(),
+                Input = nameof(SimulationReactiveInput.Frequency),
+                Output = nameof(SimulationReactiveOutput.HueShift),
+                Amount = Math.Clamp(layer.AudioFrequencyHueShiftDegrees, 0, 360)
+            });
+        }
+
+        var model = new LayerEditorSimulationLayer
+        {
+            Id = layer.Id == Guid.Empty ? Guid.NewGuid() : layer.Id,
+            Kind = ParseSimulationItemKind(layer.Kind),
+            Name = string.IsNullOrWhiteSpace(layer.Name)
+                ? (string.Equals(layer.Kind, nameof(LayerEditorSimulationItemKind.Group), StringComparison.OrdinalIgnoreCase)
+                    ? "Sim Group"
+                    : "Simulation Layer")
+                : layer.Name,
+            Enabled = layer.Enabled,
+            InputFunction = string.IsNullOrWhiteSpace(layer.InputFunction) ? "Direct" : layer.InputFunction,
+            BlendMode = string.IsNullOrWhiteSpace(layer.BlendMode) ? "Subtractive" : layer.BlendMode,
+            InjectionMode = string.IsNullOrWhiteSpace(layer.InjectionMode) ? "Threshold" : layer.InjectionMode,
+            LifeMode = string.IsNullOrWhiteSpace(layer.LifeMode) ? "NaiveGrayscale" : layer.LifeMode,
+            BinningMode = string.IsNullOrWhiteSpace(layer.BinningMode) ? "Fill" : layer.BinningMode,
+            InjectionNoise = Math.Clamp(layer.InjectionNoise, 0, 1),
+            LifeOpacity = Math.Clamp(layer.LifeOpacity, 0, 1),
+            RgbHueShiftDegrees = layer.RgbHueShiftDegrees,
+            RgbHueShiftSpeedDegreesPerSecond = layer.RgbHueShiftSpeedDegreesPerSecond,
+            AudioFrequencyHueShiftDegrees = 0,
+            ReactiveMappings = new ObservableCollection<LayerEditorSimulationReactiveMapping>(reactiveMappings),
+            ThresholdMin = Math.Clamp(layer.ThresholdMin, 0, 1),
+            ThresholdMax = Math.Clamp(layer.ThresholdMax, 0, 1),
+            InvertThreshold = layer.InvertThreshold,
+            Parent = parent
+        };
+
+        foreach (var child in layer.Children)
+        {
+            model.Children.Add(ToEditorSimulationLayer(child, model));
+        }
+
+        return model;
+    }
+
+    private static IEnumerable<LayerEditorSource> EnumerateSources(IEnumerable<LayerEditorSource> roots)
+    {
+        foreach (var source in roots)
+        {
+            yield return source;
+            foreach (var child in EnumerateSources(source.Children))
+            {
+                yield return child;
+            }
+        }
+    }
+
+    private static List<LayerConfigSimulationLayer> FlattenSimulationLayers(IEnumerable<LayerConfigSimulationLayer> layers)
+    {
+        var flattened = new List<LayerConfigSimulationLayer>();
+        foreach (var layer in layers)
+        {
+            FlattenSimulationLayer(layer, flattened, ancestorEnabled: true);
+        }
+
+        return flattened;
+    }
+
+    private static void FlattenSimulationLayer(LayerConfigSimulationLayer layer, ICollection<LayerConfigSimulationLayer> target, bool ancestorEnabled)
+    {
+        bool enabled = ancestorEnabled && layer.Enabled;
+        if (ParseSimulationItemKind(layer.Kind) == LayerEditorSimulationItemKind.Group)
+        {
+            foreach (var child in layer.Children)
+            {
+                FlattenSimulationLayer(child, target, enabled);
+            }
+
+            return;
+        }
+
+        var flattened = new LayerConfigSimulationLayer
+        {
+            Id = layer.Id,
+            Kind = nameof(LayerEditorSimulationItemKind.Layer),
+            Name = layer.Name,
+            Enabled = enabled,
+            InputFunction = layer.InputFunction,
+            BlendMode = layer.BlendMode,
+            InjectionMode = layer.InjectionMode,
+            LifeMode = layer.LifeMode,
+            BinningMode = layer.BinningMode,
+            InjectionNoise = layer.InjectionNoise,
+            LifeOpacity = layer.LifeOpacity,
+            RgbHueShiftDegrees = layer.RgbHueShiftDegrees,
+            RgbHueShiftSpeedDegreesPerSecond = layer.RgbHueShiftSpeedDegreesPerSecond,
+            AudioFrequencyHueShiftDegrees = layer.AudioFrequencyHueShiftDegrees,
+            ReactiveMappings = layer.ReactiveMappings.Select(mapping => new LayerConfigReactiveMapping
+            {
+                Id = mapping.Id,
+                Input = mapping.Input,
+                Output = mapping.Output,
+                Amount = mapping.Amount
+            }).ToList(),
+            ThresholdMin = layer.ThresholdMin,
+            ThresholdMax = layer.ThresholdMax,
+            InvertThreshold = layer.InvertThreshold
+        };
+        target.Add(flattened);
     }
 
     private static LayerEditorSourceKind ResolveKind(LayerConfigSource config)
@@ -449,11 +588,19 @@ internal sealed class LayerConfigFile
 
         return fallback;
     }
+
+    private static LayerEditorSimulationItemKind ParseSimulationItemKind(string? value)
+    {
+        return Enum.TryParse<LayerEditorSimulationItemKind>(value, true, out var parsed)
+            ? parsed
+            : LayerEditorSimulationItemKind.Layer;
+    }
 }
 
 internal sealed class LayerConfigSource
 {
     public string? Type { get; set; }
+    public bool Enabled { get; set; } = true;
     public string? WindowTitle { get; set; }
     public string? WebcamId { get; set; }
     public string? FilePath { get; set; }
@@ -469,6 +616,7 @@ internal sealed class LayerConfigSource
     public string? KeyColor { get; set; }
     public double KeyTolerance { get; set; } = 0.1;
     public List<LayerConfigAnimation> Animations { get; set; } = new();
+    public List<LayerConfigSimulationLayer> SimulationLayers { get; set; } = new();
     public List<LayerConfigSource> Children { get; set; } = new();
 }
 
@@ -491,6 +639,7 @@ internal sealed class LayerConfigAnimation
 internal sealed class LayerConfigSimulationLayer
 {
     public Guid Id { get; set; }
+    public string Kind { get; set; } = nameof(LayerEditorSimulationItemKind.Layer);
     public string Name { get; set; } = "Simulation Layer";
     public bool Enabled { get; set; } = true;
     public string InputFunction { get; set; } = "Direct";
@@ -507,6 +656,7 @@ internal sealed class LayerConfigSimulationLayer
     public double ThresholdMin { get; set; } = 0.35;
     public double ThresholdMax { get; set; } = 0.75;
     public bool InvertThreshold { get; set; }
+    public List<LayerConfigSimulationLayer> Children { get; set; } = new();
 }
 
 internal sealed class LayerConfigReactiveMapping

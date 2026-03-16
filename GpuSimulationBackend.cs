@@ -400,6 +400,24 @@ internal sealed class GpuSimulationBackend : ISimulationBackend
         }
     }
 
+    internal bool TryGetColorSurface(out GpuCompositeSurface? surface)
+    {
+        surface = null;
+
+        lock (_sync)
+        {
+            if (!RenderColorTexture() ||
+                _colorTexture == null ||
+                _colorTextureView == null)
+            {
+                return false;
+            }
+
+            surface = new GpuCompositeSurface(_colorTexture, _colorTextureView, _colorSharedHandle, _columns, _rows);
+            return true;
+        }
+    }
+
     public void Dispose()
     {
         DisposeResources();
