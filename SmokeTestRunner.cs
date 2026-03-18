@@ -69,6 +69,7 @@ internal static class SmokeTestRunner
                 "profile-current-scene-visible-presets" => RunCurrentScenePresetProfileSmokeSuite(visibleWindow: true),
                 "profile-current-scene-fullscreen-presets" => RunCurrentScenePresetProfileSmokeSuite(visibleWindow: true, fullscreen: true),
                 "profile-current-scene-interaction" => RunCurrentSceneInteractionProfileSmokeTest(),
+                "current-scene-hover-presentation" => RunCurrentSceneHoverPresentationSmokeTest(),
                 "pacing-current-scene-visible-presets" => RunCurrentScenePacingSmokeSuite(visibleWindow: true),
                 "pacing-current-scene-fullscreen-presets" => RunCurrentScenePacingSmokeSuite(visibleWindow: true, fullscreen: true),
                 "pacing-current-scene-interaction" => RunCurrentSceneInteractionPacingSmokeTest(),
@@ -82,6 +83,7 @@ internal static class SmokeTestRunner
                 "passthrough-underlay-only" => RunPassthroughUnderlayOnlySmokeTest(),
                 "gpu-frequency-hue" => RunGpuFrequencyHueSmokeTest(),
                 "simulation-reactive-mappings" => RunSimulationReactiveMappingsSmokeTest(),
+                "pixel-sort-reactive-cell-size" => RunPixelSortReactiveCellSizeSmokeTest(),
                 "simulation-reactive-persistence" => RunSimulationReactiveMappingsPersistenceSmokeTest(),
                 "simulation-reactive-legacy-migration" => RunSimulationReactiveLegacyMigrationSmokeTest(),
                 "simulation-reactive-removal" => RunSimulationReactiveRemovalSmokeTest(),
@@ -96,6 +98,9 @@ internal static class SmokeTestRunner
                 "sim-group-enabled-toggle" => RunSimGroupEnabledToggleSmokeTest(),
                 "sim-group-remove-source" => RunSimGroupRemoveSourceSmokeTest(),
                 "sim-group-live-edit-selection" => RunSimGroupLiveEditSelectionSmokeTest(),
+                "pixel-sort-editor-roundtrip" => RunPixelSortEditorRoundTripSmokeTest(),
+                "gpu-pixel-sort" => RunGpuPixelSortSmokeTest(),
+                "sim-group-pixel-sort-color" => RunSimGroupPixelSortColorSmokeTest(),
                 "gpu-injection-mode" => RunGpuInjectionModeSmokeTest(),
                 "gpu-file-injection-mode" => RunGpuFileInjectionModeSmokeTest(smokeVideoPath),
                 "gpu-sim" => RunGpuSimulationSmokeTest(),
@@ -109,7 +114,7 @@ internal static class SmokeTestRunner
                 "startup" => RunStartupSmokeTest(),
                 "startup-recovery" => RunStartupRecoverySmokeTest(),
                 "all" => RunAllSmokeTests(),
-                _ => throw new ArgumentException($"Unknown smoke test target '{target}'. Expected profile-240, profile-480, profile-rgb-240, profile-rgb-480, profile-file-240, profile-file-480, profile-file-rgb-240, profile-file-rgb-480, profile-current-scene, profile-current-scene-visible, profile-current-scene-fullscreen, profile-current-scene-bisect, profile-current-scene-presets, profile-current-scene-visible-presets, profile-current-scene-fullscreen-presets, profile-current-scene-<144|240|480|720|1080|1440|2160>, profile-current-scene-visible-<144|240|480|720|1080|1440|2160>, profile-current-scene-fullscreen-<144|240|480|720|1080|1440|2160>, profile-current-scene-interaction, pacing-current-scene-visible-presets, pacing-current-scene-fullscreen-presets, pacing-current-scene-interaction, pacing-current-scene-overlay-fullscreen-144, pacing-current-scene-suite, frame-pump-thread-safety, gpu-benchmark, gpu-handoff, gpu-rgb-threshold, gpu-passthrough-signed-model, passthrough-underlay-only, gpu-frequency-hue, simulation-reactive-mappings, simulation-reactive-persistence, simulation-reactive-legacy-migration, simulation-reactive-removal, simulation-reactive-editor-isolation, sim-group-legacy-migration, no-sim-group-renders-composite, sim-group-removal-clears-runtime, disabled-sim-group-renders-composite, sim-group-stack-order, sim-group-inline-hue, sim-group-inline-presentation, sim-group-enabled-toggle, sim-group-remove-source, sim-group-live-edit-selection, gpu-injection-mode, gpu-file-injection-mode, gpu-sim, gpu-source, source-reset, gpu-render, profile-mainloop, profile-mainloop-sim-group, dimensions, shutdown, startup, startup-recovery, or all.")
+                _ => throw new ArgumentException($"Unknown smoke test target '{target}'. Expected profile-240, profile-480, profile-rgb-240, profile-rgb-480, profile-file-240, profile-file-480, profile-file-rgb-240, profile-file-rgb-480, profile-current-scene, profile-current-scene-visible, profile-current-scene-fullscreen, profile-current-scene-bisect, profile-current-scene-presets, profile-current-scene-visible-presets, profile-current-scene-fullscreen-presets, profile-current-scene-<144|240|480|720|1080|1440|2160>, profile-current-scene-visible-<144|240|480|720|1080|1440|2160>, profile-current-scene-fullscreen-<144|240|480|720|1080|1440|2160>, profile-current-scene-interaction, current-scene-hover-presentation, pacing-current-scene-visible-presets, pacing-current-scene-fullscreen-presets, pacing-current-scene-interaction, pacing-current-scene-overlay-fullscreen-144, pacing-current-scene-suite, frame-pump-thread-safety, gpu-benchmark, gpu-handoff, gpu-rgb-threshold, gpu-passthrough-signed-model, passthrough-underlay-only, gpu-frequency-hue, simulation-reactive-mappings, pixel-sort-reactive-cell-size, simulation-reactive-persistence, simulation-reactive-legacy-migration, simulation-reactive-removal, simulation-reactive-editor-isolation, sim-group-legacy-migration, no-sim-group-renders-composite, sim-group-removal-clears-runtime, disabled-sim-group-renders-composite, sim-group-stack-order, sim-group-inline-hue, sim-group-inline-presentation, sim-group-enabled-toggle, sim-group-remove-source, sim-group-live-edit-selection, pixel-sort-editor-roundtrip, gpu-pixel-sort, sim-group-pixel-sort-color, gpu-injection-mode, gpu-file-injection-mode, gpu-sim, gpu-source, source-reset, gpu-render, profile-mainloop, profile-mainloop-sim-group, dimensions, shutdown, startup, startup-recovery, or all.")
             };
         }
         catch (Exception ex)
@@ -281,6 +286,34 @@ internal static class SmokeTestRunner
 
         Logger.Info("GPU simulation smoke test passed.");
         return 0;
+    }
+
+    private static int RunGpuPixelSortSmokeTest()
+    {
+        Logger.Info("Running GPU pixel sort smoke test.");
+        var window = new MainWindow();
+        try
+        {
+            return window.RunGpuPixelSortSmoke() ? 0 : 1;
+        }
+        finally
+        {
+            window.Close();
+        }
+    }
+
+    private static int RunSimGroupPixelSortColorSmokeTest()
+    {
+        Logger.Info("Running sim-group pixel sort color smoke test.");
+        var window = new MainWindow();
+        try
+        {
+            return window.RunSimGroupPixelSortColorSmoke() ? 0 : 1;
+        }
+        finally
+        {
+            window.Close();
+        }
     }
 
     private static int RunGpuBenchmark()
@@ -842,6 +875,35 @@ internal static class SmokeTestRunner
         return exitCode;
     }
 
+    private static int RunPixelSortReactiveCellSizeSmokeTest()
+    {
+        int exitCode = 0;
+        var thread = new Thread(() =>
+        {
+            try
+            {
+                var app = new App();
+                app.InitializeComponent();
+                var window = new MainWindow();
+                bool ok = window.RunPixelSortReactiveCellSizeSmoke();
+                window.Close();
+                app.Shutdown();
+                exitCode = ok ? 0 : 1;
+            }
+            catch (Exception ex)
+            {
+                Logger.Error("Pixel sort reactive cell size smoke failed.", ex);
+                Console.Error.WriteLine(ex);
+                exitCode = 1;
+            }
+        });
+
+        thread.SetApartmentState(ApartmentState.STA);
+        thread.Start();
+        thread.Join();
+        return exitCode;
+    }
+
     private static int RunSimulationReactiveMappingsPersistenceSmokeTest()
     {
         int exitCode = 0;
@@ -1267,6 +1329,39 @@ internal static class SmokeTestRunner
             catch (Exception ex)
             {
                 Logger.Error("Sim-group live-edit selection smoke failed.", ex);
+                Console.Error.WriteLine(ex);
+                exitCode = 1;
+            }
+        });
+
+        thread.SetApartmentState(ApartmentState.STA);
+        thread.Start();
+        thread.Join();
+        return exitCode;
+    }
+
+    private static int RunPixelSortEditorRoundTripSmokeTest()
+    {
+        int exitCode = 0;
+        var thread = new Thread(() =>
+        {
+            try
+            {
+                var app = new App();
+                app.InitializeComponent();
+                var window = new MainWindow();
+                window.Show();
+                window.Hide();
+                var editor = new LayerEditorWindow(window);
+                bool ok = editor.RunPixelSortEditorRoundTripSmoke();
+                editor.Close();
+                window.Close();
+                app.Shutdown();
+                exitCode = ok ? 0 : 1;
+            }
+            catch (Exception ex)
+            {
+                Logger.Error("Pixel-sort editor round-trip smoke failed.", ex);
                 Console.Error.WriteLine(ex);
                 exitCode = 1;
             }
@@ -1984,6 +2079,73 @@ internal static class SmokeTestRunner
         }
 
         Logger.Info("Current-scene interaction profile smoke test passed.");
+        return exitCode;
+    }
+
+    private static int RunCurrentSceneHoverPresentationSmokeTest()
+    {
+        Logger.Info("Running current-scene hover presentation smoke test.");
+        Exception? failure = null;
+        App.LoadUserConfigInSmokeTest = true;
+
+        var app = new App();
+        app.InitializeComponent();
+        app.ShutdownMode = ShutdownMode.OnExplicitShutdown;
+        app.DispatcherUnhandledException += (_, args) =>
+        {
+            failure ??= args.Exception;
+            args.Handled = true;
+            app.Shutdown(1);
+        };
+
+        app.Startup += (_, _) =>
+        {
+            var waitForWindow = new DispatcherTimer(DispatcherPriority.ApplicationIdle)
+            {
+                Interval = TimeSpan.FromMilliseconds(50)
+            };
+
+            waitForWindow.Tick += (_, _) =>
+            {
+                if (app.MainWindow is not MainWindow window)
+                {
+                    return;
+                }
+
+                waitForWindow.Stop();
+                window.Dispatcher.BeginInvoke(async () =>
+                {
+                    try
+                    {
+                        await Task.Delay(TimeSpan.FromSeconds(3));
+                        bool ok = window.RunCurrentSceneHoverPresentationSmoke();
+                        if (!ok)
+                        {
+                            throw new InvalidOperationException("Current-scene hover presentation smoke detected unstable presented output under hover redraw pressure.");
+                        }
+
+                        window.Close();
+                        app.Shutdown(0);
+                    }
+                    catch (Exception ex)
+                    {
+                        failure ??= ex;
+                        window.Close();
+                        app.Shutdown(1);
+                    }
+                }, DispatcherPriority.ApplicationIdle);
+            };
+
+            waitForWindow.Start();
+        };
+
+        int exitCode = app.Run();
+        if (failure != null)
+        {
+            throw new InvalidOperationException("Current-scene hover presentation smoke test failed.", failure);
+        }
+
+        Logger.Info("Current-scene hover presentation smoke test passed.");
         return exitCode;
     }
 

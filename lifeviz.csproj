@@ -36,12 +36,17 @@
     <None Include="Assets\Blend.fx" />
     <None Include="Assets\GpuComposite.hlsl" />
     <None Include="Assets\GpuFinalComposite.hlsl" />
+    <None Include="Assets\GpuPixelSort.hlsl" />
     <None Include="Assets\GpuSourceComposite.hlsl" />
     <None Include="Assets\GpuSimulation.hlsl" />
     <Resource Include="Assets\Blend.ps" />
     <Resource Include="Assets\GpuCompositeVS.cso" />
     <Resource Include="Assets\GpuCompositePS.cso" />
     <Resource Include="Assets\GpuFinalCompositePS.cso" />
+    <Resource Include="Assets\GpuPixelSortInjectCompositeCS.cso" />
+    <Resource Include="Assets\GpuPixelSortPublishOutputCS.cso" />
+    <Resource Include="Assets\GpuPixelSortPublishPresentationOutputCS.cso" />
+    <Resource Include="Assets\GpuPixelSortSortPassCS.cso" />
     <Resource Include="Assets\GpuSourceCompositeVS.cso" />
     <Resource Include="Assets\GpuSourceCompositePS.cso" />
     <Resource Include="Assets\GpuSimulationInjectCS.cso" />
@@ -74,6 +79,15 @@
     <Exec Command="&quot;$(FxcExePath)&quot; /T cs_5_0 /E InjectCompositeCS /nologo /Fo &quot;Assets\GpuSimulationInjectCompositeCS.cso&quot; &quot;Assets\GpuSimulation.hlsl&quot;" Condition="Exists('$(FxcExePath)')" />
     <Exec Command="&quot;$(FxcExePath)&quot; /T cs_5_0 /E StepCS /nologo /Fo &quot;Assets\GpuSimulationStepCS.cso&quot; &quot;Assets\GpuSimulation.hlsl&quot;" Condition="Exists('$(FxcExePath)')" />
     <Exec Command="&quot;$(FxcExePath)&quot; /T cs_5_0 /E RenderCS /nologo /Fo &quot;Assets\GpuSimulationRenderCS.cso&quot; &quot;Assets\GpuSimulation.hlsl&quot;" Condition="Exists('$(FxcExePath)')" />
+    <Error Text="Shader compiler (fxc.exe) not found at '$(FxcExePath)'. Please update the FxcExePath property in lifeviz.csproj." Condition="!Exists('$(FxcExePath)')" />
+  </Target>
+
+  <Target Name="CompileGpuPixelSortShaders" BeforeTargets="CoreBuild">
+    <Message Text="Compiling GPU pixel-sort shaders Assets\GpuPixelSort.hlsl..." Importance="high" />
+    <Exec Command="&quot;$(FxcExePath)&quot; /T cs_5_0 /E InjectCompositeCS /nologo /Fo &quot;Assets\GpuPixelSortInjectCompositeCS.cso&quot; &quot;Assets\GpuPixelSort.hlsl&quot;" Condition="Exists('$(FxcExePath)')" />
+    <Exec Command="&quot;$(FxcExePath)&quot; /T cs_5_0 /E PublishOutputCS /nologo /Fo &quot;Assets\GpuPixelSortPublishOutputCS.cso&quot; &quot;Assets\GpuPixelSort.hlsl&quot;" Condition="Exists('$(FxcExePath)')" />
+    <Exec Command="&quot;$(FxcExePath)&quot; /T cs_5_0 /E PublishPresentationOutputCS /nologo /Fo &quot;Assets\GpuPixelSortPublishPresentationOutputCS.cso&quot; &quot;Assets\GpuPixelSort.hlsl&quot;" Condition="Exists('$(FxcExePath)')" />
+    <Exec Command="&quot;$(FxcExePath)&quot; /T cs_5_0 /E SortPassCS /nologo /Fo &quot;Assets\GpuPixelSortSortPassCS.cso&quot; &quot;Assets\GpuPixelSort.hlsl&quot;" Condition="Exists('$(FxcExePath)')" />
     <Error Text="Shader compiler (fxc.exe) not found at '$(FxcExePath)'. Please update the FxcExePath property in lifeviz.csproj." Condition="!Exists('$(FxcExePath)')" />
   </Target>
 

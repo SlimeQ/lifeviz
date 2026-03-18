@@ -124,6 +124,8 @@ internal sealed class GpuPresentationBackend : IDisposable
     private byte[]? _smokePresentedFrame;
     private int _smokePresentedWidth;
     private int _smokePresentedHeight;
+    private bool _diagnosticCaptureLogged;
+    private bool _diagnosticCaptureMissingLogged;
     private ID3D11Texture2D? _sharedUnderlayTexture;
     private ID3D11ShaderResourceView? _sharedUnderlayTextureView;
     private IntPtr _underlaySharedHandle;
@@ -419,6 +421,11 @@ internal sealed class GpuPresentationBackend : IDisposable
         {
             if (_smokePresentedFrame == null)
             {
+                if (App.IsDiagnosticTestMode && !_diagnosticCaptureMissingLogged)
+                {
+                    _diagnosticCaptureMissingLogged = true;
+                    Logger.Warn($"Diagnostic presented-frame capture was unavailable. drawCount={_drawCount}, surface={_surfaceWidth}x{_surfaceHeight}, useFinalComposite={_useFinalComposite}, finalPending={_finalCompositePending}.");
+                }
                 return null;
             }
 
@@ -426,6 +433,11 @@ internal sealed class GpuPresentationBackend : IDisposable
             Buffer.BlockCopy(_smokePresentedFrame, 0, copy, 0, copy.Length);
             return copy;
         }
+    }
+
+    public void RequestRedrawForSmoke()
+    {
+        _drawingSurface.Invalidate();
     }
 
     public void Dispose()
@@ -549,11 +561,17 @@ internal sealed class GpuPresentationBackend : IDisposable
             {
                 if (_finalCompositePending)
                 {
+                    e.Context.PSSetShaderResources(0, new ID3D11ShaderResourceView[MaxSimulationLayers + 1]);
                     for (int i = 0; i < _simulationLayerCount; i++)
                     {
                         if (_simulationLayerUsesSharedTexture[i])
                         {
                             EnsureSharedSimulationLayerResource(e.Device, i);
+                            if (_sharedSimulationLayerTextures[i] != null &&
+                                _simulationLayerTextures[i] != null)
+                            {
+                                e.Context.CopyResource(_simulationLayerTextures[i]!, _sharedSimulationLayerTextures[i]!);
+                            }
                         }
                         else if (_simulationLayerTextures[i] != null && _simulationLayerUploadBuffers[i] != null)
                         {
@@ -563,6 +581,10 @@ internal sealed class GpuPresentationBackend : IDisposable
                     if (_underlayUsesSharedTexture)
                     {
                         EnsureSharedUnderlayResource(e.Device);
+                        if (_sharedUnderlayTexture != null && _underlayTexture != null)
+                        {
+                            e.Context.CopyResource(_underlayTexture, _sharedUnderlayTexture);
+                        }
                     }
 
                     _finalCompositePending = false;
@@ -600,7 +622,7 @@ internal sealed class GpuPresentationBackend : IDisposable
                 _cpuFallbackDrawCount++;
             }
 
-            if (App.IsSmokeTestMode)
+            if (App.IsSmokeTestMode || App.IsDiagnosticTestMode)
             {
                 CapturePresentedFrameForSmoke(e);
             }
@@ -685,16 +707,13 @@ internal sealed class GpuPresentationBackend : IDisposable
         var resources = new ID3D11ShaderResourceView[MaxSimulationLayers + 1];
         for (int i = 0; i < MaxSimulationLayers; i++)
         {
-            resources[i] = (_simulationLayerUsesSharedTexture[i]
-                ? _sharedSimulationLayerTextureViews[i]
-                : _simulationLayerTextureViews[i])!;
+            resources[i] = _simulationLayerTextureViews[i]!;
         }
-        resources[MaxSimulationLayers] = (_underlayUsesSharedTexture
-            ? _sharedUnderlayTextureView
-            : _underlayTextureView)!;
+        resources[MaxSimulationLayers] = _underlayTextureView!;
         e.Context.PSSetShaderResources(0, resources);
         e.Context.PSSetConstantBuffers(0, new[] { _finalCompositeParametersBuffer });
         e.Context.Draw(3, 0);
+        e.Context.PSSetShaderResources(0, new ID3D11ShaderResourceView[MaxSimulationLayers + 1]);
     }
 
     private void EnsureTextureResources(ID3D11Device1 device)
@@ -851,24 +870,12 @@ internal sealed class GpuPresentationBackend : IDisposable
                 return false;
             }
 
-            if (_underlayUsesSharedTexture)
-            {
-                return _sharedUnderlayTextureView != null;
-            }
-
             return _underlayTextureView != null;
         }
 
         if (_finalCompositeParameters.UseUnderlay != 0)
         {
-            if (_underlayUsesSharedTexture)
-            {
-                if (_sharedUnderlayTextureView == null)
-                {
-                    return false;
-                }
-            }
-            else if (_underlayTextureView == null)
+            if (_underlayTextureView == null)
             {
                 return false;
             }
@@ -876,14 +883,7 @@ internal sealed class GpuPresentationBackend : IDisposable
 
         for (int i = 0; i < _simulationLayerCount; i++)
         {
-            if (_simulationLayerUsesSharedTexture[i])
-            {
-                if (_sharedSimulationLayerTextureViews[i] == null)
-                {
-                    return false;
-                }
-            }
-            else if (_simulationLayerTextures[i] == null || _simulationLayerTextureViews[i] == null || _simulationLayerUploadBuffers[i] == null)
+            if (_simulationLayerTextures[i] == null || _simulationLayerTextureViews[i] == null)
             {
                 return false;
             }
@@ -1161,6 +1161,11 @@ internal sealed class GpuPresentationBackend : IDisposable
 
         _smokePresentedWidth = width;
         _smokePresentedHeight = height;
+        if (App.IsDiagnosticTestMode && !_diagnosticCaptureLogged)
+        {
+            _diagnosticCaptureLogged = true;
+            Logger.Info($"Diagnostic presented-frame capture initialized at {width}x{height} after drawCount={_drawCount}.");
+        }
     }
 
     private void EnsureSmokeReadbackTexture(ID3D11Device1 device, int width, int height)

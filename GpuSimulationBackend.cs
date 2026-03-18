@@ -9,7 +9,7 @@ using static Vortice.Direct3D11.D3D11;
 
 namespace lifeviz;
 
-internal sealed class GpuSimulationBackend : ISimulationBackend
+internal sealed class GpuSimulationBackend : IGpuSimulationSurfaceBackend
 {
     [DllImport("kernel32.dll", SetLastError = true)]
     private static extern bool CloseHandle(IntPtr hObject);
@@ -316,7 +316,7 @@ internal sealed class GpuSimulationBackend : ISimulationBackend
         }
     }
 
-    internal bool TryInjectCompositeSurface(
+    public bool TryInjectCompositeSurface(
         GpuCompositeSurface? compositeSurface,
         double min,
         double max,
@@ -380,7 +380,7 @@ internal sealed class GpuSimulationBackend : ISimulationBackend
         }
     }
 
-    internal bool TryGetSharedColorTexture(out IntPtr sharedHandle, out int width, out int height)
+    public bool TryGetSharedColorTexture(out IntPtr sharedHandle, out int width, out int height)
     {
         sharedHandle = IntPtr.Zero;
         width = 0;
@@ -400,7 +400,7 @@ internal sealed class GpuSimulationBackend : ISimulationBackend
         }
     }
 
-    internal bool TryGetColorSurface(out GpuCompositeSurface? surface)
+    public bool TryGetColorSurface(out GpuCompositeSurface? surface)
     {
         surface = null;
 

@@ -420,7 +420,6 @@ public partial class MainWindow
                 ID3D11Texture2D currentTexture = currentSurface?.Texture ?? _compositeTextureA;
                 ID3D11ShaderResourceView currentCompositeSrv = currentSurface?.ShaderResourceView ?? _compositeSrvA;
                 IntPtr currentSharedHandle = currentSurface?.SharedTextureHandle ?? _compositeSharedHandleA;
-
                 bool wroteAny = false;
                 foreach (var layer in layers)
                 {
@@ -435,7 +434,7 @@ public partial class MainWindow
                         return null;
                     }
 
-                    bool drawIntoA = currentTexture == _compositeTextureB;
+                    bool drawIntoA = ReferenceEquals(currentTexture, _compositeTextureB);
                     ID3D11Texture2D targetTexture = drawIntoA ? _compositeTextureA : _compositeTextureB;
                     ID3D11ShaderResourceView targetSrv = drawIntoA ? _compositeSrvA : _compositeSrvB;
                     ID3D11RenderTargetView targetRtv = drawIntoA ? _compositeRtvA : _compositeRtvB;
@@ -626,7 +625,7 @@ public partial class MainWindow
                 }
 
                 bool useExistingSurface = currentSurface != null;
-                bool drawIntoA = currentSurface?.Texture == _compositeTextureB;
+                bool drawIntoA = ReferenceEquals(currentSurface?.Texture, _compositeTextureB);
                 if (!useExistingSurface)
                 {
                     _context.ClearRenderTargetView(_compositeRtvA, new Vortice.Mathematics.Color4(0f, 0f, 0f, 1f));

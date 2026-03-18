@@ -90,6 +90,7 @@ public partial class MainWindow : Window
     private const double UiInteractionThrottleFps = 20.0;
     private const int WmEnterSizeMove = 0x0231;
     private const int WmExitSizeMove = 0x0232;
+    private const int WmMouseMove = 0x0200;
     private const string GitHubRepoOwner = "SlimeQ";
     private const string GitHubRepoName = "lifeviz";
     private const string GitHubReleaseAssetName = "lifeviz_installer.exe";
@@ -267,7 +268,10 @@ public partial class MainWindow : Window
     private readonly CpuSourceCompositor _inlineSourceCompositor;
     private readonly GpuSourceCompositor _inlineGpuSourceCompositor;
     private readonly GpuSimulationGroupCompositor _gpuSimulationGroupCompositor;
+    private readonly GpuPresentationSurfaceSnapshotter _inlineGpuPresentationSnapshotter;
     private int _pendingInlineSimulationStepsThisFrame;
+    private DateTime _lastInlinePresentationFallbackLogUtc = DateTime.MinValue;
+    private int _inlineGpuPresentationFallbackCount;
 
     public MainWindow()
     {
@@ -276,6 +280,7 @@ public partial class MainWindow : Window
         _inlineSourceCompositor = new CpuSourceCompositor(this);
         _inlineGpuSourceCompositor = new GpuSourceCompositor(this);
         _gpuSimulationGroupCompositor = new GpuSimulationGroupCompositor();
+        _inlineGpuPresentationSnapshotter = new GpuPresentationSurfaceSnapshotter();
         _startupRecoveryTriggered = TryConsumeStartupRecoveryFlag();
         MarkStartupPending();
 
@@ -347,6 +352,7 @@ public partial class MainWindow : Window
                 renderBackend.Dispose();
                 _inlineGpuSourceCompositor.Dispose();
                 _gpuSimulationGroupCompositor.Dispose();
+                _inlineGpuPresentationSnapshotter.Dispose();
                 foreach (var backend in EnumerateSimulationLeafLayers(_simulationLayers).Select(layer => layer.Engine).OfType<ISimulationBackend>().Distinct())
                 {
                     backend.Dispose();
@@ -886,6 +892,23 @@ public partial class MainWindow : Window
         return true;
     }
 
+    internal bool TryGetSimulationLayerRuntimeInfoForSmoke(Guid layerId, out string layerType, out int pixelSortCellWidth, out int pixelSortCellHeight)
+    {
+        var layer = EnumerateSimulationLeafLayers(_simulationLayers).FirstOrDefault(candidate => candidate.Id == layerId);
+        if (layer == null)
+        {
+            layerType = string.Empty;
+            pixelSortCellWidth = 0;
+            pixelSortCellHeight = 0;
+            return false;
+        }
+
+        layerType = layer.LayerType.ToString();
+        pixelSortCellWidth = layer.PixelSortCellWidth;
+        pixelSortCellHeight = layer.PixelSortCellHeight;
+        return true;
+    }
+
     internal void ApplyCurrentSceneBisectVariantForSmoke(string variant)
     {
         switch (variant)
@@ -1337,79 +1360,94 @@ public partial class MainWindow : Window
         return changed && gpuBacked;
     }
 
+    private void ResetInlinePresentationDiagnosticsForSmoke()
+    {
+        _inlineGpuPresentationFallbackCount = 0;
+        _lastInlinePresentationFallbackLogUtc = DateTime.MinValue;
+        GpuPresentationSurfaceSnapshotter.ResetSmokeCounters();
+    }
+
+    private int GetInlinePresentationFallbackCountForSmoke() => _inlineGpuPresentationFallbackCount;
+
+    private (int snapshotCount, int distinctHandleCount) GetInlinePresentationSnapshotStatsForSmoke()
+        => GpuPresentationSurfaceSnapshotter.GetSmokeStats();
+
     internal bool RunSimGroupInlinePresentationFreshnessSmoke()
     {
-        if (!_renderLoopAttached)
+        if (_renderLoopAttached)
+        {
+            DetachRenderLoop();
+        }
+
+        Logger.Info("Sim-group inline-presentation smoke: starting dynamic phase.");
+        bool dynamicOk = RunSimGroupInlinePresentationDynamicPhase();
+        Logger.Info($"Sim-group inline-presentation smoke: dynamic phase complete ({dynamicOk}). Starting static phase.");
+        bool staticOk = RunSimGroupInlinePresentationStaticPhase();
+        Logger.Info($"Sim-group inline-presentation smoke: static phase complete ({staticOk}). Starting redraw-pressure phase.");
+        bool redrawOk = RunSimGroupInlinePresentationRedrawPressurePhase();
+        Logger.Info($"Sim-group inline-presentation smoke: redraw-pressure phase complete ({redrawOk}). Starting file-backed hover phase.");
+        bool fileBackedOk = RunSimGroupInlinePresentationFileBackedHoverPhase();
+        Logger.Info($"Sim-group inline-presentation smoke: file-backed hover phase complete ({fileBackedOk}). Starting exact repro hover phase.");
+        bool exactReproOk = RunSimGroupInlinePresentationExactReproHoverPhase();
+        Logger.Info($"Sim-group inline-presentation smoke: exact repro hover phase complete ({exactReproOk}). Starting real cursor hover phase.");
+        bool realCursorOk = RunSimGroupInlinePresentationRealCursorHoverPhase();
+        Logger.Info($"Sim-group inline-presentation combined smoke: dynamicOk={dynamicOk}, staticOk={staticOk}, redrawOk={redrawOk}, fileBackedOk={fileBackedOk}, exactReproOk={exactReproOk}, realCursorOk={realCursorOk}.");
+        return dynamicOk && staticOk && redrawOk && fileBackedOk && exactReproOk && realCursorOk;
+    }
+
+    private bool RunSimGroupInlinePresentationDynamicPhase()
+    {
+        if (_renderBackend is NullRenderBackend)
         {
             InitializeVisualizer();
         }
 
-        _sources.Clear();
-        ClearSimulationLayers();
-        _passthroughEnabled = false;
-        _passthroughCompositedInPixelBuffer = false;
-        _invertComposite = false;
-        _isPaused = false;
+        SetupInlinePixelSortPresentationSceneForSmoke(
+            out int width,
+            out int height,
+            out var background,
+            out var simulationGroup,
+            out var overlay,
+            overlayOpacity: 0.88);
 
-        ApplyDimensions(144, 24, DefaultAspectRatio, persist: false);
-        int width = GetReferenceSimulationEngine().Columns;
-        int height = GetReferenceSimulationEngine().Rows;
-
-        var source = CaptureSource.CreateFile("sim-group-inline-present", "Inline Present Source", width, height);
-        source.BlendMode = BlendMode.Additive;
-        source.Opacity = 1.0;
-
-        var simulationGroup = CaptureSource.CreateSimulationGroup("Inline Present Group");
-        simulationGroup.SimulationLayers.Add(new SimulationLayerSpec
+        byte[][] backgroundFrames =
         {
-            Id = Guid.NewGuid(),
-            Kind = LayerEditorSimulationItemKind.Layer,
-            Name = "Positive",
-            Enabled = true,
-            InputFunction = SimulationInputFunction.Direct,
-            BlendMode = BlendMode.Additive,
-            InjectionMode = GameOfLifeEngine.InjectionMode.Threshold,
-            LifeMode = GameOfLifeEngine.LifeMode.RgbChannels,
-            BinningMode = GameOfLifeEngine.BinningMode.Fill,
-            InjectionNoise = 0.0,
-            LifeOpacity = 1.0,
-            ThresholdMin = 0.25,
-            ThresholdMax = 0.85,
-            InvertThreshold = false
-        });
-
-        _sources.Add(source);
-        _sources.Add(simulationGroup);
-        UpdatePrimaryAspectIfNeeded();
-        ApplySimulationLayersFromSourceStack(fallbackToDefault: false);
-        ConfigureSimulationLayerEngines(_configuredRows, _configuredDepth, _currentAspectRatio, randomize: false);
-
-        byte[][] sourceFrames =
+            BuildSmokeRainbowBgra(width, height, 0.00),
+            BuildSmokeRainbowBgra(width, height, 0.18),
+            BuildSmokeRainbowBgra(width, height, 0.37),
+            BuildSmokeRainbowBgra(width, height, 0.56)
+        };
+        byte[][] overlayFrames =
         {
-            BuildSmokeSolidBgra(width, height, 255, 255, 255),
-            BuildSmokeSolidBgra(width, height, 0, 0, 255),
-            BuildSmokeCheckerBgra(width, height, 0, 0, 0, 255, 255, 255),
-            BuildSmokeGradientBgra(width, height)
+            BuildSmokePortraitBgra(width, height, 0),
+            BuildSmokePortraitBgra(width, height, 1),
+            BuildSmokePortraitBgra(width, height, 2),
+            BuildSmokePortraitBgra(width, height, 3)
         };
 
+        ResetInlinePresentationDiagnosticsForSmoke();
+        int baselineFallbacks = GetInlinePresentationFallbackCountForSmoke();
+        int drawAdvances = 0;
         int compositeChanges = 0;
         int presentedChanges = 0;
-        int drawAdvances = 0;
+        int compositePresentedMismatches = 0;
         byte[]? previousComposite = null;
         byte[]? previousPresented = null;
-        int sustainedIterations = 96;
+        int iterations = 144;
 
-        for (int i = 0; i < sustainedIterations; i++)
+        for (int i = 0; i < iterations; i++)
         {
-            byte[] frameBuffer = sourceFrames[i % sourceFrames.Length];
-            source.LastFrame = new SourceFrame(frameBuffer, width, height, null, width, height);
-            foreach (var runtimeLayer in EnumerateSimulationLeafLayers(_simulationLayers))
+            if (i > 0 && i % 24 == 0)
             {
-                runtimeLayer.TimeSinceLastStep = 1.0;
+                Logger.Info($"Sim-group inline-presentation dynamic smoke progress: iteration={i}/{iterations}.");
             }
 
-            _pendingInlineSimulationStepsThisFrame = 1;
+            background.LastFrame = new SourceFrame(backgroundFrames[i % backgroundFrames.Length], width, height, null, width, height);
+            overlay.LastFrame = new SourceFrame(overlayFrames[(i / 2) % overlayFrames.Length], width, height, null, width, height);
+            PrimeInlineSmokeLayerStepping(simulationGroup);
+
             int priorDrawCount = _renderBackend.PresentationDrawCount;
+            _pendingInlineSimulationStepsThisFrame = 1;
             InjectCaptureFrames(injectLayers: true);
             _pendingInlineSimulationStepsThisFrame = 0;
             RenderFrame();
@@ -1421,31 +1459,1070 @@ public partial class MainWindow : Window
 
             var composite = _lastCompositeFrame?.Downscaled;
             var presented = _renderBackend.GetPresentedFrameCopyForSmoke();
-            if (previousPresented != null &&
+            if (composite != null &&
                 presented != null &&
-                !previousPresented.AsSpan().SequenceEqual(presented))
+                !BuffersEqual(composite, presented))
             {
-                presentedChanges++;
+                compositePresentedMismatches++;
             }
 
-            if (previousComposite != null &&
-                composite != null &&
-                !previousComposite.AsSpan().SequenceEqual(composite))
+            if (!BuffersEqual(previousComposite, composite))
             {
                 compositeChanges++;
+            }
+
+            if (!BuffersEqual(previousPresented, presented))
+            {
+                presentedChanges++;
             }
 
             previousComposite = composite?.ToArray();
             previousPresented = presented;
         }
 
-        bool ok = drawAdvances == sustainedIterations &&
-                  compositeChanges >= sourceFrames.Length &&
-                  presentedChanges >= sourceFrames.Length;
+        int fallbackCount = GetInlinePresentationFallbackCountForSmoke() - baselineFallbacks;
+        int minDrawAdvances = (int)Math.Ceiling(iterations * 0.50);
+        int minChanges = (int)Math.Ceiling(iterations * 0.50);
+        bool ok = drawAdvances >= minDrawAdvances &&
+                  compositeChanges >= minChanges &&
+                  presentedChanges >= minChanges &&
+                  fallbackCount == 0;
         Logger.Info(
-            $"Sim-group inline-presentation smoke: drawAdvances={drawAdvances}/{sustainedIterations}, " +
-            $"compositeChanges={compositeChanges}, presentedChanges={presentedChanges}.");
+            $"Sim-group inline-presentation dynamic smoke: drawAdvances={drawAdvances}/{iterations}, " +
+            $"compositeChanges={compositeChanges}, presentedChanges={presentedChanges}, " +
+            $"mismatches={compositePresentedMismatches}, fallbacks={fallbackCount}, " +
+            $"minDrawAdvances={minDrawAdvances}, minChanges={minChanges}.");
         return ok;
+    }
+
+    private bool RunSimGroupInlinePresentationStaticPhase()
+    {
+        if (_renderBackend is NullRenderBackend)
+        {
+            InitializeVisualizer();
+        }
+
+        SetupInlinePixelSortPresentationSceneForSmoke(
+            out int width,
+            out int height,
+            out var background,
+            out var simulationGroup,
+            out var overlay,
+            overlayOpacity: 0.88);
+
+        byte[] backgroundFrame = BuildSmokeRainbowBgra(width, height, 0.12);
+        byte[] overlayFrame = BuildSmokePortraitBgra(width, height, 0);
+
+        ResetInlinePresentationDiagnosticsForSmoke();
+        int baselineFallbacks = GetInlinePresentationFallbackCountForSmoke();
+        int drawAdvances = 0;
+        int compositeChanges = 0;
+        int presentedChanges = 0;
+        int compositePresentedMismatches = 0;
+        byte[]? baselineComposite = null;
+        byte[]? baselinePresented = null;
+        var compositeSignatures = new HashSet<ulong>();
+        var presentedSignatures = new HashSet<ulong>();
+        int iterations = 240;
+
+        for (int i = 0; i < iterations; i++)
+        {
+            if (i > 0 && i % 40 == 0)
+            {
+                Logger.Info($"Sim-group inline-presentation static smoke progress: iteration={i}/{iterations}.");
+            }
+
+            background.LastFrame = new SourceFrame(backgroundFrame, width, height, null, width, height);
+            overlay.LastFrame = new SourceFrame(overlayFrame, width, height, null, width, height);
+            PrimeInlineSmokeLayerStepping(simulationGroup);
+
+            int priorDrawCount = _renderBackend.PresentationDrawCount;
+            _pendingInlineSimulationStepsThisFrame = 1;
+            InjectCaptureFrames(injectLayers: true);
+            _pendingInlineSimulationStepsThisFrame = 0;
+            RenderFrame();
+
+            if (WaitForPresentationDrawForSmoke(priorDrawCount))
+            {
+                drawAdvances++;
+            }
+
+            var composite = _lastCompositeFrame?.Downscaled;
+            var presented = _renderBackend.GetPresentedFrameCopyForSmoke();
+            ulong? compositeSignature = ComputeSmokeBufferSignature(composite);
+            ulong? presentedSignature = ComputeSmokeBufferSignature(presented);
+            if (compositeSignature.HasValue)
+            {
+                compositeSignatures.Add(compositeSignature.Value);
+            }
+
+            if (presentedSignature.HasValue)
+            {
+                presentedSignatures.Add(presentedSignature.Value);
+            }
+
+            if (composite != null &&
+                presented != null &&
+                !BuffersEqual(composite, presented))
+            {
+                compositePresentedMismatches++;
+            }
+
+            if (i == 0)
+            {
+                baselineComposite = composite?.ToArray();
+                baselinePresented = presented;
+                continue;
+            }
+
+            if (!BuffersEqual(baselineComposite, composite))
+            {
+                compositeChanges++;
+            }
+
+            if (!BuffersEqual(baselinePresented, presented))
+            {
+                presentedChanges++;
+            }
+        }
+
+        int fallbackCount = GetInlinePresentationFallbackCountForSmoke() - baselineFallbacks;
+        int minDrawAdvances = (int)Math.Ceiling(iterations * 0.75);
+        bool ok = drawAdvances >= minDrawAdvances &&
+                  compositeChanges == 0 &&
+                  presentedChanges == 0 &&
+                  compositeSignatures.Count == 1 &&
+                  presentedSignatures.Count == 1 &&
+                  fallbackCount == 0;
+        Logger.Info(
+            $"Sim-group inline-presentation static smoke: drawAdvances={drawAdvances}/{iterations}, " +
+            $"compositeChanges={compositeChanges}, presentedChanges={presentedChanges}, " +
+            $"mismatches={compositePresentedMismatches}, compositeSignatures={compositeSignatures.Count}, " +
+            $"presentedSignatures={presentedSignatures.Count}, fallbacks={fallbackCount}.");
+        return ok;
+    }
+
+    private bool RunSimGroupInlinePresentationRedrawPressurePhase()
+    {
+        SetupInlinePixelSortPresentationSceneForSmoke(
+            out int width,
+            out int height,
+            out var background,
+            out _,
+            out var overlay,
+            overlayOpacity: 0.88);
+
+        byte[] backgroundFrame = BuildSmokeRainbowBgra(width, height, 0.12);
+        byte[] overlayFrame = BuildSmokePortraitBgra(width, height, 0);
+        background.LastFrame = new SourceFrame(backgroundFrame, width, height, null, width, height);
+        overlay.LastFrame = new SourceFrame(overlayFrame, width, height, null, width, height);
+
+        ResetInlinePresentationDiagnosticsForSmoke();
+        int warmupDraws = 12;
+        for (int i = 0; i < warmupDraws; i++)
+        {
+            int priorWarmupDrawCount = _renderBackend.PresentationDrawCount;
+            _renderBackend.RequestPresentationRedrawForSmoke();
+            RenderFrame();
+            WaitForPresentationDrawForSmoke(priorWarmupDrawCount, maxIdlePasses: 16);
+        }
+
+        int baselineFallbacks = GetInlinePresentationFallbackCountForSmoke();
+        int drawAdvances = 0;
+        int presentedChanges = 0;
+        var presentedSignatures = new HashSet<ulong>();
+        byte[]? baselinePresented = null;
+        int iterations = 180;
+
+        for (int i = 0; i < iterations; i++)
+        {
+            if (i > 0 && i % 30 == 0)
+            {
+                Logger.Info($"Sim-group inline-presentation redraw-pressure smoke progress: iteration={i}/{iterations}.");
+            }
+
+            ApplyChromeHoverStressForSmoke(i);
+            int priorDrawCount = _renderBackend.PresentationDrawCount;
+            _renderBackend.RequestPresentationRedrawForSmoke();
+            RenderFrame();
+            if (WaitForPresentationDrawForSmoke(priorDrawCount, maxIdlePasses: 16))
+            {
+                drawAdvances++;
+            }
+
+            var presented = _renderBackend.GetPresentedFrameCopyForSmoke();
+            ulong? signature = ComputeSmokeBufferSignature(presented);
+            if (signature.HasValue)
+            {
+                presentedSignatures.Add(signature.Value);
+            }
+
+            if (i == 0)
+            {
+                baselinePresented = presented;
+                continue;
+            }
+
+            if (!BuffersEqual(baselinePresented, presented))
+            {
+                presentedChanges++;
+            }
+        }
+
+        int fallbackCount = GetInlinePresentationFallbackCountForSmoke() - baselineFallbacks;
+        int minDrawAdvances = (int)Math.Ceiling(iterations * 0.80);
+        bool ok = drawAdvances >= minDrawAdvances &&
+                  presentedChanges == 0 &&
+                  presentedSignatures.Count == 1 &&
+                  fallbackCount == 0;
+        Logger.Info(
+            $"Sim-group inline-presentation redraw-pressure smoke: drawAdvances={drawAdvances}/{iterations}, " +
+            $"presentedChanges={presentedChanges}, presentedSignatures={presentedSignatures.Count}, fallbacks={fallbackCount}.");
+        return ok;
+    }
+
+    private bool RunSimGroupInlinePresentationFileBackedHoverPhase()
+    {
+        SetupInlinePixelSortPresentationSceneForSmoke(
+            out int width,
+            out int height,
+            out var background,
+            out _,
+            out var overlay,
+            overlayOpacity: 0.88,
+            rows: 480,
+            useFileBackedSources: true);
+
+        DateTime deadlineUtc = DateTime.UtcNow + TimeSpan.FromSeconds(8);
+        while ((background.LastFrame == null || overlay.LastFrame == null) && DateTime.UtcNow < deadlineUtc)
+        {
+            int priorDrawCount = _renderBackend.PresentationDrawCount;
+            _pendingInlineSimulationStepsThisFrame = 1;
+            InjectCaptureFrames(injectLayers: true);
+            _pendingInlineSimulationStepsThisFrame = 0;
+            RenderFrame();
+            WaitForPresentationDrawForSmoke(priorDrawCount, maxIdlePasses: 24);
+        }
+
+        if (background.LastFrame == null || overlay.LastFrame == null)
+        {
+            Logger.Warn("Sim-group inline-presentation file-backed hover smoke failed to load file-backed source frames.");
+            return false;
+        }
+
+        var baseline = CollectInlinePresentationMetricsForSmoke(frames: 90, applyHoverStress: false, refreshSources: true);
+        var hover = CollectInlinePresentationMetricsForSmoke(frames: 90, applyHoverStress: true, refreshSources: true);
+        double baselineP95 = ComputePercentile(baseline.Deltas, 0.95);
+        double hoverP95 = ComputePercentile(hover.Deltas, 0.95);
+        double baselineAverage = baseline.Deltas.Count > 0 ? baseline.Deltas.Average() : 0.0;
+        double hoverAverage = hover.Deltas.Count > 0 ? hover.Deltas.Average() : 0.0;
+
+        bool ok = baseline.EmptyFrames == 0 &&
+                  hover.EmptyFrames == 0 &&
+                  baseline.DrawAdvances >= 60 &&
+                  hover.DrawAdvances >= 75 &&
+                  hoverP95 <= Math.Max(baselineP95 * 1.15, baselineP95 + 2.0) &&
+                  hoverAverage <= Math.Max(baselineAverage * 1.15, baselineAverage + 1.0);
+
+        Logger.Info(
+            $"Sim-group inline-presentation file-backed hover smoke: baselineDraws={baseline.DrawAdvances}/90, " +
+            $"hoverDraws={hover.DrawAdvances}/90, baselineAvg={baselineAverage:F2}, hoverAvg={hoverAverage:F2}, " +
+            $"baselineP95={baselineP95:F2}, hoverP95={hoverP95:F2}, baselineEmpty={baseline.EmptyFrames}, hoverEmpty={hover.EmptyFrames}.");
+        return ok;
+    }
+
+    private bool RunSimGroupInlinePresentationExactReproHoverPhase()
+    {
+        if (!TryGetInlinePixelSortExactReproPathsForSmoke(out string backgroundPath, out string overlayPath))
+        {
+            Logger.Warn("Sim-group inline-presentation exact repro hover smoke skipped because exact repro assets were unavailable.");
+            return false;
+        }
+
+        SetupInlinePixelSortPresentationSceneForSmoke(
+            out int width,
+            out int height,
+            out var background,
+            out _,
+            out var overlay,
+            overlayOpacity: 1.0,
+            rows: 480,
+            useFileBackedSources: true,
+            backgroundFilePathOverride: backgroundPath,
+            overlayFilePathOverride: overlayPath,
+            backgroundBlendModeOverride: BlendMode.Additive,
+            overlayFitModeOverride: FitMode.Fit);
+
+        DateTime deadlineUtc = DateTime.UtcNow + TimeSpan.FromSeconds(8);
+        while ((background.LastFrame == null || overlay.LastFrame == null) && DateTime.UtcNow < deadlineUtc)
+        {
+            int priorDrawCount = _renderBackend.PresentationDrawCount;
+            _pendingInlineSimulationStepsThisFrame = 1;
+            InjectCaptureFrames(injectLayers: true);
+            _pendingInlineSimulationStepsThisFrame = 0;
+            RenderFrame();
+            WaitForPresentationDrawForSmoke(priorDrawCount, maxIdlePasses: 24);
+        }
+
+        if (background.LastFrame == null || overlay.LastFrame == null)
+        {
+            Logger.Warn("Sim-group inline-presentation exact repro hover smoke failed to load exact repro source frames.");
+            return false;
+        }
+
+        int baselineFrames = 90;
+        int hoverFrames = 180;
+        int baselineDrawAdvances = 0;
+        int hoverDrawAdvances = 0;
+        var baselinePresentedSignatures = new HashSet<ulong>();
+        var hoverPresentedSignatures = new HashSet<ulong>();
+        var hoverCompositeSignatures = new HashSet<ulong>();
+        byte[]? baselinePresented = null;
+        byte[]? baselineComposite = null;
+        int hoverPresentedChanges = 0;
+        int hoverCompositeChanges = 0;
+
+        for (int i = 0; i < baselineFrames; i++)
+        {
+            int priorDrawCount = _renderBackend.PresentationDrawCount;
+            _pendingInlineSimulationStepsThisFrame = 1;
+            InjectCaptureFrames(injectLayers: true);
+            _pendingInlineSimulationStepsThisFrame = 0;
+            RenderFrame();
+            if (WaitForPresentationDrawForSmoke(priorDrawCount, maxIdlePasses: 24))
+            {
+                baselineDrawAdvances++;
+            }
+
+            byte[]? presented = _renderBackend.GetPresentedFrameCopyForSmoke();
+            ulong? presentedSignature = ComputeSmokeBufferSignature(presented);
+            if (presentedSignature.HasValue)
+            {
+                baselinePresentedSignatures.Add(presentedSignature.Value);
+            }
+
+            if (i == 0)
+            {
+                baselinePresented = presented;
+                baselineComposite = _lastCompositeFrame?.Downscaled?.ToArray();
+            }
+        }
+
+        for (int i = 0; i < hoverFrames; i++)
+        {
+            ApplyChromeHoverStressForSmoke(i);
+            int priorDrawCount = _renderBackend.PresentationDrawCount;
+            _renderBackend.RequestPresentationRedrawForSmoke();
+            _pendingInlineSimulationStepsThisFrame = 1;
+            InjectCaptureFrames(injectLayers: true);
+            _pendingInlineSimulationStepsThisFrame = 0;
+            RenderFrame();
+            if (WaitForPresentationDrawForSmoke(priorDrawCount, maxIdlePasses: 24))
+            {
+                hoverDrawAdvances++;
+            }
+
+            byte[]? presented = _renderBackend.GetPresentedFrameCopyForSmoke();
+            byte[]? composite = _lastCompositeFrame?.Downscaled;
+            ulong? presentedSignature = ComputeSmokeBufferSignature(presented);
+            ulong? compositeSignature = ComputeSmokeBufferSignature(composite);
+            if (presentedSignature.HasValue)
+            {
+                hoverPresentedSignatures.Add(presentedSignature.Value);
+            }
+
+            if (compositeSignature.HasValue)
+            {
+                hoverCompositeSignatures.Add(compositeSignature.Value);
+            }
+
+            if (!BuffersEqual(baselinePresented, presented))
+            {
+                hoverPresentedChanges++;
+            }
+
+            if (!BuffersEqual(baselineComposite, composite))
+            {
+                hoverCompositeChanges++;
+            }
+        }
+
+        var snapshotStats = GetInlinePresentationSnapshotStatsForSmoke();
+        bool ok = baselineDrawAdvances >= 60 &&
+                  hoverDrawAdvances >= 150 &&
+                  baselinePresentedSignatures.Count == 1 &&
+                  hoverPresentedSignatures.Count == 1 &&
+                  hoverCompositeSignatures.Count == 1 &&
+                  hoverPresentedChanges == 0 &&
+                  hoverCompositeChanges == 0 &&
+                  snapshotStats.snapshotCount > 0 &&
+                  snapshotStats.distinctHandleCount >= 2;
+
+        Logger.Info(
+            $"Sim-group inline-presentation exact repro hover smoke: baselineDraws={baselineDrawAdvances}/{baselineFrames}, " +
+            $"hoverDraws={hoverDrawAdvances}/{hoverFrames}, baselinePresentedSignatures={baselinePresentedSignatures.Count}, " +
+            $"hoverPresentedSignatures={hoverPresentedSignatures.Count}, hoverCompositeSignatures={hoverCompositeSignatures.Count}, " +
+            $"hoverPresentedChanges={hoverPresentedChanges}, hoverCompositeChanges={hoverCompositeChanges}, " +
+            $"snapshotCount={snapshotStats.snapshotCount}, distinctSnapshotHandles={snapshotStats.distinctHandleCount}.");
+        return ok;
+    }
+
+    private bool RunSimGroupInlinePresentationRealCursorHoverPhase()
+    {
+        if (!TryGetInlinePixelSortExactReproPathsForSmoke(out string backgroundPath, out string overlayPath))
+        {
+            Logger.Warn("Sim-group inline-presentation real cursor hover smoke skipped because exact repro assets were unavailable.");
+            return false;
+        }
+
+        SetupInlinePixelSortPresentationSceneForSmoke(
+            out _,
+            out _,
+            out var background,
+            out _,
+            out var overlay,
+            overlayOpacity: 1.0,
+            rows: 480,
+            useFileBackedSources: true,
+            backgroundFilePathOverride: backgroundPath,
+            overlayFilePathOverride: overlayPath,
+            backgroundBlendModeOverride: BlendMode.Additive,
+            overlayFitModeOverride: FitMode.Fit);
+
+        DateTime deadlineUtc = DateTime.UtcNow + TimeSpan.FromSeconds(8);
+        while ((background.LastFrame == null || overlay.LastFrame == null) && DateTime.UtcNow < deadlineUtc)
+        {
+            int priorDrawCount = _renderBackend.PresentationDrawCount;
+            _pendingInlineSimulationStepsThisFrame = 1;
+            InjectCaptureFrames(injectLayers: true);
+            _pendingInlineSimulationStepsThisFrame = 0;
+            RenderFrame();
+            WaitForPresentationDrawForSmoke(priorDrawCount, maxIdlePasses: 24);
+        }
+
+        if (background.LastFrame == null || overlay.LastFrame == null)
+        {
+            Logger.Warn("Sim-group inline-presentation real cursor hover smoke failed to load exact repro source frames.");
+            return false;
+        }
+
+        return RunRealCursorHoverStabilityCheckForSmoke(
+            "Sim-group inline-presentation real cursor hover smoke",
+            baselineFrames: 45,
+            hoverSteps: 6,
+            hoverFramesPerStep: 18,
+            postHoverFrames: 45,
+            refreshSources: true);
+    }
+
+    private (int DrawAdvances, int EmptyFrames, List<double> Deltas) CollectInlinePresentationMetricsForSmoke(int frames, bool applyHoverStress, bool refreshSources)
+    {
+        int drawAdvances = 0;
+        int emptyFrames = 0;
+        var deltas = new List<double>(Math.Max(0, frames - 1));
+        byte[]? previousPresented = null;
+
+        for (int i = 0; i < frames; i++)
+        {
+            if (applyHoverStress)
+            {
+                ApplyChromeHoverStressForSmoke(i);
+                _renderBackend.RequestPresentationRedrawForSmoke();
+            }
+
+            int priorDrawCount = _renderBackend.PresentationDrawCount;
+            if (refreshSources)
+            {
+                _pendingInlineSimulationStepsThisFrame = 1;
+                InjectCaptureFrames(injectLayers: true);
+                _pendingInlineSimulationStepsThisFrame = 0;
+            }
+
+            RenderFrame();
+            if (WaitForPresentationDrawForSmoke(priorDrawCount, maxIdlePasses: 24))
+            {
+                drawAdvances++;
+            }
+
+            byte[]? presented = _renderBackend.GetPresentedFrameCopyForSmoke();
+            if (presented == null || presented.Length == 0)
+            {
+                emptyFrames++;
+                continue;
+            }
+
+            if (previousPresented != null)
+            {
+                deltas.Add(ComputeSmokeAverageDelta(previousPresented, presented));
+            }
+
+            previousPresented = presented;
+        }
+
+        return (drawAdvances, emptyFrames, deltas);
+    }
+
+    private void SetupInlinePixelSortPresentationSceneForSmoke(
+        out int width,
+        out int height,
+        out CaptureSource background,
+        out CaptureSource simulationGroup,
+        out CaptureSource overlay,
+        double overlayOpacity,
+        int rows = 240,
+        bool useFileBackedSources = false,
+        string? backgroundFilePathOverride = null,
+        string? overlayFilePathOverride = null,
+        BlendMode? backgroundBlendModeOverride = null,
+        FitMode? overlayFitModeOverride = null)
+    {
+        _sources.Clear();
+        ClearSimulationLayers();
+        _passthroughEnabled = false;
+        _passthroughCompositedInPixelBuffer = false;
+        _invertComposite = false;
+        _isPaused = false;
+
+        ApplyDimensions(rows, 24, DefaultAspectRatio, persist: false);
+        width = GetReferenceSimulationEngine().Columns;
+        height = GetReferenceSimulationEngine().Rows;
+
+        string? backgroundFilePath = null;
+        string? overlayFilePath = null;
+        if (useFileBackedSources)
+        {
+            backgroundFilePath = backgroundFilePathOverride ?? CreateSmokeBitmapFile("inline-pixel-sort-background", BuildSmokeRainbowBgra(width, height, 0.0), width, height);
+            overlayFilePath = overlayFilePathOverride ?? CreateSmokeBitmapFile("inline-pixel-sort-overlay", BuildSmokePortraitBgra(width, height, 0), width, height);
+        }
+
+        background = CaptureSource.CreateFile(backgroundFilePath ?? "inline-pixel-sort-background", "Inline Pixel Sort Background", width, height);
+        background.BlendMode = backgroundBlendModeOverride ?? BlendMode.Normal;
+        background.Opacity = 1.0;
+        background.UsePinnedFrameForSmoke = !useFileBackedSources;
+        background.LastFrame = useFileBackedSources
+            ? null
+            : new SourceFrame(BuildSmokeRainbowBgra(width, height, 0.0), width, height, null, width, height);
+
+        simulationGroup = CaptureSource.CreateSimulationGroup("Inline Pixel Sort Group");
+        simulationGroup.SimulationLayers.Add(new SimulationLayerSpec
+        {
+            Id = Guid.NewGuid(),
+            Kind = LayerEditorSimulationItemKind.Layer,
+            LayerType = SimulationLayerType.PixelSort,
+            Name = "Pixel Sort",
+            Enabled = true,
+            InputFunction = SimulationInputFunction.Direct,
+            BlendMode = BlendMode.Normal,
+            InjectionMode = GameOfLifeEngine.InjectionMode.Threshold,
+            LifeMode = GameOfLifeEngine.LifeMode.NaiveGrayscale,
+            BinningMode = GameOfLifeEngine.BinningMode.Fill,
+            InjectionNoise = 0.0,
+            LifeOpacity = 1.0,
+            ThresholdMin = 0.35,
+            ThresholdMax = 0.75,
+            InvertThreshold = false,
+            PixelSortCellWidth = 12,
+            PixelSortCellHeight = 8
+        });
+
+        overlay = CaptureSource.CreateFile(overlayFilePath ?? "inline-pixel-sort-overlay", "Inline Pixel Sort Overlay", width, height);
+        overlay.BlendMode = BlendMode.Normal;
+        overlay.FitMode = overlayFitModeOverride ?? FitMode.Fill;
+        overlay.Opacity = Math.Clamp(overlayOpacity, 0.0, 1.0);
+        overlay.UsePinnedFrameForSmoke = !useFileBackedSources;
+        overlay.LastFrame = useFileBackedSources
+            ? null
+            : new SourceFrame(BuildSmokePortraitBgra(width, height, 0), width, height, null, width, height);
+
+        _sources.Add(background);
+        _sources.Add(simulationGroup);
+        _sources.Add(overlay);
+        UpdatePrimaryAspectIfNeeded();
+        ApplySimulationLayersFromSourceStack(fallbackToDefault: false);
+        ConfigureSimulationLayerEngines(_configuredRows, _configuredDepth, _currentAspectRatio, randomize: false);
+    }
+
+    private static bool TryGetInlinePixelSortExactReproPathsForSmoke(out string backgroundPath, out string overlayPath)
+    {
+        string[] roots =
+        {
+            Directory.GetCurrentDirectory(),
+            AppContext.BaseDirectory
+        };
+
+        foreach (string root in roots.Distinct(StringComparer.OrdinalIgnoreCase))
+        {
+            string candidateBackground = Path.Combine(root, "Assets", "SmokeRepro", "rainbow-background-1438899140wt8.jpg");
+            string candidateOverlay = Path.Combine(root, "Assets", "SmokeRepro", "Mona_Lisa_repro.png");
+            if (File.Exists(candidateBackground) && File.Exists(candidateOverlay))
+            {
+                backgroundPath = candidateBackground;
+                overlayPath = candidateOverlay;
+                return true;
+            }
+        }
+
+        backgroundPath = string.Empty;
+        overlayPath = string.Empty;
+        return false;
+    }
+
+    private void ApplyChromeHoverStressForSmoke(int iteration)
+    {
+        byte accent = (byte)(iteration % 2 == 0 ? 0x22 : 0x55);
+        var brush = new SolidColorBrush(Color.FromArgb(0xFF, accent, accent, accent));
+        var border = new SolidColorBrush(Color.FromArgb(0xFF, (byte)(accent + 0x11), (byte)(accent + 0x11), (byte)(accent + 0x11)));
+
+        if (ChromeBar != null)
+        {
+            ChromeBar.BorderBrush = border;
+            ChromeBar.InvalidateVisual();
+        }
+
+        if (ChromeMenuButton != null)
+        {
+            ChromeMenuButton.Background = brush;
+            ChromeMenuButton.BorderBrush = border;
+            ChromeMenuButton.InvalidateVisual();
+        }
+
+        if (ChromeSceneEditorButton != null)
+        {
+            ChromeSceneEditorButton.Background = brush;
+            ChromeSceneEditorButton.BorderBrush = border;
+            ChromeSceneEditorButton.InvalidateVisual();
+        }
+
+        if (ChromeMinimizeButton != null)
+        {
+            ChromeMinimizeButton.Background = brush;
+            ChromeMinimizeButton.BorderBrush = border;
+            ChromeMinimizeButton.InvalidateVisual();
+        }
+
+        if (ChromeFullscreenButton != null)
+        {
+            ChromeFullscreenButton.Background = brush;
+            ChromeFullscreenButton.BorderBrush = border;
+            ChromeFullscreenButton.InvalidateVisual();
+        }
+
+        if (ChromeCloseButton != null)
+        {
+            ChromeCloseButton.Background = brush;
+            ChromeCloseButton.BorderBrush = border;
+            ChromeCloseButton.InvalidateVisual();
+        }
+    }
+
+    private void PrimeInlineSmokeLayerStepping(CaptureSource simulationGroup)
+    {
+        var runtimeGroup = FindSimulationNode(simulationGroup.Id);
+        if (runtimeGroup == null)
+        {
+            return;
+        }
+
+        foreach (var layer in EnumerateSimulationLeafLayers(runtimeGroup.Children))
+        {
+            layer.TimeSinceLastStep = 1.0;
+        }
+    }
+
+    private static bool BuffersEqual(byte[]? left, byte[]? right)
+    {
+        if (ReferenceEquals(left, right))
+        {
+            return true;
+        }
+
+        if (left == null || right == null || left.Length != right.Length)
+        {
+            return false;
+        }
+
+        return left.AsSpan().SequenceEqual(right);
+    }
+
+    private static ulong? ComputeSmokeBufferSignature(byte[]? buffer)
+    {
+        if (buffer == null)
+        {
+            return null;
+        }
+
+        const ulong offset = 14695981039346656037UL;
+        const ulong prime = 1099511628211UL;
+        ulong hash = offset;
+        for (int i = 0; i < buffer.Length; i++)
+        {
+            hash ^= buffer[i];
+            hash *= prime;
+        }
+
+        return hash;
+    }
+
+    internal bool RunCurrentSceneHoverPresentationSmoke()
+    {
+        if (!_renderLoopAttached)
+        {
+            InitializeVisualizer();
+        }
+
+        if (_sources.Count == 0)
+        {
+            Logger.Warn("Current-scene hover presentation smoke has no sources to evaluate.");
+            return false;
+        }
+
+        const int baselineFrames = 120;
+        const int hoverFrames = 120;
+
+        for (int i = 0; i < 24; i++)
+        {
+            int priorWarmupDrawCount = _renderBackend.PresentationDrawCount;
+            if (!WaitForPresentationDrawForSmoke(priorWarmupDrawCount, maxIdlePasses: 24))
+            {
+                break;
+            }
+        }
+
+        ResetInlinePresentationDiagnosticsForSmoke();
+        var baseline = CollectCurrentSceneHoverPresentationMetrics(frames: baselineFrames, applyHoverStress: false);
+        var hover = CollectCurrentSceneHoverPresentationMetrics(frames: hoverFrames, applyHoverStress: true);
+
+        double baselineP95 = ComputePercentile(baseline.Deltas, 0.95);
+        double hoverP95 = ComputePercentile(hover.Deltas, 0.95);
+        double baselineAverage = baseline.Deltas.Count > 0 ? baseline.Deltas.Average() : 0.0;
+        double hoverAverage = hover.Deltas.Count > 0 ? hover.Deltas.Average() : 0.0;
+        double baselineSpikeThreshold = Math.Max(8.0, baselineP95 * 1.35);
+        int baselineSpikes = baseline.Deltas.Count(delta => delta >= baselineSpikeThreshold);
+        int hoverSpikes = hover.Deltas.Count(delta => delta >= baselineSpikeThreshold);
+        double baselineSpikeRatio = baseline.Deltas.Count > 0 ? baselineSpikes / (double)baseline.Deltas.Count : 0.0;
+        double hoverSpikeRatio = hover.Deltas.Count > 0 ? hoverSpikes / (double)hover.Deltas.Count : 0.0;
+
+        bool ok = hover.DrawAdvances >= (int)Math.Ceiling(hoverFrames * 0.85) &&
+                  hover.EmptyFrames == 0 &&
+                  hoverP95 <= Math.Max(baselineP95 * 1.75, baselineP95 + 6.0) &&
+                  hoverAverage <= Math.Max(baselineAverage * 1.50, baselineAverage + 4.0) &&
+                  hoverSpikeRatio <= baselineSpikeRatio + 0.12;
+
+        var snapshotStats = GetInlinePresentationSnapshotStatsForSmoke();
+        bool requiresInlineSnapshots = HasEmbeddedSimulationGroups(_sources);
+        if (requiresInlineSnapshots)
+        {
+            ok = ok &&
+                 snapshotStats.snapshotCount > 0 &&
+                 snapshotStats.distinctHandleCount >= 2;
+        }
+
+        Logger.Info(
+            $"Current-scene hover presentation smoke: baselineDraws={baseline.DrawAdvances}/{baselineFrames}, " +
+            $"hoverDraws={hover.DrawAdvances}/{hoverFrames}, baselineAvg={baselineAverage:F2}, hoverAvg={hoverAverage:F2}, " +
+            $"baselineP95={baselineP95:F2}, hoverP95={hoverP95:F2}, baselineSpikeRatio={baselineSpikeRatio:F3}, " +
+            $"hoverSpikeRatio={hoverSpikeRatio:F3}, hoverEmptyFrames={hover.EmptyFrames}, " +
+            $"snapshotCount={snapshotStats.snapshotCount}, distinctSnapshotHandles={snapshotStats.distinctHandleCount}, " +
+            $"requiresInlineSnapshots={requiresInlineSnapshots}.");
+
+        bool realCursorOk = RunRealCursorHoverStabilityCheckForSmoke(
+            "Current-scene real cursor hover smoke",
+            baselineFrames: 45,
+            hoverSteps: 6,
+            hoverFramesPerStep: 18,
+            postHoverFrames: 45,
+            refreshSources: true);
+
+        return ok && realCursorOk;
+    }
+
+    private (int DrawAdvances, int EmptyFrames, List<double> Deltas) CollectCurrentSceneHoverPresentationMetrics(int frames, bool applyHoverStress)
+    {
+        int drawAdvances = 0;
+        int emptyFrames = 0;
+        var deltas = new List<double>(Math.Max(0, frames - 1));
+        byte[]? previousPresented = null;
+
+        for (int i = 0; i < frames; i++)
+        {
+            if (applyHoverStress)
+            {
+                ApplyChromeHoverStressForSmoke(i);
+                _renderBackend.RequestPresentationRedrawForSmoke();
+            }
+
+            int priorDrawCount = _renderBackend.PresentationDrawCount;
+            if (WaitForPresentationDrawForSmoke(priorDrawCount, maxIdlePasses: 24))
+            {
+                drawAdvances++;
+            }
+
+            byte[]? presented = _renderBackend.GetPresentedFrameCopyForSmoke();
+            if (presented == null || presented.Length == 0)
+            {
+                emptyFrames++;
+                continue;
+            }
+
+            if (previousPresented != null)
+            {
+                deltas.Add(ComputeSmokeAverageDelta(previousPresented, presented));
+            }
+
+            previousPresented = presented;
+        }
+
+        return (drawAdvances, emptyFrames, deltas);
+    }
+
+    private bool RunRealCursorHoverStabilityCheckForSmoke(
+        string label,
+        int baselineFrames,
+        int hoverSteps,
+        int hoverFramesPerStep,
+        int postHoverFrames,
+        bool refreshSources)
+    {
+        if (!GetCursorPos(out var originalCursor))
+        {
+            Logger.Warn($"{label}: failed to read original cursor position.");
+            return false;
+        }
+
+        try
+        {
+            var baseline = CollectCursorHoverPresentationMetricsForSmoke(
+                frames: baselineFrames,
+                moveCursor: false,
+                hoverSteps: hoverSteps,
+                refreshSources: refreshSources);
+            var hover = CollectCursorHoverPresentationMetricsForSmoke(
+                frames: hoverSteps * hoverFramesPerStep,
+                moveCursor: true,
+                hoverSteps: hoverSteps,
+                refreshSources: refreshSources);
+            MoveCursorOutsideWindowForSmoke();
+            var postHover = CollectCursorHoverPresentationMetricsForSmoke(
+                frames: postHoverFrames,
+                moveCursor: false,
+                hoverSteps: hoverSteps,
+                refreshSources: refreshSources);
+
+            bool ok = baseline.EmptyFrames == 0 &&
+                      hover.EmptyFrames == 0 &&
+                      postHover.EmptyFrames == 0 &&
+                      baseline.UniquePresentedSignatures == 1 &&
+                      hover.UniquePresentedSignatures == 1 &&
+                      postHover.UniquePresentedSignatures == 1 &&
+                      baseline.UniqueCompositeSignatures == 1 &&
+                      hover.UniqueCompositeSignatures == 1 &&
+                      postHover.UniqueCompositeSignatures == 1 &&
+                      hover.PresentedChanges == 0 &&
+                      hover.CompositeChanges == 0 &&
+                      postHover.PresentedChanges == 0 &&
+                      postHover.CompositeChanges == 0;
+
+            Logger.Info(
+                $"{label}: baselineDraws={baseline.DrawAdvances}/{baselineFrames}, " +
+                $"hoverDraws={hover.DrawAdvances}/{hoverSteps * hoverFramesPerStep}, postHoverDraws={postHover.DrawAdvances}/{postHoverFrames}, " +
+                $"baselinePresentedSignatures={baseline.UniquePresentedSignatures}, hoverPresentedSignatures={hover.UniquePresentedSignatures}, postHoverPresentedSignatures={postHover.UniquePresentedSignatures}, " +
+                $"baselineCompositeSignatures={baseline.UniqueCompositeSignatures}, hoverCompositeSignatures={hover.UniqueCompositeSignatures}, postHoverCompositeSignatures={postHover.UniqueCompositeSignatures}, " +
+                $"hoverPresentedChanges={hover.PresentedChanges}, hoverCompositeChanges={hover.CompositeChanges}, " +
+                $"postHoverPresentedChanges={postHover.PresentedChanges}, postHoverCompositeChanges={postHover.CompositeChanges}.");
+
+            return ok;
+        }
+        finally
+        {
+            SetCursorPos(originalCursor.X, originalCursor.Y);
+        }
+    }
+
+    private (int DrawAdvances, int EmptyFrames, int UniquePresentedSignatures, int UniqueCompositeSignatures, int PresentedChanges, int CompositeChanges)
+        CollectCursorHoverPresentationMetricsForSmoke(
+            int frames,
+            bool moveCursor,
+            int hoverSteps,
+            bool refreshSources)
+    {
+        int drawAdvances = 0;
+        int emptyFrames = 0;
+        int presentedChanges = 0;
+        int compositeChanges = 0;
+        var presentedSignatures = new HashSet<ulong>();
+        var compositeSignatures = new HashSet<ulong>();
+        byte[]? baselinePresented = null;
+        byte[]? baselineComposite = null;
+
+        for (int i = 0; i < frames; i++)
+        {
+            if (moveCursor)
+            {
+                MoveCursorAcrossWindowForSmoke(i, hoverSteps);
+            }
+
+            int priorDrawCount = _renderBackend.PresentationDrawCount;
+            if (refreshSources)
+            {
+                _pendingInlineSimulationStepsThisFrame = 1;
+                InjectCaptureFrames(injectLayers: true);
+                _pendingInlineSimulationStepsThisFrame = 0;
+            }
+
+            RenderFrame();
+            if (WaitForPresentationDrawForSmoke(priorDrawCount, maxIdlePasses: 24))
+            {
+                drawAdvances++;
+            }
+
+            byte[]? presented = _renderBackend.GetPresentedFrameCopyForSmoke();
+            byte[]? composite = _lastCompositeFrame?.Downscaled;
+            if (presented == null || presented.Length == 0 || composite == null || composite.Length == 0)
+            {
+                emptyFrames++;
+                continue;
+            }
+
+            ulong? presentedSignature = ComputeSmokeBufferSignature(presented);
+            ulong? compositeSignature = ComputeSmokeBufferSignature(composite);
+            if (presentedSignature.HasValue)
+            {
+                presentedSignatures.Add(presentedSignature.Value);
+            }
+
+            if (compositeSignature.HasValue)
+            {
+                compositeSignatures.Add(compositeSignature.Value);
+            }
+
+            if (baselinePresented == null)
+            {
+                baselinePresented = presented;
+                baselineComposite = composite.ToArray();
+                continue;
+            }
+
+            if (!BuffersEqual(baselinePresented, presented))
+            {
+                presentedChanges++;
+            }
+
+            if (!BuffersEqual(baselineComposite, composite))
+            {
+                compositeChanges++;
+            }
+        }
+
+        return (
+            drawAdvances,
+            emptyFrames,
+            presentedSignatures.Count,
+            compositeSignatures.Count,
+            presentedChanges,
+            compositeChanges);
+    }
+
+    private void MoveCursorAcrossWindowForSmoke(int iteration, int hoverSteps)
+    {
+        double width = ActualWidth;
+        double height = ActualHeight;
+        if (width <= 1 || height <= 1)
+        {
+            return;
+        }
+
+        Point topLeft = PointToScreen(new Point(0, 0));
+        int safeSteps = Math.Max(hoverSteps, 1);
+        int stepIndex = iteration % safeSteps;
+        double normalizedX = safeSteps == 1 ? 0.5 : stepIndex / (double)(safeSteps - 1);
+        double x = topLeft.X + (width * (0.15 + normalizedX * 0.70));
+        double yBand = iteration % 3 switch
+        {
+            0 => 0.10,
+            1 => 0.35,
+            _ => 0.65
+        };
+        double y = topLeft.Y + (height * yBand);
+        SetCursorPos((int)Math.Round(x), (int)Math.Round(y));
+    }
+
+    private void MoveCursorOutsideWindowForSmoke()
+    {
+        Point topLeft = PointToScreen(new Point(0, 0));
+        SetCursorPos((int)Math.Round(topLeft.X - 32), (int)Math.Round(topLeft.Y - 32));
+    }
+
+    private static double ComputeSmokeAverageDelta(byte[] left, byte[] right)
+    {
+        int length = Math.Min(left.Length, right.Length);
+        if (length == 0)
+        {
+            return 0.0;
+        }
+
+        const int sampleStride = 16;
+        long total = 0;
+        int count = 0;
+        for (int i = 0; i < length; i += sampleStride)
+        {
+            total += Math.Abs(left[i] - right[i]);
+            count++;
+        }
+
+        return count > 0 ? total / (double)count : 0.0;
+    }
+
+    private static double ComputePercentile(List<double> values, double percentile)
+    {
+        if (values.Count == 0)
+        {
+            return 0.0;
+        }
+
+        percentile = Math.Clamp(percentile, 0.0, 1.0);
+        var ordered = values.OrderBy(value => value).ToArray();
+        int index = (int)Math.Clamp(Math.Ceiling((ordered.Length - 1) * percentile), 0, ordered.Length - 1);
+        return ordered[index];
+    }
+
+    private static string CreateSmokeBitmapFile(string stem, byte[] bgra, int width, int height)
+    {
+        string directory = Path.Combine(AppContext.BaseDirectory, "smoke-assets");
+        Directory.CreateDirectory(directory);
+        string path = Path.Combine(directory, $"{stem}-{width}x{height}.bmp");
+
+        int stride = width * 4;
+        int pixelDataSize = stride * height;
+        const int fileHeaderSize = 14;
+        const int infoHeaderSize = 40;
+        int fileSize = fileHeaderSize + infoHeaderSize + pixelDataSize;
+
+        using var stream = new FileStream(path, FileMode.Create, FileAccess.Write, FileShare.Read);
+        using var writer = new BinaryWriter(stream);
+        writer.Write((ushort)0x4D42);
+        writer.Write(fileSize);
+        writer.Write((ushort)0);
+        writer.Write((ushort)0);
+        writer.Write(fileHeaderSize + infoHeaderSize);
+        writer.Write(infoHeaderSize);
+        writer.Write(width);
+        writer.Write(height);
+        writer.Write((ushort)1);
+        writer.Write((ushort)32);
+        writer.Write(0);
+        writer.Write(pixelDataSize);
+        writer.Write(2835);
+        writer.Write(2835);
+        writer.Write(0);
+        writer.Write(0);
+
+        for (int row = height - 1; row >= 0; row--)
+        {
+            int offset = row * stride;
+            writer.Write(bgra, offset, stride);
+        }
+
+        return path;
     }
 
     internal void SetReferenceSimulationLayerLifeModeForSmoke(GameOfLifeEngine.LifeMode mode)
@@ -2165,16 +3242,25 @@ public partial class MainWindow : Window
                 composite.GpuSurface.Width == width &&
                 composite.GpuSurface.Height == height)
             {
+                GpuCompositeSurface presentationSurface = composite.GpuSurface;
                 if (composite.GpuSurface.SharedTextureHandle != IntPtr.Zero)
                 {
                     GpuSharedDevice.FlushIfCreated();
+                    if (_inlineGpuPresentationSnapshotter.IsAvailable)
+                    {
+                        var snappedSurface = _inlineGpuPresentationSnapshotter.Snapshot(composite.GpuSurface);
+                        if (snappedSurface != null)
+                        {
+                            presentationSurface = snappedSurface;
+                        }
+                    }
                 }
 
                 long presentInlineStamp = BeginProfileStamp();
                 presentedInlineGpu = _renderBackend.PresentSimulationComposition(
                     Array.Empty<SimulationPresentationLayerData>(),
                     null,
-                    composite.GpuSurface,
+                    presentationSurface,
                     simulationBaseline: 0,
                     useSignedAddSubPassthrough: false,
                     useMixedAddSubPassthroughModel: false,
@@ -2194,6 +3280,22 @@ public partial class MainWindow : Window
                 TryRecordFrame(requiredLength);
                 EndProfileStamp("record_frame_ms", inlineRecordStamp);
                 return;
+            }
+
+            if (composite.GpuSurface != null)
+            {
+                _inlineGpuPresentationFallbackCount++;
+                if (DateTime.UtcNow - _lastInlinePresentationFallbackLogUtc > TimeSpan.FromSeconds(2))
+                {
+                    _lastInlinePresentationFallbackLogUtc = DateTime.UtcNow;
+                    Logger.Warn(
+                        $"Inline GPU present fell back to CPU. " +
+                        $"Surface={composite.GpuSurface.Width}x{composite.GpuSurface.Height}, " +
+                        $"Target={width}x{height}, " +
+                        $"Handle={(composite.GpuSurface.SharedTextureHandle != IntPtr.Zero ? "shared" : "none")}, " +
+                        $"Invert={_invertComposite}, " +
+                        $"CpuReadable={composite.Downscaled.Length >= requiredLength}.");
+                }
             }
 
             if (composite.DownscaledWidth == width &&
@@ -5313,13 +6415,8 @@ public partial class MainWindow : Window
     private void AddSimulationGroup(List<CaptureSource> targetList)
     {
         var source = CaptureSource.CreateSimulationGroup();
-        foreach (var spec in BuildDefaultSimulationLayerSpecs())
-        {
-            source.SimulationLayers.Add(spec);
-        }
-
         targetList.Add(source);
-        ApplySimulationLayersFromSourceStack(fallbackToDefault: true);
+        ApplySimulationLayersFromSourceStack(fallbackToDefault: false);
         Logger.Info("Inserted new simulation group.");
         UpdatePrimaryAspectIfNeeded();
         RenderFrame();
@@ -5678,6 +6775,7 @@ public partial class MainWindow : Window
         {
             Id = layer.Id,
             Kind = layer.Kind,
+            LayerType = layer.LayerType,
             Name = layer.Name,
             Enabled = layer.Enabled,
             InputFunction = layer.InputFunction,
@@ -5696,12 +6794,16 @@ public partial class MainWindow : Window
                     Id = mapping.Id,
                     Input = mapping.Input,
                     Output = mapping.Output,
-                    Amount = mapping.Amount
+                    Amount = mapping.Amount,
+                    ThresholdMin = mapping.ThresholdMin,
+                    ThresholdMax = mapping.ThresholdMax
                 })
                 .ToList(),
             ThresholdMin = layer.ThresholdMin,
             ThresholdMax = layer.ThresholdMax,
             InvertThreshold = layer.InvertThreshold,
+            PixelSortCellWidth = layer.PixelSortCellWidth,
+            PixelSortCellHeight = layer.PixelSortCellHeight,
             Children = layer.Children.Select(CloneSimulationLayerSpec).ToList()
         };
     }
@@ -6246,7 +7348,7 @@ public partial class MainWindow : Window
             }
 
             source.SimulationLayers.Clear();
-            foreach (var simulationLayer in FlattenSourceSimulationLayerSpecs(NormalizeSimulationLayerSpecs(simulationLayers)))
+            foreach (var simulationLayer in FlattenSourceSimulationLayerSpecs(NormalizeSimulationLayerSpecs(simulationLayers, fallbackToDefault: false)))
             {
                 source.SimulationLayers.Add(simulationLayer);
             }
@@ -7110,7 +8212,7 @@ public partial class MainWindow : Window
 
     private bool TryInjectLayerFromGpuSurface(SimulationLayerState layer, GpuCompositeSurface inputSurface)
     {
-        if (layer.Engine is not GpuSimulationBackend gpuEngine)
+        if (layer.Engine is not IGpuSimulationSurfaceBackend gpuEngine)
         {
             return false;
         }
@@ -7146,7 +8248,7 @@ public partial class MainWindow : Window
 
         bool invertInput = layer.InputFunction == SimulationInputFunction.Inverse;
         double currentHueShiftDegrees = CurrentRgbHueShiftDegrees(layer);
-        if (engine is GpuSimulationBackend gpuEngine &&
+        if (engine is IGpuSimulationSurfaceBackend gpuEngine &&
             currentComposite.GpuSurface != null &&
             gpuEngine.TryInjectCompositeSurface(
                 currentComposite.GpuSurface,
@@ -7266,7 +8368,7 @@ public partial class MainWindow : Window
 
     private GpuCompositeSurface? GetPublishedSimulationSurface(SimulationLayerState layer)
     {
-        return layer.Engine is GpuSimulationBackend gpuBackend &&
+        return layer.Engine is IGpuSimulationSurfaceBackend gpuBackend &&
                gpuBackend.TryGetColorSurface(out var surface)
             ? surface
             : null;
@@ -7429,6 +8531,24 @@ public partial class MainWindow : Window
         };
     }
 
+    private static double NormalizeReactiveInputThreshold(double value, double thresholdMin, double thresholdMax)
+    {
+        double min = Math.Clamp(thresholdMin, 0, 1);
+        double max = Math.Clamp(thresholdMax, 0, 1);
+        if (max < min)
+        {
+            (min, max) = (max, min);
+        }
+
+        double clampedValue = Math.Clamp(value, 0, 1);
+        if (max - min <= 0.000001)
+        {
+            return clampedValue >= max ? 1.0 : 0.0;
+        }
+
+        return Math.Clamp((clampedValue - min) / (max - min), 0, 1);
+    }
+
     private void ApplySimulationLayerReactiveState()
     {
         foreach (var layer in EnumerateSimulationLeafLayers(_simulationLayers))
@@ -7443,21 +8563,28 @@ public partial class MainWindow : Window
             layer.EffectiveInjectionNoise = Math.Clamp(layer.InjectionNoise, 0, 1);
             layer.EffectiveThresholdMin = Math.Clamp(layer.ThresholdMin, 0, 1);
             layer.EffectiveThresholdMax = Math.Clamp(layer.ThresholdMax, 0, 1);
+            layer.EffectivePixelSortCellWidth = Math.Clamp(layer.PixelSortCellWidth, 1, Math.Max(1, layer.Engine?.Columns ?? _configuredRows));
+            layer.EffectivePixelSortCellHeight = Math.Clamp(layer.PixelSortCellHeight, 1, Math.Max(1, layer.Engine?.Rows ?? _configuredRows));
 
             if (!layer.Enabled)
             {
                 layer.TimeSinceLastStep = 0;
+                ApplySimulationLayerEngineSettings(layer);
                 continue;
             }
 
             if (!HasSimulationReactiveAudioInput())
             {
+                ApplySimulationLayerEngineSettings(layer);
                 continue;
             }
 
             foreach (var mapping in layer.ReactiveMappings)
             {
-                double inputValue = GetReactiveInputValue(mapping.Input);
+                double inputValue = NormalizeReactiveInputThreshold(
+                    GetReactiveInputValue(mapping.Input),
+                    mapping.ThresholdMin,
+                    mapping.ThresholdMax);
                 switch (mapping.Output)
                 {
                     case SimulationReactiveOutput.Opacity:
@@ -7490,6 +8617,24 @@ public partial class MainWindow : Window
                     case SimulationReactiveOutput.ThresholdMax:
                         layer.EffectiveThresholdMax = Math.Clamp(layer.EffectiveThresholdMax - (inputValue * Math.Clamp(mapping.Amount, 0, 1)), 0, 1);
                         break;
+                    case SimulationReactiveOutput.PixelSortCellWidth:
+                    {
+                        int maxWidth = Math.Max(1, layer.Engine?.Columns ?? _configuredRows);
+                        layer.EffectivePixelSortCellWidth = Math.Clamp(
+                            layer.EffectivePixelSortCellWidth + (int)Math.Round(inputValue * Math.Clamp(mapping.Amount, 0, 50)),
+                            1,
+                            maxWidth);
+                        break;
+                    }
+                    case SimulationReactiveOutput.PixelSortCellHeight:
+                    {
+                        int maxHeight = Math.Max(1, layer.Engine?.Rows ?? _configuredRows);
+                        layer.EffectivePixelSortCellHeight = Math.Clamp(
+                            layer.EffectivePixelSortCellHeight + (int)Math.Round(inputValue * Math.Clamp(mapping.Amount, 0, 50)),
+                            1,
+                            maxHeight);
+                        break;
+                    }
                 }
             }
 
@@ -7497,6 +8642,8 @@ public partial class MainWindow : Window
             {
                 (layer.EffectiveThresholdMin, layer.EffectiveThresholdMax) = (layer.EffectiveThresholdMax, layer.EffectiveThresholdMin);
             }
+
+            ApplySimulationLayerEngineSettings(layer);
         }
     }
 
@@ -7658,6 +8805,14 @@ public partial class MainWindow : Window
 
         foreach (var source in sources.ToList())
         {
+            if (source.UsePinnedFrameForSmoke && source.LastFrame != null)
+            {
+                source.HasError = false;
+                source.MissedFrames = 0;
+                source.FirstFrameReceived = true;
+                continue;
+            }
+
             bool includeNativeSource = ShouldPreferNativeSourceFrame(source);
 
             if (source.Type == CaptureSource.SourceType.SimGroup)
@@ -7927,10 +9082,6 @@ public partial class MainWindow : Window
             return false;
         }
 
-        var referenceEngine = GetReferenceSimulationEngine();
-        int targetPixels = referenceEngine.Columns * referenceEngine.Rows;
-        const int staticNativeThresholdPixels = 640 * 360;
-
         if (source.Type == CaptureSource.SourceType.VideoSequence)
         {
             return false;
@@ -7945,7 +9096,10 @@ public partial class MainWindow : Window
             return false;
         }
 
-        return targetPixels >= staticNativeThresholdPixels;
+        // Static file-backed images stay on the exact CPU-downscaled path so they
+        // remain pixel-stable and avoid native-source redraw/flicker quirks during
+        // hover-driven WPF redraw pressure.
+        return false;
     }
 
     private void TogglePassthrough_Click(object sender, RoutedEventArgs e)
@@ -8193,6 +9347,19 @@ public partial class MainWindow : Window
     [DllImport("winmm.dll", EntryPoint = "timeEndPeriod")]
     private static extern uint timeEndPeriod(uint uPeriod);
 
+    [DllImport("user32.dll")]
+    private static extern bool GetCursorPos(out NativePoint lpPoint);
+
+    [DllImport("user32.dll")]
+    private static extern bool SetCursorPos(int x, int y);
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct NativePoint
+    {
+        public int X;
+        public int Y;
+    }
+
     private void UpdateFullscreenMenuItem()
     {
         if (FullscreenMenuItem != null)
@@ -8434,6 +9601,12 @@ public partial class MainWindow : Window
         Inverse
     }
 
+    private enum SimulationLayerType
+    {
+        Life,
+        PixelSort
+    }
+
     private enum AudioReactiveSeedPattern
     {
         Glider,
@@ -8445,7 +9618,8 @@ public partial class MainWindow : Window
     {
         public Guid Id { get; set; }
         public LayerEditorSimulationItemKind Kind { get; set; } = LayerEditorSimulationItemKind.Layer;
-        public string Name { get; set; } = "Simulation Layer";
+        public SimulationLayerType LayerType { get; set; } = SimulationLayerType.Life;
+        public string Name { get; set; } = "Life Sim";
         public bool Enabled { get; set; } = true;
         public SimulationInputFunction InputFunction { get; set; } = SimulationInputFunction.Direct;
         public BlendMode BlendMode { get; set; } = BlendMode.Subtractive;
@@ -8461,6 +9635,8 @@ public partial class MainWindow : Window
         public double ThresholdMin { get; set; } = 0.35;
         public double ThresholdMax { get; set; } = 0.75;
         public bool InvertThreshold { get; set; }
+        public int PixelSortCellWidth { get; set; } = 12;
+        public int PixelSortCellHeight { get; set; } = 8;
         public double EffectiveLifeOpacity { get; set; } = 1.0;
         public double EffectiveSimulationTargetFps { get; set; } = DefaultFps;
         public double ReactiveHueShiftDegrees { get; set; }
@@ -8468,6 +9644,8 @@ public partial class MainWindow : Window
         public double EffectiveInjectionNoise { get; set; }
         public double EffectiveThresholdMin { get; set; } = 0.35;
         public double EffectiveThresholdMax { get; set; } = 0.75;
+        public int EffectivePixelSortCellWidth { get; set; } = 12;
+        public int EffectivePixelSortCellHeight { get; set; } = 8;
         public double TimeSinceLastStep { get; set; }
         public SimulationLayerState? Parent { get; set; }
         public List<SimulationLayerState> Children { get; } = new();
@@ -8484,7 +9662,8 @@ public partial class MainWindow : Window
     {
         public Guid Id { get; init; }
         public LayerEditorSimulationItemKind Kind { get; init; } = LayerEditorSimulationItemKind.Layer;
-        public string Name { get; init; } = "Simulation Layer";
+        public SimulationLayerType LayerType { get; init; } = SimulationLayerType.Life;
+        public string Name { get; init; } = "Life Sim";
         public bool Enabled { get; init; } = true;
         public SimulationInputFunction InputFunction { get; init; } = SimulationInputFunction.Direct;
         public BlendMode BlendMode { get; init; } = BlendMode.Subtractive;
@@ -8500,6 +9679,8 @@ public partial class MainWindow : Window
         public double ThresholdMin { get; init; } = 0.35;
         public double ThresholdMax { get; init; } = 0.75;
         public bool InvertThreshold { get; init; }
+        public int PixelSortCellWidth { get; init; } = 12;
+        public int PixelSortCellHeight { get; init; } = 8;
         public List<SimulationLayerSpec> Children { get; init; } = new();
     }
 
@@ -8681,12 +9862,22 @@ public partial class MainWindow : Window
             : LayerEditorSimulationItemKind.Layer;
     }
 
+    private static SimulationLayerType ParseSimulationLayerType(string? value)
+    {
+        return Enum.TryParse<SimulationLayerType>(value, true, out var parsed)
+            ? parsed
+            : SimulationLayerType.Life;
+    }
+
     private LayerEditorSimulationLayer ToEditorSimulationLayer(SimulationLayerState layer)
     {
         var editorLayer = new LayerEditorSimulationLayer
         {
             Id = layer.Id,
             Kind = layer.Kind,
+            LayerType = layer.LayerType == SimulationLayerType.PixelSort
+                ? LayerEditorSimulationLayerType.PixelSort
+                : LayerEditorSimulationLayerType.Life,
             Name = layer.Name,
             Enabled = layer.Enabled,
             InputFunction = layer.InputFunction.ToString(),
@@ -8705,11 +9896,15 @@ public partial class MainWindow : Window
                     Id = mapping.Id,
                     Input = mapping.Input.ToString(),
                     Output = mapping.Output.ToString(),
-                    Amount = mapping.Amount
+                    Amount = mapping.Amount,
+                    ThresholdMin = mapping.ThresholdMin,
+                    ThresholdMax = mapping.ThresholdMax
                 })),
             ThresholdMin = layer.ThresholdMin,
             ThresholdMax = layer.ThresholdMax,
-            InvertThreshold = layer.InvertThreshold
+            InvertThreshold = layer.InvertThreshold,
+            PixelSortCellWidth = layer.PixelSortCellWidth,
+            PixelSortCellHeight = layer.PixelSortCellHeight
         };
 
         foreach (var child in layer.Children)
@@ -8728,6 +9923,9 @@ public partial class MainWindow : Window
         {
             Id = layer.Id,
             Kind = layer.Kind,
+            LayerType = layer.LayerType == SimulationLayerType.PixelSort
+                ? LayerEditorSimulationLayerType.PixelSort
+                : LayerEditorSimulationLayerType.Life,
             Name = layer.Name,
             Enabled = layer.Enabled,
             InputFunction = layer.InputFunction.ToString(),
@@ -8746,11 +9944,15 @@ public partial class MainWindow : Window
                     Id = mapping.Id,
                     Input = mapping.Input.ToString(),
                     Output = mapping.Output.ToString(),
-                    Amount = mapping.Amount
+                    Amount = mapping.Amount,
+                    ThresholdMin = mapping.ThresholdMin,
+                    ThresholdMax = mapping.ThresholdMax
                 })),
             ThresholdMin = layer.ThresholdMin,
             ThresholdMax = layer.ThresholdMax,
-            InvertThreshold = layer.InvertThreshold
+            InvertThreshold = layer.InvertThreshold,
+            PixelSortCellWidth = layer.PixelSortCellWidth,
+            PixelSortCellHeight = layer.PixelSortCellHeight
         };
 
         foreach (var child in layer.Children)
@@ -8770,66 +9972,7 @@ public partial class MainWindow : Window
             return;
         }
 
-        var specs = BuildDefaultSimulationLayerSpecs();
-        _simulationLayers.Add(new SimulationLayerState
-        {
-            Id = specs[0].Id,
-            Name = specs[0].Name,
-            Enabled = specs[0].Enabled,
-            InputFunction = specs[0].InputFunction,
-            BlendMode = specs[0].BlendMode,
-            InjectionMode = specs[0].InjectionMode,
-            LifeMode = specs[0].LifeMode,
-            BinningMode = specs[0].BinningMode,
-            InjectionNoise = specs[0].InjectionNoise,
-            LifeOpacity = specs[0].LifeOpacity,
-            RgbHueShiftDegrees = specs[0].RgbHueShiftDegrees,
-            RgbHueShiftSpeedDegreesPerSecond = specs[0].RgbHueShiftSpeedDegreesPerSecond,
-            AudioFrequencyHueShiftDegrees = specs[0].AudioFrequencyHueShiftDegrees,
-            ReactiveMappings = CloneReactiveMappings(specs[0].ReactiveMappings),
-            EffectiveLifeOpacity = specs[0].LifeOpacity,
-            EffectiveSimulationTargetFps = _currentSimulationTargetFps,
-            EffectiveRgbHueShiftSpeedDegreesPerSecond = specs[0].RgbHueShiftSpeedDegreesPerSecond,
-            EffectiveInjectionNoise = specs[0].InjectionNoise,
-            ThresholdMin = specs[0].ThresholdMin,
-            ThresholdMax = specs[0].ThresholdMax,
-            EffectiveThresholdMin = specs[0].ThresholdMin,
-            EffectiveThresholdMax = specs[0].ThresholdMax,
-            InvertThreshold = specs[0].InvertThreshold,
-            Engine = _engine
-        });
-        _simulationLayers.Add(new SimulationLayerState
-        {
-            Id = specs[1].Id,
-            Name = specs[1].Name,
-            Enabled = specs[1].Enabled,
-            InputFunction = specs[1].InputFunction,
-            BlendMode = specs[1].BlendMode,
-            InjectionMode = specs[1].InjectionMode,
-            LifeMode = specs[1].LifeMode,
-            BinningMode = specs[1].BinningMode,
-            InjectionNoise = specs[1].InjectionNoise,
-            LifeOpacity = specs[1].LifeOpacity,
-            RgbHueShiftDegrees = specs[1].RgbHueShiftDegrees,
-            RgbHueShiftSpeedDegreesPerSecond = specs[1].RgbHueShiftSpeedDegreesPerSecond,
-            AudioFrequencyHueShiftDegrees = specs[1].AudioFrequencyHueShiftDegrees,
-            ReactiveMappings = CloneReactiveMappings(specs[1].ReactiveMappings),
-            EffectiveLifeOpacity = specs[1].LifeOpacity,
-            EffectiveSimulationTargetFps = _currentSimulationTargetFps,
-            EffectiveRgbHueShiftSpeedDegreesPerSecond = specs[1].RgbHueShiftSpeedDegreesPerSecond,
-            EffectiveInjectionNoise = specs[1].InjectionNoise,
-            ThresholdMin = specs[1].ThresholdMin,
-            ThresholdMax = specs[1].ThresholdMax,
-            EffectiveThresholdMin = specs[1].ThresholdMin,
-            EffectiveThresholdMax = specs[1].ThresholdMax,
-            InvertThreshold = specs[1].InvertThreshold,
-            Engine = CreateConfiguredSimulationEngine(randomize: true)
-        });
-        ConfigureSimulationEngine(_engine, _configuredRows, _configuredDepth, _currentAspectRatio, randomize: true);
-        foreach (var layer in EnumerateSimulationLeafLayers(_simulationLayers))
-        {
-            ApplySimulationLayerEngineSettings(layer);
-        }
+        ApplySimulationLayerSpecs(BuildDefaultSimulationLayerSpecs());
     }
 
     private ISimulationBackend GetReferenceSimulationEngine()
@@ -8863,9 +10006,11 @@ public partial class MainWindow : Window
         }
     }
 
-    private ISimulationBackend CreateConfiguredSimulationEngine(bool randomize)
+    private ISimulationBackend CreateConfiguredSimulationEngine(SimulationLayerType layerType, bool randomize)
     {
-        ISimulationBackend engine = new GpuSimulationBackend();
+        ISimulationBackend engine = layerType == SimulationLayerType.PixelSort
+            ? new GpuPixelSortBackend()
+            : new GpuSimulationBackend();
         ConfigureSimulationEngine(engine, _configuredRows, _configuredDepth, _currentAspectRatio, randomize);
         return engine;
     }
@@ -8884,6 +10029,15 @@ public partial class MainWindow : Window
     {
         if (layer.IsGroup || layer.Engine == null)
         {
+            return;
+        }
+
+        if (layer.LayerType == SimulationLayerType.PixelSort)
+        {
+            if (layer.Engine is GpuPixelSortBackend pixelSortBackend)
+            {
+                pixelSortBackend.SetCellSize(layer.EffectivePixelSortCellWidth, layer.EffectivePixelSortCellHeight);
+            }
             return;
         }
 
@@ -8938,7 +10092,8 @@ public partial class MainWindow : Window
             new()
             {
                 Id = Guid.NewGuid(),
-                Name = "Positive",
+                LayerType = SimulationLayerType.Life,
+                Name = "Life Sim",
                 Enabled = true,
                 InputFunction = SimulationInputFunction.Direct,
                 BlendMode = BlendMode.Additive,
@@ -8948,22 +10103,9 @@ public partial class MainWindow : Window
                 AudioFrequencyHueShiftDegrees = 0,
                 ThresholdMin = 0.35,
                 ThresholdMax = 0.75,
-                InvertThreshold = false
-            },
-            new()
-            {
-                Id = Guid.NewGuid(),
-                Name = "Negative",
-                Enabled = true,
-                InputFunction = SimulationInputFunction.Inverse,
-                BlendMode = BlendMode.Subtractive,
-                InjectionMode = GameOfLifeEngine.InjectionMode.Threshold,
-                RgbHueShiftDegrees = 0,
-                RgbHueShiftSpeedDegreesPerSecond = 0,
-                AudioFrequencyHueShiftDegrees = 0,
-                ThresholdMin = 0.35,
-                ThresholdMax = 0.75,
-                InvertThreshold = false
+                InvertThreshold = false,
+                PixelSortCellWidth = 12,
+                PixelSortCellHeight = 8
             }
         };
     }
@@ -9043,7 +10185,9 @@ public partial class MainWindow : Window
                     Id = id,
                     Input = ParseReactiveInputOrDefault(mapping.Input, SimulationReactiveInput.Level),
                     Output = output,
-                    Amount = SimulationReactivity.ClampAmount(output, mapping.Amount)
+                    Amount = SimulationReactivity.ClampAmount(output, mapping.Amount),
+                    ThresholdMin = Math.Clamp(mapping.ThresholdMin, 0, 1),
+                    ThresholdMax = Math.Clamp(mapping.ThresholdMax, 0, 1)
                 });
             }
         }
@@ -9078,7 +10222,9 @@ public partial class MainWindow : Window
                     Id = id,
                     Input = ParseReactiveInputOrDefault(mapping.Input, SimulationReactiveInput.Level),
                     Output = output,
-                    Amount = SimulationReactivity.ClampAmount(output, mapping.Amount)
+                    Amount = SimulationReactivity.ClampAmount(output, mapping.Amount),
+                    ThresholdMin = Math.Clamp(mapping.ThresholdMin, 0, 1),
+                    ThresholdMax = Math.Clamp(mapping.ThresholdMax, 0, 1)
                 });
             }
         }
@@ -9104,7 +10250,9 @@ public partial class MainWindow : Window
             Id = Guid.NewGuid(),
             Input = SimulationReactiveInput.Frequency,
             Output = SimulationReactiveOutput.HueShift,
-            Amount = SimulationReactivity.ClampAmount(SimulationReactiveOutput.HueShift, legacyAudioFrequencyHueShiftDegrees)
+            Amount = SimulationReactivity.ClampAmount(SimulationReactiveOutput.HueShift, legacyAudioFrequencyHueShiftDegrees),
+            ThresholdMin = 0,
+            ThresholdMax = 1
         });
     }
 
@@ -9120,7 +10268,9 @@ public partial class MainWindow : Window
             if (left[i].Id != right[i].Id ||
                 left[i].Input != right[i].Input ||
                 left[i].Output != right[i].Output ||
-                Math.Abs(left[i].Amount - right[i].Amount) > 0.000001)
+                Math.Abs(left[i].Amount - right[i].Amount) > 0.000001 ||
+                Math.Abs(left[i].ThresholdMin - right[i].ThresholdMin) > 0.000001 ||
+                Math.Abs(left[i].ThresholdMax - right[i].ThresholdMax) > 0.000001)
             {
                 return false;
             }
@@ -9239,7 +10389,11 @@ public partial class MainWindow : Window
         return true;
     }
 
-    private static string NormalizeSimulationLayerName(string? value, int index, LayerEditorSimulationItemKind kind = LayerEditorSimulationItemKind.Layer)
+    private static string NormalizeSimulationLayerName(
+        string? value,
+        int index,
+        LayerEditorSimulationItemKind kind = LayerEditorSimulationItemKind.Layer,
+        SimulationLayerType layerType = SimulationLayerType.Life)
     {
         if (!string.IsNullOrWhiteSpace(value))
         {
@@ -9248,10 +10402,12 @@ public partial class MainWindow : Window
 
         return kind == LayerEditorSimulationItemKind.Group
             ? $"Sim Group {index + 1}"
-            : $"Simulation Layer {index + 1}";
+            : layerType == SimulationLayerType.PixelSort
+                ? $"Pixel Sort {index + 1}"
+                : $"Life Sim {index + 1}";
     }
 
-    private List<SimulationLayerSpec> NormalizeSimulationLayerSpecs(IReadOnlyList<LayerEditorSimulationLayer>? simulationLayers)
+    private List<SimulationLayerSpec> NormalizeSimulationLayerSpecs(IReadOnlyList<LayerEditorSimulationLayer>? simulationLayers, bool fallbackToDefault = true)
     {
         var normalized = new List<SimulationLayerSpec>();
         var seenIds = new HashSet<Guid>();
@@ -9264,7 +10420,7 @@ public partial class MainWindow : Window
             }
         }
 
-        if (normalized.Count == 0)
+        if (normalized.Count == 0 && fallbackToDefault)
         {
             return BuildDefaultSimulationLayerSpecs();
         }
@@ -9300,6 +10456,7 @@ public partial class MainWindow : Window
         {
             Id = spec.Id,
             Kind = LayerEditorSimulationItemKind.Layer,
+            LayerType = spec.LayerType,
             Name = spec.Name,
             Enabled = enabled,
             InputFunction = spec.InputFunction,
@@ -9317,15 +10474,19 @@ public partial class MainWindow : Window
                 Id = mapping.Id,
                 Input = mapping.Input,
                 Output = mapping.Output,
-                Amount = mapping.Amount
+                Amount = mapping.Amount,
+                ThresholdMin = mapping.ThresholdMin,
+                ThresholdMax = mapping.ThresholdMax
             }).ToList(),
             ThresholdMin = spec.ThresholdMin,
             ThresholdMax = spec.ThresholdMax,
-            InvertThreshold = spec.InvertThreshold
+            InvertThreshold = spec.InvertThreshold,
+            PixelSortCellWidth = spec.PixelSortCellWidth,
+            PixelSortCellHeight = spec.PixelSortCellHeight
         });
     }
 
-    private List<SimulationLayerSpec> NormalizeSimulationLayerSpecs(IReadOnlyList<AppConfig.SimulationLayerConfig>? simulationLayers)
+    private List<SimulationLayerSpec> NormalizeSimulationLayerSpecs(IReadOnlyList<AppConfig.SimulationLayerConfig>? simulationLayers, bool fallbackToDefault = true)
     {
         var normalized = new List<SimulationLayerSpec>();
         var seenIds = new HashSet<Guid>();
@@ -9338,7 +10499,7 @@ public partial class MainWindow : Window
             }
         }
 
-        if (normalized.Count == 0)
+        if (normalized.Count == 0 && fallbackToDefault)
         {
             return BuildDefaultSimulationLayerSpecs();
         }
@@ -9369,6 +10530,9 @@ public partial class MainWindow : Window
             };
         }
 
+        var layerType = layer.LayerType == LayerEditorSimulationLayerType.PixelSort
+            ? SimulationLayerType.PixelSort
+            : SimulationLayerType.Life;
         var inputFunction = ParseSimulationInputFunctionOrDefault(layer.InputFunction, SimulationInputFunction.Direct);
         var defaultBlend = inputFunction == SimulationInputFunction.Inverse ? BlendMode.Subtractive : BlendMode.Additive;
         var blendMode = ParseBlendModeOrDefault(layer.BlendMode, defaultBlend);
@@ -9381,7 +10545,8 @@ public partial class MainWindow : Window
         {
             Id = id,
             Kind = LayerEditorSimulationItemKind.Layer,
-            Name = NormalizeSimulationLayerName(layer.Name, index),
+            LayerType = layerType,
+            Name = NormalizeSimulationLayerName(layer.Name, index, layerType: layerType),
             Enabled = layer.Enabled,
             InputFunction = inputFunction,
             BlendMode = blendMode,
@@ -9396,7 +10561,9 @@ public partial class MainWindow : Window
             ReactiveMappings = NormalizeReactiveMappings(layer.ReactiveMappings, 0),
             ThresholdMin = thresholdMin,
             ThresholdMax = thresholdMax,
-            InvertThreshold = invertThreshold
+            InvertThreshold = invertThreshold,
+            PixelSortCellWidth = Math.Clamp(layer.PixelSortCellWidth, 1, 4096),
+            PixelSortCellHeight = Math.Clamp(layer.PixelSortCellHeight, 1, 4096)
         };
     }
 
@@ -9424,6 +10591,7 @@ public partial class MainWindow : Window
             };
         }
 
+        var layerType = ParseSimulationLayerType(layer.LayerType);
         var inputFunction = ParseSimulationInputFunctionOrDefault(layer.InputFunction, SimulationInputFunction.Direct);
         var defaultBlend = inputFunction == SimulationInputFunction.Inverse ? BlendMode.Subtractive : BlendMode.Additive;
         var blendMode = ParseBlendModeOrDefault(layer.BlendMode, defaultBlend);
@@ -9432,11 +10600,14 @@ public partial class MainWindow : Window
         var binningMode = ParseSimulationBinningModeOrDefault(layer.BinningMode, _binningMode);
         var (thresholdMin, thresholdMax, invertThreshold) =
             NormalizeLayerThresholds(layer.ThresholdMin, layer.ThresholdMax, layer.InvertThreshold, _captureThresholdMin, _captureThresholdMax, _invertThreshold);
+        int pixelSortCellWidth = Math.Clamp(layer.PixelSortCellWidth > 0 ? layer.PixelSortCellWidth : layer.PixelSortGridColumns, 1, 4096);
+        int pixelSortCellHeight = Math.Clamp(layer.PixelSortCellHeight > 0 ? layer.PixelSortCellHeight : layer.PixelSortGridRows, 1, 4096);
         return new SimulationLayerSpec
         {
             Id = id,
             Kind = LayerEditorSimulationItemKind.Layer,
-            Name = NormalizeSimulationLayerName(layer.Name, index),
+            LayerType = layerType,
+            Name = NormalizeSimulationLayerName(layer.Name, index, layerType: layerType),
             Enabled = layer.Enabled,
             InputFunction = inputFunction,
             BlendMode = blendMode,
@@ -9451,7 +10622,9 @@ public partial class MainWindow : Window
             ReactiveMappings = NormalizeReactiveMappings(layer.ReactiveMappings, layer.AudioFrequencyHueShiftDegrees),
             ThresholdMin = thresholdMin,
             ThresholdMax = thresholdMax,
-            InvertThreshold = invertThreshold
+            InvertThreshold = invertThreshold,
+            PixelSortCellWidth = pixelSortCellWidth,
+            PixelSortCellHeight = pixelSortCellHeight
         };
     }
 
@@ -9476,7 +10649,8 @@ public partial class MainWindow : Window
         var positive = new SimulationLayerSpec
         {
             Id = Guid.NewGuid(),
-            Name = "Positive",
+            LayerType = SimulationLayerType.Life,
+            Name = "Life Sim",
             Enabled = positiveLayerEnabled,
             InputFunction = SimulationInputFunction.Direct,
             BlendMode = ParseBlendModeOrDefault(positiveLayerBlendMode, BlendMode.Additive),
@@ -9491,11 +10665,14 @@ public partial class MainWindow : Window
             ReactiveMappings = new List<SimulationReactiveMapping>(),
             ThresholdMin = normalizedThresholdMin,
             ThresholdMax = normalizedThresholdMax,
-            InvertThreshold = normalizedInvertThreshold
+            InvertThreshold = normalizedInvertThreshold,
+            PixelSortCellWidth = 12,
+            PixelSortCellHeight = 8
         };
         var negative = new SimulationLayerSpec
         {
             Id = Guid.NewGuid(),
+            LayerType = SimulationLayerType.Life,
             Name = "Negative",
             Enabled = negativeLayerEnabled,
             InputFunction = SimulationInputFunction.Inverse,
@@ -9511,7 +10688,9 @@ public partial class MainWindow : Window
             ReactiveMappings = new List<SimulationReactiveMapping>(),
             ThresholdMin = normalizedThresholdMin,
             ThresholdMax = normalizedThresholdMax,
-            InvertThreshold = normalizedInvertThreshold
+            InvertThreshold = normalizedInvertThreshold,
+            PixelSortCellWidth = 12,
+            PixelSortCellHeight = 8
         };
 
         var list = new List<SimulationLayerSpec>(2);
@@ -9613,6 +10792,7 @@ public partial class MainWindow : Window
         var layer = existing ?? new SimulationLayerState { Id = spec.Id };
         layer.Kind = spec.Kind;
         layer.Parent = parent;
+        layer.LayerType = spec.LayerType;
         layer.Name = spec.Name;
         layer.Enabled = spec.Enabled;
 
@@ -9632,9 +10812,20 @@ public partial class MainWindow : Window
             return layer;
         }
 
+        bool needsEngineReplacement =
+            layer.Engine == null ||
+            (spec.LayerType == SimulationLayerType.PixelSort && layer.Engine is not GpuPixelSortBackend) ||
+            (spec.LayerType == SimulationLayerType.Life && layer.Engine is not GpuSimulationBackend);
+
+        if (needsEngineReplacement && layer.Engine != null)
+        {
+            RetireSimulationEngine(layer.Engine);
+            layer.Engine = null;
+        }
+
         if (layer.Engine == null)
         {
-            if (!primaryAssigned && currentPrimaryId == spec.Id)
+            if (spec.LayerType == SimulationLayerType.Life && !primaryAssigned && currentPrimaryId == spec.Id)
             {
                 layer.Engine = _engine;
                 primaryAssigned = true;
@@ -9642,7 +10833,7 @@ public partial class MainWindow : Window
             }
             else
             {
-                layer.Engine = CreateConfiguredSimulationEngine(randomize: true);
+                layer.Engine = CreateConfiguredSimulationEngine(spec.LayerType, randomize: true);
             }
         }
         else if (ReferenceEquals(layer.Engine, _engine))
@@ -9665,6 +10856,8 @@ public partial class MainWindow : Window
         layer.ThresholdMin = spec.ThresholdMin;
         layer.ThresholdMax = spec.ThresholdMax;
         layer.InvertThreshold = spec.InvertThreshold;
+        layer.PixelSortCellWidth = spec.PixelSortCellWidth;
+        layer.PixelSortCellHeight = spec.PixelSortCellHeight;
         layer.EffectiveLifeOpacity = layer.LifeOpacity;
         layer.EffectiveSimulationTargetFps = _currentSimulationTargetFps;
         layer.ReactiveHueShiftDegrees = 0;
@@ -9672,6 +10865,8 @@ public partial class MainWindow : Window
         layer.EffectiveInjectionNoise = layer.InjectionNoise;
         layer.EffectiveThresholdMin = layer.ThresholdMin;
         layer.EffectiveThresholdMax = layer.ThresholdMax;
+        layer.EffectivePixelSortCellWidth = layer.PixelSortCellWidth;
+        layer.EffectivePixelSortCellHeight = layer.PixelSortCellHeight;
         layer.TimeSinceLastStep = 0;
 
         ApplySimulationLayerEngineSettings(layer);
@@ -9685,7 +10880,7 @@ public partial class MainWindow : Window
             return;
         }
 
-        var firstLeaf = EnumerateSimulationLeafLayers(layers).FirstOrDefault();
+        var firstLeaf = EnumerateSimulationLeafLayers(layers).FirstOrDefault(layer => layer.LayerType == SimulationLayerType.Life);
         if (firstLeaf == null)
         {
             return;
@@ -10096,7 +11291,7 @@ public partial class MainWindow : Window
         ref bool injectedAnyLayer,
         ref int steppedPassCount)
     {
-        bool includeCpuReadback = _isRecording || App.IsSmokeTestMode;
+        bool includeCpuReadback = _isRecording || App.IsSmokeTestMode || App.IsDiagnosticTestMode;
         if (_inlineGpuSourceCompositor.IsAvailable &&
             _gpuSimulationGroupCompositor.IsAvailable)
         {
@@ -10547,6 +11742,7 @@ public partial class MainWindow : Window
         bool hasEnabledAdditiveSimulationLayer = visibleLayers.Any(layer => layer.BlendMode == BlendMode.Additive);
         int additiveLayerCount = visibleLayers.Count(layer => layer.BlendMode == BlendMode.Additive);
         int subtractiveLayerCount = visibleLayers.Count(layer => layer.BlendMode == BlendMode.Subtractive);
+        bool hasStandaloneOutputLayer = activeLayerEntries.Any(layer => layer.PublishesStandaloneOutput);
         bool hasEnabledNonAddSubSimulationLayer = visibleLayers.Any(layer =>
             layer.BlendMode != BlendMode.Additive &&
             layer.BlendMode != BlendMode.Subtractive);
@@ -10567,7 +11763,8 @@ public partial class MainWindow : Window
             simulationBaseline = 0;
         }
 
-        bool useSignedAddSubPassthrough = inputComposite != null && !hasEnabledNonAddSubSimulationLayer;
+        bool includeUnderlayInFinalComposite = inputComposite != null && !hasStandaloneOutputLayer;
+        bool useSignedAddSubPassthrough = includeUnderlayInFinalComposite && !hasEnabledNonAddSubSimulationLayer;
         bool useMixedAddSubPassthroughModel = useSignedAddSubPassthrough &&
                                               additiveLayerCount > 0 &&
                                               subtractiveLayerCount > 0;
@@ -10575,7 +11772,7 @@ public partial class MainWindow : Window
         byte[]? underlayBuffer = null;
         int underlayWidth = 0;
         int underlayHeight = 0;
-        if (inputComposite != null && inputComposite.GpuSurface == null)
+        if (includeUnderlayInFinalComposite && inputComposite != null && inputComposite.GpuSurface == null)
         {
             underlayBuffer = inputComposite.Downscaled;
             underlayWidth = inputComposite.DownscaledWidth;
@@ -10585,7 +11782,7 @@ public partial class MainWindow : Window
         byte[]? groupBuffer = source.CompositeDownscaledBuffer;
         var composite = _gpuSimulationGroupCompositor.Compose(
             activeLayerEntries,
-            inputComposite?.GpuSurface,
+            includeUnderlayInFinalComposite ? inputComposite?.GpuSurface : null,
             underlayBuffer,
             underlayWidth,
             underlayHeight,
@@ -10596,7 +11793,7 @@ public partial class MainWindow : Window
             width,
             height,
             ref groupBuffer,
-            includeCpuReadback: _isRecording || (App.IsSmokeTestMode && !_suppressSmokeIntermediateSimGroupReadback));
+            includeCpuReadback: _isRecording || App.IsDiagnosticTestMode || (App.IsSmokeTestMode && !_suppressSmokeIntermediateSimGroupReadback));
         source.CompositeDownscaledBuffer = groupBuffer;
         if (composite != null &&
             composite.Downscaled.Length >= composite.DownscaledWidth * composite.DownscaledHeight * 4)
@@ -10746,6 +11943,7 @@ public partial class MainWindow : Window
         bool hasEnabledAdditiveSimulationLayer = blendLayers.Any(layer => layer.BlendMode == BlendMode.Additive);
         int additiveLayerCount = blendLayers.Count(layer => layer.BlendMode == BlendMode.Additive);
         int subtractiveLayerCount = blendLayers.Count(layer => layer.BlendMode == BlendMode.Subtractive);
+        bool hasStandaloneOutputLayer = blendLayers.Any(layer => layer.PublishesStandaloneOutput);
         bool hasEnabledNonAddSubSimulationLayer = blendLayers.Any(layer =>
             layer.BlendMode != BlendMode.Additive &&
             layer.BlendMode != BlendMode.Subtractive);
@@ -10766,7 +11964,8 @@ public partial class MainWindow : Window
             simulationBaseline = 0;
         }
 
-        bool useSignedAddSubPassthrough = inputComposite != null && !hasEnabledNonAddSubSimulationLayer;
+        bool includeUnderlayInFinalComposite = inputComposite != null && !hasStandaloneOutputLayer;
+        bool useSignedAddSubPassthrough = includeUnderlayInFinalComposite && !hasEnabledNonAddSubSimulationLayer;
         bool useMixedAddSubPassthroughModel = useSignedAddSubPassthrough &&
                                               additiveLayerCount > 0 &&
                                               subtractiveLayerCount > 0;
@@ -10783,7 +11982,7 @@ public partial class MainWindow : Window
                 int underlayB = simulationBaseline;
                 int underlayG = simulationBaseline;
                 int underlayR = simulationBaseline;
-                if (inputComposite != null && inputComposite.Downscaled.Length >= requiredLength)
+                if (includeUnderlayInFinalComposite && inputComposite != null && inputComposite.Downscaled.Length >= requiredLength)
                 {
                     underlayB = targetBuffer[index];
                     underlayG = targetBuffer[index + 1];
@@ -11107,6 +12306,172 @@ public partial class MainWindow : Window
             fillTicks * tickScale / divisor,
             width,
             height);
+    }
+
+    internal bool RunGpuPixelSortSmoke()
+    {
+        const int sourceWidth = 96;
+        const int sourceHeight = 54;
+
+        var source = CaptureSource.CreateFile("pixel-sort-source", "Pixel Sort Source", sourceWidth, sourceHeight);
+        source.LastFrame = new SourceFrame(
+            BuildSmokePixelSortPatternBgra(sourceWidth, sourceHeight),
+            sourceWidth,
+            sourceHeight,
+            null,
+            sourceWidth,
+            sourceHeight);
+        source.BlendMode = BlendMode.Normal;
+        source.Opacity = 1.0;
+
+        byte[]? compositeBuffer = null;
+        var composite = BuildCompositeFrame(
+            new List<CaptureSource> { source },
+            ref compositeBuffer,
+            useEngineDimensions: true,
+            animationTime: 0.0,
+            includeCpuReadback: true);
+        if (composite?.GpuSurface == null || composite.DownscaledWidth <= 0 || composite.DownscaledHeight <= 0)
+        {
+            Logger.Warn("GPU pixel sort smoke: composite surface was unavailable.");
+            return false;
+        }
+
+        using var backend = new GpuPixelSortBackend();
+        backend.Configure(composite.DownscaledHeight, 24, (double)composite.DownscaledWidth / composite.DownscaledHeight);
+        backend.SetCellSize(12, 8);
+
+        bool injected = backend.TryInjectCompositeSurface(
+            composite.GpuSurface,
+            0.0,
+            1.0,
+            invertThreshold: false,
+            GameOfLifeEngine.InjectionMode.Threshold,
+            noiseProbability: 0.0,
+            period: 1,
+            pulseStep: 0,
+            invertInput: false,
+            hueShiftDegrees: 0.0);
+
+        byte[] injectedBuffer = new byte[backend.Columns * backend.Rows * 4];
+        backend.FillColorBuffer(injectedBuffer);
+        bool injectHistogramPreserved = HaveMatchingPixelHistogram(composite.Downscaled, injectedBuffer, pixelCount: Math.Min(composite.Downscaled.Length, injectedBuffer.Length) / 4);
+
+        backend.Step();
+
+        byte[] sorted = new byte[backend.Columns * backend.Rows * 4];
+        backend.FillColorBuffer(sorted);
+        bool surfaceOk = backend.TryGetColorSurface(out var surface) && surface != null;
+
+        int changedPixels = 0;
+        int pixelCount = Math.Min(composite.Downscaled.Length, sorted.Length) / 4;
+        for (int i = 0; i < pixelCount; i++)
+        {
+            int index = i * 4;
+            int diff =
+                Math.Abs(composite.Downscaled[index] - sorted[index]) +
+                Math.Abs(composite.Downscaled[index + 1] - sorted[index + 1]) +
+                Math.Abs(composite.Downscaled[index + 2] - sorted[index + 2]);
+            if (diff >= 12)
+            {
+                changedPixels++;
+            }
+        }
+
+        bool changedEnough = changedPixels > Math.Max(32, pixelCount / 10);
+        bool histogramPreserved = HaveMatchingPixelHistogram(composite.Downscaled, sorted, pixelCount);
+        Logger.Info(
+            $"GPU pixel sort smoke: injected={injected}, injectHistogramPreserved={injectHistogramPreserved}, surfaceOk={surfaceOk}, changedPixels={changedPixels}, totalPixels={pixelCount}, changedEnough={changedEnough}, histogramPreserved={histogramPreserved}.");
+        return injected && surfaceOk && changedEnough && histogramPreserved;
+    }
+
+    internal bool RunSimGroupPixelSortColorSmoke()
+    {
+        if (!_renderLoopAttached)
+        {
+            InitializeVisualizer();
+        }
+
+        _sources.Clear();
+        ClearSimulationLayers();
+        _passthroughEnabled = false;
+        _passthroughCompositedInPixelBuffer = false;
+        _invertComposite = false;
+        _isPaused = false;
+
+        ApplyDimensions(144, 24, DefaultAspectRatio, persist: false);
+        int width = GetReferenceSimulationEngine().Columns;
+        int height = GetReferenceSimulationEngine().Rows;
+
+        byte[] sourceBuffer = BuildSmokePixelSortPatternBgra(width, height);
+        var source = CaptureSource.CreateFile("sim-group-pixel-sort-source", "Sim Group Pixel Sort Source", width, height);
+        source.LastFrame = new SourceFrame(sourceBuffer, width, height, null, width, height);
+        source.BlendMode = BlendMode.Normal;
+        source.Opacity = 1.0;
+
+        var simulationGroup = CaptureSource.CreateSimulationGroup("Pixel Sort Group");
+        simulationGroup.SimulationLayers.Add(new SimulationLayerSpec
+        {
+            Id = Guid.NewGuid(),
+            Kind = LayerEditorSimulationItemKind.Layer,
+            LayerType = SimulationLayerType.PixelSort,
+            Name = "Pixel Sort",
+            Enabled = true,
+            InputFunction = SimulationInputFunction.Direct,
+            BlendMode = BlendMode.Normal,
+            InjectionMode = GameOfLifeEngine.InjectionMode.Threshold,
+            LifeMode = GameOfLifeEngine.LifeMode.NaiveGrayscale,
+            BinningMode = GameOfLifeEngine.BinningMode.Fill,
+            InjectionNoise = 0.0,
+            LifeOpacity = 1.0,
+            ThresholdMin = 0.0,
+            ThresholdMax = 1.0,
+            InvertThreshold = false,
+            PixelSortCellWidth = 12,
+            PixelSortCellHeight = 8
+        });
+
+        _sources.Add(source);
+        _sources.Add(simulationGroup);
+
+        ApplySimulationLayersFromSourceStack(fallbackToDefault: false);
+        ConfigureSimulationLayerEngines(_configuredRows, _configuredDepth, _currentAspectRatio, randomize: false);
+        foreach (var runtimeLayer in EnumerateSimulationLeafLayers(_simulationLayers))
+        {
+            runtimeLayer.TimeSinceLastStep = 1.0;
+        }
+
+        _pendingInlineSimulationStepsThisFrame = 1;
+        InjectCaptureFrames(injectLayers: true);
+        _pendingInlineSimulationStepsThisFrame = 0;
+
+        byte[]? output = simulationGroup.LastFrame?.Downscaled;
+        bool gpuBacked = _lastCompositeFrame?.GpuSurface != null;
+        if (output == null || output.Length < width * height * 4)
+        {
+            Logger.Warn("Sim-group pixel-sort color smoke: group output was unavailable.");
+            return false;
+        }
+
+        int pixelCount = Math.Min(sourceBuffer.Length, output.Length) / 4;
+        bool histogramPreserved = HaveMatchingPixelHistogram(sourceBuffer, output, pixelCount);
+        int changedPixels = 0;
+        for (int i = 0; i < pixelCount; i++)
+        {
+            int index = i * 4;
+            int diff =
+                Math.Abs(sourceBuffer[index] - output[index]) +
+                Math.Abs(sourceBuffer[index + 1] - output[index + 1]) +
+                Math.Abs(sourceBuffer[index + 2] - output[index + 2]);
+            if (diff >= 12)
+            {
+                changedPixels++;
+            }
+        }
+
+        bool changedEnough = changedPixels > Math.Max(32, pixelCount / 10);
+        Logger.Info($"Sim-group pixel-sort color smoke: gpuBacked={gpuBacked}, histogramPreserved={histogramPreserved}, changedPixels={changedPixels}, totalPixels={pixelCount}, changedEnough={changedEnough}.");
+        return gpuBacked && histogramPreserved && changedEnough;
     }
 
     internal bool RunGpuCompositeToSimulationSmoke()
@@ -11592,43 +12957,57 @@ public partial class MainWindow : Window
                 {
                     Input = SimulationReactiveInput.Level,
                     Output = SimulationReactiveOutput.Opacity,
-                    Amount = 1.0
+                    Amount = 1.0,
+                    ThresholdMin = 0.0,
+                    ThresholdMax = 0.5
                 },
                 new()
                 {
                     Input = SimulationReactiveInput.Level,
                     Output = SimulationReactiveOutput.Framerate,
-                    Amount = 1.0
+                    Amount = 1.0,
+                    ThresholdMin = 0.0,
+                    ThresholdMax = 0.5
                 },
                 new()
                 {
                     Input = SimulationReactiveInput.Frequency,
                     Output = SimulationReactiveOutput.HueShift,
-                    Amount = 180.0
+                    Amount = 180.0,
+                    ThresholdMin = 0.4,
+                    ThresholdMax = 0.6
                 },
                 new()
                 {
                     Input = SimulationReactiveInput.Bass,
                     Output = SimulationReactiveOutput.InjectionNoise,
-                    Amount = 0.5
+                    Amount = 0.5,
+                    ThresholdMin = 0.0,
+                    ThresholdMax = 0.2
                 },
                 new()
                 {
                     Input = SimulationReactiveInput.Mid,
                     Output = SimulationReactiveOutput.ThresholdMin,
-                    Amount = 0.2
+                    Amount = 0.2,
+                    ThresholdMin = 0.1,
+                    ThresholdMax = 0.3
                 },
                 new()
                 {
                     Input = SimulationReactiveInput.High,
                     Output = SimulationReactiveOutput.ThresholdMax,
-                    Amount = 0.1
+                    Amount = 0.1,
+                    ThresholdMin = 0.2,
+                    ThresholdMax = 0.4
                 },
                 new()
                 {
                     Input = SimulationReactiveInput.Level,
                     Output = SimulationReactiveOutput.HueSpeed,
-                    Amount = 60.0
+                    Amount = 60.0,
+                    ThresholdMin = 0.0,
+                    ThresholdMax = 0.5
                 }
             };
 
@@ -11652,14 +13031,14 @@ public partial class MainWindow : Window
 
             ApplySimulationLayerReactiveState();
 
-            bool opacityOk = Math.Abs(layer.EffectiveLifeOpacity - 0.2) < 0.0001;
-            bool fpsOk = Math.Abs(layer.EffectiveSimulationTargetFps - 15.0) < 0.0001;
+            bool opacityOk = Math.Abs(layer.EffectiveLifeOpacity - 0.4) < 0.0001;
+            bool fpsOk = Math.Abs(layer.EffectiveSimulationTargetFps - 30.0) < 0.0001;
             bool reactiveHueOk = Math.Abs(layer.ReactiveHueShiftDegrees - 90.0) < 0.0001;
             bool finalHueOk = Math.Abs(CurrentRgbHueShiftDegrees(layer) - 120.0) < 0.0001;
-            bool noiseOk = Math.Abs(layer.EffectiveInjectionNoise - 0.15) < 0.0001;
-            bool thresholdMinOk = Math.Abs(layer.EffectiveThresholdMin - 0.39) < 0.0001;
-            bool thresholdMaxOk = Math.Abs(layer.EffectiveThresholdMax - 0.72) < 0.0001;
-            bool hueSpeedOk = Math.Abs(layer.EffectiveRgbHueShiftSpeedDegreesPerSecond - 20.0) < 0.0001;
+            bool noiseOk = Math.Abs(layer.EffectiveInjectionNoise - 0.35) < 0.0001;
+            bool thresholdMinOk = Math.Abs(layer.EffectiveThresholdMin - 0.45) < 0.0001;
+            bool thresholdMaxOk = Math.Abs(layer.EffectiveThresholdMax - 0.70) < 0.0001;
+            bool hueSpeedOk = Math.Abs(layer.EffectiveRgbHueShiftSpeedDegreesPerSecond - 35.0) < 0.0001;
             bool ok = opacityOk && fpsOk && reactiveHueOk && finalHueOk && noiseOk && thresholdMinOk && thresholdMaxOk && hueSpeedOk;
 
             Logger.Info(
@@ -11668,6 +13047,131 @@ public partial class MainWindow : Window
                 $"reactiveHue={layer.ReactiveHueShiftDegrees:0.###}, finalHue={CurrentRgbHueShiftDegrees(layer):0.###}, " +
                 $"noise={layer.EffectiveInjectionNoise:0.###}, thMin={layer.EffectiveThresholdMin:0.###}, thMax={layer.EffectiveThresholdMax:0.###}, " +
                 $"hueSpeed={layer.EffectiveRgbHueShiftSpeedDegreesPerSecond:0.###}, ok={ok}.");
+            return ok;
+        }
+        finally
+        {
+            _currentSimulationTargetFps = previousSimulationTargetFps;
+            _fastAudioLevel = previousFastAudioLevel;
+            _audioReactiveEnabled = previousAudioReactiveEnabled;
+            _selectedAudioDeviceId = previousAudioDeviceId;
+        }
+    }
+
+    internal bool RunPixelSortReactiveCellSizeSmoke()
+    {
+        double previousSimulationTargetFps = _currentSimulationTargetFps;
+        double previousFastAudioLevel = _fastAudioLevel;
+        bool previousAudioReactiveEnabled = _audioReactiveEnabled;
+        string? previousAudioDeviceId = _selectedAudioDeviceId;
+
+        try
+        {
+            var layerId = Guid.NewGuid();
+            ApplySimulationLayerSpecs(new List<SimulationLayerSpec>
+            {
+                new()
+                {
+                    Id = layerId,
+                    Kind = LayerEditorSimulationItemKind.Layer,
+                    LayerType = SimulationLayerType.PixelSort,
+                    Name = "Pixel Sort Reactive Test",
+                    Enabled = true,
+                    InputFunction = SimulationInputFunction.Direct,
+                    BlendMode = BlendMode.Normal,
+                    InjectionMode = GameOfLifeEngine.InjectionMode.Threshold,
+                    LifeMode = GameOfLifeEngine.LifeMode.NaiveGrayscale,
+                    BinningMode = GameOfLifeEngine.BinningMode.Fill,
+                    InjectionNoise = 0.0,
+                    LifeOpacity = 1.0,
+                    ThresholdMin = 0.0,
+                    ThresholdMax = 1.0,
+                    InvertThreshold = false,
+                    PixelSortCellWidth = 4,
+                    PixelSortCellHeight = 6,
+                    ReactiveMappings = new List<SimulationReactiveMapping>
+                    {
+                        new()
+                        {
+                            Input = SimulationReactiveInput.Level,
+                            Output = SimulationReactiveOutput.PixelSortCellWidth,
+                            Amount = 8.0
+                        },
+                        new()
+                        {
+                            Input = SimulationReactiveInput.High,
+                            Output = SimulationReactiveOutput.PixelSortCellHeight,
+                            Amount = 5.0
+                        }
+                    }
+                }
+            });
+
+            var layer = EnumerateSimulationLeafLayers(_simulationLayers).FirstOrDefault(candidate => candidate.Id == layerId);
+            if (layer == null || layer.Engine is not GpuPixelSortBackend pixelSortBackend)
+            {
+                Logger.Warn("Pixel sort reactive cell size smoke: pixel-sort runtime layer was unavailable.");
+                return false;
+            }
+
+            _audioReactiveEnabled = false;
+            _selectedAudioDeviceId = "smoke";
+            _currentSimulationTargetFps = 60.0;
+            _fastAudioLevel = 0.5;
+            _audioBeatDetector.SetSmokeReactiveState(
+                level: 0.5,
+                bass: 0.1,
+                mid: 0.2,
+                high: 0.4,
+                frequency: 0.0,
+                bassFrequency: 0.0,
+                midFrequency: 0.0,
+                highFrequency: 0.0);
+
+            ApplySimulationLayerReactiveState();
+
+            int expectedCellWidth = 8;
+            int expectedCellHeight = 8;
+            bool widthOk = layer.EffectivePixelSortCellWidth == expectedCellWidth;
+            bool heightOk = layer.EffectivePixelSortCellHeight == expectedCellHeight;
+
+            byte[] sourceBuffer = BuildSmokePixelSortPatternBgra(layer.Engine.Columns, layer.Engine.Rows);
+            var source = CaptureSource.CreateFile("pixel-sort-reactive-source", "Pixel Sort Reactive Source", layer.Engine.Columns, layer.Engine.Rows);
+            source.LastFrame = new SourceFrame(sourceBuffer, layer.Engine.Columns, layer.Engine.Rows, null, layer.Engine.Columns, layer.Engine.Rows);
+            source.BlendMode = BlendMode.Normal;
+            source.Opacity = 1.0;
+
+            byte[]? compositeBuffer = null;
+            var composite = BuildCompositeFrame(
+                new List<CaptureSource> { source },
+                ref compositeBuffer,
+                useEngineDimensions: true,
+                animationTime: 0.0,
+                includeCpuReadback: true);
+
+            bool injected = composite?.GpuSurface != null &&
+                            pixelSortBackend.TryInjectCompositeSurface(
+                                composite.GpuSurface,
+                                0.0,
+                                1.0,
+                                invertThreshold: false,
+                                GameOfLifeEngine.InjectionMode.Threshold,
+                                noiseProbability: 0.0,
+                                period: 1,
+                                pulseStep: 0,
+                                invertInput: false,
+                                hueShiftDegrees: 0.0);
+
+            pixelSortBackend.Step();
+
+            byte[] sorted = new byte[pixelSortBackend.Columns * pixelSortBackend.Rows * 4];
+            pixelSortBackend.FillColorBuffer(sorted);
+            bool histogramPreserved = HaveMatchingPixelHistogram(sourceBuffer, sorted, Math.Min(sourceBuffer.Length, sorted.Length) / 4);
+
+            bool ok = widthOk && heightOk && injected && histogramPreserved;
+            Logger.Info(
+                $"Pixel sort reactive cell size smoke: width={layer.EffectivePixelSortCellWidth}, height={layer.EffectivePixelSortCellHeight}, " +
+                $"expected=({expectedCellWidth},{expectedCellHeight}), injected={injected}, histogramPreserved={histogramPreserved}, ok={ok}.");
             return ok;
         }
         finally
@@ -11705,21 +13209,27 @@ public partial class MainWindow : Window
                     Id = Guid.NewGuid(),
                     Input = nameof(SimulationReactiveInput.Level),
                     Output = nameof(SimulationReactiveOutput.Opacity),
-                    Amount = 0.8
+                    Amount = 0.8,
+                    ThresholdMin = 0.2,
+                    ThresholdMax = 0.7
                 },
                 new()
                 {
                     Id = Guid.NewGuid(),
                     Input = nameof(SimulationReactiveInput.Mid),
                     Output = nameof(SimulationReactiveOutput.Framerate),
-                    Amount = 0.65
+                    Amount = 0.65,
+                    ThresholdMin = 0.1,
+                    ThresholdMax = 0.6
                 },
                 new()
                 {
                     Id = Guid.NewGuid(),
                     Input = nameof(SimulationReactiveInput.HighFrequency),
                     Output = nameof(SimulationReactiveOutput.HueShift),
-                    Amount = 210.0
+                    Amount = 210.0,
+                    ThresholdMin = 0.25,
+                    ThresholdMax = 0.9
                 }
             }
         };
@@ -11738,7 +13248,9 @@ public partial class MainWindow : Window
                 if (left[i].Id != right[i].Id ||
                     !string.Equals(left[i].Input, right[i].Input, StringComparison.Ordinal) ||
                     !string.Equals(left[i].Output, right[i].Output, StringComparison.Ordinal) ||
-                    Math.Abs(left[i].Amount - right[i].Amount) > 0.000001)
+                    Math.Abs(left[i].Amount - right[i].Amount) > 0.000001 ||
+                    Math.Abs(left[i].ThresholdMin - right[i].ThresholdMin) > 0.000001 ||
+                    Math.Abs(left[i].ThresholdMax - right[i].ThresholdMax) > 0.000001)
                 {
                     return false;
                 }
@@ -11791,7 +13303,9 @@ public partial class MainWindow : Window
                     Id = mapping.Id,
                     Input = mapping.Input,
                     Output = mapping.Output,
-                    Amount = mapping.Amount
+                    Amount = mapping.Amount,
+                    ThresholdMin = mapping.ThresholdMin,
+                    ThresholdMax = mapping.ThresholdMax
                 }).ToList()
             }
         };
@@ -11805,7 +13319,9 @@ public partial class MainWindow : Window
                 runtime.Id == editor.Id &&
                 runtime.Input.ToString() == editor.Input &&
                 runtime.Output.ToString() == editor.Output &&
-                Math.Abs(runtime.Amount - editor.Amount) <= 0.000001).All(match => match);
+                Math.Abs(runtime.Amount - editor.Amount) <= 0.000001 &&
+                Math.Abs(runtime.ThresholdMin - editor.ThresholdMin) <= 0.000001 &&
+                Math.Abs(runtime.ThresholdMax - editor.ThresholdMax) <= 0.000001).All(match => match);
 
         bool ok = projectRoundTripOk && appConfigRoundTripOk;
         Logger.Info(
@@ -12227,6 +13743,175 @@ public partial class MainWindow : Window
         return buffer;
     }
 
+    private static byte[] BuildSmokeRainbowBgra(int width, int height, double phase)
+    {
+        var buffer = new byte[width * height * 4];
+        for (int row = 0; row < height; row++)
+        {
+            double rowT = height > 1 ? row / (double)(height - 1) : 0.0;
+            for (int col = 0; col < width; col++)
+            {
+                double colT = width > 1 ? col / (double)(width - 1) : 0.0;
+                double t = (colT + (rowT * 0.35) + phase) % 1.0;
+                (byte r, byte g, byte b) = HueToRgb(t, 0.88, 1.0);
+                int index = (row * width + col) * 4;
+                buffer[index] = b;
+                buffer[index + 1] = g;
+                buffer[index + 2] = r;
+                buffer[index + 3] = 255;
+            }
+        }
+
+        return buffer;
+    }
+
+    private static byte[] BuildSmokePixelSortPatternBgra(int width, int height)
+    {
+        var buffer = new byte[width * height * 4];
+        for (int row = 0; row < height; row++)
+        {
+            for (int col = 0; col < width; col++)
+            {
+                int index = (row * width + col) * 4;
+                buffer[index] = (byte)((col * 37 + row * 19) & 0xFF);
+                buffer[index + 1] = (byte)((col * 11 + row * 73) & 0xFF);
+                buffer[index + 2] = (byte)((col * 59 + row * 29 + ((col ^ row) * 13)) & 0xFF);
+                buffer[index + 3] = 255;
+            }
+        }
+
+        return buffer;
+    }
+
+    private static byte[] BuildSmokePortraitBgra(int width, int height, int variant)
+    {
+        var buffer = new byte[width * height * 4];
+        double variantOffset = variant * 0.0125;
+        double backgroundWarmth = 0.85 + (variant * 0.03);
+        double faceWarmth = 1.0 + (variant * 0.025);
+        double hairShift = variant * 0.01;
+        double faceCx = 0.53 + hairShift;
+        double faceCy = 0.42 + (variant * 0.005);
+        double faceRx = 0.135;
+        double faceRy = 0.205;
+        double hairRx = 0.18;
+        double hairRy = 0.28;
+        double shoulderCy = 0.83;
+
+        for (int row = 0; row < height; row++)
+        {
+            double rowT = height > 1 ? row / (double)(height - 1) : 0.0;
+            for (int col = 0; col < width; col++)
+            {
+                double colT = width > 1 ? col / (double)(width - 1) : 0.0;
+                double dxFace = (colT - faceCx) / faceRx;
+                double dyFace = (rowT - faceCy) / faceRy;
+                double dxHair = (colT - (faceCx - 0.005)) / hairRx;
+                double dyHair = (rowT - (faceCy - 0.02)) / hairRy;
+                double dxLeftEye = (colT - (faceCx - 0.038)) / 0.022;
+                double dxRightEye = (colT - (faceCx + 0.038)) / 0.022;
+                double dyEye = (rowT - (faceCy - 0.03)) / 0.012;
+                double dxMouth = (colT - faceCx) / 0.046;
+                double dyMouth = (rowT - (faceCy + 0.065)) / 0.018;
+                double dxShoulder = (colT - 0.52) / 0.24;
+                double dyShoulder = (rowT - shoulderCy) / 0.13;
+
+                double background = 0.84 - (0.28 * rowT) + (0.06 * Math.Sin((colT * 8.0) + variantOffset));
+                double shoulder = Math.Max(0.0, 1.0 - ((dxShoulder * dxShoulder) + (dyShoulder * dyShoulder)));
+                double hair = Math.Max(0.0, 1.0 - ((dxHair * dxHair) + (dyHair * dyHair)));
+                double face = Math.Max(0.0, 1.0 - ((dxFace * dxFace) + (dyFace * dyFace)));
+                double leftEye = Math.Max(0.0, 1.0 - ((dxLeftEye * dxLeftEye) + (dyEye * dyEye)));
+                double rightEye = Math.Max(0.0, 1.0 - ((dxRightEye * dxRightEye) + (dyEye * dyEye)));
+                double mouth = Math.Max(0.0, 1.0 - ((dxMouth * dxMouth) + (dyMouth * dyMouth)));
+
+                double baseR = 188 * backgroundWarmth * background;
+                double baseG = 196 * backgroundWarmth * background;
+                double baseB = 178 * backgroundWarmth * background;
+
+                baseR -= shoulder * 70;
+                baseG -= shoulder * 74;
+                baseB -= shoulder * 72;
+
+                baseR -= hair * 116;
+                baseG -= hair * 120;
+                baseB -= hair * 124;
+
+                baseR += face * 44 * faceWarmth;
+                baseG += face * 28 * faceWarmth;
+                baseB += face * 12 * faceWarmth;
+
+                double featureDarkness = (leftEye + rightEye) * 58 + mouth * 36;
+                baseR -= featureDarkness;
+                baseG -= featureDarkness;
+                baseB -= featureDarkness;
+
+                int index = (row * width + col) * 4;
+                buffer[index] = (byte)Math.Clamp((int)Math.Round(baseB), 0, 255);
+                buffer[index + 1] = (byte)Math.Clamp((int)Math.Round(baseG), 0, 255);
+                buffer[index + 2] = (byte)Math.Clamp((int)Math.Round(baseR), 0, 255);
+                buffer[index + 3] = 255;
+            }
+        }
+
+        return buffer;
+    }
+
+    private static bool HaveMatchingPixelHistogram(byte[] left, byte[] right, int pixelCount)
+    {
+        if (left.Length < pixelCount * 4 || right.Length < pixelCount * 4)
+        {
+            return false;
+        }
+
+        var counts = new Dictionary<int, int>(pixelCount);
+        for (int i = 0; i < pixelCount; i++)
+        {
+            int index = i * 4;
+            int leftKey = left[index] |
+                          (left[index + 1] << 8) |
+                          (left[index + 2] << 16) |
+                          (left[index + 3] << 24);
+            counts[leftKey] = counts.TryGetValue(leftKey, out int existingLeft) ? existingLeft + 1 : 1;
+
+            int rightKey = right[index] |
+                           (right[index + 1] << 8) |
+                           (right[index + 2] << 16) |
+                           (right[index + 3] << 24);
+            counts[rightKey] = counts.TryGetValue(rightKey, out int existingRight) ? existingRight - 1 : -1;
+        }
+
+        return counts.Values.All(value => value == 0);
+    }
+
+    private static (byte r, byte g, byte b) HueToRgb(double hue, double saturation, double value)
+    {
+        hue = ((hue % 1.0) + 1.0) % 1.0;
+        saturation = Math.Clamp(saturation, 0.0, 1.0);
+        value = Math.Clamp(value, 0.0, 1.0);
+
+        double scaled = hue * 6.0;
+        int sector = (int)Math.Floor(scaled);
+        double fraction = scaled - sector;
+        double p = value * (1.0 - saturation);
+        double q = value * (1.0 - (saturation * fraction));
+        double t = value * (1.0 - (saturation * (1.0 - fraction)));
+
+        (double r, double g, double b) = sector switch
+        {
+            0 => (value, t, p),
+            1 => (q, value, p),
+            2 => (p, value, t),
+            3 => (p, q, value),
+            4 => (t, p, value),
+            _ => (value, p, q)
+        };
+
+        return (
+            (byte)Math.Clamp((int)Math.Round(r * 255.0), 0, 255),
+            (byte)Math.Clamp((int)Math.Round(g * 255.0), 0, 255),
+            (byte)Math.Clamp((int)Math.Round(b * 255.0), 0, 255));
+    }
+
     private static byte[] BuildSmokeCheckerBgra(int width, int height, byte bA, byte gA, byte rA, byte bB, byte gB, byte rB)
     {
         var buffer = new byte[width * height * 4];
@@ -12366,8 +14051,9 @@ public partial class MainWindow : Window
                     double scale = Math.Clamp(animation.DvdScale, 0.01, 1.0);
                     double maxX = Math.Max(0, destWidth - (destWidth * scale));
                     double maxY = Math.Max(0, destHeight - (destHeight * scale));
-                    double posX = maxX * progressX;
-                    double posY = maxY * progressY;
+                    // Point-sampled layers shimmer badly when DVD bounce lands between pixels.
+                    double posX = Math.Round(maxX * progressX);
+                    double posY = Math.Round(maxY * progressY);
 
                     var scaleTransform = CreateScaleAtOrigin(scale);
                     var translateTransform = CreateTranslation(posX, posY);
@@ -12757,6 +14443,7 @@ public partial class MainWindow : Window
             byte[] colorBuffer,
             BlendMode blendMode,
             double opacity,
+            bool publishesStandaloneOutput,
             bool applyHueShift,
             double hueRr,
             double hueRg,
@@ -12771,6 +14458,7 @@ public partial class MainWindow : Window
             ColorBuffer = colorBuffer;
             BlendMode = blendMode;
             Opacity = opacity;
+            PublishesStandaloneOutput = publishesStandaloneOutput;
             ApplyHueShift = applyHueShift;
             HueRr = hueRr;
             HueRg = hueRg;
@@ -12786,6 +14474,7 @@ public partial class MainWindow : Window
         public byte[] ColorBuffer { get; }
         public BlendMode BlendMode { get; }
         public double Opacity { get; }
+        public bool PublishesStandaloneOutput { get; }
         public bool ApplyHueShift { get; }
         public double HueRr { get; }
         public double HueRg { get; }
@@ -12854,7 +14543,27 @@ public partial class MainWindow : Window
             return false;
         }
 
-        if (engine is GpuSimulationBackend gpuBackend &&
+        if (layer.LayerType == SimulationLayerType.PixelSort &&
+            engine is GpuPixelSortBackend pixelSortBackend &&
+            pixelSortBackend.TryGetPresentationSurface(out var pixelSortSurface) &&
+            pixelSortSurface != null)
+        {
+            presentationLayer = new SimulationPresentationLayerData
+            {
+                Buffer = null,
+                Surface = pixelSortSurface,
+                SharedTextureHandle = IntPtr.Zero,
+                Width = pixelSortSurface.Width,
+                Height = pixelSortSurface.Height,
+                PublishesStandaloneOutput = true,
+                BlendMode = (int)layer.BlendMode,
+                Opacity = opacity,
+                HueShiftDegrees = (float)CurrentRgbHueShiftDegrees(layer)
+            };
+            return true;
+        }
+
+        if (engine is IGpuSimulationSurfaceBackend gpuBackend &&
             gpuBackend.TryGetSharedColorTexture(out IntPtr sharedHandle, out int width, out int height))
         {
             float hueShiftDegrees = (float)CurrentRgbHueShiftDegrees(layer);
@@ -12874,6 +14583,7 @@ public partial class MainWindow : Window
                 SharedTextureHandle = sharedHandle,
                 Width = width,
                 Height = height,
+                PublishesStandaloneOutput = LayerPublishesStandaloneOutput(layer),
                 BlendMode = (int)layer.BlendMode,
                 Opacity = opacity,
                 HueShiftDegrees = hueShiftDegrees
@@ -12893,6 +14603,7 @@ public partial class MainWindow : Window
             Surface = null,
             Width = engine.Columns,
             Height = engine.Rows,
+            PublishesStandaloneOutput = LayerPublishesStandaloneOutput(layer),
             BlendMode = (int)layer.BlendMode,
             Opacity = opacity,
             HueShiftDegrees = (float)CurrentRgbHueShiftDegrees(layer)
@@ -12918,7 +14629,9 @@ public partial class MainWindow : Window
         if (!_renderBackend.SupportsGpuSimulationComposition || _isRecording)
         {
             double hueShiftDegrees = CurrentRgbHueShiftDegrees(layer);
-            bool applyHueShift = layer.LifeMode == GameOfLifeEngine.LifeMode.RgbChannels && Math.Abs(hueShiftDegrees) > 0.001;
+            bool applyHueShift =
+                Math.Abs(hueShiftDegrees) > 0.001 &&
+                (layer.LayerType == SimulationLayerType.PixelSort || layer.LifeMode == GameOfLifeEngine.LifeMode.RgbChannels);
             if (applyHueShift)
             {
                 ApplyHueShiftToColorBuffer(targetBuffer, engine.Columns, engine.Rows, hueShiftDegrees);
@@ -13004,6 +14717,7 @@ public partial class MainWindow : Window
                 colorBuffer,
                 layer.BlendMode,
                 opacity,
+                LayerPublishesStandaloneOutput(layer),
                 applyHueShift,
                 hueRr,
                 hueRg,
@@ -13018,6 +14732,9 @@ public partial class MainWindow : Window
 
         return blendLayers.ToArray();
     }
+
+    private static bool LayerPublishesStandaloneOutput(SimulationLayerState layer)
+        => layer.LayerType == SimulationLayerType.PixelSort;
 
     private static void SampleInlineSimulationLayerColor(
         InlineSimulationBlendLayerData layer,
@@ -14895,6 +16612,7 @@ public partial class MainWindow : Window
         {
             Id = layer.Id,
             Kind = layer.Kind.ToString(),
+            LayerType = layer.LayerType.ToString(),
             Name = layer.Name,
             Enabled = layer.Enabled,
             InputFunction = layer.InputFunction.ToString(),
@@ -14912,11 +16630,15 @@ public partial class MainWindow : Window
                 Id = mapping.Id,
                 Input = mapping.Input.ToString(),
                 Output = mapping.Output.ToString(),
-                Amount = mapping.Amount
+                Amount = mapping.Amount,
+                ThresholdMin = mapping.ThresholdMin,
+                ThresholdMax = mapping.ThresholdMax
             }).ToList(),
             ThresholdMin = layer.ThresholdMin,
             ThresholdMax = layer.ThresholdMax,
-            InvertThreshold = layer.InvertThreshold
+            InvertThreshold = layer.InvertThreshold,
+            PixelSortCellWidth = layer.PixelSortCellWidth,
+            PixelSortCellHeight = layer.PixelSortCellHeight
         };
 
         foreach (var child in layer.Children)
@@ -14933,6 +16655,7 @@ public partial class MainWindow : Window
         {
             Id = layer.Id,
             Kind = layer.Kind.ToString(),
+            LayerType = layer.LayerType.ToString(),
             Name = layer.Name,
             Enabled = layer.Enabled,
             InputFunction = layer.InputFunction.ToString(),
@@ -14950,11 +16673,15 @@ public partial class MainWindow : Window
                 Id = mapping.Id,
                 Input = mapping.Input.ToString(),
                 Output = mapping.Output.ToString(),
-                Amount = mapping.Amount
+                Amount = mapping.Amount,
+                ThresholdMin = mapping.ThresholdMin,
+                ThresholdMax = mapping.ThresholdMax
             }).ToList(),
             ThresholdMin = layer.ThresholdMin,
             ThresholdMax = layer.ThresholdMax,
-            InvertThreshold = layer.InvertThreshold
+            InvertThreshold = layer.InvertThreshold,
+            PixelSortCellWidth = layer.PixelSortCellWidth,
+            PixelSortCellHeight = layer.PixelSortCellHeight
         };
 
         foreach (var child in layer.Children)
@@ -15486,7 +17213,7 @@ public partial class MainWindow : Window
         if (source.Type == CaptureSource.SourceType.SimGroup)
         {
             source.SimulationLayers.Clear();
-            foreach (var simulationLayer in FlattenSourceSimulationLayerSpecs(NormalizeSimulationLayerSpecs(model.SimulationLayers)))
+            foreach (var simulationLayer in FlattenSourceSimulationLayerSpecs(NormalizeSimulationLayerSpecs(model.SimulationLayers, fallbackToDefault: false)))
             {
                 source.SimulationLayers.Add(simulationLayer);
             }
@@ -15778,7 +17505,7 @@ public partial class MainWindow : Window
         source.SimulationLayers.Clear();
         if (source.Type == CaptureSource.SourceType.SimGroup && config.SimulationLayers.Count > 0)
         {
-            foreach (var simulationLayer in FlattenSourceSimulationLayerSpecs(NormalizeSimulationLayerSpecs(config.SimulationLayers)))
+            foreach (var simulationLayer in FlattenSourceSimulationLayerSpecs(NormalizeSimulationLayerSpecs(config.SimulationLayers, fallbackToDefault: false)))
             {
                 source.SimulationLayers.Add(simulationLayer);
             }
@@ -15897,7 +17624,8 @@ public partial class MainWindow : Window
         {
             public Guid Id { get; set; }
             public string Kind { get; set; } = nameof(LayerEditorSimulationItemKind.Layer);
-            public string Name { get; set; } = "Simulation Layer";
+            public string LayerType { get; set; } = nameof(SimulationLayerType.Life);
+            public string Name { get; set; } = "Life Sim";
             public bool Enabled { get; set; } = true;
             public string InputFunction { get; set; } = SimulationInputFunction.Direct.ToString();
             public string BlendMode { get; set; } = MainWindow.BlendMode.Subtractive.ToString();
@@ -15913,6 +17641,10 @@ public partial class MainWindow : Window
             public double ThresholdMin { get; set; } = 0.35;
             public double ThresholdMax { get; set; } = 0.75;
             public bool InvertThreshold { get; set; }
+            public int PixelSortCellWidth { get; set; } = 12;
+            public int PixelSortCellHeight { get; set; } = 8;
+            public int PixelSortGridColumns { get; set; }
+            public int PixelSortGridRows { get; set; }
             public List<SimulationLayerConfig> Children { get; set; } = new();
         }
 
@@ -15922,6 +17654,8 @@ public partial class MainWindow : Window
             public string Input { get; set; } = nameof(SimulationReactiveInput.Level);
             public string Output { get; set; } = nameof(SimulationReactiveOutput.Opacity);
             public double Amount { get; set; } = 1.0;
+            public double ThresholdMin { get; set; }
+            public double ThresholdMax { get; set; } = 1.0;
         }
 
         public sealed class SourceConfig
@@ -16076,6 +17810,7 @@ public partial class MainWindow : Window
         public byte KeyColorR { get; set; }
         public byte KeyColorG { get; set; }
         public byte KeyColorB { get; set; }
+        public bool UsePinnedFrameForSmoke { get; set; }
         public bool RetryInitializationAttempted { get; set; }
         public long LastObservedFrameToken { get; set; }
 

@@ -109,6 +109,11 @@ internal sealed class WpfPresentationBackend : IDisposable
         return copy;
     }
 
+    public void RequestRedrawForSmoke()
+    {
+        _targetImage.InvalidateVisual();
+    }
+
     private void EnsureEffectResources()
     {
         if (_overlayBrush == null)

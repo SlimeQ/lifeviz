@@ -11,6 +11,7 @@ internal sealed class SimulationPresentationLayerData
     public IntPtr SharedTextureHandle { get; init; }
     public int Width { get; init; }
     public int Height { get; init; }
+    public bool PublishesStandaloneOutput { get; init; }
     public required int BlendMode { get; init; }
     public required float Opacity { get; init; }
     public float HueShiftDegrees { get; init; }
@@ -50,6 +51,8 @@ public partial class MainWindow
             bool invertComposite);
 
         byte[]? GetPresentedFrameCopyForSmoke();
+
+        void RequestPresentationRedrawForSmoke();
     }
 
     private sealed class NullRenderBackend : IRenderBackend
@@ -89,6 +92,10 @@ public partial class MainWindow
             bool invertComposite) => false;
 
         public byte[]? GetPresentedFrameCopyForSmoke() => null;
+
+        public void RequestPresentationRedrawForSmoke()
+        {
+        }
 
         public int PresentationDrawCount => 0;
 
@@ -137,6 +144,8 @@ public partial class MainWindow
             bool invertComposite) => false;
 
         public byte[]? GetPresentedFrameCopyForSmoke() => _presentationBackend.GetPresentedFrameCopyForSmoke();
+
+        public void RequestPresentationRedrawForSmoke() => _presentationBackend.RequestRedrawForSmoke();
 
         public int PresentationDrawCount => _presentationBackend.PresentCount;
 
@@ -214,6 +223,8 @@ public partial class MainWindow
                 invertComposite);
 
         public byte[]? GetPresentedFrameCopyForSmoke() => _presentationBackend.GetPresentedFrameCopyForSmoke();
+
+        public void RequestPresentationRedrawForSmoke() => _presentationBackend.RequestRedrawForSmoke();
 
         public int PresentationDrawCount => _presentationBackend.DrawCount;
 

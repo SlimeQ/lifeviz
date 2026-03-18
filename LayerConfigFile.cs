@@ -51,7 +51,8 @@ internal sealed class LayerConfigFile
                 new()
                 {
                     Id = Guid.NewGuid(),
-                    Name = "Positive",
+                    LayerType = nameof(LayerEditorSimulationLayerType.Life),
+                    Name = "Life Sim",
                     Enabled = true,
                     InputFunction = "Direct",
                     BlendMode = "Additive",
@@ -66,27 +67,9 @@ internal sealed class LayerConfigFile
                     ReactiveMappings = new List<LayerConfigReactiveMapping>(),
                     ThresholdMin = 0.35,
                     ThresholdMax = 0.75,
-                    InvertThreshold = false
-                },
-                new()
-                {
-                    Id = Guid.NewGuid(),
-                    Name = "Negative",
-                    Enabled = true,
-                    InputFunction = "Inverse",
-                    BlendMode = "Subtractive",
-                    InjectionMode = "Threshold",
-                    LifeMode = "NaiveGrayscale",
-                    BinningMode = "Fill",
-                    InjectionNoise = 0,
-                    LifeOpacity = 1.0,
-                    RgbHueShiftDegrees = 0,
-                    RgbHueShiftSpeedDegreesPerSecond = 0,
-                    AudioFrequencyHueShiftDegrees = 0,
-                    ReactiveMappings = new List<LayerConfigReactiveMapping>(),
-                    ThresholdMin = 0.35,
-                    ThresholdMax = 0.75,
-                    InvertThreshold = false
+                    InvertThreshold = false,
+                    PixelSortCellWidth = 12,
+                    PixelSortCellHeight = 8
                 }
             };
         }
@@ -226,8 +209,9 @@ internal sealed class LayerConfigFile
         {
             Id = layer.Id,
             Kind = layer.Kind.ToString(),
+            LayerType = layer.LayerType.ToString(),
             Name = string.IsNullOrWhiteSpace(layer.Name)
-                ? (layer.IsGroup ? "Sim Group" : "Simulation Layer")
+                ? (layer.IsGroup ? "Sim Group" : layer.TypeLabel)
                 : layer.Name,
             Enabled = layer.Enabled,
             InputFunction = string.IsNullOrWhiteSpace(layer.InputFunction) ? "Direct" : layer.InputFunction,
@@ -246,12 +230,16 @@ internal sealed class LayerConfigFile
                     Id = mapping.Id,
                     Input = string.IsNullOrWhiteSpace(mapping.Input) ? nameof(SimulationReactiveInput.Level) : mapping.Input,
                     Output = string.IsNullOrWhiteSpace(mapping.Output) ? nameof(SimulationReactiveOutput.Opacity) : mapping.Output,
-                    Amount = mapping.Amount
+                    Amount = mapping.Amount,
+                    ThresholdMin = mapping.ThresholdMin,
+                    ThresholdMax = mapping.ThresholdMax
                 })
                 .ToList(),
             ThresholdMin = Math.Clamp(layer.ThresholdMin, 0, 1),
             ThresholdMax = Math.Clamp(layer.ThresholdMax, 0, 1),
-            InvertThreshold = layer.InvertThreshold
+            InvertThreshold = layer.InvertThreshold,
+            PixelSortCellWidth = Math.Clamp(layer.PixelSortCellWidth, 1, 4096),
+            PixelSortCellHeight = Math.Clamp(layer.PixelSortCellHeight, 1, 4096)
         };
 
         foreach (var child in layer.Children)
@@ -342,7 +330,9 @@ internal sealed class LayerConfigFile
                 Output = string.IsNullOrWhiteSpace(mapping.Output) ? nameof(SimulationReactiveOutput.Opacity) : mapping.Output,
                 Amount = SimulationReactivity.ClampAmount(
                     ParseReactiveOutputOrDefault(mapping.Output, SimulationReactiveOutput.Opacity),
-                    mapping.Amount)
+                    mapping.Amount),
+                ThresholdMin = Math.Clamp(mapping.ThresholdMin, 0, 1),
+                ThresholdMax = Math.Clamp(mapping.ThresholdMax, 0, 1)
             })
             .ToList();
 
@@ -353,7 +343,9 @@ internal sealed class LayerConfigFile
                 Id = Guid.NewGuid(),
                 Input = nameof(SimulationReactiveInput.Frequency),
                 Output = nameof(SimulationReactiveOutput.HueShift),
-                Amount = Math.Clamp(layer.AudioFrequencyHueShiftDegrees, 0, 360)
+                Amount = Math.Clamp(layer.AudioFrequencyHueShiftDegrees, 0, 360),
+                ThresholdMin = 0,
+                ThresholdMax = 1
             });
         }
 
@@ -361,10 +353,11 @@ internal sealed class LayerConfigFile
         {
             Id = layer.Id == Guid.Empty ? Guid.NewGuid() : layer.Id,
             Kind = ParseSimulationItemKind(layer.Kind),
+            LayerType = ParseSimulationLayerType(layer.LayerType),
             Name = string.IsNullOrWhiteSpace(layer.Name)
                 ? (string.Equals(layer.Kind, nameof(LayerEditorSimulationItemKind.Group), StringComparison.OrdinalIgnoreCase)
                     ? "Sim Group"
-                    : "Simulation Layer")
+                    : ResolveDefaultSimulationLayerName(ParseSimulationLayerType(layer.LayerType)))
                 : layer.Name,
             Enabled = layer.Enabled,
             InputFunction = string.IsNullOrWhiteSpace(layer.InputFunction) ? "Direct" : layer.InputFunction,
@@ -381,6 +374,8 @@ internal sealed class LayerConfigFile
             ThresholdMin = Math.Clamp(layer.ThresholdMin, 0, 1),
             ThresholdMax = Math.Clamp(layer.ThresholdMax, 0, 1),
             InvertThreshold = layer.InvertThreshold,
+            PixelSortCellWidth = Math.Clamp(layer.PixelSortCellWidth > 0 ? layer.PixelSortCellWidth : layer.PixelSortGridColumns, 1, 4096),
+            PixelSortCellHeight = Math.Clamp(layer.PixelSortCellHeight > 0 ? layer.PixelSortCellHeight : layer.PixelSortGridRows, 1, 4096),
             Parent = parent
         };
 
@@ -432,6 +427,7 @@ internal sealed class LayerConfigFile
         {
             Id = layer.Id,
             Kind = nameof(LayerEditorSimulationItemKind.Layer),
+            LayerType = layer.LayerType,
             Name = layer.Name,
             Enabled = enabled,
             InputFunction = layer.InputFunction,
@@ -449,11 +445,15 @@ internal sealed class LayerConfigFile
                 Id = mapping.Id,
                 Input = mapping.Input,
                 Output = mapping.Output,
-                Amount = mapping.Amount
+                Amount = mapping.Amount,
+                ThresholdMin = mapping.ThresholdMin,
+                ThresholdMax = mapping.ThresholdMax
             }).ToList(),
             ThresholdMin = layer.ThresholdMin,
             ThresholdMax = layer.ThresholdMax,
-            InvertThreshold = layer.InvertThreshold
+            InvertThreshold = layer.InvertThreshold,
+            PixelSortCellWidth = layer.PixelSortCellWidth,
+            PixelSortCellHeight = layer.PixelSortCellHeight
         };
         target.Add(flattened);
     }
@@ -484,7 +484,8 @@ internal sealed class LayerConfigFile
             ["Positive"] = new LayerEditorSimulationLayer
             {
                 Id = Guid.NewGuid(),
-                Name = "Positive",
+                LayerType = LayerEditorSimulationLayerType.Life,
+                Name = "Life Sim",
                 Enabled = PositiveLayerEnabled,
                 InputFunction = "Direct",
                 BlendMode = positiveBlend,
@@ -499,27 +500,9 @@ internal sealed class LayerConfigFile
                 ReactiveMappings = new ObservableCollection<LayerEditorSimulationReactiveMapping>(),
                 ThresholdMin = 0.35,
                 ThresholdMax = 0.75,
-                InvertThreshold = false
-            },
-            ["Negative"] = new LayerEditorSimulationLayer
-            {
-                Id = Guid.NewGuid(),
-                Name = "Negative",
-                Enabled = NegativeLayerEnabled,
-                InputFunction = "Inverse",
-                BlendMode = negativeBlend,
-                InjectionMode = string.IsNullOrWhiteSpace(ProjectSettings?.InjectionMode) ? "Threshold" : ProjectSettings.InjectionMode,
-                LifeMode = string.IsNullOrWhiteSpace(ProjectSettings?.LifeMode) ? "NaiveGrayscale" : ProjectSettings.LifeMode,
-                BinningMode = string.IsNullOrWhiteSpace(ProjectSettings?.BinningMode) ? "Fill" : ProjectSettings.BinningMode,
-                InjectionNoise = Math.Clamp(ProjectSettings?.InjectionNoise ?? 0, 0, 1),
-                LifeOpacity = 1.0,
-                RgbHueShiftDegrees = ProjectSettings?.RgbHueShiftDegrees ?? 0,
-                RgbHueShiftSpeedDegreesPerSecond = ProjectSettings?.RgbHueShiftSpeedDegreesPerSecond ?? 0,
-                AudioFrequencyHueShiftDegrees = 0,
-                ReactiveMappings = new ObservableCollection<LayerEditorSimulationReactiveMapping>(),
-                ThresholdMin = 0.35,
-                ThresholdMax = 0.75,
-                InvertThreshold = false
+                InvertThreshold = false,
+                PixelSortCellWidth = 12,
+                PixelSortCellHeight = 8
             }
         };
 
@@ -595,6 +578,18 @@ internal sealed class LayerConfigFile
             ? parsed
             : LayerEditorSimulationItemKind.Layer;
     }
+
+    private static LayerEditorSimulationLayerType ParseSimulationLayerType(string? value)
+    {
+        return Enum.TryParse<LayerEditorSimulationLayerType>(value, true, out var parsed)
+            ? parsed
+            : LayerEditorSimulationLayerType.Life;
+    }
+
+    private static string ResolveDefaultSimulationLayerName(LayerEditorSimulationLayerType layerType)
+    {
+        return layerType == LayerEditorSimulationLayerType.PixelSort ? "Pixel Sort" : "Life Sim";
+    }
 }
 
 internal sealed class LayerConfigSource
@@ -640,7 +635,8 @@ internal sealed class LayerConfigSimulationLayer
 {
     public Guid Id { get; set; }
     public string Kind { get; set; } = nameof(LayerEditorSimulationItemKind.Layer);
-    public string Name { get; set; } = "Simulation Layer";
+    public string LayerType { get; set; } = nameof(LayerEditorSimulationLayerType.Life);
+    public string Name { get; set; } = "Life Sim";
     public bool Enabled { get; set; } = true;
     public string InputFunction { get; set; } = "Direct";
     public string BlendMode { get; set; } = "Subtractive";
@@ -656,6 +652,10 @@ internal sealed class LayerConfigSimulationLayer
     public double ThresholdMin { get; set; } = 0.35;
     public double ThresholdMax { get; set; } = 0.75;
     public bool InvertThreshold { get; set; }
+    public int PixelSortCellWidth { get; set; } = 12;
+    public int PixelSortCellHeight { get; set; } = 8;
+    public int PixelSortGridColumns { get; set; }
+    public int PixelSortGridRows { get; set; }
     public List<LayerConfigSimulationLayer> Children { get; set; } = new();
 }
 
@@ -665,6 +665,8 @@ internal sealed class LayerConfigReactiveMapping
     public string Input { get; set; } = nameof(SimulationReactiveInput.Level);
     public string Output { get; set; } = nameof(SimulationReactiveOutput.Opacity);
     public double Amount { get; set; } = 1.0;
+    public double ThresholdMin { get; set; }
+    public double ThresholdMax { get; set; } = 1.0;
 }
 
 internal sealed class LayerConfigProjectSettings

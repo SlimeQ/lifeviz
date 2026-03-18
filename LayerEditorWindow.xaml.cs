@@ -115,7 +115,7 @@ public partial class LayerEditorWindow : Window
                                  SelectedSimulationReactiveMappingsGroupBox.DataContext is LayerEditorSimulationLayer visibleLayer &&
                                  visibleLayer.Id == first.Id;
 
-        AddSimulationLayer("Direct");
+        AddSimulationLayer(LayerEditorSimulationLayerType.Life);
         var second = GetSelectedSimulationLayer();
         if (second == null || ReferenceEquals(second, first))
         {
@@ -232,6 +232,62 @@ public partial class LayerEditorWindow : Window
         return sourceRemoved && after.totalLayers == 0 && after.enabledLayers == 0;
     }
 
+    internal bool RunPixelSortEditorRoundTripSmoke()
+    {
+        RefreshFromSources();
+        var simulationSource = EnsureSimulationSourceForSmoke();
+        if (simulationSource == null)
+        {
+            Logger.Warn("Pixel-sort editor round-trip smoke: missing sim-group source.");
+            return false;
+        }
+
+        SetSelectedSource(simulationSource);
+        AddSimulationLayer(LayerEditorSimulationLayerType.PixelSort);
+        var addedLayer = GetSelectedSimulationLayer();
+        if (addedLayer == null)
+        {
+            Logger.Warn("Pixel-sort editor round-trip smoke: add did not select a new layer.");
+            return false;
+        }
+
+        Guid addedLayerId = addedLayer.Id;
+        addedLayer.PixelSortCellWidth = 19;
+        addedLayer.PixelSortCellHeight = 11;
+        ApplySimulationLayerSettingsLive(force: true);
+        Dispatcher.Invoke(() => { }, DispatcherPriority.Background);
+
+        bool runtimeBeforeRefreshOk = _owner.TryGetSimulationLayerRuntimeInfoForSmoke(
+            addedLayerId,
+            out var runtimeTypeBeforeRefresh,
+            out var runtimeColumnsBeforeRefresh,
+            out var runtimeRowsBeforeRefresh) &&
+            string.Equals(runtimeTypeBeforeRefresh, "PixelSort", StringComparison.Ordinal) &&
+            runtimeColumnsBeforeRefresh == 19 &&
+            runtimeRowsBeforeRefresh == 11;
+
+        RefreshFromSources(simulationSource.Id);
+        var refreshedSource = EnumerateSources(_viewModel.Sources).FirstOrDefault(source => source.Id == simulationSource.Id);
+        var refreshedLayer = refreshedSource == null ? null : FindSimulationLayerById(refreshedSource.SimulationLayers, addedLayerId);
+        bool editorRefreshOk = refreshedLayer?.LayerType == LayerEditorSimulationLayerType.PixelSort &&
+                               refreshedLayer.PixelSortCellWidth == 19 &&
+                               refreshedLayer.PixelSortCellHeight == 11;
+
+        bool runtimeAfterRefreshOk = _owner.TryGetSimulationLayerRuntimeInfoForSmoke(
+            addedLayerId,
+            out var runtimeTypeAfterRefresh,
+            out var runtimeColumnsAfterRefresh,
+            out var runtimeRowsAfterRefresh) &&
+            string.Equals(runtimeTypeAfterRefresh, "PixelSort", StringComparison.Ordinal) &&
+            runtimeColumnsAfterRefresh == 19 &&
+            runtimeRowsAfterRefresh == 11;
+
+        Logger.Info(
+            $"Pixel-sort editor round-trip smoke: runtimeBeforeRefresh={runtimeBeforeRefreshOk}, " +
+            $"editorRefresh={editorRefreshOk}, runtimeAfterRefresh={runtimeAfterRefreshOk}.");
+        return runtimeBeforeRefreshOk && editorRefreshOk && runtimeAfterRefreshOk;
+    }
+
     private LayerEditorSource? EnsureSimulationSourceForSmoke()
     {
         var simulationSource = EnumerateSources(_viewModel.Sources).FirstOrDefault(source => source.IsSimulationGroup);
@@ -248,7 +304,16 @@ public partial class LayerEditorWindow : Window
 
         _owner.AddSimulationGroupFromEditor(null);
         RefreshFromSources();
-        return EnumerateSources(_viewModel.Sources).FirstOrDefault(source => source.IsSimulationGroup);
+        simulationSource = EnumerateSources(_viewModel.Sources).FirstOrDefault(source => source.IsSimulationGroup);
+        if (simulationSource != null && simulationSource.SimulationLayers.Count == 0)
+        {
+            SetSelectedSource(simulationSource);
+            AddSimulationLayer(LayerEditorSimulationLayerType.Life);
+            Dispatcher.Invoke(() => { }, DispatcherPriority.Background);
+            simulationSource = EnumerateSources(_viewModel.Sources).FirstOrDefault(source => source.IsSimulationGroup);
+        }
+
+        return simulationSource;
     }
 
     private void RefreshFromSources(Guid? preferredSelectionId = null)
@@ -412,6 +477,7 @@ public partial class LayerEditorWindow : Window
         {
             Id = source.Id,
             Kind = source.Kind,
+            LayerType = source.LayerType,
             Name = source.Name,
             Enabled = source.Enabled,
             InputFunction = source.InputFunction,
@@ -428,7 +494,9 @@ public partial class LayerEditorWindow : Window
                 source.ReactiveMappings.Select(CloneReactiveMapping)),
             ThresholdMin = source.ThresholdMin,
             ThresholdMax = source.ThresholdMax,
-            InvertThreshold = source.InvertThreshold
+            InvertThreshold = source.InvertThreshold,
+            PixelSortCellWidth = source.PixelSortCellWidth,
+            PixelSortCellHeight = source.PixelSortCellHeight
         };
 
         foreach (var child in source.Children)
@@ -448,7 +516,9 @@ public partial class LayerEditorWindow : Window
             Id = source.Id,
             Input = source.Input,
             Output = source.Output,
-            Amount = source.Amount
+            Amount = source.Amount,
+            ThresholdMin = source.ThresholdMin,
+            ThresholdMax = source.ThresholdMax
         };
     }
 
@@ -574,7 +644,11 @@ public partial class LayerEditorWindow : Window
         }
     }
 
-    private bool ShouldApplyLive() => !_ownerIsShuttingDown && _viewModel.LiveMode && !_suppressLiveUpdates;
+    private bool ShouldApplyLive() =>
+        !ReferenceEquals(_viewModel, null) &&
+        !_ownerIsShuttingDown &&
+        !_suppressLiveUpdates &&
+        DataContext is LayerEditorViewModel { LiveMode: true };
 
     private bool EnsureLiveModeForVideoTransport()
     {
@@ -930,13 +1004,13 @@ public partial class LayerEditorWindow : Window
         SetSelectedSimulationLayer(e.NewValue as LayerEditorSimulationLayer);
     }
 
-    private void AddSimulationLayerDirect_Click(object sender, RoutedEventArgs e) => AddSimulationLayer("Direct");
+    private void AddSimulationLayerDirect_Click(object sender, RoutedEventArgs e) => AddSimulationLayer(LayerEditorSimulationLayerType.Life);
 
-    private void AddSimulationLayerInverse_Click(object sender, RoutedEventArgs e) => AddSimulationLayer("Inverse");
+    private void AddSimulationPixelSort_Click(object sender, RoutedEventArgs e) => AddSimulationLayer(LayerEditorSimulationLayerType.PixelSort);
 
     private void AddSimulationGroup_Click(object sender, RoutedEventArgs e) => AddSimulationGroup();
 
-    private void AddSimulationLayer(string inputFunction)
+    private void AddSimulationLayer(LayerEditorSimulationLayerType layerType)
     {
         var simulationSource = GetSelectedSimulationSource();
         var simulationLayers = simulationSource?.SimulationLayers;
@@ -945,9 +1019,9 @@ public partial class LayerEditorWindow : Window
             return;
         }
 
-        string baseName = string.Equals(inputFunction, "Inverse", StringComparison.OrdinalIgnoreCase)
-            ? "Inverse Layer"
-            : "Simulation Layer";
+        string baseName = layerType == LayerEditorSimulationLayerType.PixelSort
+            ? "Pixel Sort"
+            : "Life Sim";
         int suffix = 1;
         string nextName = baseName;
         while (EnumerateSimulationLayers(simulationLayers).Any(layer => string.Equals(layer.Name, nextName, StringComparison.OrdinalIgnoreCase)))
@@ -961,10 +1035,12 @@ public partial class LayerEditorWindow : Window
         var newLayer = new LayerEditorSimulationLayer
         {
             Id = Guid.NewGuid(),
+            LayerType = layerType,
             Name = nextName,
             Enabled = true,
-            InputFunction = string.Equals(inputFunction, "Inverse", StringComparison.OrdinalIgnoreCase) ? "Inverse" : "Direct",
-            BlendMode = string.Equals(inputFunction, "Inverse", StringComparison.OrdinalIgnoreCase) ? "Subtractive" : "Additive",
+            InputFunction = "Direct",
+            BlendMode = selectedSimulationLayer?.BlendMode
+                ?? (layerType == LayerEditorSimulationLayerType.PixelSort ? "Normal" : "Additive"),
             InjectionMode = selectedSimulationLayer?.InjectionMode ?? "Threshold",
             LifeMode = selectedSimulationLayer?.LifeMode ?? "NaiveGrayscale",
             BinningMode = selectedSimulationLayer?.BinningMode ?? "Fill",
@@ -976,7 +1052,9 @@ public partial class LayerEditorWindow : Window
             ReactiveMappings = new ObservableCollection<LayerEditorSimulationReactiveMapping>(),
             ThresholdMin = selectedSimulationLayer?.ThresholdMin ?? 0.35,
             ThresholdMax = selectedSimulationLayer?.ThresholdMax ?? 0.75,
-            InvertThreshold = selectedSimulationLayer?.InvertThreshold ?? false
+            InvertThreshold = selectedSimulationLayer?.InvertThreshold ?? false,
+            PixelSortCellWidth = selectedSimulationLayer?.PixelSortCellWidth ?? 12,
+            PixelSortCellHeight = selectedSimulationLayer?.PixelSortCellHeight ?? 8
         };
         AttachReactiveMappingHandlers(newLayer);
 
@@ -988,7 +1066,7 @@ public partial class LayerEditorWindow : Window
 
         if (ShouldApplyLive())
         {
-            ApplySimulationLayerSettingsLive();
+            ApplySimulationLayerSettingsLive(force: true);
         }
     }
 
@@ -1025,7 +1103,7 @@ public partial class LayerEditorWindow : Window
 
         if (ShouldApplyLive())
         {
-            ApplySimulationLayerSettingsLive();
+            ApplySimulationLayerSettingsLive(force: true);
         }
     }
 
@@ -1060,7 +1138,7 @@ public partial class LayerEditorWindow : Window
 
         if (ShouldApplyLive())
         {
-            ApplySimulationLayerSettingsLive();
+            ApplySimulationLayerSettingsLive(force: true);
         }
     }
 
@@ -1094,7 +1172,7 @@ public partial class LayerEditorWindow : Window
         SetSelectedSimulationLayer(selected);
         if (ShouldApplyLive())
         {
-            ApplySimulationLayerSettingsLive();
+            ApplySimulationLayerSettingsLive(force: true);
         }
     }
 
@@ -1280,6 +1358,14 @@ public partial class LayerEditorWindow : Window
         }
     }
 
+    private void SimulationLayerPixelSortGrid_Changed(object sender, RoutedPropertyChangedEventArgs<double> e)
+    {
+        if (ShouldApplyLive())
+        {
+            ApplySimulationLayerSettingsLive();
+        }
+    }
+
     private void AddSimulationReactiveMapping_Click(object sender, RoutedEventArgs e)
     {
         var layer = GetSelectedSimulationLayer();
@@ -1293,7 +1379,9 @@ public partial class LayerEditorWindow : Window
             Id = Guid.NewGuid(),
             Input = nameof(SimulationReactiveInput.Level),
             Output = nameof(SimulationReactiveOutput.Opacity),
-            Amount = 1.0
+            Amount = 1.0,
+            ThresholdMin = 0.0,
+            ThresholdMax = 1.0
         };
         mapping.PropertyChanged += ReactiveMapping_PropertyChanged;
         layer.ReactiveMappings.Add(mapping);
@@ -1343,9 +1431,18 @@ public partial class LayerEditorWindow : Window
         }
     }
 
-    private void ApplySimulationLayerSettingsLive()
+    private void SimulationReactiveMappingThreshold_Changed(object sender, RoutedPropertyChangedEventArgs<double> e)
     {
-        if (_suppressSimulationLayerBindingApply)
+        GetSelectedSimulationLayer()?.NotifyDetailsChanged();
+        if (ShouldApplyLive())
+        {
+            ApplySimulationLayerSettingsLive();
+        }
+    }
+
+    private void ApplySimulationLayerSettingsLive(bool force = false)
+    {
+        if (_suppressSimulationLayerBindingApply && !force)
         {
             TraceSelection("ApplySimulationLayerSettingsLive suppressed during sim-layer selection bind.");
             return;
@@ -1929,7 +2026,7 @@ public partial class LayerEditorWindow : Window
 
             case LayerEditorSourceKind.SimGroup:
             {
-                var source = new LayerEditorSource
+                return new LayerEditorSource
                 {
                     Id = Guid.NewGuid(),
                     Kind = LayerEditorSourceKind.SimGroup,
@@ -1941,11 +2038,6 @@ public partial class LayerEditorWindow : Window
                     KeyColorHex = "#000000",
                     KeyTolerance = 0.1
                 };
-                source.SimulationLayers.Add(BuildDefaultSimulationLayer("Positive", "Direct", "Additive"));
-                source.SimulationLayers.Add(BuildDefaultSimulationLayer("Negative", "Inverse", "Subtractive"));
-                AttachReactiveMappingHandlers(source.SimulationLayers[0]);
-                AttachReactiveMappingHandlers(source.SimulationLayers[1]);
-                return source;
             }
 
             case LayerEditorSourceKind.Window:
@@ -2268,15 +2360,16 @@ public partial class LayerEditorWindow : Window
         return null;
     }
 
-    private static LayerEditorSimulationLayer BuildDefaultSimulationLayer(string name, string inputFunction, string blendMode)
+    private static LayerEditorSimulationLayer BuildDefaultSimulationLayer(string name, LayerEditorSimulationLayerType layerType)
     {
         return new LayerEditorSimulationLayer
         {
             Id = Guid.NewGuid(),
+            LayerType = layerType,
             Name = name,
             Enabled = true,
-            InputFunction = inputFunction,
-            BlendMode = blendMode,
+            InputFunction = "Direct",
+            BlendMode = layerType == LayerEditorSimulationLayerType.PixelSort ? "Normal" : "Additive",
             InjectionMode = "Threshold",
             LifeMode = "NaiveGrayscale",
             BinningMode = "Fill",
@@ -2288,7 +2381,9 @@ public partial class LayerEditorWindow : Window
             ReactiveMappings = new ObservableCollection<LayerEditorSimulationReactiveMapping>(),
             ThresholdMin = 0.35,
             ThresholdMax = 0.75,
-            InvertThreshold = false
+            InvertThreshold = false,
+            PixelSortCellWidth = 12,
+            PixelSortCellHeight = 8
         };
     }
 

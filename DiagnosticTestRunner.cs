@@ -30,6 +30,7 @@ internal static class DiagnosticTestRunner
             string target = args[1].Trim();
             exitCode = target.ToLowerInvariant() switch
             {
+                "current-scene-hover-presentation" => RunCurrentSceneHoverPresentationDiagnostic(),
                 "profile-current-scene-visible" => RunCurrentSceneProfileDiagnostic(visibleWindow: true, forcedRows: null, fullscreen: false),
                 "profile-current-scene-fullscreen" => RunCurrentSceneProfileDiagnostic(visibleWindow: true, forcedRows: null, fullscreen: true),
                 "profile-current-scene-interaction" => RunCurrentSceneInteractionDiagnostic(),
@@ -38,7 +39,7 @@ internal static class DiagnosticTestRunner
                 "profile-current-scene-fullscreen-presets" => RunCurrentScenePresetProfileDiagnostic(visibleWindow: true, fullscreen: true),
                 _ when TryRunCurrentScenePresetProfileTarget(target, out int presetExitCode) => presetExitCode,
                 _ => throw new ArgumentException(
-                    $"Unknown diagnostic target '{target}'. Expected profile-current-scene-visible, profile-current-scene-fullscreen, profile-current-scene-interaction, profile-current-scene-soak-720, " +
+                    $"Unknown diagnostic target '{target}'. Expected current-scene-hover-presentation, profile-current-scene-visible, profile-current-scene-fullscreen, profile-current-scene-interaction, profile-current-scene-soak-720, " +
                     "profile-current-scene-visible-presets, profile-current-scene-fullscreen-presets, " +
                     "profile-current-scene-visible-<144|240|480|720|1080|1440|2160>, or profile-current-scene-fullscreen-<144|240|480|720|1080|1440|2160>.")
             };
@@ -215,6 +216,83 @@ internal static class DiagnosticTestRunner
         }
 
         Logger.Info("Diagnostic current-scene profile passed.");
+        return result;
+    }
+
+    private static int RunCurrentSceneHoverPresentationDiagnostic()
+    {
+        Logger.Info("Running diagnostic current-scene hover presentation test.");
+
+        Exception? failure = null;
+        bool closePending = false;
+        bool ok = false;
+        var app = new App();
+        app.InitializeComponent();
+        app.ShutdownMode = ShutdownMode.OnExplicitShutdown;
+        app.DispatcherUnhandledException += (_, args) =>
+        {
+            if (closePending && IsIgnorableDrawingSurfaceShutdownException(args.Exception))
+            {
+                args.Handled = true;
+                return;
+            }
+
+            failure ??= args.Exception;
+            args.Handled = true;
+            app.Shutdown(1);
+        };
+
+        app.Startup += (_, _) =>
+        {
+            var waitForWindow = new DispatcherTimer(DispatcherPriority.ApplicationIdle)
+            {
+                Interval = TimeSpan.FromMilliseconds(50)
+            };
+
+            waitForWindow.Tick += (_, _) =>
+            {
+                if (app.MainWindow is not MainWindow window)
+                {
+                    return;
+                }
+
+                waitForWindow.Stop();
+
+                window.Dispatcher.BeginInvoke(new Func<Task>(async () =>
+                {
+                    try
+                    {
+                        await Task.Delay(TimeSpan.FromSeconds(4));
+                        ok = window.RunCurrentSceneHoverPresentationSmoke();
+                        if (!ok)
+                        {
+                            throw new InvalidOperationException("Diagnostic current-scene hover presentation test failed.");
+                        }
+
+                        closePending = true;
+                        window.Close();
+                        app.Shutdown(0);
+                    }
+                    catch (Exception ex)
+                    {
+                        failure ??= ex;
+                        closePending = true;
+                        window.Close();
+                        app.Shutdown(1);
+                    }
+                }), DispatcherPriority.ApplicationIdle);
+            };
+
+            waitForWindow.Start();
+        };
+
+        int result = app.Run();
+        if (failure != null)
+        {
+            throw new InvalidOperationException("Diagnostic current-scene hover presentation test failed.", failure);
+        }
+
+        Logger.Info("Diagnostic current-scene hover presentation test passed.");
         return result;
     }
 

@@ -23,6 +23,12 @@ internal enum LayerEditorSimulationItemKind
     Group
 }
 
+internal enum LayerEditorSimulationLayerType
+{
+    Life,
+    PixelSort
+}
+
 internal sealed class LayerEditorOption
 {
     public LayerEditorOption(string value, string label)
@@ -153,7 +159,9 @@ internal static class LayerEditorOptions
         new LayerEditorOption(nameof(SimulationReactiveOutput.HueSpeed), "Hue Speed"),
         new LayerEditorOption(nameof(SimulationReactiveOutput.InjectionNoise), "Injection Noise"),
         new LayerEditorOption(nameof(SimulationReactiveOutput.ThresholdMin), "Threshold Min"),
-        new LayerEditorOption(nameof(SimulationReactiveOutput.ThresholdMax), "Threshold Max")
+        new LayerEditorOption(nameof(SimulationReactiveOutput.ThresholdMax), "Threshold Max"),
+        new LayerEditorOption(nameof(SimulationReactiveOutput.PixelSortCellWidth), "Cell Width"),
+        new LayerEditorOption(nameof(SimulationReactiveOutput.PixelSortCellHeight), "Cell Height")
     };
 }
 
@@ -755,6 +763,8 @@ internal sealed class LayerEditorSimulationReactiveMapping : LayerEditorNotify
     private string _input = nameof(SimulationReactiveInput.Level);
     private string _output = nameof(SimulationReactiveOutput.Opacity);
     private double _amount = 1.0;
+    private double _thresholdMin;
+    private double _thresholdMax = 1.0;
 
     public Guid Id
     {
@@ -808,45 +818,101 @@ internal sealed class LayerEditorSimulationReactiveMapping : LayerEditorNotify
         }
     }
 
+    public double ThresholdMin
+    {
+        get => _thresholdMin;
+        set
+        {
+            double clamped = Math.Clamp(value, 0, 1);
+            if (SetField(ref _thresholdMin, clamped))
+            {
+                if (_thresholdMax < clamped)
+                {
+                    _thresholdMax = clamped;
+                    OnPropertyChanged(nameof(ThresholdMax));
+                    OnPropertyChanged(nameof(ThresholdMaxDisplay));
+                }
+
+                OnPropertyChanged(nameof(ThresholdMinDisplay));
+                OnPropertyChanged(nameof(DisplayText));
+            }
+        }
+    }
+
+    public double ThresholdMax
+    {
+        get => _thresholdMax;
+        set
+        {
+            double clamped = Math.Clamp(value, 0, 1);
+            if (SetField(ref _thresholdMax, clamped))
+            {
+                if (_thresholdMin > clamped)
+                {
+                    _thresholdMin = clamped;
+                    OnPropertyChanged(nameof(ThresholdMin));
+                    OnPropertyChanged(nameof(ThresholdMinDisplay));
+                }
+
+                OnPropertyChanged(nameof(ThresholdMaxDisplay));
+                OnPropertyChanged(nameof(DisplayText));
+            }
+        }
+    }
+
     public bool IsHueShiftOutput => ParseOutput(Output) == SimulationReactiveOutput.HueShift;
     public bool IsHueSpeedOutput => ParseOutput(Output) == SimulationReactiveOutput.HueSpeed;
     public double AmountMaximum => ParseOutput(Output) switch
     {
         SimulationReactiveOutput.HueShift => 360.0,
         SimulationReactiveOutput.HueSpeed => 180.0,
+        SimulationReactiveOutput.PixelSortCellWidth => 50.0,
+        SimulationReactiveOutput.PixelSortCellHeight => 50.0,
         _ => 1.0
     };
     public double AmountTickFrequency => ParseOutput(Output) switch
     {
         SimulationReactiveOutput.HueShift => 15.0,
         SimulationReactiveOutput.HueSpeed => 10.0,
+        SimulationReactiveOutput.PixelSortCellWidth => 1.0,
+        SimulationReactiveOutput.PixelSortCellHeight => 1.0,
         _ => 0.05
     };
     public double AmountLargeChange => ParseOutput(Output) switch
     {
         SimulationReactiveOutput.HueShift => 15.0,
         SimulationReactiveOutput.HueSpeed => 10.0,
+        SimulationReactiveOutput.PixelSortCellWidth => 5.0,
+        SimulationReactiveOutput.PixelSortCellHeight => 5.0,
         _ => 0.1
     };
     public double AmountSmallChange => ParseOutput(Output) switch
     {
         SimulationReactiveOutput.HueShift => 1.0,
         SimulationReactiveOutput.HueSpeed => 1.0,
+        SimulationReactiveOutput.PixelSortCellWidth => 1.0,
+        SimulationReactiveOutput.PixelSortCellHeight => 1.0,
         _ => 0.05
     };
     public string AmountLabel => ParseOutput(Output) switch
     {
         SimulationReactiveOutput.HueShift => "Degrees",
         SimulationReactiveOutput.HueSpeed => "Deg/sec",
+        SimulationReactiveOutput.PixelSortCellWidth => "Max +Pixels",
+        SimulationReactiveOutput.PixelSortCellHeight => "Max +Pixels",
         _ => "Strength"
     };
     public string AmountDisplay => ParseOutput(Output) switch
     {
         SimulationReactiveOutput.HueShift => $"{Amount:0.#}deg",
         SimulationReactiveOutput.HueSpeed => $"{Amount:0.#}deg/s",
+        SimulationReactiveOutput.PixelSortCellWidth => $"+{Amount:0.#}px",
+        SimulationReactiveOutput.PixelSortCellHeight => $"+{Amount:0.#}px",
         _ => $"{Amount:P0}"
     };
-    public string DisplayText => $"{ResolveLabel(Input, LayerEditorOptions.SimulationReactiveInputs)} -> {ResolveLabel(Output, LayerEditorOptions.SimulationReactiveOutputs)} ({AmountDisplay})";
+    public string ThresholdMinDisplay => $"{ThresholdMin:P0}";
+    public string ThresholdMaxDisplay => $"{ThresholdMax:P0}";
+    public string DisplayText => $"{ResolveLabel(Input, LayerEditorOptions.SimulationReactiveInputs)} -> {ResolveLabel(Output, LayerEditorOptions.SimulationReactiveOutputs)} ({AmountDisplay}, In {ThresholdMinDisplay}-{ThresholdMaxDisplay})";
 
     public IReadOnlyList<LayerEditorOption> InputOptions => LayerEditorOptions.SimulationReactiveInputs;
     public IReadOnlyList<LayerEditorOption> OutputOptions => LayerEditorOptions.SimulationReactiveOutputs;
@@ -876,7 +942,8 @@ internal sealed class LayerEditorSimulationLayer : LayerEditorNotify
 {
     private Guid _id;
     private LayerEditorSimulationItemKind _kind = LayerEditorSimulationItemKind.Layer;
-    private string _name = "Simulation Layer";
+    private LayerEditorSimulationLayerType _layerType = LayerEditorSimulationLayerType.Life;
+    private string _name = "Life Sim";
     private bool _enabled = true;
     private string _inputFunction = "Direct";
     private string _blendMode = "Subtractive";
@@ -891,6 +958,8 @@ internal sealed class LayerEditorSimulationLayer : LayerEditorNotify
     private double _rgbHueShiftDegrees;
     private double _rgbHueShiftSpeedDegreesPerSecond;
     private double _audioFrequencyHueShiftDegrees;
+    private int _pixelSortCellWidth = 12;
+    private int _pixelSortCellHeight = 8;
     private ObservableCollection<LayerEditorSimulationReactiveMapping> _reactiveMappings = new();
     private ObservableCollection<LayerEditorSimulationLayer> _children = new();
     private bool _isExpanded = true;
@@ -927,6 +996,23 @@ internal sealed class LayerEditorSimulationLayer : LayerEditorNotify
             {
                 OnPropertyChanged(nameof(TreeLabel));
                 Parent?.NotifyDetailsChanged();
+            }
+        }
+    }
+
+    public LayerEditorSimulationLayerType LayerType
+    {
+        get => _layerType;
+        set
+        {
+            if (SetField(ref _layerType, value))
+            {
+                OnPropertyChanged(nameof(TypeLabel));
+                OnPropertyChanged(nameof(IsLifeLayer));
+                OnPropertyChanged(nameof(IsPixelSortLayer));
+                OnPropertyChanged(nameof(KindLabel));
+                OnPropertyChanged(nameof(TreeLabel));
+                OnPropertyChanged(nameof(Details));
             }
         }
     }
@@ -1100,6 +1186,32 @@ internal sealed class LayerEditorSimulationLayer : LayerEditorNotify
         }
     }
 
+    public int PixelSortCellWidth
+    {
+        get => _pixelSortCellWidth;
+        set
+        {
+            int normalized = Math.Clamp(value, 1, 4096);
+            if (SetField(ref _pixelSortCellWidth, normalized))
+            {
+                OnPropertyChanged(nameof(Details));
+            }
+        }
+    }
+
+    public int PixelSortCellHeight
+    {
+        get => _pixelSortCellHeight;
+        set
+        {
+            int normalized = Math.Clamp(value, 1, 4096);
+            if (SetField(ref _pixelSortCellHeight, normalized))
+            {
+                OnPropertyChanged(nameof(Details));
+            }
+        }
+    }
+
     public ObservableCollection<LayerEditorSimulationReactiveMapping> ReactiveMappings
     {
         get => _reactiveMappings;
@@ -1148,15 +1260,23 @@ internal sealed class LayerEditorSimulationLayer : LayerEditorNotify
 
     public bool IsGroup => Kind == LayerEditorSimulationItemKind.Group;
 
-    public string KindLabel => IsGroup ? "Sim Group" : "Simulation Layer";
+    public bool IsLifeLayer => !IsGroup && LayerType == LayerEditorSimulationLayerType.Life;
+
+    public bool IsPixelSortLayer => !IsGroup && LayerType == LayerEditorSimulationLayerType.PixelSort;
+
+    public string TypeLabel => LayerType == LayerEditorSimulationLayerType.PixelSort ? "Pixel Sort" : "Life Sim";
+
+    public string KindLabel => IsGroup ? "Sim Group" : TypeLabel;
 
     public string TreeLabel => string.IsNullOrWhiteSpace(Name)
-        ? (IsGroup ? "Sim Group" : "Simulation Layer")
+        ? (IsGroup ? "Sim Group" : TypeLabel)
         : Name;
 
     public string Details => IsGroup
         ? $"{(Enabled ? "Enabled" : "Disabled")} | {Children.Count} item{(Children.Count == 1 ? string.Empty : "s")}"
-        : $"{(Enabled ? "Enabled" : "Disabled")} | {InputFunction} | {BlendMode} | {LifeMode} | {BinningMode} | Noise {InjectionNoise:P0} | Opacity {LifeOpacity:P0} | Hue {RgbHueShiftDegrees:0.#}deg {RgbHueShiftSpeedDegreesPerSecond:+0.#;-0.#;0}deg/s | Reactive {ReactiveMappings.Count} | {InjectionMode} | Th {ThresholdMin:P0}-{ThresholdMax:P0}{(InvertThreshold ? " inv" : string.Empty)}";
+        : LayerType == LayerEditorSimulationLayerType.PixelSort
+            ? $"{(Enabled ? "Enabled" : "Disabled")} | Pixel Sort | {BlendMode} | Cell {PixelSortCellWidth}x{PixelSortCellHeight} | Opacity {LifeOpacity:P0} | Hue {RgbHueShiftDegrees:0.#}deg {RgbHueShiftSpeedDegreesPerSecond:+0.#;-0.#;0}deg/s | Reactive {ReactiveMappings.Count}"
+            : $"{(Enabled ? "Enabled" : "Disabled")} | {InputFunction} | {BlendMode} | {LifeMode} | {BinningMode} | Noise {InjectionNoise:P0} | Opacity {LifeOpacity:P0} | Hue {RgbHueShiftDegrees:0.#}deg {RgbHueShiftSpeedDegreesPerSecond:+0.#;-0.#;0}deg/s | Reactive {ReactiveMappings.Count} | {InjectionMode} | Th {ThresholdMin:P0}-{ThresholdMax:P0}{(InvertThreshold ? " inv" : string.Empty)}";
 
     public IReadOnlyList<LayerEditorOption> BlendModeOptions => LayerEditorOptions.BlendModes;
     public IReadOnlyList<LayerEditorOption> InputFunctionOptions => LayerEditorOptions.SimulationInputFunctions;

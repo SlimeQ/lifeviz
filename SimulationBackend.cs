@@ -24,3 +24,22 @@ internal interface ISimulationBackend : IDisposable
     void InjectFrame(bool[,] frame);
     void InjectRgbFrame(bool[,] red, bool[,] green, bool[,] blue);
 }
+
+internal interface IGpuSimulationSurfaceBackend : ISimulationBackend
+{
+    bool TryInjectCompositeSurface(
+        GpuCompositeSurface? compositeSurface,
+        double min,
+        double max,
+        bool invertThreshold,
+        GameOfLifeEngine.InjectionMode mode,
+        double noiseProbability,
+        int period,
+        int pulseStep,
+        bool invertInput,
+        double hueShiftDegrees = 0.0);
+
+    bool TryGetSharedColorTexture(out IntPtr sharedHandle, out int width, out int height);
+
+    bool TryGetColorSurface(out GpuCompositeSurface? surface);
+}

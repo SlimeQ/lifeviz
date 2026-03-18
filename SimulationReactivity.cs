@@ -23,7 +23,9 @@ internal enum SimulationReactiveOutput
     HueSpeed,
     InjectionNoise,
     ThresholdMin,
-    ThresholdMax
+    ThresholdMax,
+    PixelSortCellWidth,
+    PixelSortCellHeight
 }
 
 internal sealed class SimulationReactiveMapping
@@ -32,6 +34,8 @@ internal sealed class SimulationReactiveMapping
     public SimulationReactiveInput Input { get; set; } = SimulationReactiveInput.Level;
     public SimulationReactiveOutput Output { get; set; } = SimulationReactiveOutput.Opacity;
     public double Amount { get; set; } = 1.0;
+    public double ThresholdMin { get; set; }
+    public double ThresholdMax { get; set; } = 1.0;
 
     public SimulationReactiveMapping Clone()
     {
@@ -40,7 +44,9 @@ internal sealed class SimulationReactiveMapping
             Id = Id,
             Input = Input,
             Output = Output,
-            Amount = Amount
+            Amount = Amount,
+            ThresholdMin = ThresholdMin,
+            ThresholdMax = ThresholdMax
         };
     }
 }
@@ -55,6 +61,8 @@ internal static class SimulationReactivity
         {
             SimulationReactiveOutput.HueShift => Math.Clamp(amount, 0, 360),
             SimulationReactiveOutput.HueSpeed => Math.Clamp(amount, 0, 180),
+            SimulationReactiveOutput.PixelSortCellWidth => Math.Clamp(amount, 0, 50),
+            SimulationReactiveOutput.PixelSortCellHeight => Math.Clamp(amount, 0, 50),
             _ => Math.Clamp(amount, 0, 1)
         };
     }

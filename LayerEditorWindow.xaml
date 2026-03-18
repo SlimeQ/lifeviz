@@ -881,10 +881,10 @@
                                                    Foreground="#A0A0A0"
                                                    Margin="0,0,0,8" />
                                         <WrapPanel Margin="0,0,0,8">
-                                            <Button Content="Add Direct Layer"
+                                            <Button Content="Add Life Sim"
                                                     Click="AddSimulationLayerDirect_Click" />
-                                            <Button Content="Add Inverse Layer"
-                                                    Click="AddSimulationLayerInverse_Click" />
+                                            <Button Content="Add Pixel Sort Layer"
+                                                    Click="AddSimulationPixelSort_Click" />
                                             <Button Content="Move Up"
                                                     Click="MoveSimulationLayerUp_Click" />
                                             <Button Content="Move Down"
@@ -940,6 +940,11 @@
                                                              Margin="0,4,0,8"
                                                              TextChanged="SimulationLayerName_Changed" />
 
+                                                    <TextBlock Text="Type" />
+                                                    <TextBlock Text="{Binding TypeLabel}"
+                                                               Foreground="#A0A0A0"
+                                                               Margin="0,4,0,8" />
+
                                                     <CheckBox x:Name="SelectedSimulationEnabledCheckBox"
                                                               Content="Enabled"
                                                               IsChecked="{Binding Enabled}"
@@ -966,16 +971,6 @@
 
                                                         <WrapPanel>
                                                             <StackPanel Orientation="Horizontal" Margin="0,0,12,6">
-                                                                <TextBlock Text="Input" VerticalAlignment="Center" />
-                                                                <ComboBox ItemsSource="{Binding InputFunctionOptions}"
-                                                                          DisplayMemberPath="Label"
-                                                                          SelectedValuePath="Value"
-                                                                          SelectedValue="{Binding InputFunction}"
-                                                                          Margin="8,0,0,0"
-                                                                          Width="180"
-                                                                          SelectionChanged="SimulationLayerInputFunction_Changed" />
-                                                            </StackPanel>
-                                                            <StackPanel Orientation="Horizontal" Margin="0,0,12,6">
                                                                 <TextBlock Text="Blend" VerticalAlignment="Center" />
                                                                 <ComboBox ItemsSource="{Binding BlendModeOptions}"
                                                                           DisplayMemberPath="Label"
@@ -989,39 +984,6 @@
 
                                                         <WrapPanel>
                                                             <StackPanel Orientation="Horizontal" Margin="0,0,12,6">
-                                                                <TextBlock Text="Injection" VerticalAlignment="Center" />
-                                                                <ComboBox ItemsSource="{Binding InjectionModeOptions}"
-                                                                          DisplayMemberPath="Label"
-                                                                          SelectedValuePath="Value"
-                                                                          SelectedValue="{Binding InjectionMode}"
-                                                                          Margin="8,0,0,0"
-                                                                          Width="180"
-                                                                          SelectionChanged="SimulationLayerInjectionMode_Changed" />
-                                                            </StackPanel>
-                                                            <StackPanel Orientation="Horizontal" Margin="0,0,12,6">
-                                                                <TextBlock Text="Life Mode" VerticalAlignment="Center" />
-                                                                <ComboBox ItemsSource="{Binding LifeModeOptions}"
-                                                                          DisplayMemberPath="Label"
-                                                                          SelectedValuePath="Value"
-                                                                          SelectedValue="{Binding LifeMode}"
-                                                                          Margin="8,0,0,0"
-                                                                          Width="180"
-                                                                          SelectionChanged="SimulationLayerLifeMode_Changed" />
-                                                            </StackPanel>
-                                                            <StackPanel Orientation="Horizontal" Margin="0,0,12,6">
-                                                                <TextBlock Text="Binning" VerticalAlignment="Center" />
-                                                                <ComboBox ItemsSource="{Binding BinningModeOptions}"
-                                                                          DisplayMemberPath="Label"
-                                                                          SelectedValuePath="Value"
-                                                                          SelectedValue="{Binding BinningMode}"
-                                                                          Margin="8,0,0,0"
-                                                                          Width="180"
-                                                                          SelectionChanged="SimulationLayerBinningMode_Changed" />
-                                                            </StackPanel>
-                                                        </WrapPanel>
-
-                                                        <WrapPanel>
-                                                            <StackPanel Orientation="Horizontal" Margin="0,0,12,6">
                                                                 <TextBlock Text="Opacity" VerticalAlignment="Center" />
                                                                 <Slider Minimum="0"
                                                                         Maximum="1"
@@ -1029,15 +991,6 @@
                                                                         Width="150"
                                                                         Margin="8,0,0,0"
                                                                         ValueChanged="SimulationLayerLifeOpacity_Changed" />
-                                                            </StackPanel>
-                                                            <StackPanel Orientation="Horizontal" Margin="0,0,12,6">
-                                                                <TextBlock Text="Noise" VerticalAlignment="Center" />
-                                                                <Slider Minimum="0"
-                                                                        Maximum="1"
-                                                                        Value="{Binding InjectionNoise}"
-                                                                        Width="150"
-                                                                        Margin="8,0,0,0"
-                                                                        ValueChanged="SimulationLayerInjectionNoise_Changed" />
                                                             </StackPanel>
                                                         </WrapPanel>
 
@@ -1061,6 +1014,122 @@
                                                                         ValueChanged="SimulationLayerHue_Changed" />
                                                             </StackPanel>
                                                         </WrapPanel>
+
+                                                        <StackPanel>
+                                                            <StackPanel.Style>
+                                                                <Style TargetType="StackPanel">
+                                                                    <Setter Property="Visibility" Value="Collapsed" />
+                                                                    <Style.Triggers>
+                                                                        <DataTrigger Binding="{Binding IsLifeLayer}" Value="True">
+                                                                            <Setter Property="Visibility" Value="Visible" />
+                                                                        </DataTrigger>
+                                                                    </Style.Triggers>
+                                                                </Style>
+                                                            </StackPanel.Style>
+
+                                                            <WrapPanel>
+                                                                <StackPanel Orientation="Horizontal" Margin="0,0,12,6">
+                                                                    <TextBlock Text="Input" VerticalAlignment="Center" />
+                                                                    <ComboBox ItemsSource="{Binding InputFunctionOptions}"
+                                                                              DisplayMemberPath="Label"
+                                                                              SelectedValuePath="Value"
+                                                                              SelectedValue="{Binding InputFunction}"
+                                                                              Margin="8,0,0,0"
+                                                                              Width="180"
+                                                                              SelectionChanged="SimulationLayerInputFunction_Changed" />
+                                                                </StackPanel>
+                                                                <StackPanel Orientation="Horizontal" Margin="0,0,12,6">
+                                                                    <TextBlock Text="Injection" VerticalAlignment="Center" />
+                                                                    <ComboBox ItemsSource="{Binding InjectionModeOptions}"
+                                                                              DisplayMemberPath="Label"
+                                                                              SelectedValuePath="Value"
+                                                                              SelectedValue="{Binding InjectionMode}"
+                                                                              Margin="8,0,0,0"
+                                                                              Width="180"
+                                                                              SelectionChanged="SimulationLayerInjectionMode_Changed" />
+                                                                </StackPanel>
+                                                            </WrapPanel>
+
+                                                            <WrapPanel>
+                                                                <StackPanel Orientation="Horizontal" Margin="0,0,12,6">
+                                                                    <TextBlock Text="Life Mode" VerticalAlignment="Center" />
+                                                                    <ComboBox ItemsSource="{Binding LifeModeOptions}"
+                                                                              DisplayMemberPath="Label"
+                                                                              SelectedValuePath="Value"
+                                                                              SelectedValue="{Binding LifeMode}"
+                                                                              Margin="8,0,0,0"
+                                                                              Width="180"
+                                                                              SelectionChanged="SimulationLayerLifeMode_Changed" />
+                                                                </StackPanel>
+                                                                <StackPanel Orientation="Horizontal" Margin="0,0,12,6">
+                                                                    <TextBlock Text="Binning" VerticalAlignment="Center" />
+                                                                    <ComboBox ItemsSource="{Binding BinningModeOptions}"
+                                                                              DisplayMemberPath="Label"
+                                                                              SelectedValuePath="Value"
+                                                                              SelectedValue="{Binding BinningMode}"
+                                                                              Margin="8,0,0,0"
+                                                                              Width="180"
+                                                                              SelectionChanged="SimulationLayerBinningMode_Changed" />
+                                                                </StackPanel>
+                                                                <StackPanel Orientation="Horizontal" Margin="0,0,12,6">
+                                                                    <TextBlock Text="Noise" VerticalAlignment="Center" />
+                                                                    <Slider Minimum="0"
+                                                                            Maximum="1"
+                                                                            Value="{Binding InjectionNoise}"
+                                                                            Width="150"
+                                                                            Margin="8,0,0,0"
+                                                                            ValueChanged="SimulationLayerInjectionNoise_Changed" />
+                                                                </StackPanel>
+                                                            </WrapPanel>
+                                                        </StackPanel>
+
+                                                        <StackPanel>
+                                                            <StackPanel.Style>
+                                                                <Style TargetType="StackPanel">
+                                                                    <Setter Property="Visibility" Value="Collapsed" />
+                                                                    <Style.Triggers>
+                                                                        <DataTrigger Binding="{Binding IsPixelSortLayer}" Value="True">
+                                                                            <Setter Property="Visibility" Value="Visible" />
+                                                                        </DataTrigger>
+                                                                    </Style.Triggers>
+                                                                </Style>
+                                                            </StackPanel.Style>
+
+                                                            <TextBlock Text="Per-frame luminance sort inside each cell."
+                                                                       Foreground="#A0A0A0"
+                                                                       Margin="0,0,0,8" />
+
+                                                            <WrapPanel>
+                                                                <StackPanel Orientation="Horizontal" Margin="0,0,12,6">
+                                                                    <TextBlock Text="Cell Width" VerticalAlignment="Center" />
+                                                                    <Slider Minimum="1"
+                                                                            Maximum="512"
+                                                                            TickFrequency="1"
+                                                                            IsSnapToTickEnabled="True"
+                                                                            Value="{Binding PixelSortCellWidth}"
+                                                                            Width="150"
+                                                                            Margin="8,0,0,0"
+                                                                            ValueChanged="SimulationLayerPixelSortGrid_Changed" />
+                                                                    <TextBlock Text="{Binding PixelSortCellWidth}"
+                                                                               Margin="8,0,0,0"
+                                                                               VerticalAlignment="Center" />
+                                                                </StackPanel>
+                                                                <StackPanel Orientation="Horizontal" Margin="0,0,12,6">
+                                                                    <TextBlock Text="Cell Height" VerticalAlignment="Center" />
+                                                                    <Slider Minimum="1"
+                                                                            Maximum="512"
+                                                                            TickFrequency="1"
+                                                                            IsSnapToTickEnabled="True"
+                                                                            Value="{Binding PixelSortCellHeight}"
+                                                                            Width="150"
+                                                                            Margin="8,0,0,0"
+                                                                            ValueChanged="SimulationLayerPixelSortGrid_Changed" />
+                                                                    <TextBlock Text="{Binding PixelSortCellHeight}"
+                                                                               Margin="8,0,0,0"
+                                                                               VerticalAlignment="Center" />
+                                                                </StackPanel>
+                                                            </WrapPanel>
+                                                        </StackPanel>
 
                                                         <GroupBox x:Name="SelectedSimulationReactiveMappingsGroupBox"
                                                                   Header="Reactive Mappings"
@@ -1159,6 +1228,44 @@
                                                                                                        Margin="8,0,0,0"
                                                                                                        VerticalAlignment="Center" />
                                                                                         </StackPanel>
+
+                                                                                        <StackPanel Orientation="Horizontal"
+                                                                                                    Margin="0,0,12,6">
+                                                                                            <TextBlock Text="Input Min"
+                                                                                                       VerticalAlignment="Center" />
+                                                                                            <Slider Minimum="0"
+                                                                                                    Maximum="1"
+                                                                                                    TickFrequency="0.05"
+                                                                                                    SmallChange="0.01"
+                                                                                                    LargeChange="0.05"
+                                                                                                    IsSnapToTickEnabled="False"
+                                                                                                    Value="{Binding ThresholdMin}"
+                                                                                                    Width="120"
+                                                                                                    Margin="8,0,0,0"
+                                                                                                    ValueChanged="SimulationReactiveMappingThreshold_Changed" />
+                                                                                            <TextBlock Text="{Binding ThresholdMinDisplay}"
+                                                                                                       Margin="8,0,0,0"
+                                                                                                       VerticalAlignment="Center" />
+                                                                                        </StackPanel>
+
+                                                                                        <StackPanel Orientation="Horizontal"
+                                                                                                    Margin="0,0,12,6">
+                                                                                            <TextBlock Text="Input Max"
+                                                                                                       VerticalAlignment="Center" />
+                                                                                            <Slider Minimum="0"
+                                                                                                    Maximum="1"
+                                                                                                    TickFrequency="0.05"
+                                                                                                    SmallChange="0.01"
+                                                                                                    LargeChange="0.05"
+                                                                                                    IsSnapToTickEnabled="False"
+                                                                                                    Value="{Binding ThresholdMax}"
+                                                                                                    Width="120"
+                                                                                                    Margin="8,0,0,0"
+                                                                                                    ValueChanged="SimulationReactiveMappingThreshold_Changed" />
+                                                                                            <TextBlock Text="{Binding ThresholdMaxDisplay}"
+                                                                                                       Margin="8,0,0,0"
+                                                                                                       VerticalAlignment="Center" />
+                                                                                        </StackPanel>
                                                                                     </WrapPanel>
                                                                                 </StackPanel>
                                                                             </Border>
@@ -1169,6 +1276,16 @@
                                                         </GroupBox>
 
                                                         <WrapPanel>
+                                                            <WrapPanel.Style>
+                                                                <Style TargetType="WrapPanel">
+                                                                    <Setter Property="Visibility" Value="Collapsed" />
+                                                                    <Style.Triggers>
+                                                                        <DataTrigger Binding="{Binding IsLifeLayer}" Value="True">
+                                                                            <Setter Property="Visibility" Value="Visible" />
+                                                                        </DataTrigger>
+                                                                    </Style.Triggers>
+                                                                </Style>
+                                                            </WrapPanel.Style>
                                                             <StackPanel Orientation="Horizontal" Margin="0,0,12,6">
                                                                 <TextBlock Text="Threshold Min" VerticalAlignment="Center" />
                                                                 <Slider x:Name="SelectedSimulationThresholdMinSlider"
@@ -1220,10 +1337,10 @@
                                         <StackPanel Grid.Column="0"
                                                     Visibility="Collapsed">
                                             <WrapPanel Margin="0,0,0,8">
-                                                <Button Content="Add Direct Layer"
+                                                <Button Content="Add Life Sim"
                                                         Click="AddSimulationLayerDirect_Click" />
-                                                <Button Content="Add Inverse Layer"
-                                                        Click="AddSimulationLayerInverse_Click" />
+                                                <Button Content="Add Pixel Sort Layer"
+                                                        Click="AddSimulationPixelSort_Click" />
                                                 <Button Content="Add Sim Group"
                                                         Click="AddSimulationGroup_Click" />
                                             </WrapPanel>
@@ -1597,6 +1714,44 @@
                                                                                                 Margin="8,0,0,0"
                                                                                                 ValueChanged="SimulationReactiveMappingAmount_Changed" />
                                                                                         <TextBlock Text="{Binding AmountDisplay}"
+                                                                                                   Margin="8,0,0,0"
+                                                                                                   VerticalAlignment="Center" />
+                                                                                    </StackPanel>
+
+                                                                                    <StackPanel Orientation="Horizontal"
+                                                                                                Margin="0,0,12,6">
+                                                                                        <TextBlock Text="Input Min"
+                                                                                                   VerticalAlignment="Center" />
+                                                                                        <Slider Minimum="0"
+                                                                                                Maximum="1"
+                                                                                                TickFrequency="0.05"
+                                                                                                SmallChange="0.01"
+                                                                                                LargeChange="0.05"
+                                                                                                IsSnapToTickEnabled="False"
+                                                                                                Value="{Binding ThresholdMin}"
+                                                                                                Width="120"
+                                                                                                Margin="8,0,0,0"
+                                                                                                ValueChanged="SimulationReactiveMappingThreshold_Changed" />
+                                                                                        <TextBlock Text="{Binding ThresholdMinDisplay}"
+                                                                                                   Margin="8,0,0,0"
+                                                                                                   VerticalAlignment="Center" />
+                                                                                    </StackPanel>
+
+                                                                                    <StackPanel Orientation="Horizontal"
+                                                                                                Margin="0,0,12,6">
+                                                                                        <TextBlock Text="Input Max"
+                                                                                                   VerticalAlignment="Center" />
+                                                                                        <Slider Minimum="0"
+                                                                                                Maximum="1"
+                                                                                                TickFrequency="0.05"
+                                                                                                SmallChange="0.01"
+                                                                                                LargeChange="0.05"
+                                                                                                IsSnapToTickEnabled="False"
+                                                                                                Value="{Binding ThresholdMax}"
+                                                                                                Width="120"
+                                                                                                Margin="8,0,0,0"
+                                                                                                ValueChanged="SimulationReactiveMappingThreshold_Changed" />
+                                                                                        <TextBlock Text="{Binding ThresholdMaxDisplay}"
                                                                                                    Margin="8,0,0,0"
                                                                                                    VerticalAlignment="Center" />
                                                                                     </StackPanel>
