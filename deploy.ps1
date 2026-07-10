@@ -1,6 +1,7 @@
 param(
     [string]$Configuration = 'Release',
-    [string]$PublishProfile = 'Properties/PublishProfiles/WinClickOnce.pubxml'
+    [string]$PublishProfile = 'Properties/PublishProfiles/WinClickOnce.pubxml',
+    [switch]$RegisterClickOnce
 )
 
 $ErrorActionPreference = 'Stop'
@@ -15,8 +16,8 @@ function Invoke-Step {
 
     Write-Host "[deploy] $Message" -ForegroundColor Cyan
     & $Action
-    if ($LASTEXITCODE -and $LASTEXITCODE -ne 0) {
-        throw "Step failed with exit code $LASTEXITCODE"
+    if (-not $?) {
+        throw "Step failed: $Message"
     }
 }
 
@@ -42,11 +43,11 @@ $installHelper = Join-Path $root 'Install-ClickOnce.ps1'
 if (Test-Path $installHelper) {
     Copy-Item -Path $installHelper -Destination (Join-Path $publishDir 'Install-ClickOnce.ps1') -Force
 }
-$appManifest = Join-Path $publishDir 'lifeviz.application'
-if (!(Test-Path $appManifest)) {
-    throw "lifeviz.application not found at $appManifest"
-}
-
-Invoke-Step "Launching ClickOnce manifest ($appManifest)" {
-    Start-Process -FilePath $appManifest
+Invoke-Step 'Staging install and refreshing shortcuts' {
+    if ($RegisterClickOnce) {
+        & $installHelper -SourcePath $publishDir -RegisterClickOnce
+    }
+    else {
+        & $installHelper -SourcePath $publishDir
+    }
 }

@@ -33,6 +33,9 @@
                 <MenuItem x:Name="RecordMenuItem"
                           Header="Start Recording"
                           Click="RecordMenuItem_Click" />
+                <MenuItem x:Name="OfflineRenderMenuItem"
+                          Header="Render Fixed Duration..."
+                          Click="OfflineRenderMenuItem_Click" />
                 <MenuItem Header="Recording Quality"
                           x:Name="RecordingQualityMenu">
                     <MenuItem Header="Lossless (FFV1, MKV)"
@@ -323,6 +326,7 @@
                               Visibility="Collapsed">
                         <MenuItem Header="Naive Grayscale" IsCheckable="True" Click="LifeModeItem_Click" />
                         <MenuItem Header="RGB Channel Bins" IsCheckable="True" Click="LifeModeItem_Click" />
+                        <MenuItem Header="Bitwise RGB" IsCheckable="True" Click="LifeModeItem_Click" />
                     </MenuItem>
                     <MenuItem Header="Binning Mode"
                               x:Name="BinningModeMenu"

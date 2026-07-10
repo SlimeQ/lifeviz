@@ -82,6 +82,7 @@ internal sealed class GpuSimulationBackend : IGpuSimulationSurfaceBackend
     private bool _colorTextureDirty = true;
     private int _columns = 256;
     private int _rows = 144;
+    private int _requestedDepth = 24;
     private int _depth = 24;
     private int _rDepth = 8;
     private int _gDepth = 8;
@@ -136,10 +137,11 @@ internal sealed class GpuSimulationBackend : IGpuSimulationSurfaceBackend
             _aspectRatio = aspectRatio.Value;
         }
 
-        _depth = Math.Clamp(requestedDepth, 3, 96);
+        _requestedDepth = Math.Clamp(requestedDepth, 3, 96);
+        _depth = ResolveDepthForMode(_requestedDepth, _mode);
         _columns = Math.Clamp((int)Math.Round(_rows * _aspectRatio), 32, 4096);
         _rows = Math.Max(72, Math.Min(2160, (int)Math.Round(_columns / _aspectRatio)));
-        (_rDepth, _gDepth, _bDepth) = CalculateChannelDepths(_depth);
+        (_rDepth, _gDepth, _bDepth) = CalculateChannelDepths(_depth, _mode);
 
         lock (_sync)
         {
@@ -167,6 +169,8 @@ internal sealed class GpuSimulationBackend : IGpuSimulationSurfaceBackend
         }
 
         _mode = mode;
+        _depth = ResolveDepthForMode(_requestedDepth, _mode);
+        (_rDepth, _gDepth, _bDepth) = CalculateChannelDepths(_depth, _mode);
         lock (_sync)
         {
             EnsureResources();
@@ -371,7 +375,10 @@ internal sealed class GpuSimulationBackend : IGpuSimulationSurfaceBackend
             _pulsePeriod = Math.Max(1, period);
             _pulseStep = Math.Max(0, pulseStep);
             _invertInput = invertInput;
-            ConfigureInjectHueMatrix(_mode == GameOfLifeEngine.LifeMode.RgbChannels ? -hueShiftDegrees : 0.0);
+            ConfigureInjectHueMatrix(
+                _mode == GameOfLifeEngine.LifeMode.RgbChannels || _mode == GameOfLifeEngine.LifeMode.Bitwise
+                    ? -hueShiftDegrees
+                    : 0.0);
 
             DispatchCompositeInjectShader(compositeSurface.ShaderResourceView);
             SwapHistory();
@@ -743,7 +750,12 @@ internal sealed class GpuSimulationBackend : IGpuSimulationSurfaceBackend
             PulsePeriod = (uint)Math.Max(1, _pulsePeriod),
             PulseStep = (uint)Math.Max(0, _pulseStep),
             InvertThreshold = _invertThreshold ? 1u : 0u,
-            LifeMode = _mode == GameOfLifeEngine.LifeMode.RgbChannels ? 1u : 0u,
+            LifeMode = _mode switch
+            {
+                GameOfLifeEngine.LifeMode.RgbChannels => 1u,
+                GameOfLifeEngine.LifeMode.Bitwise => 2u,
+                _ => 0u
+            },
             InjectHueRr = _injectHueRr,
             InjectHueRg = _injectHueRg,
             InjectHueRb = _injectHueRb,
@@ -835,8 +847,18 @@ internal sealed class GpuSimulationBackend : IGpuSimulationSurfaceBackend
         return memory.ToArray();
     }
 
-    private static (int r, int g, int b) CalculateChannelDepths(int depth)
+    private static int ResolveDepthForMode(int requestedDepth, GameOfLifeEngine.LifeMode mode)
     {
+        return mode == GameOfLifeEngine.LifeMode.Bitwise ? 24 : requestedDepth;
+    }
+
+    private static (int r, int g, int b) CalculateChannelDepths(int depth, GameOfLifeEngine.LifeMode mode)
+    {
+        if (mode == GameOfLifeEngine.LifeMode.Bitwise)
+        {
+            return (8, 8, 8);
+        }
+
         int baseSlice = depth / 3;
         int remainder = depth % 3;
         int r = baseSlice + (remainder > 0 ? 1 : 0);

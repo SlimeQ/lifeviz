@@ -83,6 +83,9 @@ internal sealed class AudioBeatDetector : IDisposable
     private double _spectrumAnalysisAccumulator;
     private volatile bool _enableSpectrumAnalysis;
     private volatile bool _enableDebugHistory;
+    private bool _offlineInputActive;
+    private bool _externalInputActive;
+    private double _offlineTimelineSeconds;
     
     public DateTime LastBeatTime { get; private set; } = DateTime.MinValue;
     public long BeatCount { get; private set; }
@@ -106,7 +109,9 @@ internal sealed class AudioBeatDetector : IDisposable
     public double BassFrequencyNormalized { get; private set; }
     public double MidFrequencyNormalized { get; private set; }
     public double HighFrequencyNormalized { get; private set; }
-    public bool IsRunning => (_graph != null && _inputNode != null) || _wasapiLoopbackCapture != null;
+    public bool IsRunning => (_graph != null && _inputNode != null) ||
+                             _wasapiLoopbackCapture != null ||
+                             _externalInputActive;
 
     public double InputGain
     {
@@ -115,6 +120,56 @@ internal sealed class AudioBeatDetector : IDisposable
     }
 
     private uint _sampleRate = 48000;
+
+    public void BeginOfflineInput(uint sampleRate = 48000)
+    {
+        Stop();
+        _sampleRate = Math.Max(8000, sampleRate);
+        _offlineTimelineSeconds = 0;
+        _externalInputActive = false;
+        _offlineInputActive = true;
+    }
+
+    public void ProcessOfflineSamples(ReadOnlySpan<float> samples, double timelineSeconds)
+    {
+        if (!_offlineInputActive)
+        {
+            return;
+        }
+
+        _offlineTimelineSeconds = Math.Max(0, timelineSeconds);
+        ProcessPcmSamples(samples);
+    }
+
+    public void EndOfflineInput()
+    {
+        _offlineInputActive = false;
+        ResetState();
+    }
+
+    public void BeginExternalInput(uint sampleRate = 48000)
+    {
+        Stop();
+        _sampleRate = Math.Max(8000, sampleRate);
+        _offlineInputActive = false;
+        _externalInputActive = true;
+    }
+
+    public void ProcessExternalSamples(ReadOnlySpan<float> samples)
+    {
+        if (!_externalInputActive)
+        {
+            return;
+        }
+
+        ProcessPcmSamples(samples);
+    }
+
+    public void EndExternalInput()
+    {
+        _externalInputActive = false;
+        ResetState();
+    }
 
     public async Task<IReadOnlyList<AudioDeviceInfo>> EnumerateAudioDevices()
     {
@@ -338,6 +393,8 @@ internal sealed class AudioBeatDetector : IDisposable
                 return;
             }
 
+            _offlineInputActive = false;
+            _externalInputActive = false;
             StopInternal();
             ResetState();
 
@@ -895,12 +952,15 @@ internal sealed class AudioBeatDetector : IDisposable
         // Simple Beat Detection: Instant energy > C * Average Energy
         // And wait some time (debounce)
         
+        DateTime analysisNow = _offlineInputActive
+            ? DateTime.UnixEpoch.AddSeconds(_offlineTimelineSeconds)
+            : DateTime.UtcNow;
         if (TransientEnergy > 0.06 &&
             rms > _localEnergyAverage * C &&
-            (DateTime.UtcNow - LastBeatTime).TotalSeconds > 0.08) // Max 750 BPM
+            (analysisNow - LastBeatTime).TotalSeconds > 0.08) // Max 750 BPM
         {
             IsBeat = true;
-            var now = DateTime.UtcNow;
+            var now = analysisNow;
             BeatCount++;
             
             // Calculate BPM
@@ -966,6 +1026,8 @@ internal sealed class AudioBeatDetector : IDisposable
         _lock.Wait();
         try
         {
+            _offlineInputActive = false;
+            _externalInputActive = false;
             StopInternal();
             ResetState();
         }

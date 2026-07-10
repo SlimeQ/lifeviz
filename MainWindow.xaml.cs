@@ -51,6 +51,8 @@ public partial class MainWindow : Window
     private const double AnimationTranslateFactor = 0.1;
     private const double AnimationRotateDegrees = 12;
     private const double AnimationDvdScale = 0.2;
+    private const double MinLayerScale = 0.1;
+    private const double MaxLayerScale = 4.0;
     private const double AnimationDvdCycleBeats = 4.0;
     private const double AnimationDvdAspectFactor = 1.3;
     private const double AnimationBeatShakeFactor = 0.03;
@@ -84,6 +86,8 @@ public partial class MainWindow : Window
     private const double MaxRgbHueShiftSpeedDegreesPerSecond = 180.0;
     private const int DefaultDecoderThreadLimit = 0;
     private const int DefaultVideoDecodeFpsLimit = 0;
+    private const string VideoStackAudioSourceId = "video-stack:silent";
+    private const int LiveVideoAudioMixSampleCount = 4096;
     private const double MinReactiveHueFrequencyHz = 27.5;
     private const double MaxReactiveHueFrequencyHz = 4186.01;
     private const double MaxColorDistance = 441.6729559300637;
@@ -124,6 +128,14 @@ public partial class MainWindow : Window
     private Size _lastWindowSize;
     private Size _lastClientSize;
     private bool _isRecording;
+    private bool _isOfflineRendering;
+    private double _offlineAnimationTimeSeconds;
+    private double _offlineFrameDeltaSeconds;
+    private bool _offlineVideoAudioActive;
+    private float[]? _offlineAudioMixBuffer;
+    private readonly float[] _liveVideoAudioMixBuffer = new float[LiveVideoAudioMixSampleCount];
+    private CancellationTokenSource? _offlineRenderCancellation;
+    private OfflineRenderWindow? _offlineRenderWindow;
     private RecordingSession? _recordingSession;
     private Stopwatch? _recordingStopwatch;
     private TimeSpan _recordingFrameInterval;
@@ -135,6 +147,9 @@ public partial class MainWindow : Window
     private int _recordingDisplayWidth;
     private int _recordingDisplayHeight;
     private int _recordingScale = 1;
+    private int _recordingFps;
+    private long _recordingFramesSubmitted;
+    private byte[]? _lastRecordingFrame;
     private RecordingQuality _recordingQuality = RecordingQuality.High;
     private string? _recordingPath;
     private ImageSource? _recordingOverlayIcon;
@@ -767,6 +782,11 @@ public partial class MainWindow : Window
         try
         {
             _fileCapture.SetPerformanceSettings(_lowContentionMode, _decoderThreadLimit, _videoDecodeFpsLimit);
+            foreach (var source in EnumerateSources(_sources))
+            {
+                source.VideoSequence?.SetPerformanceSettings(_lowContentionMode, _decoderThreadLimit, _videoDecodeFpsLimit);
+                source.AutoClip?.SetPerformanceSettings(_lowContentionMode, _decoderThreadLimit, _videoDecodeFpsLimit);
+            }
         }
         catch (Exception ex)
         {
@@ -2860,10 +2880,12 @@ public partial class MainWindow : Window
             return;
         }
 
-        // Keep the frame loop below WPF's own render/present work so DrawingSurface
-        // draw callbacks can continue to drain instead of getting starved by our
-        // own frame scheduling.
-        DispatcherPriority callbackPriority = DispatcherPriority.Background;
+        // Schedule the producer beside WPF's presentation work. Background priority can be
+        // starved for hundreds of milliseconds by a continuously invalidated D3D surface,
+        // which makes cheap BPM transforms arrive in visible clumps. Render priority keeps
+        // simulation/animation production and DrawingSurface presentation on one cadence;
+        // the single-queued-callback guard below prevents the producer from flooding WPF.
+        DispatcherPriority callbackPriority = DispatcherPriority.Render;
 
         Dispatcher.BeginInvoke(callbackPriority, new Action(() =>
         {
@@ -2900,7 +2922,9 @@ public partial class MainWindow : Window
             _lastProfileFrameTimestamp = frameStartStamp;
         }
 
-        double now = _lifetimeStopwatch.Elapsed.TotalSeconds;
+        double now = _isOfflineRendering
+            ? _offlineAnimationTimeSeconds
+            : _lifetimeStopwatch.Elapsed.TotalSeconds;
         bool interactionThrottled = IsUiInteractionThrottled();
         if (frameStartStamp != 0)
         {
@@ -2917,15 +2941,20 @@ public partial class MainWindow : Window
             _lastUiInteractionRenderTime = now;
         }
 
-        double dt = now - _lastRenderTime;
-        _lastRenderTime = now;
+        double dt = _isOfflineRendering
+            ? _offlineFrameDeltaSeconds
+            : now - _lastRenderTime;
+        if (!_isOfflineRendering)
+        {
+            _lastRenderTime = now;
+        }
         RecordFrameGapHistory(frameGapMs > 0 ? frameGapMs : dt * 1000.0, dt);
 
         // --- FPS Modulation ---
         if (_fpsOscillationEnabled)
         {
             double bpm = _oscillationBpm;
-            if (_audioSyncEnabled)
+            if (_audioSyncEnabled && HasReactiveAudioInput())
             {
                 bpm = _audioBeatDetector.CurrentBpm;
             }
@@ -2935,12 +2964,12 @@ public partial class MainWindow : Window
             
             double frequency = bpm / 60.0;
             
-            if (_audioSyncEnabled)
+            if (_audioSyncEnabled && HasReactiveAudioInput())
             {
                  // Sync phase to beat: Peak at beat.
                  // Sin wave peaks at 0.25 (PI/2).
                  // So we want Phase = 0.25 when TimeSinceBeat = 0.
-                 double timeSinceBeat = (DateTime.UtcNow - _audioBeatDetector.LastBeatTime).TotalSeconds;
+                 double timeSinceBeat = (GetReactiveAudioNow() - _audioBeatDetector.LastBeatTime).TotalSeconds;
                  
                  // Handle potentially large numbers or negative drift
                  if (timeSinceBeat < 0) timeSinceBeat = 0;
@@ -2971,9 +3000,19 @@ public partial class MainWindow : Window
         }
 
         // --- Simulation Step ---
-        double elapsed = _stepStopwatch.Elapsed.TotalSeconds;
-        _stepStopwatch.Restart();
+        double elapsed = _isOfflineRendering
+            ? _offlineFrameDeltaSeconds
+            : _stepStopwatch.Elapsed.TotalSeconds;
+        if (!_isOfflineRendering)
+        {
+            _stepStopwatch.Restart();
+        }
         _timeSinceLastStep += elapsed;
+
+        if (!_isOfflineRendering && IsVideoStackAudioSelection(_selectedAudioDeviceId))
+        {
+            ProcessLiveVideoAudioFrame(_sources);
+        }
 
         UpdateAudioAnalysisRequirements();
 
@@ -3196,9 +3235,16 @@ public partial class MainWindow : Window
             _renderFrames = 0;
             _simulationFpsStopwatch.Restart();
         }
-        long overlayStamp = BeginProfileStamp();
-        UpdateFpsOverlay();
-        EndProfileStamp("fps_overlay_ms", overlayStamp);
+        if (_isOfflineRendering)
+        {
+            _offlineAnimationTimeSeconds += _offlineFrameDeltaSeconds;
+        }
+        else
+        {
+            long overlayStamp = BeginProfileStamp();
+            UpdateFpsOverlay();
+            EndProfileStamp("fps_overlay_ms", overlayStamp);
+        }
         EndProfileStamp("frame_total_ms", frameStartStamp);
     }
 
@@ -3310,13 +3356,16 @@ public partial class MainWindow : Window
 
                 _passthroughCompositedInPixelBuffer = true;
 
-                long presentInlineStamp = BeginProfileStamp();
-                _renderBackend.PresentFrame(_pixelBuffer, stride);
-                EndProfileStamp("present_frame_ms", presentInlineStamp);
+                if (!_isOfflineRendering)
+                {
+                    long presentInlineStamp = BeginProfileStamp();
+                    _renderBackend.PresentFrame(_pixelBuffer, stride);
+                    EndProfileStamp("present_frame_ms", presentInlineStamp);
 
-                long inlineEffectStamp = BeginProfileStamp();
-                UpdateEffectInput();
-                EndProfileStamp("underlay_effect_ms", inlineEffectStamp);
+                    long inlineEffectStamp = BeginProfileStamp();
+                    UpdateEffectInput();
+                    EndProfileStamp("underlay_effect_ms", inlineEffectStamp);
+                }
 
                 long inlineRecordStamp = BeginProfileStamp();
                 TryRecordFrame(requiredLength);
@@ -3375,13 +3424,16 @@ public partial class MainWindow : Window
 
             _passthroughCompositedInPixelBuffer = true;
 
-            long presentPassthroughStamp = BeginProfileStamp();
-            _renderBackend.PresentFrame(_pixelBuffer, stride);
-            EndProfileStamp("present_frame_ms", presentPassthroughStamp);
+            if (!_isOfflineRendering)
+            {
+                long presentPassthroughStamp = BeginProfileStamp();
+                _renderBackend.PresentFrame(_pixelBuffer, stride);
+                EndProfileStamp("present_frame_ms", presentPassthroughStamp);
 
-            long underlayOnlyStamp = BeginProfileStamp();
-            UpdateEffectInput();
-            EndProfileStamp("underlay_effect_ms", underlayOnlyStamp);
+                long underlayOnlyStamp = BeginProfileStamp();
+                UpdateEffectInput();
+                EndProfileStamp("underlay_effect_ms", underlayOnlyStamp);
+            }
 
             long recordUnderlayStamp = BeginProfileStamp();
             TryRecordFrame(requiredLength);
@@ -3622,14 +3674,17 @@ public partial class MainWindow : Window
         }
         EndProfileStamp("cpu_blend_ms", blendStamp);
 
-        long presentStamp = BeginProfileStamp();
-        _renderBackend.PresentFrame(_pixelBuffer, stride);
-        EndProfileStamp("present_frame_ms", presentStamp);
+        if (!_isOfflineRendering)
+        {
+            long presentStamp = BeginProfileStamp();
+            _renderBackend.PresentFrame(_pixelBuffer, stride);
+            EndProfileStamp("present_frame_ms", presentStamp);
 
-        long underlayStamp = BeginProfileStamp();
-        UpdateUnderlayBitmap(requiredLength);
-        UpdateEffectInput();
-        EndProfileStamp("underlay_effect_ms", underlayStamp);
+            long underlayStamp = BeginProfileStamp();
+            UpdateUnderlayBitmap(requiredLength);
+            UpdateEffectInput();
+            EndProfileStamp("underlay_effect_ms", underlayStamp);
+        }
 
         long recordStamp = BeginProfileStamp();
         TryRecordFrame(requiredLength);
@@ -3638,7 +3693,9 @@ public partial class MainWindow : Window
 
     private void TryRecordFrame(int requiredLength)
     {
-        if (!_isRecording || _recordingSession == null || _recordingStopwatch == null)
+        const int MaxCatchUpRecordingFramesPerTick = 12;
+
+        if (!_isRecording || _recordingSession == null || (!_isOfflineRendering && _recordingStopwatch == null))
         {
             return;
         }
@@ -3661,16 +3718,25 @@ public partial class MainWindow : Window
             return;
         }
 
-        var elapsed = _recordingStopwatch.Elapsed;
-        if (elapsed < _nextRecordingFrameTime)
+        int dueFrameCount;
+        if (_isOfflineRendering)
         {
-            return;
+            dueFrameCount = 1;
         }
-
-        _nextRecordingFrameTime += _recordingFrameInterval;
-        while (elapsed >= _nextRecordingFrameTime)
+        else
         {
-            _nextRecordingFrameTime += _recordingFrameInterval;
+            var elapsed = _recordingStopwatch!.Elapsed;
+            if (elapsed < _nextRecordingFrameTime)
+            {
+                return;
+            }
+
+            dueFrameCount = 0;
+            do
+            {
+                dueFrameCount++;
+                _nextRecordingFrameTime += _recordingFrameInterval;
+            } while (elapsed >= _nextRecordingFrameTime && dueFrameCount < MaxCatchUpRecordingFramesPerTick);
         }
 
         int sourceSize = _recordingSourceWidth * _recordingSourceHeight * 4;
@@ -3680,16 +3746,37 @@ public partial class MainWindow : Window
             return;
         }
 
-        var buffer = ArrayPool<byte>.Shared.Rent(frameSize);
-        if (!BuildRecordingFrame(buffer, frameSize, sourceSize))
+        var frame = ArrayPool<byte>.Shared.Rent(frameSize);
+        if (!BuildRecordingFrame(frame, frameSize, sourceSize))
         {
-            ArrayPool<byte>.Shared.Return(buffer);
+            ArrayPool<byte>.Shared.Return(frame);
             return;
         }
 
-        if (!_recordingSession.TryEnqueue(buffer))
+        StoreLastRecordingFrame(frame, frameSize);
+
+        List<byte[]> framesToEnqueue = new(dueFrameCount) { frame };
+        for (int i = 1; i < dueFrameCount; i++)
         {
-            Logger.Warn("Recording frame dropped (encoder backlog).");
+            var duplicate = ArrayPool<byte>.Shared.Rent(frameSize);
+            Buffer.BlockCopy(frame, 0, duplicate, 0, frameSize);
+            framesToEnqueue.Add(duplicate);
+        }
+
+        for (int i = 0; i < framesToEnqueue.Count; i++)
+        {
+            var frameToEnqueue = framesToEnqueue[i];
+            if (!_recordingSession.TryEnqueue(frameToEnqueue))
+            {
+                Logger.Warn("Recording frame could not be queued because the encoder stopped.");
+                for (int j = i + 1; j < framesToEnqueue.Count; j++)
+                {
+                    ArrayPool<byte>.Shared.Return(framesToEnqueue[j]);
+                }
+                break;
+            }
+
+            _recordingFramesSubmitted++;
         }
     }
 
@@ -4133,7 +4220,405 @@ public partial class MainWindow : Window
         }
     }
 
-    private void StartRecording()
+    private void OfflineRenderMenuItem_Click(object sender, RoutedEventArgs e)
+    {
+        if (_isRecording || _isOfflineRendering || _offlineRenderWindow != null)
+        {
+            return;
+        }
+
+        int sceneFps = Math.Clamp((int)Math.Round(_currentFpsFromConfig), 1, 144);
+        var dialog = new OfflineRenderWindow(sceneFps) { Owner = this };
+        _offlineRenderWindow = dialog;
+        dialog.CancelRequested += (_, _) => _offlineRenderCancellation?.Cancel();
+        dialog.StartRequested += async (_, request) =>
+            await RunOfflineRenderAsync(dialog, request.Duration, request.OutputFps);
+        dialog.Closed += (_, _) =>
+        {
+            if (ReferenceEquals(_offlineRenderWindow, dialog))
+            {
+                _offlineRenderWindow = null;
+            }
+        };
+        dialog.ShowDialog();
+    }
+
+    private async Task RunOfflineRenderAsync(OfflineRenderWindow dialog, TimeSpan duration, int outputFps)
+    {
+        if (_isRecording || _isOfflineRendering)
+        {
+            dialog.Complete("Another recording is already active.", succeeded: false);
+            return;
+        }
+
+        bool renderLoopWasAttached = _renderLoopAttached;
+        _offlineRenderCancellation = new CancellationTokenSource();
+        CancellationToken cancellationToken = _offlineRenderCancellation.Token;
+        Stopwatch exportStopwatch = Stopwatch.StartNew();
+        string? outputPath = null;
+        bool completed = false;
+        bool started = false;
+        bool offlineAudioInputStarted = false;
+        ProcessPriorityClass? previousProcessPriority = null;
+        ThreadPriority? previousUiThreadPriority = null;
+
+        try
+        {
+            double animationStart = _lifetimeStopwatch.Elapsed.TotalSeconds;
+            if (renderLoopWasAttached)
+            {
+                DetachRenderLoop();
+            }
+
+            try
+            {
+                using var currentProcess = Process.GetCurrentProcess();
+                previousProcessPriority = currentProcess.PriorityClass;
+                currentProcess.PriorityClass = ProcessPriorityClass.AboveNormal;
+            }
+            catch (Exception ex)
+            {
+                Logger.Warn($"Could not raise offline-render process priority: {ex.Message}");
+            }
+            try
+            {
+                previousUiThreadPriority = Thread.CurrentThread.Priority;
+                Thread.CurrentThread.Priority = ThreadPriority.AboveNormal;
+            }
+            catch (Exception ex)
+            {
+                Logger.Warn($"Could not raise offline-render UI thread priority: {ex.Message}");
+            }
+
+            _offlineAnimationTimeSeconds = animationStart;
+            _isOfflineRendering = true;
+            StartRecording(offlineRender: true, fpsOverride: outputFps);
+            started = _isRecording && _recordingSession != null;
+            if (!started)
+            {
+                dialog.Complete("The encoder could not be started.", succeeded: false);
+                return;
+            }
+
+            outputPath = _recordingPath;
+            _offlineFrameDeltaSeconds = 1.0 / Math.Max(1, _recordingFps);
+            long totalFrames = Math.Max(1, (long)Math.Round(duration.TotalSeconds * _recordingFps));
+            _fileCapture.BeginOfflineRender(_recordingFps, _offlineAnimationTimeSeconds);
+            SetVideoSequenceOfflineRenderMode(_sources, enabled: true, _recordingFps);
+            _offlineVideoAudioActive = HasEnabledOfflineVideoAudio(_sources);
+            _audioBeatDetector.BeginOfflineInput();
+            offlineAudioInputStarted = true;
+            UpdateAudioAnalysisRequirements();
+            Logger.Info(_offlineVideoAudioActive
+                ? "Offline reactivity is using the mixed audio tracks from enabled video layers."
+                : "Offline reactivity has no enabled video audio tracks; reactive inputs will remain silent.");
+            dialog.UpdateProgress(0, totalFrames, TimeSpan.Zero, null);
+
+            long lastUiUpdateStamp = 0;
+            for (long frameIndex = 0; frameIndex < totalFrames; frameIndex++)
+            {
+                if (cancellationToken.IsCancellationRequested || _isShuttingDown || !_isRecording)
+                {
+                    break;
+                }
+
+                _fileCapture.SetOfflineRenderTime(_offlineAnimationTimeSeconds);
+                ProcessOfflineVideoAudioFrame(_sources, frameIndex, _recordingFps);
+                FrameTimer_Tick(null, EventArgs.Empty);
+
+                if (_recordingSession?.TryGetError(out string? encoderError) == true)
+                {
+                    throw new InvalidOperationException(encoderError ?? "The video encoder stopped unexpectedly.");
+                }
+
+                long nowStamp = Stopwatch.GetTimestamp();
+                bool shouldRefreshUi = frameIndex == totalFrames - 1 ||
+                                       lastUiUpdateStamp == 0 ||
+                                       FrameProfiler.ElapsedMilliseconds(lastUiUpdateStamp, nowStamp) >= 100;
+                if (shouldRefreshUi)
+                {
+                    long completedFrames = Math.Min(_recordingFramesSubmitted, totalFrames);
+                    TimeSpan elapsed = exportStopwatch.Elapsed;
+                    bool hasStableEstimate = completedFrames >= Math.Max(10, _recordingFps) &&
+                                             elapsed >= TimeSpan.FromSeconds(3);
+                    TimeSpan? remaining = hasStableEstimate
+                        ? TimeSpan.FromSeconds(Math.Max(0, elapsed.TotalSeconds * (totalFrames - completedFrames) / completedFrames))
+                        : null;
+                    dialog.UpdateProgress(completedFrames, totalFrames, elapsed, remaining);
+                    lastUiUpdateStamp = nowStamp;
+                    // Dispatcher-priority continuations can be deferred aggressively while every
+                    // LifeViz window is inactive. The timer keeps the export runnable in that
+                    // state. Only yield through WPF's render/input queues while the dialog is
+                    // active (a cancel click activates it first); otherwise the progress display
+                    // catches up on activation without throttling the actual background export.
+                    await Task.Delay(1);
+                    if (dialog.IsActive)
+                    {
+                        await Dispatcher.Yield(DispatcherPriority.Render);
+                        await Dispatcher.Yield(DispatcherPriority.Input);
+                    }
+                }
+            }
+
+            completed = !cancellationToken.IsCancellationRequested &&
+                        !_isShuttingDown &&
+                        _recordingFramesSubmitted >= totalFrames;
+        }
+        catch (Exception ex)
+        {
+            Logger.Error("Offline render failed.", ex);
+            if (!_isShuttingDown)
+            {
+                dialog.Complete($"Render failed: {ex.Message}", succeeded: false);
+            }
+            return;
+        }
+        finally
+        {
+            SetVideoSequenceOfflineRenderMode(_sources, enabled: false, fps: 0);
+            _fileCapture.EndOfflineRender();
+            if (offlineAudioInputStarted)
+            {
+                _audioBeatDetector.EndOfflineInput();
+            }
+            _offlineVideoAudioActive = false;
+            _offlineAudioMixBuffer = null;
+            if (started && _isRecording)
+            {
+                StopRecording(showMessage: false);
+            }
+
+            _isOfflineRendering = false;
+            _offlineFrameDeltaSeconds = 0;
+            _offlineRenderCancellation?.Dispose();
+            _offlineRenderCancellation = null;
+            UpdateRecordingUi();
+
+            if (previousUiThreadPriority.HasValue)
+            {
+                try { Thread.CurrentThread.Priority = previousUiThreadPriority.Value; } catch { }
+            }
+            if (previousProcessPriority.HasValue)
+            {
+                try
+                {
+                    using var currentProcess = Process.GetCurrentProcess();
+                    currentProcess.PriorityClass = previousProcessPriority.Value;
+                }
+                catch { }
+            }
+
+            if (renderLoopWasAttached && !_isShuttingDown)
+            {
+                AttachRenderLoop();
+            }
+
+            if (offlineAudioInputStarted &&
+                !_isShuttingDown &&
+                !string.IsNullOrWhiteSpace(_selectedAudioDeviceId))
+            {
+                if (IsVideoStackAudioSelection(_selectedAudioDeviceId))
+                {
+                    _audioBeatDetector.BeginExternalInput();
+                    SetLiveVideoStackAnalysisEnabled(true);
+                }
+                else
+                {
+                    _ = _audioBeatDetector.InitializeAsync(_selectedAudioDeviceId);
+                }
+            }
+        }
+
+        if (_isShuttingDown)
+        {
+            return;
+        }
+
+        string fileName = string.IsNullOrWhiteSpace(outputPath) ? "video" : Path.GetFileName(outputPath);
+        dialog.Complete(
+            completed ? $"Render complete: {fileName}" : $"Render cancelled. Partial video saved as {fileName}",
+            succeeded: completed);
+    }
+
+    private static void SetVideoSequenceOfflineRenderMode(IEnumerable<CaptureSource> sources, bool enabled, int fps)
+    {
+        foreach (var source in sources)
+        {
+            source.VideoSequence?.SetOfflineRenderMode(enabled, fps);
+            source.AutoClip?.SetOfflineRenderMode(enabled, fps);
+            if (source.Children.Count > 0)
+            {
+                SetVideoSequenceOfflineRenderMode(source.Children, enabled, fps);
+            }
+        }
+    }
+
+    private bool HasEnabledOfflineVideoAudio(IEnumerable<CaptureSource> sources)
+    {
+        if (!_sourceAudioMasterEnabled || _sourceAudioMasterVolume <= 0.0001)
+        {
+            return false;
+        }
+
+        foreach (var source in sources)
+        {
+            if (!source.Enabled)
+            {
+                continue;
+            }
+
+            if (source.Type == CaptureSource.SourceType.Group && HasEnabledOfflineVideoAudio(source.Children))
+            {
+                return true;
+            }
+
+            if (IsVideoSource(source) &&
+                source.VideoAudioEnabled &&
+                source.VideoAudioVolume > 0.0001 &&
+                !source.VideoPlaybackPaused)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private void ProcessOfflineVideoAudioFrame(
+        IEnumerable<CaptureSource> sources,
+        long frameIndex,
+        int outputFps)
+    {
+        const int sampleRate = 48000;
+        outputFps = Math.Max(1, outputFps);
+        long startSample = (frameIndex * sampleRate) / outputFps;
+        long endSample = ((frameIndex + 1) * sampleRate) / outputFps;
+        int sampleCount = Math.Max(1, (int)(endSample - startSample));
+        if (_offlineAudioMixBuffer == null || _offlineAudioMixBuffer.Length < sampleCount)
+        {
+            _offlineAudioMixBuffer = new float[sampleCount];
+        }
+
+        Span<float> mix = _offlineAudioMixBuffer.AsSpan(0, sampleCount);
+        mix.Clear();
+        if (_offlineVideoAudioActive)
+        {
+            MixOfflineVideoAudioSources(sources, mix);
+        }
+
+        for (int i = 0; i < mix.Length; i++)
+        {
+            mix[i] = Math.Clamp(mix[i], -1f, 1f);
+        }
+        _audioBeatDetector.ProcessOfflineSamples(mix, _offlineAnimationTimeSeconds);
+    }
+
+    private void MixOfflineVideoAudioSources(IEnumerable<CaptureSource> sources, Span<float> mix)
+    {
+        foreach (var source in sources)
+        {
+            if (!source.Enabled)
+            {
+                continue;
+            }
+
+            if (source.Type == CaptureSource.SourceType.Group)
+            {
+                MixOfflineVideoAudioSources(source.Children, mix);
+                continue;
+            }
+
+            if (!source.VideoAudioEnabled ||
+                source.VideoAudioVolume <= 0.0001 ||
+                source.VideoPlaybackPaused)
+            {
+                continue;
+            }
+
+            if (source.Type == CaptureSource.SourceType.VideoSequence)
+            {
+                source.VideoSequence?.MixOfflineAudioFrame(mix);
+            }
+            else if (source.Type == CaptureSource.SourceType.AutoClip)
+            {
+                source.AutoClip?.MixOfflineAudioFrame(mix);
+            }
+            else if (source.Type == CaptureSource.SourceType.File &&
+                     !string.IsNullOrWhiteSpace(source.FilePath) &&
+                     IsVideoSource(source))
+            {
+                _fileCapture.MixOfflineVideoAudioFrame(source.FilePath, mix);
+            }
+        }
+    }
+
+    private void ProcessLiveVideoAudioFrame(IEnumerable<CaptureSource> sources)
+    {
+        Span<float> mix = _liveVideoAudioMixBuffer;
+        mix.Clear();
+        int sampleCount = MixLiveVideoAudioSources(sources, mix);
+        if (sampleCount <= 0)
+        {
+            // Clear held analysis state promptly while no selected video track has data.
+            _audioBeatDetector.ProcessExternalSamples(mix[..512]);
+            return;
+        }
+
+        Span<float> activeMix = mix[..Math.Min(sampleCount, mix.Length)];
+        for (int i = 0; i < activeMix.Length; i++)
+        {
+            activeMix[i] = Math.Clamp(activeMix[i], -1f, 1f);
+        }
+
+        _audioBeatDetector.ProcessExternalSamples(activeMix);
+    }
+
+    private int MixLiveVideoAudioSources(IEnumerable<CaptureSource> sources, Span<float> mix)
+    {
+        int maxSamplesMixed = 0;
+        foreach (var source in sources)
+        {
+            if (!source.Enabled)
+            {
+                continue;
+            }
+
+            if (source.Type == CaptureSource.SourceType.Group)
+            {
+                maxSamplesMixed = Math.Max(maxSamplesMixed, MixLiveVideoAudioSources(source.Children, mix));
+                continue;
+            }
+
+            if (!source.VideoAudioEnabled ||
+                source.VideoAudioVolume <= 0.0001 ||
+                source.VideoPlaybackPaused)
+            {
+                continue;
+            }
+
+            int mixed = 0;
+            if (source.Type == CaptureSource.SourceType.VideoSequence)
+            {
+                mixed = source.VideoSequence?.MixLiveAudioSamples(mix) ?? 0;
+            }
+            else if (source.Type == CaptureSource.SourceType.AutoClip)
+            {
+                mixed = source.AutoClip?.MixLiveAudioSamples(mix) ?? 0;
+            }
+            else if (source.Type == CaptureSource.SourceType.File &&
+                     !string.IsNullOrWhiteSpace(source.FilePath) &&
+                     IsVideoSource(source))
+            {
+                mixed = _fileCapture.MixLiveVideoAudioSamples(source.FilePath, mix);
+            }
+
+            maxSamplesMixed = Math.Max(maxSamplesMixed, mixed);
+        }
+
+        return maxSamplesMixed;
+    }
+
+    private void StartRecording(bool offlineRender = false, int? fpsOverride = null)
     {
         if (_isRecording)
         {
@@ -4164,17 +4649,26 @@ public partial class MainWindow : Window
         {
             targetHeight = targetOutputHeight;
         }
-        int fps = Math.Clamp((int)Math.Round(_currentFpsFromConfig), 1, 144);
+        int fps = Math.Clamp(fpsOverride ?? (int)Math.Round(_currentFpsFromConfig), 1, 144);
         var settings = RecordingSettings.FromQuality(_recordingQuality, targetWidth, targetHeight, fps);
 
         string folder = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyVideos), "LifeViz");
         Directory.CreateDirectory(folder);
         string extension = settings.FileExtension.StartsWith(".") ? settings.FileExtension : $".{settings.FileExtension}";
         string filePath = Path.Combine(folder, $"lifeviz_{DateTime.Now:yyyyMMdd_HHmmss}{extension}");
+        string? recordingAudioDeviceId = offlineRender || IsVideoStackAudioSelection(_selectedAudioDeviceId)
+            ? null
+            : _selectedAudioDeviceId;
 
         try
         {
-            _recordingSession = new RecordingSession(filePath, targetWidth, targetHeight, fps, settings);
+            _recordingSession = new RecordingSession(
+                filePath,
+                targetWidth,
+                targetHeight,
+                fps,
+                settings,
+                recordingAudioDeviceId);
         }
         catch (Exception ex)
         {
@@ -4194,10 +4688,17 @@ public partial class MainWindow : Window
         _recordingPath = filePath;
         _recordingFrameInterval = TimeSpan.FromSeconds(1.0 / fps);
         _nextRecordingFrameTime = TimeSpan.Zero;
-        _recordingStopwatch = Stopwatch.StartNew();
+        _recordingFps = fps;
+        _recordingFramesSubmitted = 0;
+        ClearLastRecordingFrame();
+        _recordingStopwatch = offlineRender ? null : Stopwatch.StartNew();
         _isRecording = true;
         UpdateRecordingUi();
-        Logger.Info($"Recording started: {filePath} ({width}x{height} @ {fps} fps, {settings.Quality})");
+        string audioState = string.IsNullOrWhiteSpace(recordingAudioDeviceId)
+            ? "video-only"
+            : "with selected audio source";
+        string mode = offlineRender ? "Offline render" : "Recording";
+        Logger.Info($"{mode} started: {filePath} ({width}x{height} @ {fps} fps, {settings.Quality}, {audioState})");
     }
 
     private void StopRecording(bool showMessage, string? reason = null)
@@ -4208,11 +4709,13 @@ public partial class MainWindow : Window
         }
 
         _isRecording = false;
+        TimeSpan elapsed = _recordingStopwatch?.Elapsed ?? TimeSpan.Zero;
         _recordingStopwatch?.Stop();
         _recordingStopwatch = null;
 
         try
         {
+            PadRecordingToElapsedDuration(elapsed);
             _recordingSession?.Dispose();
         }
         catch (Exception ex)
@@ -4244,15 +4747,88 @@ public partial class MainWindow : Window
         _recordingDisplayWidth = 0;
         _recordingDisplayHeight = 0;
         _recordingScale = 1;
+        _recordingFps = 0;
+        _recordingFramesSubmitted = 0;
         _recordingFrameInterval = TimeSpan.Zero;
         _nextRecordingFrameTime = TimeSpan.Zero;
+        ClearLastRecordingFrame();
+    }
+
+    private void StoreLastRecordingFrame(byte[] frame, int frameSize)
+    {
+        if (_lastRecordingFrame == null || _lastRecordingFrame.Length < frameSize)
+        {
+            ClearLastRecordingFrame();
+            _lastRecordingFrame = ArrayPool<byte>.Shared.Rent(frameSize);
+        }
+
+        Buffer.BlockCopy(frame, 0, _lastRecordingFrame, 0, frameSize);
+    }
+
+    private void ClearLastRecordingFrame()
+    {
+        if (_lastRecordingFrame == null)
+        {
+            return;
+        }
+
+        ArrayPool<byte>.Shared.Return(_lastRecordingFrame);
+        _lastRecordingFrame = null;
+    }
+
+    private void PadRecordingToElapsedDuration(TimeSpan elapsed)
+    {
+        if (_recordingSession == null ||
+            _recordingFps <= 0 ||
+            _lastRecordingFrame == null ||
+            _recordingWidth <= 0 ||
+            _recordingHeight <= 0)
+        {
+            return;
+        }
+
+        long targetFrames = Math.Max(0, (long)Math.Ceiling(elapsed.TotalSeconds * _recordingFps));
+        long missingFrames = targetFrames - _recordingFramesSubmitted;
+        if (missingFrames <= 0)
+        {
+            return;
+        }
+
+        int frameSize = _recordingWidth * _recordingHeight * 4;
+        long paddedFrames = 0;
+        while (_recordingFramesSubmitted < targetFrames)
+        {
+            var duplicate = ArrayPool<byte>.Shared.Rent(frameSize);
+            Buffer.BlockCopy(_lastRecordingFrame, 0, duplicate, 0, frameSize);
+            if (!_recordingSession.TryEnqueue(duplicate))
+            {
+                Logger.Warn("Recording final duration padding stopped because the encoder stopped.");
+                break;
+            }
+
+            _recordingFramesSubmitted++;
+            paddedFrames++;
+        }
+
+        if (paddedFrames > 0)
+        {
+            Logger.Info($"Recording padded {paddedFrames} frame(s) to preserve wall-clock duration.");
+        }
     }
 
     private void UpdateRecordingUi()
     {
         if (RecordMenuItem != null)
         {
-            RecordMenuItem.Header = _isRecording ? "Stop Recording" : "Start Recording";
+            RecordMenuItem.Header = _isOfflineRendering
+                ? "Offline Render in Progress"
+                : _isRecording ? "Stop Recording" : "Start Recording";
+            RecordMenuItem.IsEnabled = !_isOfflineRendering;
+        }
+
+        if (OfflineRenderMenuItem != null)
+        {
+            OfflineRenderMenuItem.IsEnabled = !_isRecording && !_isOfflineRendering;
         }
 
         if (TaskbarInfo != null)
@@ -4614,7 +5190,7 @@ public partial class MainWindow : Window
         UpdateRecordingUi();
         if (RecordingQualityMenu != null)
         {
-            RecordingQualityMenu.IsEnabled = !_isRecording;
+            RecordingQualityMenu.IsEnabled = !_isRecording && !_isOfflineRendering;
             UpdateRecordingQualityMenuChecks();
         }
 
@@ -4797,6 +5373,16 @@ public partial class MainWindow : Window
         };
         noneItem.Click += (_, _) => ClearAudioDeviceSelection();
         AudioSourceMenu.Items.Add(noneItem);
+
+        var videoStackItem = new MenuItem
+        {
+            Header = "Video Stack (Silent)",
+            ToolTip = "Analyze enabled Play Audio video tracks internally without sending them to an output device.",
+            IsCheckable = true,
+            IsChecked = IsVideoStackAudioSelection(_selectedAudioDeviceId)
+        };
+        videoStackItem.Click += (_, _) => SelectVideoStackAudioSource();
+        AudioSourceMenu.Items.Add(videoStackItem);
         AudioSourceMenu.Items.Add(new Separator());
 
         try
@@ -4867,6 +5453,8 @@ public partial class MainWindow : Window
 
         if (_selectedAudioDeviceId == device.Id) return;
 
+        SetLiveVideoStackAnalysisEnabled(false);
+        _audioBeatDetector.Stop();
         _selectedAudioDeviceId = device.Id;
         ApplyAudioInputGainForSelection();
         UpdateAudioInputGainUi();
@@ -4894,6 +5482,32 @@ public partial class MainWindow : Window
         PopulateAudioMenu();
     }
 
+    private void SelectVideoStackAudioSource()
+    {
+        if (IsVideoStackAudioSelection(_selectedAudioDeviceId))
+        {
+            return;
+        }
+
+        _selectedAudioDeviceId = VideoStackAudioSourceId;
+        ApplyAudioInputGainForSelection();
+        UpdateAudioInputGainUi();
+        _audioBeatDetector.BeginExternalInput();
+        SetLiveVideoStackAnalysisEnabled(true);
+        _lastAudioReactiveBeatCount = 0;
+        _lastAudioReactiveSeedUtc = DateTime.MinValue;
+        _smoothedLevelEnergy = 0;
+        _smoothedEnergy = 0;
+        _fastAudioLevel = 0;
+        _audioReactiveFpsMultiplier = 1.0;
+        _audioReactiveLevelSeedBurstsLastStep = 0;
+        _audioReactiveBeatSeedBurstsLastStep = 0;
+        UpdateAudioReactiveMenuState();
+        SaveConfig();
+        PopulateAudioMenu();
+        Logger.Info("Audio reactivity source changed to the silent video-stack mix.");
+    }
+
     private void ClearAudioDeviceSelection()
     {
         if (string.IsNullOrWhiteSpace(_selectedAudioDeviceId))
@@ -4902,6 +5516,7 @@ public partial class MainWindow : Window
         }
 
         _selectedAudioDeviceId = null;
+        SetLiveVideoStackAnalysisEnabled(false);
         _audioBeatDetector.Stop();
         ApplyAudioInputGainForSelection();
         UpdateAudioInputGainUi();
@@ -4956,6 +5571,7 @@ public partial class MainWindow : Window
         SourcesMenu.Items.Add(BuildAddFileMenuItem(null));
         SourcesMenu.Items.Add(BuildAddYoutubeMenuItem(null));
         SourcesMenu.Items.Add(BuildAddVideoSequenceMenuItem(null));
+        SourcesMenu.Items.Add(BuildAddAutoClipMenuItem(null));
         SourcesMenu.Items.Add(new Separator());
 
         if (_sources.Count == 0)
@@ -5135,6 +5751,13 @@ public partial class MainWindow : Window
         var addSequenceItem = new MenuItem { Header = "Add Video Sequence...", Tag = parentGroup };
         addSequenceItem.Click += AddVideoSequenceMenuItem_Click;
         return addSequenceItem;
+    }
+
+    private MenuItem BuildAddAutoClipMenuItem(CaptureSource? parentGroup)
+    {
+        var addAutoClipItem = new MenuItem { Header = "Add AutoClip", Tag = parentGroup };
+        addAutoClipItem.Click += AddAutoClipMenuItem_Click;
+        return addAutoClipItem;
     }
 
     private MenuItem BuildAddYoutubeMenuItem(CaptureSource? parentGroup)
@@ -5379,6 +6002,38 @@ public partial class MainWindow : Window
                     directionMenu.Items.Add(directionItem);
                 }
                 animationItem.Items.Add(directionMenu);
+
+                var startAngleItem = new MenuItem
+                {
+                    Header = "Start Angle",
+                    StaysOpenOnClick = true
+                };
+                var startAngleValueItem = new MenuItem
+                {
+                    Header = $"{animation.StartAngleDegrees:0}°",
+                    IsEnabled = false
+                };
+                var startAngleSlider = new Slider
+                {
+                    Minimum = 0,
+                    Maximum = 360,
+                    Value = Math.Clamp(animation.StartAngleDegrees, 0, 360),
+                    Width = 140,
+                    SmallChange = 1,
+                    LargeChange = 15,
+                    Margin = new Thickness(12, 4, 12, 8)
+                };
+                startAngleSlider.ValueChanged += (_, args) =>
+                {
+                    animation.StartAngleDegrees = Math.Clamp(args.NewValue, 0, 360);
+                    startAngleValueItem.Header = $"{animation.StartAngleDegrees:0}°";
+                    RenderFrame();
+                    SaveConfig();
+                    NotifyLayerEditorSourcesChanged();
+                };
+                startAngleItem.Items.Add(startAngleValueItem);
+                startAngleItem.Items.Add(startAngleSlider);
+                animationItem.Items.Add(startAngleItem);
             }
             else if (animation.Type == AnimationType.DvdBounce)
             {
@@ -5603,6 +6258,7 @@ public partial class MainWindow : Window
             sourceItem.Items.Add(BuildAddFileMenuItem(source));
             sourceItem.Items.Add(BuildAddYoutubeMenuItem(source));
             sourceItem.Items.Add(BuildAddVideoSequenceMenuItem(source));
+            sourceItem.Items.Add(BuildAddAutoClipMenuItem(source));
             sourceItem.Items.Add(new Separator());
         }
 
@@ -5637,14 +6293,13 @@ public partial class MainWindow : Window
         var animationsMenu = BuildAnimationsMenu(source);
 
         MenuItem? restartVideoItem = null;
-        bool isVideoLayer = source.Type == CaptureSource.SourceType.VideoSequence ||
-                            (source.Type == CaptureSource.SourceType.File &&
-                             !string.IsNullOrWhiteSpace(source.FilePath) &&
-                             IsVideoFileSourcePath(source.FilePath));
+        bool isVideoLayer = IsVideoSource(source);
         MenuItem? videoAudioItem = null;
         MenuItem? videoAudioVolumeItem = null;
         MenuItem? videoPlaybackItem = null;
         MenuItem? videoSeekItem = null;
+        MenuItem? autoClipFadeItem = null;
+        MenuItem? autoClipLoopItem = null;
         if (isVideoLayer)
         {
             restartVideoItem = new MenuItem
@@ -5653,72 +6308,121 @@ public partial class MainWindow : Window
             };
             restartVideoItem.Click += (_, _) => RestartVideoSource(source);
 
-            bool hasPlaybackState = TryGetSourceVideoPlaybackState(source, out var playbackState);
-            if (hasPlaybackState)
+            if (source.Type == CaptureSource.SourceType.AutoClip)
             {
-                source.VideoPlaybackPaused = playbackState.IsPaused;
-            }
-            videoPlaybackItem = new MenuItem
-            {
-                Header = source.VideoPlaybackPaused ? "Play" : "Pause"
-            };
-            videoPlaybackItem.Click += (_, _) =>
-            {
-                bool shouldPause = !source.VideoPlaybackPaused;
-                if (SetSourceVideoPlaybackPaused(source, shouldPause))
+                autoClipFadeItem = new MenuItem
                 {
-                    source.VideoPlaybackPaused = shouldPause;
-                    videoPlaybackItem.Header = shouldPause ? "Play" : "Pause";
+                    Header = "Fade In / Out",
+                    StaysOpenOnClick = true
+                };
+                var fadeValueItem = new MenuItem
+                {
+                    Header = $"{source.AutoClipFadeSeconds:0.00} s",
+                    IsEnabled = false
+                };
+                var fadeSlider = new Slider
+                {
+                    Minimum = 0,
+                    Maximum = 10,
+                    Value = Math.Clamp(source.AutoClipFadeSeconds, 0, 10),
+                    Width = 140,
+                    SmallChange = 0.05,
+                    LargeChange = 0.5,
+                    Margin = new Thickness(12, 4, 12, 8)
+                };
+                fadeSlider.ValueChanged += (_, args) =>
+                {
+                    source.AutoClipFadeSeconds = Math.Clamp(args.NewValue, 0, 10);
+                    fadeValueItem.Header = $"{source.AutoClipFadeSeconds:0.00} s";
+                    RenderFrame();
+                    SaveConfig();
                     NotifyLayerEditorSourcesChanged();
-                }
-            };
+                };
+                autoClipFadeItem.Items.Add(fadeValueItem);
+                autoClipFadeItem.Items.Add(fadeSlider);
 
-            videoSeekItem = new MenuItem
-            {
-                Header = "Scrub",
-                StaysOpenOnClick = true,
-                IsEnabled = hasPlaybackState && playbackState.IsSeekable
-            };
-            var videoSeekValueItem = new MenuItem
-            {
-                Header = hasPlaybackState
-                    ? $"{FormatPlaybackTime(playbackState.PositionSeconds)} / {FormatPlaybackTime(playbackState.DurationSeconds)}"
-                    : "Unavailable",
-                IsEnabled = false
-            };
-            var videoSeekSlider = new Slider
-            {
-                Minimum = 0,
-                Maximum = 1,
-                Value = hasPlaybackState ? playbackState.NormalizedPosition : 0,
-                Width = 160,
-                SmallChange = 0.01,
-                LargeChange = 0.05,
-                IsEnabled = hasPlaybackState && playbackState.IsSeekable,
-                Margin = new Thickness(12, 4, 12, 8)
-            };
-            videoSeekSlider.ValueChanged += (_, args) =>
-            {
-                if (!videoSeekSlider.IsMouseCaptureWithin)
+                autoClipLoopItem = new MenuItem
                 {
-                    return;
-                }
+                    Header = "Loop Selected File",
+                    IsCheckable = true,
+                    IsChecked = source.AutoClipLoopSelectedFile
+                };
+                autoClipLoopItem.Click += (_, _) =>
+                {
+                    source.AutoClipLoopSelectedFile = !source.AutoClipLoopSelectedFile;
+                    source.AutoClip?.SetLoopSelectedFile(source.AutoClipLoopSelectedFile);
+                    autoClipLoopItem.IsChecked = source.AutoClipLoopSelectedFile;
+                    source.LastFrame = null;
+                    RenderFrame();
+                    SaveConfig();
+                    NotifyLayerEditorSourcesChanged();
+                };
+            }
 
-                if (!SeekSourceVideo(source, args.NewValue))
+            if (source.Type != CaptureSource.SourceType.AutoClip)
+            {
+                bool hasPlaybackState = TryGetSourceVideoPlaybackState(source, out var playbackState);
+                if (hasPlaybackState)
                 {
-                    return;
+                    source.VideoPlaybackPaused = playbackState.IsPaused;
                 }
+                videoPlaybackItem = new MenuItem
+                {
+                    Header = source.VideoPlaybackPaused ? "Play" : "Pause"
+                };
+                videoPlaybackItem.Click += (_, _) =>
+                {
+                    bool shouldPause = !source.VideoPlaybackPaused;
+                    if (SetSourceVideoPlaybackPaused(source, shouldPause))
+                    {
+                        source.VideoPlaybackPaused = shouldPause;
+                        videoPlaybackItem.Header = shouldPause ? "Play" : "Pause";
+                        NotifyLayerEditorSourcesChanged();
+                    }
+                };
 
-                if (TryGetSourceVideoPlaybackState(source, out var updatedState))
+                videoSeekItem = new MenuItem
                 {
-                    source.VideoPlaybackPaused = updatedState.IsPaused;
-                    videoSeekValueItem.Header =
-                        $"{FormatPlaybackTime(updatedState.PositionSeconds)} / {FormatPlaybackTime(updatedState.DurationSeconds)}";
-                }
-                NotifyLayerEditorSourcesChanged();
-            };
-            videoSeekItem.Items.Add(videoSeekValueItem);
-            videoSeekItem.Items.Add(videoSeekSlider);
+                    Header = "Scrub",
+                    StaysOpenOnClick = true,
+                    IsEnabled = hasPlaybackState && playbackState.IsSeekable
+                };
+                var videoSeekValueItem = new MenuItem
+                {
+                    Header = hasPlaybackState
+                        ? $"{FormatPlaybackTime(playbackState.PositionSeconds)} / {FormatPlaybackTime(playbackState.DurationSeconds)}"
+                        : "Unavailable",
+                    IsEnabled = false
+                };
+                var videoSeekSlider = new Slider
+                {
+                    Minimum = 0,
+                    Maximum = 1,
+                    Value = hasPlaybackState ? playbackState.NormalizedPosition : 0,
+                    Width = 160,
+                    SmallChange = 0.01,
+                    LargeChange = 0.05,
+                    IsEnabled = hasPlaybackState && playbackState.IsSeekable,
+                    Margin = new Thickness(12, 4, 12, 8)
+                };
+                videoSeekSlider.ValueChanged += (_, args) =>
+                {
+                    if (!videoSeekSlider.IsMouseCaptureWithin || !SeekSourceVideo(source, args.NewValue))
+                    {
+                        return;
+                    }
+
+                    if (TryGetSourceVideoPlaybackState(source, out var updatedState))
+                    {
+                        source.VideoPlaybackPaused = updatedState.IsPaused;
+                        videoSeekValueItem.Header =
+                            $"{FormatPlaybackTime(updatedState.PositionSeconds)} / {FormatPlaybackTime(updatedState.DurationSeconds)}";
+                    }
+                    NotifyLayerEditorSourcesChanged();
+                };
+                videoSeekItem.Items.Add(videoSeekValueItem);
+                videoSeekItem.Items.Add(videoSeekSlider);
+            }
 
             videoAudioItem = new MenuItem
             {
@@ -5811,10 +6515,14 @@ public partial class MainWindow : Window
             NotifyLayerEditorSourcesChanged();
         };
 
-        var keyMenu = new MenuItem { Header = "Keying (Normal)" };
+        var keyMenu = new MenuItem
+        {
+            Header = "Mask / Keying (Normal)",
+            IsEnabled = source.BlendMode == BlendMode.Normal
+        };
         var keyEnabledItem = new MenuItem
         {
-            Header = "Enable Keying",
+            Header = "Enable Color Mask / Keying",
             IsCheckable = true,
             IsChecked = source.KeyEnabled
         };
@@ -5922,6 +6630,38 @@ public partial class MainWindow : Window
         opacityItem.Items.Add(opacityValueItem);
         opacityItem.Items.Add(opacitySlider);
 
+        var scaleItem = new MenuItem
+        {
+            Header = "Scale",
+            StaysOpenOnClick = true
+        };
+        var scaleValueItem = new MenuItem
+        {
+            Header = $"{source.Scale:0.00}×",
+            IsEnabled = false
+        };
+        var scaleSlider = new Slider
+        {
+            Minimum = MinLayerScale,
+            Maximum = MaxLayerScale,
+            Value = Math.Clamp(source.Scale, MinLayerScale, MaxLayerScale),
+            Width = 140,
+            SmallChange = 0.05,
+            LargeChange = 0.25,
+            Margin = new Thickness(12, 4, 12, 8)
+        };
+        scaleSlider.ValueChanged += (_, args) =>
+        {
+            source.Scale = Math.Clamp(args.NewValue, MinLayerScale, MaxLayerScale);
+            Logger.Info($"Source scale changed: {source.DisplayName} ({source.Type}) = {source.Scale:F2}");
+            scaleValueItem.Header = $"{source.Scale:0.00}×";
+            RenderFrame();
+            SaveConfig();
+            NotifyLayerEditorSourcesChanged();
+        };
+        scaleItem.Items.Add(scaleValueItem);
+        scaleItem.Items.Add(scaleSlider);
+
         var removeItem = new MenuItem
         {
             Header = "Remove"
@@ -5934,6 +6674,14 @@ public partial class MainWindow : Window
         if (restartVideoItem != null)
         {
             sourceItem.Items.Add(restartVideoItem);
+        }
+        if (autoClipFadeItem != null)
+        {
+            sourceItem.Items.Add(autoClipFadeItem);
+        }
+        if (autoClipLoopItem != null)
+        {
+            sourceItem.Items.Add(autoClipLoopItem);
         }
         if (videoPlaybackItem != null)
         {
@@ -5961,6 +6709,7 @@ public partial class MainWindow : Window
         sourceItem.Items.Add(mirrorItem);
         sourceItem.Items.Add(keyMenu);
         sourceItem.Items.Add(opacityItem);
+        sourceItem.Items.Add(scaleItem);
         sourceItem.Items.Add(new Separator());
         sourceItem.Items.Add(removeItem);
 
@@ -5975,6 +6724,7 @@ public partial class MainWindow : Window
             CaptureSource.SourceType.Webcam => $"{prefix}Camera: {source.DisplayName}",
             CaptureSource.SourceType.File => $"{prefix}File: {source.DisplayName}",
             CaptureSource.SourceType.VideoSequence => $"{prefix}Video Sequence: {source.DisplayName}",
+            CaptureSource.SourceType.AutoClip => $"{prefix}AutoClip: {source.DisplayName}",
             CaptureSource.SourceType.Group => $"{prefix}Group: {source.DisplayName}",
             _ => $"{prefix}{source.DisplayName}"
         };
@@ -6060,6 +6810,12 @@ public partial class MainWindow : Window
         {
             AddVideoSequenceSource(dialog.FileNames, parentGroup?.Children ?? _sources);
         }
+    }
+
+    private void AddAutoClipMenuItem_Click(object sender, RoutedEventArgs e)
+    {
+        CaptureSource? parentGroup = sender is MenuItem { Tag: CaptureSource group } ? group : null;
+        AddAutoClipSource(Array.Empty<string>(), parentGroup?.Children ?? _sources);
     }
 
     private void SourceBlendModeItem_Click(object sender, RoutedEventArgs e)
@@ -6161,7 +6917,7 @@ public partial class MainWindow : Window
     private bool TryGetAnimationBeatTiming(double timeSeconds, out double beatDuration, out double beatsElapsed, out bool beatAligned)
     {
         double bpm = _animationBpm > 0 ? _animationBpm : DefaultAnimationBpm;
-        bool audioRequested = _animationAudioSyncEnabled && !string.IsNullOrWhiteSpace(_selectedAudioDeviceId);
+        bool audioRequested = _animationAudioSyncEnabled && HasReactiveAudioInput();
         double effectiveBpm = bpm;
         if (audioRequested)
         {
@@ -6187,7 +6943,7 @@ public partial class MainWindow : Window
 
         if (beatAligned)
         {
-            double timeSinceBeat = (DateTime.UtcNow - _audioBeatDetector.LastBeatTime).TotalSeconds;
+            double timeSinceBeat = (GetReactiveAudioNow() - _audioBeatDetector.LastBeatTime).TotalSeconds;
             if (timeSinceBeat < 0)
             {
                 timeSinceBeat = 0;
@@ -6402,6 +7158,27 @@ public partial class MainWindow : Window
         NotifyLayerEditorSourcesChanged();
     }
 
+    private void AddAutoClipSource(IReadOnlyList<string> paths, List<CaptureSource> targetList)
+    {
+        const double minClipSeconds = 2.0;
+        const double maxClipSeconds = 5.0;
+        const double minDelaySeconds = 0.0;
+        const double maxDelaySeconds = 0.0;
+        if (!_fileCapture.TryCreateAutoClip(paths, minClipSeconds, maxClipSeconds, minDelaySeconds, maxDelaySeconds, out var session, out var error))
+        {
+            string message = error ?? "Could not create AutoClip.";
+            MessageBox.Show(this, message, "AutoClip Error", MessageBoxButton.OK, MessageBoxImage.Warning);
+            return;
+        }
+
+        targetList.Add(CaptureSource.CreateAutoClip(session!, minClipSeconds, maxClipSeconds, minDelaySeconds, maxDelaySeconds));
+        Logger.Info("Inserted new AutoClip layer.");
+        UpdatePrimaryAspectIfNeeded();
+        RenderFrame();
+        SaveConfig();
+        NotifyLayerEditorSourcesChanged();
+    }
+
     private void AddLayerGroup(List<CaptureSource> targetList)
     {
         targetList.Add(CaptureSource.CreateGroup());
@@ -6457,6 +7234,12 @@ public partial class MainWindow : Window
             ApplySourceVideoAudioState(source);
             restarted = true;
         }
+        else if (source.Type == CaptureSource.SourceType.AutoClip && source.AutoClip != null)
+        {
+            source.AutoClip.Restart();
+            ApplySourceVideoAudioState(source);
+            restarted = true;
+        }
         else if (source.Type == CaptureSource.SourceType.File &&
                  !string.IsNullOrWhiteSpace(source.FilePath) &&
                  IsVideoFileSourcePath(source.FilePath))
@@ -6485,6 +7268,7 @@ public partial class MainWindow : Window
 
     private bool IsVideoSource(CaptureSource source) =>
         source.Type == CaptureSource.SourceType.VideoSequence ||
+        source.Type == CaptureSource.SourceType.AutoClip ||
         (source.Type == CaptureSource.SourceType.File &&
          !string.IsNullOrWhiteSpace(source.FilePath) &&
          IsVideoFileSourcePath(source.FilePath));
@@ -6501,6 +7285,14 @@ public partial class MainWindow : Window
             source.VideoSequence?.SetAudioMaster(_sourceAudioMasterEnabled, _sourceAudioMasterVolume);
             source.VideoSequence?.SetAudioVolume(source.VideoAudioVolume);
             source.VideoSequence?.SetAudioEnabled(source.VideoAudioEnabled);
+            return;
+        }
+
+        if (source.Type == CaptureSource.SourceType.AutoClip)
+        {
+            source.AutoClip?.SetAudioMaster(_sourceAudioMasterEnabled, _sourceAudioMasterVolume);
+            source.AutoClip?.SetAudioVolume(source.VideoAudioVolume);
+            source.AutoClip?.SetAudioEnabled(source.VideoAudioEnabled);
             return;
         }
 
@@ -6524,6 +7316,10 @@ public partial class MainWindow : Window
             if (source.Type == CaptureSource.SourceType.VideoSequence)
             {
                 source.VideoSequence?.SetAudioMaster(_sourceAudioMasterEnabled, _sourceAudioMasterVolume);
+            }
+            else if (source.Type == CaptureSource.SourceType.AutoClip)
+            {
+                source.AutoClip?.SetAudioMaster(_sourceAudioMasterEnabled, _sourceAudioMasterVolume);
             }
         }
     }
@@ -6908,6 +7704,186 @@ public partial class MainWindow : Window
         RunWithoutLayerEditorRefresh(() => AddVideoSequenceSource(paths, targetList));
     }
 
+    internal void AddAutoClipFromEditor(Guid? parentId)
+    {
+        var targetList = ResolveTargetList(parentId);
+        if (targetList == null)
+        {
+            return;
+        }
+
+        RunWithoutLayerEditorRefresh(() => AddAutoClipSource(Array.Empty<string>(), targetList));
+    }
+
+    internal void UpdateAutoClipFromEditor(
+        Guid sourceId,
+        IReadOnlyList<string> paths,
+        double minClipSeconds,
+        double maxClipSeconds,
+        double minDelaySeconds,
+        double maxDelaySeconds,
+        IReadOnlyList<LayerEditorAutoClipVideoOverride> videoOverrides)
+    {
+        RunWithoutLayerEditorRefresh(() =>
+        {
+            CaptureSource? source = FindSourceById(sourceId);
+            if (source?.Type != CaptureSource.SourceType.AutoClip)
+            {
+                return;
+            }
+
+            if (!_fileCapture.TryCreateAutoClip(
+                    paths,
+                    minClipSeconds,
+                    maxClipSeconds,
+                    minDelaySeconds,
+                    maxDelaySeconds,
+                    out var replacement,
+                    out var error))
+            {
+                MessageBox.Show(this, error ?? "Could not update AutoClip.", "AutoClip Error", MessageBoxButton.OK, MessageBoxImage.Warning);
+                return;
+            }
+
+            source.DisposeAutoClip();
+            source.AutoClipMinClipSeconds = Math.Min(minClipSeconds, maxClipSeconds);
+            source.AutoClipMaxClipSeconds = Math.Max(minClipSeconds, maxClipSeconds);
+            source.AutoClipMinDelaySeconds = Math.Min(minDelaySeconds, maxDelaySeconds);
+            source.AutoClipMaxDelaySeconds = Math.Max(minDelaySeconds, maxDelaySeconds);
+            replacement!.SetLoopSelectedFile(source.AutoClipLoopSelectedFile);
+            source.SetAutoClip(replacement!);
+            SyncAutoClipVideoOverrides(source, videoOverrides);
+            source.LastFrame = null;
+            source.FirstFrameReceived = false;
+            source.MissedFrames = 0;
+            ApplySourceVideoAudioState(source);
+            UpdatePrimaryAspectIfNeeded();
+            RenderFrame();
+            SaveConfig();
+            RebuildSourcesMenu();
+        });
+    }
+
+    internal void UpdateAutoClipFadeFromEditor(Guid sourceId, double fadeSeconds)
+    {
+        RunWithoutLayerEditorRefresh(() =>
+        {
+            CaptureSource? source = FindSourceById(sourceId);
+            if (source?.Type != CaptureSource.SourceType.AutoClip)
+            {
+                return;
+            }
+
+            source.AutoClipFadeSeconds = Math.Clamp(fadeSeconds, 0, 10);
+            RenderFrame();
+            SaveConfig();
+        });
+    }
+
+    internal void UpdateAutoClipLoopSelectedFileFromEditor(Guid sourceId, bool enabled)
+    {
+        RunWithoutLayerEditorRefresh(() =>
+        {
+            CaptureSource? source = FindSourceById(sourceId);
+            if (source?.Type != CaptureSource.SourceType.AutoClip)
+            {
+                return;
+            }
+
+            source.AutoClipLoopSelectedFile = enabled;
+            source.AutoClip?.SetLoopSelectedFile(enabled);
+            source.LastFrame = null;
+            RenderFrame();
+            SaveConfig();
+        });
+    }
+
+    internal void UpdateAutoClipVideoOverrideFromEditor(Guid sourceId, LayerEditorAutoClipVideoOverride model)
+    {
+        RunWithoutLayerEditorRefresh(() =>
+        {
+            CaptureSource? source = FindSourceById(sourceId);
+            if (source?.Type != CaptureSource.SourceType.AutoClip || string.IsNullOrWhiteSpace(model.FilePath))
+            {
+                return;
+            }
+
+            source.AutoClipVideoOverrides[model.FilePath] = BuildAutoClipVideoOverride(model, source);
+            RenderFrame();
+            SaveConfig();
+        });
+    }
+
+    private static void SyncAutoClipVideoOverrides(
+        CaptureSource source,
+        IEnumerable<LayerEditorAutoClipVideoOverride> models)
+    {
+        source.AutoClipVideoOverrides.Clear();
+        foreach (var model in models)
+        {
+            if (!string.IsNullOrWhiteSpace(model.FilePath))
+            {
+                source.AutoClipVideoOverrides[model.FilePath] = BuildAutoClipVideoOverride(model, source);
+            }
+        }
+    }
+
+    private static void SyncAutoClipVideoOverrides(
+        CaptureSource source,
+        IEnumerable<AppConfig.AutoClipVideoOverrideConfig>? configs)
+    {
+        source.AutoClipVideoOverrides.Clear();
+        foreach (var config in configs ?? Enumerable.Empty<AppConfig.AutoClipVideoOverrideConfig>())
+        {
+            if (string.IsNullOrWhiteSpace(config.FilePath))
+            {
+                continue;
+            }
+            var model = new LayerEditorAutoClipVideoOverride
+            {
+                FilePath = config.FilePath,
+                BlendMode = string.IsNullOrWhiteSpace(config.BlendMode) ? "Inherit" : config.BlendMode,
+                KeyMode = string.IsNullOrWhiteSpace(config.KeyMode) ? "Inherit" : config.KeyMode,
+                KeyColorHex = string.IsNullOrWhiteSpace(config.KeyColor) ? "#000000" : config.KeyColor,
+                KeyTolerance = config.KeyTolerance
+            };
+            source.AutoClipVideoOverrides[config.FilePath] = BuildAutoClipVideoOverride(model, source);
+        }
+    }
+
+    private static AutoClipVideoCompositeOverride BuildAutoClipVideoOverride(
+        LayerEditorAutoClipVideoOverride model,
+        CaptureSource source)
+    {
+        BlendMode? blendMode = Enum.TryParse<BlendMode>(model.BlendMode, true, out var parsedBlend)
+            ? parsedBlend
+            : null;
+        bool? keyEnabled = model.KeyMode switch
+        {
+            "Enabled" => true,
+            "Disabled" => false,
+            _ => null
+        };
+        byte r = source.KeyColorR;
+        byte g = source.KeyColorG;
+        byte b = source.KeyColorB;
+        if (TryParseHexColor(model.KeyColorHex, out var parsedR, out var parsedG, out var parsedB))
+        {
+            r = parsedR;
+            g = parsedG;
+            b = parsedB;
+        }
+        return new AutoClipVideoCompositeOverride
+        {
+            BlendMode = blendMode,
+            KeyEnabled = keyEnabled,
+            KeyColorR = r,
+            KeyColorG = g,
+            KeyColorB = b,
+            KeyTolerance = Math.Clamp(model.KeyTolerance, 0, 1)
+        };
+    }
+
     internal async void AddYoutubeSourceFromEditor(string url, Guid? parentId)
     {
          var targetList = ResolveTargetList(parentId);
@@ -6988,6 +7964,22 @@ public partial class MainWindow : Window
             }
 
             source.Opacity = Math.Clamp(opacity, 0, 1);
+            RenderFrame();
+            SaveConfig();
+        });
+    }
+
+    internal void UpdateSourceScale(Guid sourceId, double scale)
+    {
+        RunWithoutLayerEditorRefresh(() =>
+        {
+            var source = FindSourceById(sourceId);
+            if (source == null)
+            {
+                return;
+            }
+
+            source.Scale = Math.Clamp(scale, MinLayerScale, MaxLayerScale);
             RenderFrame();
             SaveConfig();
         });
@@ -7522,6 +8514,7 @@ public partial class MainWindow : Window
             animation.RotationDirection = rotate;
         }
         animation.RotationDegrees = Math.Clamp(model.RotationDegrees, 0, 360);
+        animation.StartAngleDegrees = Math.Clamp(model.StartAngleDegrees, 0, 360);
         if (model.DvdScale > 0)
         {
             animation.DvdScale = Math.Clamp(model.DvdScale, 0.01, 1.0);
@@ -7577,6 +8570,10 @@ public partial class MainWindow : Window
         else if (source.Type == CaptureSource.SourceType.VideoSequence)
         {
             source.DisposeVideoSequence();
+        }
+        else if (source.Type == CaptureSource.SourceType.AutoClip)
+        {
+            source.DisposeAutoClip();
         }
         else if (source.Type == CaptureSource.SourceType.File && source.FilePath != null)
         {
@@ -7720,7 +8717,9 @@ public partial class MainWindow : Window
             return;
         }
 
-        double animationTime = _lifetimeStopwatch.Elapsed.TotalSeconds;
+        double animationTime = _isOfflineRendering
+            ? _offlineAnimationTimeSeconds
+            : _lifetimeStopwatch.Elapsed.TotalSeconds;
         long captureSourcesStamp = BeginProfileStamp();
         bool removedAny = CaptureSourceList(_sources, animationTime);
         EndProfileStamp("capture_sources_ms", captureSourcesStamp);
@@ -7904,6 +8903,13 @@ public partial class MainWindow : Window
                 engine.InjectFrame(grayMask);
                 cpuGrayInjectLayerCount++;
                 injectedAnyLayer = true;
+            }
+            else if (layer.LifeMode == GameOfLifeEngine.LifeMode.Bitwise)
+            {
+                if (App.IsSmokeTestMode)
+                {
+                    Logger.Info("CPU fallback inject path skipped for Bitwise life mode because it requires the GPU composite surface path.");
+                }
             }
             else
             {
@@ -8304,6 +9310,15 @@ public partial class MainWindow : Window
             return true;
         }
 
+        if (layer.LifeMode == GameOfLifeEngine.LifeMode.Bitwise)
+        {
+            if (App.IsSmokeTestMode)
+            {
+                Logger.Info("CPU fallback inject path skipped for Bitwise life mode because it requires the GPU composite surface path.");
+            }
+            return false;
+        }
+
         var rMask = layer.RedMask = EnsureLayerMask(layer.RedMask, currentComposite.DownscaledHeight, currentComposite.DownscaledWidth);
         var gMask = layer.GreenMask = EnsureLayerMask(layer.GreenMask, currentComposite.DownscaledHeight, currentComposite.DownscaledWidth);
         var bMask = layer.BlueMask = EnsureLayerMask(layer.BlueMask, currentComposite.DownscaledHeight, currentComposite.DownscaledWidth);
@@ -8376,7 +9391,7 @@ public partial class MainWindow : Window
 
     private void ApplyAudioReactiveFps()
     {
-        if (!_audioReactiveEnabled || !_audioReactiveLevelToFpsEnabled || string.IsNullOrWhiteSpace(_selectedAudioDeviceId))
+        if (!_audioReactiveEnabled || !_audioReactiveLevelToFpsEnabled || !HasReactiveAudioInput())
         {
             _audioReactiveFpsMultiplier = 1.0;
             return;
@@ -8492,7 +9507,7 @@ public partial class MainWindow : Window
 
     private void ApplyAudioReactiveLifeOpacity()
     {
-        if (!_audioReactiveEnabled || !_audioReactiveLevelToLifeOpacityEnabled || string.IsNullOrWhiteSpace(_selectedAudioDeviceId))
+        if (!_audioReactiveEnabled || !_audioReactiveLevelToLifeOpacityEnabled || !HasReactiveAudioInput())
         {
             _effectiveLifeOpacity = _lifeOpacity;
             return;
@@ -8507,8 +9522,17 @@ public partial class MainWindow : Window
 
     private bool HasSimulationReactiveAudioInput()
     {
-        return !string.IsNullOrWhiteSpace(_selectedAudioDeviceId);
+        return HasReactiveAudioInput();
     }
+
+    private bool HasReactiveAudioInput() =>
+        (_isOfflineRendering && _offlineVideoAudioActive) ||
+        !string.IsNullOrWhiteSpace(_selectedAudioDeviceId);
+
+    private DateTime GetReactiveAudioNow() =>
+        _isOfflineRendering
+            ? DateTime.UnixEpoch.AddSeconds(Math.Max(0, _offlineAnimationTimeSeconds))
+            : DateTime.UtcNow;
 
     private double GetReactiveInputValue(SimulationReactiveInput input)
     {
@@ -8649,7 +9673,7 @@ public partial class MainWindow : Window
 
     private int ApplyAudioReactiveLevelSeeding(int stepFactor)
     {
-        if (!_audioReactiveEnabled || !_audioReactiveLevelSeedEnabled || string.IsNullOrWhiteSpace(_selectedAudioDeviceId))
+        if (!_audioReactiveEnabled || !_audioReactiveLevelSeedEnabled || !HasReactiveAudioInput())
         {
             return 0;
         }
@@ -8673,7 +9697,7 @@ public partial class MainWindow : Window
     private int ApplyAudioReactiveBeatSeeding()
     {
         long beatCount = _audioBeatDetector.BeatCount;
-        if (!_audioReactiveEnabled || !_audioReactiveBeatSeedEnabled || string.IsNullOrWhiteSpace(_selectedAudioDeviceId))
+        if (!_audioReactiveEnabled || !_audioReactiveBeatSeedEnabled || !HasReactiveAudioInput())
         {
             _lastAudioReactiveBeatCount = beatCount;
             return 0;
@@ -8687,7 +9711,7 @@ public partial class MainWindow : Window
 
         _lastAudioReactiveBeatCount = beatCount;
 
-        var now = DateTime.UtcNow;
+        var now = GetReactiveAudioNow();
         if (_lastAudioReactiveSeedUtc != DateTime.MinValue &&
             (now - _lastAudioReactiveSeedUtc).TotalMilliseconds < _audioReactiveSeedCooldownMs)
         {
@@ -8929,6 +9953,27 @@ public partial class MainWindow : Window
                         }
                     }
                 }
+                else if (source.Type == CaptureSource.SourceType.AutoClip && source.AutoClip != null)
+                {
+                    var referenceEngine = GetReferenceSimulationEngine();
+                    long autoClipCaptureStamp = BeginProfileStamp();
+                    var autoClipFrame = source.AutoClip.CaptureFrame(referenceEngine.Columns, referenceEngine.Rows, source.FitMode, includeSource: includeNativeSource);
+                    EndProfileStamp("capture_autoclip_frame_ms", autoClipCaptureStamp);
+                    if (autoClipFrame.HasValue)
+                    {
+                        var value = autoClipFrame.Value;
+                        frame = new SourceFrame(value.OverlayDownscaled, value.DownscaledWidth, value.DownscaledHeight,
+                            value.OverlaySource, value.SourceWidth, value.SourceHeight, value.FrameToken, value.FramePublishTimestamp);
+                        source.UpdateFileDimensions(value.SourceWidth, value.SourceHeight);
+                        source.HasError = false;
+                        source.MissedFrames = 0;
+                        if (!source.FirstFrameReceived)
+                        {
+                            source.FirstFrameReceived = true;
+                            Logger.Info($"AutoClip frame acquired for {source.DisplayName}: {value.SourceWidth}x{value.SourceHeight}");
+                        }
+                    }
+                }
                 else if (source.Type == CaptureSource.SourceType.File && !string.IsNullOrWhiteSpace(source.FilePath))
                 {
                     var referenceEngine = GetReferenceSimulationEngine();
@@ -9021,6 +10066,28 @@ public partial class MainWindow : Window
                         continue;
                     }
                     if (source.MissedFrames <= 180 && age < TimeSpan.FromSeconds(10))
+                    {
+                        continue;
+                    }
+                }
+
+                if (source.Type == CaptureSource.SourceType.AutoClip)
+                {
+                    if (source.AutoClip?.IsDelaying == true || source.AutoClip?.IsEmpty == true)
+                    {
+                        source.LastFrame = null;
+                        source.HasError = false;
+                        source.MissedFrames = 0;
+                        continue;
+                    }
+
+                    if (source.AutoClip?.State == FileCaptureService.FileCaptureState.Pending)
+                    {
+                        continue;
+                    }
+
+                    source.MissedFrames++;
+                    if (source.MissedFrames <= 180)
                     {
                         continue;
                     }
@@ -9721,6 +10788,7 @@ public partial class MainWindow : Window
         {
             CaptureSource.SourceType.File => "capture_file_fresh_frame_ratio",
             CaptureSource.SourceType.VideoSequence => "capture_sequence_fresh_frame_ratio",
+            CaptureSource.SourceType.AutoClip => "capture_autoclip_fresh_frame_ratio",
             _ => string.Empty
         };
 
@@ -9728,6 +10796,7 @@ public partial class MainWindow : Window
         {
             CaptureSource.SourceType.File => "capture_file_frame_age_ms",
             CaptureSource.SourceType.VideoSequence => "capture_sequence_frame_age_ms",
+            CaptureSource.SourceType.AutoClip => "capture_autoclip_frame_age_ms",
             _ => string.Empty
         };
 
@@ -9761,6 +10830,8 @@ public partial class MainWindow : Window
                 => Path.GetFileName(source.FilePath),
             CaptureSource.SourceType.VideoSequence when source.VideoSequence != null
                 => Path.GetFileName(source.VideoSequence.Paths.FirstOrDefault() ?? source.DisplayName),
+            CaptureSource.SourceType.AutoClip when source.AutoClip != null
+                => Path.GetFileName(source.AutoClip.Paths.FirstOrDefault() ?? source.DisplayName),
             _ => source.DisplayName
         };
 
@@ -10025,7 +11096,7 @@ public partial class MainWindow : Window
         }
     }
 
-    private static void ApplySimulationLayerEngineSettings(SimulationLayerState layer)
+    private void ApplySimulationLayerEngineSettings(SimulationLayerState layer)
     {
         if (layer.IsGroup || layer.Engine == null)
         {
@@ -10039,6 +11110,12 @@ public partial class MainWindow : Window
                 pixelSortBackend.SetCellSize(layer.EffectivePixelSortCellWidth, layer.EffectivePixelSortCellHeight);
             }
             return;
+        }
+
+        int desiredDepth = layer.LifeMode == GameOfLifeEngine.LifeMode.Bitwise ? 24 : _configuredDepth;
+        if (layer.Engine.Depth != desiredDepth)
+        {
+            layer.Engine.Configure(_configuredRows, desiredDepth, _currentAspectRatio);
         }
 
         if (layer.Engine.Mode != layer.LifeMode)
@@ -11016,6 +12093,7 @@ public partial class MainWindow : Window
         public AnimationSpeed Speed { get; set; } = AnimationSpeed.Normal;
         public TranslateDirection TranslateDirection { get; set; } = TranslateDirection.Right;
         public RotationDirection RotationDirection { get; set; } = RotationDirection.Clockwise;
+        public double StartAngleDegrees { get; set; }
         public double RotationDegrees { get; set; } = AnimationRotateDegrees;
         public double DvdScale { get; set; } = AnimationDvdScale;
         public double BeatShakeIntensity { get; set; } = 1.0;
@@ -11023,6 +12101,16 @@ public partial class MainWindow : Window
         public double AudioGranularMidGain { get; set; } = DefaultAudioGranularEqBandGain;
         public double AudioGranularHighGain { get; set; } = DefaultAudioGranularEqBandGain;
         public double BeatsPerCycle { get; set; } = 1.0;
+    }
+
+    private sealed class AutoClipVideoCompositeOverride
+    {
+        public BlendMode? BlendMode { get; set; }
+        public bool? KeyEnabled { get; set; }
+        public byte KeyColorR { get; set; }
+        public byte KeyColorG { get; set; }
+        public byte KeyColorB { get; set; }
+        public double KeyTolerance { get; set; } = DefaultKeyTolerance;
     }
 
     private void UpdateDisplaySurface(bool force = false)
@@ -11040,6 +12128,15 @@ public partial class MainWindow : Window
         {
             targetWidth = referenceEngine.Columns;
             targetHeight = referenceEngine.Rows;
+        }
+
+        if (_isOfflineRendering &&
+            !force &&
+            _pixelBuffer != null &&
+            _displayWidth == targetWidth &&
+            _displayHeight == targetHeight)
+        {
+            return;
         }
 
         _pixelBuffer = _renderBackend.EnsureSurface(targetWidth, targetHeight, force);
@@ -11256,6 +12353,67 @@ public partial class MainWindow : Window
         public byte G { get; }
         public byte B { get; }
         public double Tolerance { get; }
+    }
+
+    private static (BlendMode BlendMode, KeyingSettings Keying) ResolveSourceCompositeSettings(CaptureSource source)
+    {
+        BlendMode blendMode = source.BlendMode;
+        bool keyEnabled = source.KeyEnabled;
+        byte keyR = source.KeyColorR;
+        byte keyG = source.KeyColorG;
+        byte keyB = source.KeyColorB;
+        double keyTolerance = source.KeyTolerance;
+
+        string? currentPath = source.Type == CaptureSource.SourceType.AutoClip ? source.AutoClip?.CurrentPath : null;
+        if (!string.IsNullOrWhiteSpace(currentPath) &&
+            source.AutoClipVideoOverrides.TryGetValue(currentPath, out var fileOverride))
+        {
+            blendMode = fileOverride.BlendMode ?? blendMode;
+            if (fileOverride.KeyEnabled.HasValue)
+            {
+                keyEnabled = fileOverride.KeyEnabled.Value;
+                if (keyEnabled)
+                {
+                    keyR = fileOverride.KeyColorR;
+                    keyG = fileOverride.KeyColorG;
+                    keyB = fileOverride.KeyColorB;
+                    keyTolerance = fileOverride.KeyTolerance;
+                }
+            }
+        }
+
+        bool normal = blendMode == BlendMode.Normal;
+        return (blendMode, new KeyingSettings(keyEnabled && normal, normal, keyR, keyG, keyB, keyTolerance));
+    }
+
+    internal static bool RunAutoClipVideoOverrideResolutionSmoke(FileCaptureService.AutoClipSession session, string path)
+    {
+        var source = CaptureSource.CreateAutoClip(session, 1, 1, 0, 0);
+        source.BlendMode = BlendMode.Additive;
+        source.KeyEnabled = false;
+        source.AutoClipVideoOverrides[path] = new AutoClipVideoCompositeOverride
+        {
+            BlendMode = BlendMode.Normal,
+            KeyEnabled = true,
+            KeyColorR = 0x0C,
+            KeyColorG = 0xED,
+            KeyColorB = 0x07,
+            KeyTolerance = 0.7
+        };
+        var keyed = ResolveSourceCompositeSettings(source);
+        bool keyedOk = keyed.BlendMode == BlendMode.Normal && keyed.Keying.Enabled &&
+                       keyed.Keying.R == 0x0C && keyed.Keying.G == 0xED && keyed.Keying.B == 0x07 &&
+                       Math.Abs(keyed.Keying.Tolerance - 0.7) < 0.0001;
+
+        source.AutoClipVideoOverrides[path] = new AutoClipVideoCompositeOverride
+        {
+            BlendMode = BlendMode.Additive,
+            KeyEnabled = false
+        };
+        var additive = ResolveSourceCompositeSettings(source);
+        bool additiveOk = additive.BlendMode == BlendMode.Additive && !additive.Keying.Enabled;
+        Logger.Info($"AutoClip override resolution smoke: keyed={keyedOk}, additive={additiveOk}.");
+        return keyedOk && additiveOk;
     }
 
     private CompositeFrame? BuildCompositeFrame(List<CaptureSource> sources, ref byte[]? downscaledBuffer, bool useEngineDimensions, double animationTime, bool includeCpuReadback = true)
@@ -12385,6 +13543,200 @@ public partial class MainWindow : Window
         return injected && surfaceOk && changedEnough && histogramPreserved;
     }
 
+    internal bool RunGpuBitwiseSmoke()
+    {
+        const int sourceWidth = 96;
+        const int sourceHeight = 54;
+
+        var source = CaptureSource.CreateFile("bitwise-source", "Bitwise Source", sourceWidth, sourceHeight);
+        source.LastFrame = new SourceFrame(
+            BuildSmokePixelSortPatternBgra(sourceWidth, sourceHeight),
+            sourceWidth,
+            sourceHeight,
+            null,
+            sourceWidth,
+            sourceHeight);
+        source.BlendMode = BlendMode.Normal;
+        source.Opacity = 1.0;
+
+        byte[]? compositeBuffer = null;
+        var composite = BuildCompositeFrame(
+            new List<CaptureSource> { source },
+            ref compositeBuffer,
+            useEngineDimensions: true,
+            animationTime: 0.0,
+            includeCpuReadback: true);
+        if (composite?.GpuSurface == null || composite.DownscaledWidth <= 0 || composite.DownscaledHeight <= 0)
+        {
+            Logger.Warn("GPU bitwise smoke: composite surface was unavailable.");
+            return false;
+        }
+
+        using var backend = new GpuSimulationBackend();
+        backend.Configure(composite.DownscaledHeight, 24, (double)composite.DownscaledWidth / composite.DownscaledHeight);
+        backend.SetMode(GameOfLifeEngine.LifeMode.Bitwise);
+        backend.SetBinningMode(GameOfLifeEngine.BinningMode.Fill);
+
+        bool injected = backend.TryInjectCompositeSurface(
+            composite.GpuSurface,
+            0.0,
+            1.0,
+            invertThreshold: false,
+            GameOfLifeEngine.InjectionMode.Threshold,
+            noiseProbability: 0.0,
+            period: 1,
+            pulseStep: 0,
+            invertInput: false,
+            hueShiftDegrees: 0.0);
+
+        int pixelCount = (backend.Columns * backend.Rows);
+        byte[] output = new byte[pixelCount * 4];
+        backend.FillColorBuffer(output);
+        byte[] expected = BuildExpectedBitwiseColorBuffer(composite.Downscaled, backend.Columns, backend.Rows);
+        GetBufferDiffStats(expected, output, pixelCount * 4, out int changedBytes, out int maxChannelDiff);
+
+        backend.Step();
+        byte[] steppedOutput = new byte[pixelCount * 4];
+        backend.FillColorBuffer(steppedOutput);
+        byte[] expectedStepped = BuildExpectedBitwiseStepColorBuffer(composite.Downscaled, backend.Columns, backend.Rows);
+        GetBufferDiffStats(expectedStepped, steppedOutput, pixelCount * 4, out int steppedChangedBytes, out int steppedMaxChannelDiff);
+
+        bool surfaceOk = backend.TryGetColorSurface(out var surface) && surface != null;
+        bool nearExactReconstruction = changedBytes <= 16 && maxChannelDiff <= 1;
+        bool steppedNearExact = steppedChangedBytes <= 16 && steppedMaxChannelDiff <= 1;
+        Logger.Info(
+            $"GPU bitwise smoke: injected={injected}, surfaceOk={surfaceOk}, nearExactReconstruction={nearExactReconstruction}, changedBytes={changedBytes}, maxChannelDiff={maxChannelDiff}, steppedNearExact={steppedNearExact}, steppedChangedBytes={steppedChangedBytes}, steppedMaxChannelDiff={steppedMaxChannelDiff}.");
+        return injected && surfaceOk && nearExactReconstruction && steppedNearExact;
+    }
+
+    private static byte[] BuildExpectedBitwiseColorBuffer(byte[] sourceBgra, int width, int height)
+    {
+        int pixelCount = width * height;
+        byte[] expected = new byte[pixelCount * 4];
+        for (int i = 0; i < pixelCount; i++)
+        {
+            int index = i * 4;
+            expected[index] = sourceBgra[index + 2];
+            expected[index + 1] = sourceBgra[index + 1];
+            expected[index + 2] = sourceBgra[index];
+            expected[index + 3] = sourceBgra[index + 3];
+        }
+
+        return expected;
+    }
+
+    private static byte[] BuildExpectedBitwiseStepColorBuffer(byte[] sourceBgra, int width, int height)
+    {
+        int pixelCount = width * height;
+        bool[] stepPlanes = new bool[pixelCount * 24];
+
+        for (int y = 0; y < height; y++)
+        {
+            for (int x = 0; x < width; x++)
+            {
+                int pixelIndex = (y * width) + x;
+                int bgraIndex = pixelIndex * 4;
+                byte r = sourceBgra[bgraIndex + 2];
+                byte g = sourceBgra[bgraIndex + 1];
+                byte b = sourceBgra[bgraIndex];
+
+                for (int plane = 0; plane < 24; plane++)
+                {
+                    int channelBit = plane % 8;
+                    byte channel = plane < 8 ? r : plane < 16 ? g : b;
+                    bool alive = ((channel >> (7 - channelBit)) & 1) != 0;
+                    int neighbors = 0;
+
+                    for (int offsetY = -1; offsetY <= 1; offsetY++)
+                    {
+                        for (int offsetX = -1; offsetX <= 1; offsetX++)
+                        {
+                            if (offsetX == 0 && offsetY == 0)
+                            {
+                                continue;
+                            }
+
+                            int sampleX = x + offsetX;
+                            int sampleY = y + offsetY;
+                            if (sampleX < 0 || sampleY < 0 || sampleX >= width || sampleY >= height)
+                            {
+                                continue;
+                            }
+
+                            int samplePixelIndex = (sampleY * width) + sampleX;
+                            int sampleBgraIndex = samplePixelIndex * 4;
+                            byte sampleChannel = plane < 8
+                                ? sourceBgra[sampleBgraIndex + 2]
+                                : plane < 16
+                                    ? sourceBgra[sampleBgraIndex + 1]
+                                    : sourceBgra[sampleBgraIndex];
+                            if (((sampleChannel >> (7 - channelBit)) & 1) != 0)
+                            {
+                                neighbors++;
+                            }
+                        }
+                    }
+
+                    stepPlanes[(pixelIndex * 24) + plane] = neighbors == 3 || (alive && neighbors == 2);
+                }
+            }
+        }
+
+        byte[] expected = new byte[pixelCount * 4];
+        for (int pixelIndex = 0; pixelIndex < pixelCount; pixelIndex++)
+        {
+            int outIndex = pixelIndex * 4;
+            byte r = 0;
+            byte g = 0;
+            byte b = 0;
+            for (int bit = 0; bit < 8; bit++)
+            {
+                if (stepPlanes[(pixelIndex * 24) + bit])
+                {
+                    r |= (byte)(1 << (7 - bit));
+                }
+
+                if (stepPlanes[(pixelIndex * 24) + 8 + bit])
+                {
+                    g |= (byte)(1 << (7 - bit));
+                }
+
+                if (stepPlanes[(pixelIndex * 24) + 16 + bit])
+                {
+                    b |= (byte)(1 << (7 - bit));
+                }
+            }
+
+            expected[outIndex] = r;
+            expected[outIndex + 1] = g;
+            expected[outIndex + 2] = b;
+            expected[outIndex + 3] = 255;
+        }
+
+        return expected;
+    }
+
+    private static void GetBufferDiffStats(byte[] expected, byte[] actual, int length, out int changedBytes, out int maxChannelDiff)
+    {
+        changedBytes = 0;
+        maxChannelDiff = 0;
+        int compareLength = Math.Min(Math.Min(expected.Length, actual.Length), length);
+        for (int i = 0; i < compareLength; i++)
+        {
+            int diff = Math.Abs(expected[i] - actual[i]);
+            if (diff == 0)
+            {
+                continue;
+            }
+
+            changedBytes++;
+            if (diff > maxChannelDiff)
+            {
+                maxChannelDiff = diff;
+            }
+        }
+    }
+
     internal bool RunSimGroupPixelSortColorSmoke()
     {
         if (!_renderLoopAttached)
@@ -13506,7 +14858,7 @@ public partial class MainWindow : Window
         Logger.Info(
             $"GPU passthrough smoke: cpuReadbackBytes={cpuReadbackBytes}, gpuSurfacePresent={gpuSurfacePresent}, composited={compositedInFinalFrame}, overlayDisabled={overlayDisabled}.");
 
-        return cpuReadbackBytes > 0 &&
+        return cpuReadbackBytes == 0 &&
                gpuSurfacePresent &&
                compositedInFinalFrame &&
                overlayDisabled;
@@ -13950,14 +15302,62 @@ public partial class MainWindow : Window
         return false;
     }
 
+    internal bool RunLayerTransformControlsSmoke()
+    {
+        var source = CaptureSource.CreateGroup("Transform Smoke");
+        source.Scale = 2.0;
+        var scaleTransform = BuildAnimationTransform(source, 101, 101, 0);
+        scaleTransform.TransformPoint(100, 50, out double scaledX, out double scaledY);
+        bool scaleTransformOk = Math.Abs(scaledX - 75) < 0.0001 && Math.Abs(scaledY - 50) < 0.0001;
+
+        source.Scale = 1.0;
+        source.Animations.Add(new LayerAnimation
+        {
+            Type = AnimationType.Rotate,
+            StartAngleDegrees = 90,
+            RotationDegrees = 0
+        });
+        var rotateTransform = BuildAnimationTransform(source, 101, 101, 0);
+        rotateTransform.TransformPoint(100, 50, out double rotatedX, out double rotatedY);
+        bool startAngleTransformOk = Math.Abs(rotatedX - 50) < 0.0001 && Math.Abs(rotatedY) < 0.0001;
+
+        var editorSource = new LayerEditorSource
+        {
+            Id = Guid.NewGuid(),
+            Kind = LayerEditorSourceKind.Group,
+            DisplayName = "Transform Smoke",
+            Scale = 1.75
+        };
+        editorSource.Animations.Add(new LayerEditorAnimation
+        {
+            Id = Guid.NewGuid(),
+            Type = "Rotate",
+            StartAngleDegrees = 123,
+            RotationDegrees = 45,
+            Parent = editorSource
+        });
+        var config = LayerConfigFile.FromEditorSources(
+            new[] { editorSource },
+            Array.Empty<LayerEditorSimulationLayer>(),
+            new LayerEditorProjectSettings());
+        var roundTrip = config.ToEditorSources()
+            .First(candidate => candidate.Kind == LayerEditorSourceKind.Group &&
+                                string.Equals(candidate.DisplayName, "Transform Smoke", StringComparison.Ordinal));
+        bool persistenceOk = config.Version == 10 &&
+                             Math.Abs(roundTrip.Scale - 1.75) < 0.0001 &&
+                             roundTrip.Animations.Count == 1 &&
+                             Math.Abs(roundTrip.Animations[0].StartAngleDegrees - 123) < 0.0001;
+
+        bool ok = scaleTransformOk && startAngleTransformOk && persistenceOk;
+        Logger.Info($"Layer transform controls smoke: scale={scaleTransformOk}, startAngle={startAngleTransformOk}, persistence={persistenceOk}, ok={ok}.");
+        return ok;
+    }
+
+    internal static bool RunChromaKeySmoke() => CpuSourceCompositor.RunChromaKeyMathSmoke();
+
     private Transform2D BuildAnimationTransform(CaptureSource source, int destWidth, int destHeight, double timeSeconds)
     {
-        if (source.Animations.Count == 0 || destWidth <= 0 || destHeight <= 0)
-        {
-            return Transform2D.Identity;
-        }
-
-        if (!TryGetAnimationBeatTiming(timeSeconds, out _, out double beatsElapsed, out _))
+        if (destWidth <= 0 || destHeight <= 0)
         {
             return Transform2D.Identity;
         }
@@ -13965,7 +15365,16 @@ public partial class MainWindow : Window
         double centerX = (destWidth - 1) / 2.0;
         double centerY = (destHeight - 1) / 2.0;
 
-        Transform2D combined = Transform2D.Identity;
+        Transform2D combined = CreateScale(
+            Math.Clamp(source.Scale, MinLayerScale, MaxLayerScale),
+            centerX,
+            centerY);
+        if (source.Animations.Count == 0 ||
+            !TryGetAnimationBeatTiming(timeSeconds, out _, out double beatsElapsed, out _))
+        {
+            return combined.TryInvert(out var scaleInverse) ? scaleInverse : Transform2D.Identity;
+        }
+
         foreach (var animation in source.Animations)
         {
             double tempoMultiplier = GetSpeedMultiplier(animation.Speed);
@@ -14017,11 +15426,12 @@ public partial class MainWindow : Window
                 }
                 case AnimationType.Rotate:
                 {
-                    double angle = DegreesToRadians(animation.RotationDegrees * progress);
+                    double animatedAngle = animation.RotationDegrees * progress;
                     if (animation.RotationDirection == RotationDirection.CounterClockwise)
                     {
-                        angle = -angle;
+                        animatedAngle = -animatedAngle;
                     }
+                    double angle = DegreesToRadians(animation.StartAngleDegrees + animatedAngle);
                     animTransform = CreateRotation(angle, centerX, centerY);
                     break;
                 }
@@ -14063,7 +15473,7 @@ public partial class MainWindow : Window
                 case AnimationType.BeatShake:
                 {
                     double baseBpm = _animationBpm > 0 ? _animationBpm : DefaultAnimationBpm;
-                    bool audioRequested = _animationAudioSyncEnabled && !string.IsNullOrWhiteSpace(_selectedAudioDeviceId);
+                    bool audioRequested = _animationAudioSyncEnabled && HasReactiveAudioInput();
                     bool beatAligned = audioRequested &&
                                        _audioBeatDetector.LastBeatTime != DateTime.MinValue &&
                                        _audioBeatDetector.BeatCount > 0;
@@ -14085,7 +15495,7 @@ public partial class MainWindow : Window
                     long beatSeed;
                     if (beatAligned)
                     {
-                        timeSinceBeat = (DateTime.UtcNow - _audioBeatDetector.LastBeatTime).TotalSeconds;
+                        timeSinceBeat = (GetReactiveAudioNow() - _audioBeatDetector.LastBeatTime).TotalSeconds;
                         beatSeed = _audioBeatDetector.LastBeatTime.Ticks;
                     }
                     else
@@ -14210,17 +15620,19 @@ public partial class MainWindow : Window
 
     private double BuildAnimationOpacity(CaptureSource source, double timeSeconds)
     {
+        double opacity = source.Type == CaptureSource.SourceType.AutoClip
+            ? source.AutoClip?.GetVisualOpacity(source.AutoClipFadeSeconds) ?? 0
+            : 1.0;
         if (source.Animations.Count == 0)
         {
-            return 1.0;
+            return opacity;
         }
 
         if (!TryGetAnimationBeatTiming(timeSeconds, out _, out double beatsElapsed, out _))
         {
-            return 1.0;
+            return opacity;
         }
 
-        double opacity = 1.0;
         foreach (var animation in source.Animations)
         {
             if (animation.Type != AnimationType.Fade)
@@ -14631,7 +16043,9 @@ public partial class MainWindow : Window
             double hueShiftDegrees = CurrentRgbHueShiftDegrees(layer);
             bool applyHueShift =
                 Math.Abs(hueShiftDegrees) > 0.001 &&
-                (layer.LayerType == SimulationLayerType.PixelSort || layer.LifeMode == GameOfLifeEngine.LifeMode.RgbChannels);
+                (layer.LayerType == SimulationLayerType.PixelSort ||
+                 layer.LifeMode == GameOfLifeEngine.LifeMode.RgbChannels ||
+                 layer.LifeMode == GameOfLifeEngine.LifeMode.Bitwise);
             if (applyHueShift)
             {
                 ApplyHueShiftToColorBuffer(targetBuffer, engine.Columns, engine.Rows, hueShiftDegrees);
@@ -14693,7 +16107,9 @@ public partial class MainWindow : Window
             double hueBg = 0.0;
             double hueBb = 1.0;
 
-            if (_renderBackend.SupportsGpuSimulationComposition && !_isRecording && layer.LifeMode == GameOfLifeEngine.LifeMode.RgbChannels)
+            if (_renderBackend.SupportsGpuSimulationComposition &&
+                !_isRecording &&
+                (layer.LifeMode == GameOfLifeEngine.LifeMode.RgbChannels || layer.LifeMode == GameOfLifeEngine.LifeMode.Bitwise))
             {
                 double hueShiftDegrees = CurrentRgbHueShiftDegrees(layer);
                 if (Math.Abs(hueShiftDegrees) > 0.001)
@@ -14882,7 +16298,8 @@ public partial class MainWindow : Window
             {
                 double displayedAudioLevel = GetDisplayedAudioLevel();
                 string signalState = displayedAudioLevel >= 0.02 ? "Signal" : "Low/No Signal";
-                audioStats = $"\nAudio: {displayedAudioLevel * 100:0}% ({signalState}) | Bass: {_smoothedBass:0.0} | Freq: {_smoothedFreq:0}Hz";
+                string sourceName = IsVideoStackAudioSelection(_selectedAudioDeviceId) ? "Video Stack" : "Device";
+                audioStats = $"\nAudio ({sourceName}): {displayedAudioLevel * 100:0}% ({signalState}) | Bass: {_smoothedBass:0.0} | Freq: {_smoothedFreq:0}Hz";
             }
             else
             {
@@ -14896,7 +16313,11 @@ public partial class MainWindow : Window
             string reactiveStats = string.Empty;
             if (_audioReactiveEnabled)
             {
-                string deviceState = string.IsNullOrWhiteSpace(_selectedAudioDeviceId) ? "No Device" : "Active";
+                string deviceState = string.IsNullOrWhiteSpace(_selectedAudioDeviceId)
+                    ? "No Source"
+                    : IsVideoStackAudioSelection(_selectedAudioDeviceId)
+                        ? "Video Stack"
+                        : "Device";
                 reactiveStats = $"\nReactive: {deviceState} | InGain x{_audioInputGain:0.00} | FPS x{_audioReactiveFpsMultiplier:0.00} (min {_audioReactiveFpsMinPercent * 100.0:0}%) | Opacity {_effectiveLifeOpacity:0.00} | Beats: {_audioBeatDetector.BeatCount} | Seeds L:{_audioReactiveLevelSeedBurstsLastStep} B:{_audioReactiveBeatSeedBurstsLastStep}";
             }
 
@@ -15604,6 +17025,10 @@ public partial class MainWindow : Window
         {
             SetLifeMode(GameOfLifeEngine.LifeMode.RgbChannels);
         }
+        else if (header.StartsWith("Bitwise", StringComparison.OrdinalIgnoreCase))
+        {
+            SetLifeMode(GameOfLifeEngine.LifeMode.Bitwise);
+        }
     }
 
     private void SetLifeMode(GameOfLifeEngine.LifeMode mode)
@@ -15616,7 +17041,8 @@ public partial class MainWindow : Window
         _lifeMode = mode;
         foreach (var layer in EnumerateSimulationLeafLayers(_simulationLayers))
         {
-            layer.Engine?.SetMode(mode);
+            layer.LifeMode = mode;
+            ApplySimulationLayerEngineSettings(layer);
         }
         _pulseStep = 0;
         UpdateRgbHueShiftControls();
@@ -15638,9 +17064,11 @@ public partial class MainWindow : Window
             {
                 bool isNaive = header.StartsWith("Naive", StringComparison.OrdinalIgnoreCase);
                 bool isRgb = header.StartsWith("RGB", StringComparison.OrdinalIgnoreCase);
+                bool isBitwise = header.StartsWith("Bitwise", StringComparison.OrdinalIgnoreCase);
                 menuItem.IsCheckable = true;
                 menuItem.IsChecked = (isNaive && _lifeMode == GameOfLifeEngine.LifeMode.NaiveGrayscale) ||
-                                     (isRgb && _lifeMode == GameOfLifeEngine.LifeMode.RgbChannels);
+                                     (isRgb && _lifeMode == GameOfLifeEngine.LifeMode.RgbChannels) ||
+                                     (isBitwise && _lifeMode == GameOfLifeEngine.LifeMode.Bitwise);
             }
         }
     }
@@ -15671,7 +17099,8 @@ public partial class MainWindow : Window
 
     private double CurrentRgbHueShiftDegrees(SimulationLayerState layer)
     {
-        if (layer.LifeMode != GameOfLifeEngine.LifeMode.RgbChannels)
+        if (layer.LifeMode != GameOfLifeEngine.LifeMode.RgbChannels &&
+            layer.LifeMode != GameOfLifeEngine.LifeMode.Bitwise)
         {
             return 0;
         }
@@ -16089,7 +17518,20 @@ public partial class MainWindow : Window
         SaveConfig();
     }
 
+    private static bool IsVideoStackAudioSelection(string? deviceId) =>
+        string.Equals(deviceId, VideoStackAudioSourceId, StringComparison.Ordinal);
+
     private bool IsOutputAudioSelection(string? deviceId) => AudioBeatDetector.IsRenderSelectionId(deviceId);
+
+    private void SetLiveVideoStackAnalysisEnabled(bool enabled)
+    {
+        _fileCapture.SetLiveVideoAudioAnalysisEnabled(enabled);
+        foreach (var source in EnumerateSources(_sources))
+        {
+            source.VideoSequence?.SetLiveAudioAnalysisEnabled(enabled);
+            source.AutoClip?.SetLiveAudioAnalysisEnabled(enabled);
+        }
+    }
 
     private void ApplyAudioInputGainForSelection()
     {
@@ -16108,7 +17550,11 @@ public partial class MainWindow : Window
 
         if (AudioInputGainText != null)
         {
-            string sourceLabel = IsOutputAudioSelection(_selectedAudioDeviceId) ? "Output" : "Input";
+            string sourceLabel = IsVideoStackAudioSelection(_selectedAudioDeviceId)
+                ? "Video Stack"
+                : IsOutputAudioSelection(_selectedAudioDeviceId)
+                    ? "Output"
+                    : "Input";
             AudioInputGainText.Text = $"{_audioInputGain:0.00}x ({sourceLabel})";
         }
     }
@@ -16398,7 +17844,15 @@ public partial class MainWindow : Window
 
             if (!string.IsNullOrWhiteSpace(_selectedAudioDeviceId))
             {
-                 _ = _audioBeatDetector.InitializeAsync(_selectedAudioDeviceId);
+                if (IsVideoStackAudioSelection(_selectedAudioDeviceId))
+                {
+                    _audioBeatDetector.BeginExternalInput();
+                    SetLiveVideoStackAnalysisEnabled(true);
+                }
+                else
+                {
+                    _ = _audioBeatDetector.InitializeAsync(_selectedAudioDeviceId);
+                }
             }
             _lastAudioReactiveBeatCount = _audioBeatDetector.BeatCount;
 
@@ -16779,16 +18233,36 @@ public partial class MainWindow : Window
                 BlendMode = source.BlendMode.ToString(),
                 FitMode = source.FitMode.ToString(),
                 Opacity = source.Opacity,
+                Scale = source.Scale,
                 VideoAudioEnabled = source.VideoAudioEnabled,
                 VideoAudioVolume = source.VideoAudioVolume,
                 Mirror = source.Mirror,
                 KeyEnabled = source.KeyEnabled,
                 KeyColor = FormatHexColor(source.KeyColorR, source.KeyColorG, source.KeyColorB),
                 KeyTolerance = source.KeyTolerance,
-                Animations = BuildAnimationConfigs(source.Animations)
+                Animations = BuildAnimationConfigs(source.Animations),
+                AutoClipMinClipSeconds = source.AutoClipMinClipSeconds,
+                AutoClipMaxClipSeconds = source.AutoClipMaxClipSeconds,
+                AutoClipMinDelaySeconds = source.AutoClipMinDelaySeconds,
+                AutoClipMaxDelaySeconds = source.AutoClipMaxDelaySeconds,
+                AutoClipFadeSeconds = source.AutoClipFadeSeconds,
+                AutoClipLoopSelectedFile = source.AutoClipLoopSelectedFile,
+                AutoClipVideoOverrides = source.AutoClipVideoOverrides.Select(pair => new AppConfig.AutoClipVideoOverrideConfig
+                {
+                    FilePath = pair.Key,
+                    BlendMode = pair.Value.BlendMode?.ToString() ?? "Inherit",
+                    KeyMode = pair.Value.KeyEnabled switch
+                    {
+                        true => "Enabled",
+                        false => "Disabled",
+                        null => "Inherit"
+                    },
+                    KeyColor = FormatHexColor(pair.Value.KeyColorR, pair.Value.KeyColorG, pair.Value.KeyColorB),
+                    KeyTolerance = pair.Value.KeyTolerance
+                }).ToList()
             };
 
-            if (source.Type == CaptureSource.SourceType.VideoSequence && source.FilePaths.Count > 0)
+            if ((source.Type == CaptureSource.SourceType.VideoSequence || source.Type == CaptureSource.SourceType.AutoClip) && source.FilePaths.Count > 0)
             {
                 config.FilePaths = new List<string>(source.FilePaths);
             }
@@ -16868,6 +18342,7 @@ public partial class MainWindow : Window
                 Speed = animation.Speed.ToString(),
                 TranslateDirection = animation.TranslateDirection.ToString(),
                 RotationDirection = animation.RotationDirection.ToString(),
+                StartAngleDegrees = animation.StartAngleDegrees,
                 RotationDegrees = animation.RotationDegrees,
                 DvdScale = animation.DvdScale,
                 BeatShakeIntensity = animation.BeatShakeIntensity,
@@ -16896,6 +18371,7 @@ public partial class MainWindow : Window
                     CaptureSource.SourceType.Webcam => LayerEditorSourceKind.Webcam,
                     CaptureSource.SourceType.File => LayerEditorSourceKind.File,
                     CaptureSource.SourceType.VideoSequence => LayerEditorSourceKind.VideoSequence,
+                    CaptureSource.SourceType.AutoClip => LayerEditorSourceKind.AutoClip,
                     CaptureSource.SourceType.Group => LayerEditorSourceKind.Group,
                     CaptureSource.SourceType.SimGroup => LayerEditorSourceKind.SimGroup,
                     _ => LayerEditorSourceKind.File
@@ -16909,13 +18385,20 @@ public partial class MainWindow : Window
                 BlendMode = source.BlendMode.ToString(),
                 FitMode = source.FitMode.ToString(),
                 Opacity = source.Opacity,
+                Scale = source.Scale,
                 VideoAudioEnabled = source.VideoAudioEnabled,
                 VideoAudioVolume = source.VideoAudioVolume,
                 Mirror = source.Mirror,
                 KeyEnabled = source.KeyEnabled,
                 KeyTolerance = source.KeyTolerance,
                 KeyColorHex = FormatHexColor(source.KeyColorR, source.KeyColorG, source.KeyColorB),
-                Parent = parent
+                Parent = parent,
+                AutoClipMinClipSeconds = source.AutoClipMinClipSeconds,
+                AutoClipMaxClipSeconds = source.AutoClipMaxClipSeconds,
+                AutoClipMinDelaySeconds = source.AutoClipMinDelaySeconds,
+                AutoClipMaxDelaySeconds = source.AutoClipMaxDelaySeconds,
+                AutoClipFadeSeconds = source.AutoClipFadeSeconds,
+                AutoClipLoopSelectedFile = source.AutoClipLoopSelectedFile
             };
 
             if (TryGetSourceVideoPlaybackState(source, out var playbackState))
@@ -16931,6 +18414,33 @@ public partial class MainWindow : Window
             {
                 model.FilePaths.AddRange(source.FilePaths);
             }
+            else if (source.Type == CaptureSource.SourceType.AutoClip)
+            {
+                model.FilePaths.AddRange(source.FilePaths);
+                foreach (string path in source.FilePaths)
+                {
+                    model.AutoClipVideoPaths.Add(path);
+                    var item = new LayerEditorAutoClipVideoOverride
+                    {
+                        FilePath = path,
+                        KeyColorHex = FormatHexColor(source.KeyColorR, source.KeyColorG, source.KeyColorB),
+                        KeyTolerance = source.KeyTolerance
+                    };
+                    if (source.AutoClipVideoOverrides.TryGetValue(path, out var fileOverride))
+                    {
+                        item.BlendMode = fileOverride.BlendMode?.ToString() ?? "Inherit";
+                        item.KeyMode = fileOverride.KeyEnabled switch
+                        {
+                            true => "Enabled",
+                            false => "Disabled",
+                            null => "Inherit"
+                        };
+                        item.KeyColorHex = FormatHexColor(fileOverride.KeyColorR, fileOverride.KeyColorG, fileOverride.KeyColorB);
+                        item.KeyTolerance = fileOverride.KeyTolerance;
+                    }
+                    model.AutoClipVideoOverrides.Add(item);
+                }
+            }
 
             foreach (var animation in source.Animations)
             {
@@ -16942,6 +18452,7 @@ public partial class MainWindow : Window
                     Speed = animation.Speed.ToString(),
                     TranslateDirection = animation.TranslateDirection.ToString(),
                     RotationDirection = animation.RotationDirection.ToString(),
+                    StartAngleDegrees = animation.StartAngleDegrees,
                     RotationDegrees = animation.RotationDegrees,
                     DvdScale = animation.DvdScale,
                     BeatShakeIntensity = animation.BeatShakeIntensity,
@@ -17132,6 +18643,31 @@ public partial class MainWindow : Window
                 return null;
             }
 
+            case LayerEditorSourceKind.AutoClip:
+            {
+                IReadOnlyList<string> paths = model.AutoClipVideoPaths.Count > 0
+                    ? model.AutoClipVideoPaths
+                    : model.FilePaths;
+                if (_fileCapture.TryCreateAutoClip(
+                        paths,
+                        model.AutoClipMinClipSeconds,
+                        model.AutoClipMaxClipSeconds,
+                        model.AutoClipMinDelaySeconds,
+                        model.AutoClipMaxDelaySeconds,
+                        out var autoClip,
+                        out _))
+                {
+                    return CaptureSource.CreateAutoClip(
+                        autoClip!,
+                        model.AutoClipMinClipSeconds,
+                        model.AutoClipMaxClipSeconds,
+                        model.AutoClipMinDelaySeconds,
+                        model.AutoClipMaxDelaySeconds);
+                }
+
+                return null;
+            }
+
             case LayerEditorSourceKind.Youtube:
             {
                 if (string.IsNullOrWhiteSpace(model.FilePath))
@@ -17190,6 +18726,7 @@ public partial class MainWindow : Window
         }
 
         source.Opacity = Math.Clamp(model.Opacity, 0, 1);
+        source.Scale = Math.Clamp(model.Scale, MinLayerScale, MaxLayerScale);
         source.VideoAudioEnabled = model.VideoAudioEnabled;
         source.VideoAudioVolume = Math.Clamp(model.VideoAudioVolume, 0, 1);
         source.Mirror = model.Mirror;
@@ -17202,6 +18739,30 @@ public partial class MainWindow : Window
             source.KeyColorB = keyB;
         }
         ApplySourceVideoAudioState(source);
+
+        if (source.Type == CaptureSource.SourceType.AutoClip && source.AutoClip != null)
+        {
+            IReadOnlyList<string> paths = model.AutoClipVideoPaths.Count > 0
+                ? model.AutoClipVideoPaths
+                : model.FilePaths;
+            source.AutoClipMinClipSeconds = Math.Min(model.AutoClipMinClipSeconds, model.AutoClipMaxClipSeconds);
+            source.AutoClipMaxClipSeconds = Math.Max(model.AutoClipMinClipSeconds, model.AutoClipMaxClipSeconds);
+            source.AutoClipMinDelaySeconds = Math.Min(model.AutoClipMinDelaySeconds, model.AutoClipMaxDelaySeconds);
+            source.AutoClipMaxDelaySeconds = Math.Max(model.AutoClipMinDelaySeconds, model.AutoClipMaxDelaySeconds);
+            source.AutoClipFadeSeconds = Math.Clamp(model.AutoClipFadeSeconds, 0, 10);
+            source.AutoClipLoopSelectedFile = model.AutoClipLoopSelectedFile;
+            source.AutoClip.UpdateSettings(
+                paths,
+                source.AutoClipMinClipSeconds,
+                source.AutoClipMaxClipSeconds,
+                source.AutoClipMinDelaySeconds,
+                source.AutoClipMaxDelaySeconds);
+            source.AutoClip.SetLoopSelectedFile(source.AutoClipLoopSelectedFile);
+            SyncAutoClipVideoOverrides(source, model.AutoClipVideoOverrides);
+            source.FilePaths.Clear();
+            source.FilePaths.AddRange(paths);
+            source.SetDisplayName(source.AutoClip.DisplayName);
+        }
 
         if (source.Type == CaptureSource.SourceType.Group || source.Type == CaptureSource.SourceType.SimGroup)
         {
@@ -17260,6 +18821,7 @@ public partial class MainWindow : Window
             animation.AudioGranularMidGain = Math.Clamp(animationModel.AudioGranularMidGain, 0, MaxAudioGranularEqBandGain);
             animation.AudioGranularHighGain = Math.Clamp(animationModel.AudioGranularHighGain, 0, MaxAudioGranularEqBandGain);
             animation.RotationDegrees = Math.Clamp(animationModel.RotationDegrees, 0, 360);
+            animation.StartAngleDegrees = Math.Clamp(animationModel.StartAngleDegrees, 0, 360);
 
             source.Animations.Add(animation);
         }
@@ -17461,6 +19023,25 @@ public partial class MainWindow : Window
                         restored = CaptureSource.CreateVideoSequence(sequence!);
                     }
                     break;
+
+                case CaptureSource.SourceType.AutoClip:
+                    if (_fileCapture.TryCreateAutoClip(
+                            config.FilePaths,
+                            config.AutoClipMinClipSeconds,
+                            config.AutoClipMaxClipSeconds,
+                            config.AutoClipMinDelaySeconds,
+                            config.AutoClipMaxDelaySeconds,
+                            out var autoClip,
+                            out _))
+                    {
+                        restored = CaptureSource.CreateAutoClip(
+                            autoClip!,
+                            config.AutoClipMinClipSeconds,
+                            config.AutoClipMaxClipSeconds,
+                            config.AutoClipMinDelaySeconds,
+                            config.AutoClipMaxDelaySeconds);
+                    }
+                    break;
             }
 
             if (restored == null)
@@ -17489,6 +19070,9 @@ public partial class MainWindow : Window
         }
 
         source.Opacity = Math.Clamp(config.Opacity, 0, 1);
+        source.Scale = Math.Clamp(config.Scale, MinLayerScale, MaxLayerScale);
+        source.AutoClipFadeSeconds = Math.Clamp(config.AutoClipFadeSeconds, 0, 10);
+        source.AutoClipLoopSelectedFile = config.AutoClipLoopSelectedFile;
         source.VideoAudioEnabled = config.VideoAudioEnabled;
         source.VideoAudioVolume = Math.Clamp(config.VideoAudioVolume, 0, 1);
         source.Mirror = config.Mirror;
@@ -17501,6 +19085,11 @@ public partial class MainWindow : Window
             source.KeyColorB = keyB;
         }
         ApplySourceVideoAudioState(source);
+        source.AutoClip?.SetLoopSelectedFile(source.AutoClipLoopSelectedFile);
+        if (source.Type == CaptureSource.SourceType.AutoClip)
+        {
+            SyncAutoClipVideoOverrides(source, config.AutoClipVideoOverrides);
+        }
 
         source.SimulationLayers.Clear();
         if (source.Type == CaptureSource.SourceType.SimGroup && config.SimulationLayers.Count > 0)
@@ -17538,6 +19127,7 @@ public partial class MainWindow : Window
                     animation.RotationDirection = rotate;
                 }
                 animation.RotationDegrees = Math.Clamp(animationConfig.RotationDegrees, 0, 360);
+                animation.StartAngleDegrees = Math.Clamp(animationConfig.StartAngleDegrees, 0, 360);
                 if (animationConfig.DvdScale > 0)
                 {
                     animation.DvdScale = Math.Clamp(animationConfig.DvdScale, 0.01, 1.0);
@@ -17670,8 +19260,16 @@ public partial class MainWindow : Window
             public string BlendMode { get; set; } = MainWindow.BlendMode.Additive.ToString();
             public string FitMode { get; set; } = lifeviz.FitMode.Fill.ToString();
             public double Opacity { get; set; } = 1.0;
+            public double Scale { get; set; } = 1.0;
             public bool VideoAudioEnabled { get; set; }
             public double VideoAudioVolume { get; set; } = 1.0;
+            public double AutoClipMinClipSeconds { get; set; } = 2.0;
+            public double AutoClipMaxClipSeconds { get; set; } = 5.0;
+            public double AutoClipMinDelaySeconds { get; set; }
+            public double AutoClipMaxDelaySeconds { get; set; }
+            public double AutoClipFadeSeconds { get; set; }
+            public bool AutoClipLoopSelectedFile { get; set; }
+            public List<AutoClipVideoOverrideConfig> AutoClipVideoOverrides { get; set; } = new();
             public bool Mirror { get; set; }
             public bool KeyEnabled { get; set; }
             public string KeyColor { get; set; } = "#000000";
@@ -17681,6 +19279,15 @@ public partial class MainWindow : Window
             public List<SourceConfig> Children { get; set; } = new();
         }
 
+        public sealed class AutoClipVideoOverrideConfig
+        {
+            public string? FilePath { get; set; }
+            public string? BlendMode { get; set; } = "Inherit";
+            public string? KeyMode { get; set; } = "Inherit";
+            public string? KeyColor { get; set; } = "#000000";
+            public double KeyTolerance { get; set; } = DefaultKeyTolerance;
+        }
+
         public sealed class AnimationConfig
         {
             public string Type { get; set; } = AnimationType.ZoomIn.ToString();
@@ -17688,6 +19295,7 @@ public partial class MainWindow : Window
             public string Speed { get; set; } = AnimationSpeed.Normal.ToString();
             public string TranslateDirection { get; set; } = global::lifeviz.MainWindow.TranslateDirection.Right.ToString();
             public string RotationDirection { get; set; } = global::lifeviz.MainWindow.RotationDirection.Clockwise.ToString();
+            public double StartAngleDegrees { get; set; }
             public double RotationDegrees { get; set; } = AnimationRotateDegrees;
             public double DvdScale { get; set; } = AnimationDvdScale;
             public double BeatShakeIntensity { get; set; } = 1.0;
@@ -17737,6 +19345,7 @@ public partial class MainWindow : Window
             Webcam,
             File,
             VideoSequence,
+            AutoClip,
             Group,
             SimGroup
         }
@@ -17775,6 +19384,27 @@ public partial class MainWindow : Window
             return source;
         }
 
+        public static CaptureSource CreateAutoClip(
+            FileCaptureService.AutoClipSession session,
+            double minClipSeconds,
+            double maxClipSeconds,
+            double minDelaySeconds,
+            double maxDelaySeconds)
+        {
+            var source = new CaptureSource(SourceType.AutoClip, null, null, null, session.DisplayName, null, null)
+            {
+                AddedUtc = DateTime.UtcNow,
+                AutoClipMinClipSeconds = minClipSeconds,
+                AutoClipMaxClipSeconds = maxClipSeconds,
+                AutoClipMinDelaySeconds = minDelaySeconds,
+                AutoClipMaxDelaySeconds = maxDelaySeconds,
+                AutoClipFadeSeconds = 0,
+                AutoClipLoopSelectedFile = false
+            };
+            source.SetAutoClip(session);
+            return source;
+        }
+
         public static CaptureSource CreateGroup(string? displayName = null) =>
             new(SourceType.Group, null, null, null, displayName ?? "Layer Group", null, null) { AddedUtc = DateTime.UtcNow };
 
@@ -17788,10 +19418,12 @@ public partial class MainWindow : Window
         public string? FilePath { get; }
         public List<string> FilePaths { get; } = new();
         public FileCaptureService.VideoSequenceSession? VideoSequence { get; private set; }
+        public FileCaptureService.AutoClipSession? AutoClip { get; private set; }
         public string DisplayName { get; private set; }
         public List<CaptureSource> Children { get; } = new();
         public List<SimulationLayerSpec> SimulationLayers { get; } = new();
         public List<LayerAnimation> Animations { get; } = new();
+        public Dictionary<string, AutoClipVideoCompositeOverride> AutoClipVideoOverrides { get; } = new(StringComparer.OrdinalIgnoreCase);
         public BlendMode BlendMode { get; set; } = BlendMode.Additive;
         public FitMode FitMode { get; set; } = FitMode.Fill;
         public bool Enabled { get; set; } = true;
@@ -17801,9 +19433,16 @@ public partial class MainWindow : Window
         public bool FirstFrameReceived { get; set; }
         public DateTime AddedUtc { get; set; }
         public double Opacity { get; set; } = 1.0;
+        public double Scale { get; set; } = 1.0;
         public bool VideoAudioEnabled { get; set; }
         public double VideoAudioVolume { get; set; } = 1.0;
         public bool VideoPlaybackPaused { get; set; }
+        public double AutoClipMinClipSeconds { get; set; } = 2.0;
+        public double AutoClipMaxClipSeconds { get; set; } = 5.0;
+        public double AutoClipMinDelaySeconds { get; set; }
+        public double AutoClipMaxDelaySeconds { get; set; }
+        public double AutoClipFadeSeconds { get; set; }
+        public bool AutoClipLoopSelectedFile { get; set; }
         public bool Mirror { get; set; }
         public bool KeyEnabled { get; set; }
         public double KeyTolerance { get; set; } = DefaultKeyTolerance;
@@ -17837,6 +19476,21 @@ public partial class MainWindow : Window
         {
             VideoSequence?.Dispose();
             VideoSequence = null;
+            FilePaths.Clear();
+        }
+
+        public void SetAutoClip(FileCaptureService.AutoClipSession session)
+        {
+            AutoClip = session;
+            FilePaths.Clear();
+            FilePaths.AddRange(session.Paths);
+            SetDisplayName(session.DisplayName);
+        }
+
+        public void DisposeAutoClip()
+        {
+            AutoClip?.Dispose();
+            AutoClip = null;
             FilePaths.Clear();
         }
 
@@ -17891,7 +19545,7 @@ public partial class MainWindow : Window
                     return Math.Max(0.05, FileWidth.Value / (double)FileHeight.Value);
                 }
 
-                if (Type == SourceType.VideoSequence && FileWidth.HasValue && FileHeight.HasValue && FileHeight > 0)
+                if ((Type == SourceType.VideoSequence || Type == SourceType.AutoClip) && FileWidth.HasValue && FileHeight.HasValue && FileHeight > 0)
                 {
                     return Math.Max(0.05, FileWidth.Value / (double)FileHeight.Value);
                 }
@@ -17905,6 +19559,7 @@ public partial class MainWindow : Window
             SourceType.Window => Window?.Width,
             SourceType.File => FileWidth,
             SourceType.VideoSequence => FileWidth,
+            SourceType.AutoClip => FileWidth,
             SourceType.Group => Children.Count > 0 ? Children[0].FallbackWidth : null,
             SourceType.SimGroup => null,
             _ => LastFrame?.SourceWidth
@@ -17915,6 +19570,7 @@ public partial class MainWindow : Window
             SourceType.Window => Window?.Height,
             SourceType.File => FileHeight,
             SourceType.VideoSequence => FileHeight,
+            SourceType.AutoClip => FileHeight,
             SourceType.Group => Children.Count > 0 ? Children[0].FallbackHeight : null,
             SourceType.SimGroup => null,
             _ => LastFrame?.SourceHeight

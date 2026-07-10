@@ -99,10 +99,16 @@ internal static class SmokeTestRunner
                 "sim-group-remove-source" => RunSimGroupRemoveSourceSmokeTest(),
                 "sim-group-live-edit-selection" => RunSimGroupLiveEditSelectionSmokeTest(),
                 "pixel-sort-editor-roundtrip" => RunPixelSortEditorRoundTripSmokeTest(),
+                "gpu-bitwise" => RunGpuBitwiseSmokeTest(),
                 "gpu-pixel-sort" => RunGpuPixelSortSmokeTest(),
                 "sim-group-pixel-sort-color" => RunSimGroupPixelSortColorSmokeTest(),
                 "gpu-injection-mode" => RunGpuInjectionModeSmokeTest(),
                 "gpu-file-injection-mode" => RunGpuFileInjectionModeSmokeTest(smokeVideoPath),
+                "offline-video-audio" => RunOfflineVideoAudioSmokeTest(smokeVideoPath),
+                "live-video-audio" => RunLiveVideoAudioSmokeTest(smokeVideoPath),
+                "autoclip" => RunAutoClipSmokeTest(smokeVideoPath),
+                "layer-transform-controls" => RunLayerTransformControlsSmokeTest(),
+                "chroma-key" => MainWindow.RunChromaKeySmoke() ? 0 : 1,
                 "gpu-sim" => RunGpuSimulationSmokeTest(),
                 "gpu-source" => RunGpuSourceCompositeSmokeTest(),
                 "source-reset" => RunSourceResetSmokeTest(),
@@ -114,7 +120,7 @@ internal static class SmokeTestRunner
                 "startup" => RunStartupSmokeTest(),
                 "startup-recovery" => RunStartupRecoverySmokeTest(),
                 "all" => RunAllSmokeTests(),
-                _ => throw new ArgumentException($"Unknown smoke test target '{target}'. Expected profile-240, profile-480, profile-rgb-240, profile-rgb-480, profile-file-240, profile-file-480, profile-file-rgb-240, profile-file-rgb-480, profile-current-scene, profile-current-scene-visible, profile-current-scene-fullscreen, profile-current-scene-bisect, profile-current-scene-presets, profile-current-scene-visible-presets, profile-current-scene-fullscreen-presets, profile-current-scene-<144|240|480|720|1080|1440|2160>, profile-current-scene-visible-<144|240|480|720|1080|1440|2160>, profile-current-scene-fullscreen-<144|240|480|720|1080|1440|2160>, profile-current-scene-interaction, current-scene-hover-presentation, pacing-current-scene-visible-presets, pacing-current-scene-fullscreen-presets, pacing-current-scene-interaction, pacing-current-scene-overlay-fullscreen-144, pacing-current-scene-suite, frame-pump-thread-safety, gpu-benchmark, gpu-handoff, gpu-rgb-threshold, gpu-passthrough-signed-model, passthrough-underlay-only, gpu-frequency-hue, simulation-reactive-mappings, pixel-sort-reactive-cell-size, simulation-reactive-persistence, simulation-reactive-legacy-migration, simulation-reactive-removal, simulation-reactive-editor-isolation, sim-group-legacy-migration, no-sim-group-renders-composite, sim-group-removal-clears-runtime, disabled-sim-group-renders-composite, sim-group-stack-order, sim-group-inline-hue, sim-group-inline-presentation, sim-group-enabled-toggle, sim-group-remove-source, sim-group-live-edit-selection, pixel-sort-editor-roundtrip, gpu-pixel-sort, sim-group-pixel-sort-color, gpu-injection-mode, gpu-file-injection-mode, gpu-sim, gpu-source, source-reset, gpu-render, profile-mainloop, profile-mainloop-sim-group, dimensions, shutdown, startup, startup-recovery, or all.")
+                _ => throw new ArgumentException($"Unknown smoke test target '{target}'. Expected profile-240, profile-480, profile-rgb-240, profile-rgb-480, profile-file-240, profile-file-480, profile-file-rgb-240, profile-file-rgb-480, profile-current-scene, profile-current-scene-visible, profile-current-scene-fullscreen, profile-current-scene-bisect, profile-current-scene-presets, profile-current-scene-visible-presets, profile-current-scene-fullscreen-presets, profile-current-scene-<144|240|480|720|1080|1440|2160>, profile-current-scene-visible-<144|240|480|720|1080|1440|2160>, profile-current-scene-fullscreen-<144|240|480|720|1080|1440|2160>, profile-current-scene-interaction, current-scene-hover-presentation, pacing-current-scene-visible-presets, pacing-current-scene-fullscreen-presets, pacing-current-scene-interaction, pacing-current-scene-overlay-fullscreen-144, pacing-current-scene-suite, frame-pump-thread-safety, gpu-benchmark, gpu-handoff, gpu-rgb-threshold, gpu-passthrough-signed-model, passthrough-underlay-only, gpu-frequency-hue, simulation-reactive-mappings, pixel-sort-reactive-cell-size, simulation-reactive-persistence, simulation-reactive-legacy-migration, simulation-reactive-removal, simulation-reactive-editor-isolation, sim-group-legacy-migration, no-sim-group-renders-composite, sim-group-removal-clears-runtime, disabled-sim-group-renders-composite, sim-group-stack-order, sim-group-inline-hue, sim-group-inline-presentation, sim-group-enabled-toggle, sim-group-remove-source, sim-group-live-edit-selection, pixel-sort-editor-roundtrip, gpu-bitwise, gpu-pixel-sort, sim-group-pixel-sort-color, gpu-injection-mode, gpu-file-injection-mode, offline-video-audio, live-video-audio, gpu-sim, gpu-source, source-reset, gpu-render, profile-mainloop, profile-mainloop-sim-group, dimensions, shutdown, startup, startup-recovery, or all.")
             };
         }
         catch (Exception ex)
@@ -295,6 +301,20 @@ internal static class SmokeTestRunner
         try
         {
             return window.RunGpuPixelSortSmoke() ? 0 : 1;
+        }
+        finally
+        {
+            window.Close();
+        }
+    }
+
+    private static int RunGpuBitwiseSmokeTest()
+    {
+        Logger.Info("Running GPU bitwise smoke test.");
+        var window = new MainWindow();
+        try
+        {
+            return window.RunGpuBitwiseSmoke() ? 0 : 1;
         }
         finally
         {
@@ -491,6 +511,51 @@ internal static class SmokeTestRunner
 
         Logger.Info("GPU source composite smoke test passed.");
         return exitCode;
+    }
+
+    private static int RunLayerTransformControlsSmokeTest()
+    {
+        Logger.Info("Running layer transform controls smoke test.");
+        bool previousDiagnosticMode = App.IsDiagnosticTestMode;
+        App.IsDiagnosticTestMode = true;
+        var app = new App();
+        app.InitializeComponent();
+        app.ShutdownMode = ShutdownMode.OnExplicitShutdown;
+        bool ok = false;
+        Exception? failure = null;
+        app.DispatcherUnhandledException += (_, args) =>
+        {
+            failure ??= args.Exception;
+            args.Handled = true;
+            app.Shutdown(1);
+        };
+
+        app.Startup += (_, _) =>
+        {
+            var window = new MainWindow();
+            ok = window.RunLayerTransformControlsSmoke();
+            app.Shutdown(ok ? 0 : 1);
+        };
+
+        try
+        {
+            int exitCode = app.Run();
+            if (failure != null)
+            {
+                throw new InvalidOperationException("Layer transform controls smoke test failed.", failure);
+            }
+            if (!ok)
+            {
+                throw new InvalidOperationException("Layer scale/start-angle transform or persistence smoke failed.");
+            }
+
+            Logger.Info("Layer transform controls smoke test passed.");
+            return exitCode;
+        }
+        finally
+        {
+            App.IsDiagnosticTestMode = previousDiagnosticMode;
+        }
     }
 
     private static int RunSourceResetSmokeTest()
@@ -1425,6 +1490,271 @@ internal static class SmokeTestRunner
 
         Logger.Info("GPU file injection-mode smoke test passed.");
         return exitCode;
+    }
+
+    private static int RunOfflineVideoAudioSmokeTest(string? smokeVideoPath)
+    {
+        if (string.IsNullOrWhiteSpace(smokeVideoPath))
+        {
+            throw new ArgumentException("offline-video-audio requires a video path as the third argument or LIFEVIZ_SMOKE_VIDEO.");
+        }
+
+        Logger.Info("Running offline video-audio reactivity smoke test.");
+        using var capture = new FileCaptureService();
+        using var detector = new AudioBeatDetector();
+        if (!capture.TryGetOrAdd(smokeVideoPath, out _, out string? error))
+        {
+            throw new InvalidOperationException(error ?? "Video source could not be opened.");
+        }
+
+        double liveOffsetBeforeRender = capture.GetVideoPlaybackOffsetSecondsForDiagnostics(smokeVideoPath) ?? 0;
+        capture.BeginOfflineRender(30, 0);
+        capture.SetMasterVideoAudioEnabled(true);
+        capture.SetMasterVideoAudioVolume(1.0);
+        capture.SetVideoAudioVolume(smokeVideoPath, 1.0);
+        var mutedSamples = new float[1600];
+        capture.SetVideoAudioEnabled(smokeVideoPath, false);
+        bool mutedIgnored = !capture.MixOfflineVideoAudioFrame(smokeVideoPath, mutedSamples) &&
+                            mutedSamples.All(sample => Math.Abs(sample) < 0.000001f);
+        capture.SetVideoAudioEnabled(smokeVideoPath, true);
+        detector.BeginOfflineInput();
+        detector.SetAnalysisRequirements(enableSpectrumAnalysis: true, enableDebugHistory: false);
+
+        var samples = new float[1600];
+        double peakRms = 0;
+        double peakLevel = 0;
+        double peakBand = 0;
+        bool receivedAudio = false;
+        try
+        {
+            for (int frame = 0; frame < 90; frame++)
+            {
+                capture.CaptureFrame(smokeVideoPath, 160, 90, FitMode.Fill);
+                Array.Clear(samples);
+                receivedAudio |= capture.MixOfflineVideoAudioFrame(smokeVideoPath, samples);
+                double sumSquares = 0;
+                for (int i = 0; i < samples.Length; i++)
+                {
+                    sumSquares += samples[i] * samples[i];
+                }
+
+                peakRms = Math.Max(peakRms, Math.Sqrt(sumSquares / samples.Length));
+                detector.ProcessOfflineSamples(samples, frame / 30.0);
+                peakLevel = Math.Max(peakLevel, detector.NormalizedEnergy);
+                peakBand = Math.Max(peakBand, Math.Max(detector.BassNormalizedLevel,
+                    Math.Max(detector.MidNormalizedLevel, detector.HighNormalizedLevel)));
+            }
+        }
+        finally
+        {
+            detector.EndOfflineInput();
+            capture.EndOfflineRender();
+        }
+
+        double liveOffsetAfterRender = capture.GetVideoPlaybackBaseOffsetSecondsForDiagnostics(smokeVideoPath) ?? double.MaxValue;
+        double previewResumeDrift = Math.Abs(liveOffsetAfterRender - liveOffsetBeforeRender);
+        bool previewPositionRestored = previewResumeDrift < 0.1;
+        bool ok = mutedIgnored && receivedAudio && peakRms > 0.0001 && peakLevel > 0.01 && peakBand > 0.001 &&
+                  previewPositionRestored;
+        Logger.Info($"Offline video-audio smoke: mutedIgnored={mutedIgnored}, received={receivedAudio}, peakRms={peakRms:F6}, " +
+                    $"peakLevel={peakLevel:F3}, peakBand={peakBand:F3}, previewResumeDrift={previewResumeDrift:F3}s, " +
+                    $"previewPositionRestored={previewPositionRestored}, ok={ok}.");
+        return ok ? 0 : 1;
+    }
+
+    private static int RunLiveVideoAudioSmokeTest(string? smokeVideoPath)
+    {
+        if (string.IsNullOrWhiteSpace(smokeVideoPath))
+        {
+            throw new ArgumentException("live-video-audio requires a video path as the third argument or LIFEVIZ_SMOKE_VIDEO.");
+        }
+
+        Logger.Info("Running silent live video-stack audio reactivity smoke test.");
+        using var capture = new FileCaptureService();
+        using var detector = new AudioBeatDetector();
+        if (!capture.TryGetOrAdd(smokeVideoPath, out _, out string? error))
+        {
+            throw new InvalidOperationException(error ?? "Video source could not be opened.");
+        }
+
+        capture.SetMasterVideoAudioEnabled(true);
+        capture.SetMasterVideoAudioVolume(1.0);
+        capture.SetVideoAudioVolume(smokeVideoPath, 1.0);
+        capture.SetLiveVideoAudioAnalysisEnabled(true);
+        capture.SetVideoAudioEnabled(smokeVideoPath, false);
+        var samples = new float[4096];
+        bool mutedIgnored = capture.MixLiveVideoAudioSamples(smokeVideoPath, samples) == 0 &&
+                            samples.All(sample => Math.Abs(sample) < 0.000001f);
+
+        detector.BeginExternalInput();
+        detector.SetAnalysisRequirements(enableSpectrumAnalysis: true, enableDebugHistory: false);
+        capture.SetVideoAudioEnabled(smokeVideoPath, true);
+        bool receivedAudio = false;
+        double peakRms = 0;
+        double peakLevel = 0;
+        double peakBand = 0;
+        try
+        {
+            for (int attempt = 0; attempt < 100; attempt++)
+            {
+                Thread.Sleep(40);
+                Array.Clear(samples);
+                int sampleCount = capture.MixLiveVideoAudioSamples(smokeVideoPath, samples);
+                if (sampleCount <= 0)
+                {
+                    continue;
+                }
+
+                receivedAudio = true;
+                double sumSquares = 0;
+                for (int i = 0; i < sampleCount; i++)
+                {
+                    sumSquares += samples[i] * samples[i];
+                }
+
+                peakRms = Math.Max(peakRms, Math.Sqrt(sumSquares / sampleCount));
+                detector.ProcessExternalSamples(samples.AsSpan(0, sampleCount));
+                peakLevel = Math.Max(peakLevel, detector.NormalizedEnergy);
+                peakBand = Math.Max(peakBand, Math.Max(detector.BassNormalizedLevel,
+                    Math.Max(detector.MidNormalizedLevel, detector.HighNormalizedLevel)));
+            }
+        }
+        finally
+        {
+            capture.SetVideoAudioEnabled(smokeVideoPath, false);
+            capture.SetLiveVideoAudioAnalysisEnabled(false);
+            detector.EndExternalInput();
+        }
+
+        bool ok = mutedIgnored && receivedAudio && peakRms > 0.0001 && peakLevel > 0.01 && peakBand > 0.001;
+        Logger.Info($"Live video-audio smoke: mutedIgnored={mutedIgnored}, received={receivedAudio}, peakRms={peakRms:F6}, " +
+                    $"peakLevel={peakLevel:F3}, peakBand={peakBand:F3}, ok={ok}.");
+        return ok ? 0 : 1;
+    }
+
+    private static int RunAutoClipSmokeTest(string? smokeVideoPath)
+    {
+        if (string.IsNullOrWhiteSpace(smokeVideoPath))
+        {
+            throw new ArgumentException("autoclip requires a video path as the third argument or LIFEVIZ_SMOKE_VIDEO.");
+        }
+
+        Logger.Info("Running AutoClip scheduler smoke test.");
+        using var capture = new FileCaptureService();
+        if (!capture.TryCreateAutoClip(
+                new[] { smokeVideoPath },
+                minClipSeconds: 0.1,
+                maxClipSeconds: 0.1,
+                minDelaySeconds: 0.1,
+                maxDelaySeconds: 0.1,
+                out var autoClip,
+                out string? error))
+        {
+            throw new InvalidOperationException(error ?? "AutoClip could not be created.");
+        }
+
+        var session = autoClip ?? throw new InvalidOperationException("AutoClip session was not returned.");
+        using (session)
+        {
+            session.SetAudioMaster(true, 1.0);
+            session.SetAudioVolume(1.0);
+            session.SetAudioEnabled(true);
+            session.SetOfflineRenderMode(true, 30);
+            bool sawClipFrame = false;
+            bool sawDelay = false;
+            bool delayWasTransparent = true;
+            bool clipAudioReceived = false;
+            bool delayAudioSilent = true;
+            bool sawFadeEnvelope = false;
+            var audioSamples = new float[1600];
+            for (int frameIndex = 0; frameIndex < 12; frameIndex++)
+            {
+                Array.Clear(audioSamples);
+                bool mixedAudio = session.MixOfflineAudioFrame(audioSamples);
+                FileCaptureService.FileCaptureFrame? frame = session.CaptureFrame(160, 90, FitMode.Fill, includeSource: false);
+                if (session.IsDelaying)
+                {
+                    sawDelay = true;
+                    delayWasTransparent &= !frame.HasValue;
+                    delayAudioSilent &= !mixedAudio && audioSamples.All(sample => Math.Abs(sample) < 0.000001f);
+                }
+                else
+                {
+                    sawClipFrame |= frame.HasValue;
+                    clipAudioReceived |= mixedAudio && audioSamples.Any(sample => Math.Abs(sample) > 0.000001f);
+                    double fadeOpacity = session.GetVisualOpacity(0.04);
+                    sawFadeEnvelope |= fadeOpacity >= 0 && fadeOpacity < 0.99;
+                }
+            }
+
+            bool overrideResolutionOk = MainWindow.RunAutoClipVideoOverrideResolutionSmoke(session, smokeVideoPath);
+
+            session.UpdateSettings(Array.Empty<string>(), 1, 1, 0, 0);
+            bool emptyIsTransparent = !session.CaptureFrame(160, 90, FitMode.Fill, includeSource: false).HasValue && session.IsEmpty;
+            var editorSource = new LayerEditorSource
+            {
+                Id = Guid.NewGuid(),
+                Kind = LayerEditorSourceKind.AutoClip,
+                DisplayName = "AutoClip",
+                AutoClipMinClipSeconds = 1.25,
+                AutoClipMaxClipSeconds = 3.5,
+                AutoClipMinDelaySeconds = 0.75,
+                AutoClipMaxDelaySeconds = 2.25,
+                AutoClipFadeSeconds = 1.25,
+                AutoClipLoopSelectedFile = true,
+                BlendMode = "Normal",
+                KeyEnabled = true,
+                KeyColorHex = "#00FF00",
+                KeyTolerance = 0.25
+            };
+            editorSource.AutoClipVideoPaths.Add(smokeVideoPath);
+            editorSource.AutoClipVideoOverrides.Add(new LayerEditorAutoClipVideoOverride
+            {
+                FilePath = smokeVideoPath,
+                BlendMode = "Normal",
+                KeyMode = "Enabled",
+                KeyColorHex = "#0CED07",
+                KeyTolerance = 0.7
+            });
+            var roundTrip = LayerConfigFile.FromEditorSources(
+                    new[] { editorSource },
+                    Array.Empty<LayerEditorSimulationLayer>(),
+                    new LayerEditorProjectSettings())
+                .ToEditorSources()
+                .FirstOrDefault(source => source.Kind == LayerEditorSourceKind.AutoClip);
+            bool persistenceOk = roundTrip != null &&
+                                 roundTrip.AutoClipVideoPaths.Count == 1 &&
+                                 Math.Abs(roundTrip.AutoClipMinClipSeconds - 1.25) < 0.0001 &&
+                                 Math.Abs(roundTrip.AutoClipMaxClipSeconds - 3.5) < 0.0001 &&
+                                 Math.Abs(roundTrip.AutoClipMinDelaySeconds - 0.75) < 0.0001 &&
+                                 Math.Abs(roundTrip.AutoClipMaxDelaySeconds - 2.25) < 0.0001 &&
+                                 Math.Abs(roundTrip.AutoClipFadeSeconds - 1.25) < 0.0001 &&
+                                 roundTrip.AutoClipLoopSelectedFile &&
+                                 string.Equals(roundTrip.BlendMode, "Normal", StringComparison.OrdinalIgnoreCase) &&
+                                 roundTrip.KeyEnabled &&
+                                 string.Equals(roundTrip.KeyColorHex, "#00FF00", StringComparison.OrdinalIgnoreCase) &&
+                                 Math.Abs(roundTrip.KeyTolerance - 0.25) < 0.0001 &&
+                                 roundTrip.AutoClipVideoOverrides.Count == 1 &&
+                                 string.Equals(roundTrip.AutoClipVideoOverrides[0].BlendMode, "Normal", StringComparison.OrdinalIgnoreCase) &&
+                                 string.Equals(roundTrip.AutoClipVideoOverrides[0].KeyMode, "Enabled", StringComparison.OrdinalIgnoreCase) &&
+                                 string.Equals(roundTrip.AutoClipVideoOverrides[0].KeyColorHex, "#0CED07", StringComparison.OrdinalIgnoreCase) &&
+                                 Math.Abs(roundTrip.AutoClipVideoOverrides[0].KeyTolerance - 0.7) < 0.0001;
+            var fittedWindow = FileCaptureService.AutoClipSession.FitClipWindowToSource(10, 3, 1);
+            var oversizedWindow = FileCaptureService.AutoClipSession.FitClipWindowToSource(10, 30, 0.5);
+            var loopingWindow = FileCaptureService.AutoClipSession.SelectClipWindow(10, 30, 0.75, loopSelectedFile: true);
+            bool clipWindowsFit = fittedWindow.StartSeconds + fittedWindow.ClipSeconds <= 9.8 + 0.0001 &&
+                                  oversizedWindow.StartSeconds + oversizedWindow.ClipSeconds <= 9.8 + 0.0001 &&
+                                  oversizedWindow.ClipSeconds < 10 &&
+                                  Math.Abs(loopingWindow.StartSeconds) < 0.0001 &&
+                                  Math.Abs(loopingWindow.ClipSeconds - 30) < 0.0001;
+            bool ok = sawClipFrame && sawDelay && delayWasTransparent && clipAudioReceived && delayAudioSilent &&
+                      sawFadeEnvelope && emptyIsTransparent && persistenceOk && clipWindowsFit && overrideResolutionOk;
+            Logger.Info($"AutoClip smoke: sawClipFrame={sawClipFrame}, sawDelay={sawDelay}, " +
+                        $"delayTransparent={delayWasTransparent}, clipAudio={clipAudioReceived}, delayAudioSilent={delayAudioSilent}, " +
+                        $"fadeEnvelope={sawFadeEnvelope}, emptyTransparent={emptyIsTransparent}, " +
+                        $"persistence={persistenceOk}, clipWindowsFit={clipWindowsFit}, overrides={overrideResolutionOk}, ok={ok}.");
+            return ok ? 0 : 1;
+        }
     }
 
     private static int RunGpuPresentationSmokeTest()
@@ -2493,9 +2823,15 @@ internal static class SmokeTestRunner
         }
 
         var presentFps = report.Metrics.FirstOrDefault(metric => string.Equals(metric.Name, "presentation_draw_fps", StringComparison.Ordinal));
-        if (presentFps != null && presentFps.Count > 0 && presentFps.Average < 45.0)
+        var frameLoopFps = report.Metrics.FirstOrDefault(metric => string.Equals(metric.Name, "frame_loop_fps", StringComparison.Ordinal));
+        double minimumPresentFps = frameLoopFps != null && frameLoopFps.Count > 0
+            ? Math.Max(5.0, frameLoopFps.Average * 0.8)
+            : 45.0;
+        if (presentFps != null && presentFps.Count > 0 && presentFps.Average < minimumPresentFps)
         {
-            throw new InvalidOperationException($"{label}: present cadence regressed; average present fps was only {presentFps.Average:F2}.");
+            throw new InvalidOperationException(
+                $"{label}: present cadence regressed; average present fps was only {presentFps.Average:F2} " +
+                $"for a {frameLoopFps?.Average ?? 0:F2} fps frame loop.");
         }
 
         foreach (var ageMetric in report.Metrics.Where(metric =>

@@ -15,7 +15,7 @@ dotnet run
 ```
 
 Rider users can open `lifeviz.sln` and choose the built-in **lifeviz: Run App** configuration.
-For ClickOnce packages inside Rider, use the shared **lifeviz: Publish Installer (MSBuild.exe)** run configuration (in `.run/`); it shells out to `Publish-Installer.ps1` so full MSBuild is used. The auto-generated Rider publish config uses `dotnet msbuild` and will trip `MSB4803`.
+For ClickOnce publish payloads inside Rider, use the shared **lifeviz: Publish Installer (MSBuild.exe)** run configuration (in `.run/`); it shells out to `Publish-Installer.ps1` so full MSBuild is used. The auto-generated Rider publish config uses `dotnet msbuild` and will trip `MSB4803`.
 If you still publish via Rider's generated config, the project automatically disables the ClickOnce bootstrapper under `dotnet msbuild` so the build completes (no `setup.exe`); use the MSBuild.exe-backed script/config when you need the bootstrapper.
 
 ## Runtime Smoke Tests
@@ -34,6 +34,7 @@ dotnet bin\Debug\net9.0-windows-sbx\lifeviz.dll --smoke-test simulation-reactive
 dotnet bin\Debug\net9.0-windows-sbx\lifeviz.dll --smoke-test pixel-sort-editor-roundtrip
 dotnet bin\Debug\net9.0-windows-sbx\lifeviz.dll --smoke-test gpu-pixel-sort
 dotnet bin\Debug\net9.0-windows-sbx\lifeviz.dll --smoke-test sim-group-pixel-sort-color
+dotnet bin\Debug\net9.0-windows-sbx\lifeviz.dll --smoke-test gpu-bitwise
 dotnet bin\Debug\net9.0-windows-sbx\lifeviz.dll --smoke-test gpu-injection-mode
 dotnet bin\Debug\net9.0-windows-sbx\lifeviz.dll --smoke-test gpu-file-injection-mode C:\path\to\video.mp4
 dotnet bin\Debug\net9.0-windows-sbx\lifeviz.dll --smoke-test gpu-sim
@@ -84,6 +85,7 @@ dotnet bin\Debug\net9.0-windows-sbx\lifeviz.dll --smoke-test all
 - `pixel-sort-reactive-cell-size` drives a live GPU `Pixel Sort` layer with `Cell Width` / `Cell Height` reactive mappings and fails unless the runtime cell size actually changes while the sorted output still preserves the source histogram.
 - `gpu-pixel-sort` verifies the GPU pixel-sort layer backend by injecting a live GPU composite, resolving the sort on-GPU, and failing unless the published output surface actually changes from the input pattern while preserving the original pixel histogram.
 - `sim-group-pixel-sort-color` pushes a `Pixel Sort` layer through the real inline `Sim Group` path and fails unless the resolved group output still preserves the source histogram. This is the regression smoke for the old "wrong texture type / underlay added twice" pixel-sort color blowout.
+- `gpu-bitwise` verifies the `Bitwise RGB` life mode on the GPU path by injecting a live GPU composite and failing unless the rendered output reconstructs the original RGB bytes from the 24 Conway bit planes.
 - `gpu-injection-mode` drives the GPU composite-injection path with a mid-gray source and fails unless `Threshold`, `Random Pulse`, and `Pulse Width Modulation` still produce distinct output densities.
 - `gpu-file-injection-mode <video>` runs that same density comparison against a real decoded file frame, which is the right tool when a report reproduces only on actual media.
 - `gpu-sim` verifies the D3D11 simulation backend end to end in both `Naive Grayscale` and `RGB Channel Bins`.
@@ -146,7 +148,7 @@ dotnet bin\Debug\net9.0-windows-sbx\lifeviz.dll --diagnostic-test profile-curren
 .\install.ps1
 ```
 
-By default, `install.ps1` now publishes and then runs `Install-ClickOnce.ps1` directly against the fresh publish output (more reliable for repeated in-place updates than relaunching through a generated bootstrapper each time). If you specifically need the single-file wrapper installer, pass `-BundleInstaller`.
+By default, `install.ps1` now publishes and then runs `Install-ClickOnce.ps1` directly against the fresh publish output. The helper stages the payload under `%LOCALAPPDATA%\lifeviz-clickonce`, removes stale `LifeViz` `.appref-ms` ClickOnce shortcuts, and creates normal `LifeViz` Start Menu/Desktop shortcuts that launch the staged `lifeviz.exe` directly. This keeps Start Menu launches on the freshly staged build without showing the ClickOnce update/install UI. If you specifically need the single-file wrapper installer, pass `-BundleInstaller`.
 
 Optional parameters:
 
@@ -159,7 +161,7 @@ Optional parameters:
 
 The custom neon "LV" mark lives in `Assets/lifeviz.ico` and is referenced via `<ApplicationIcon>` inside `lifeviz.csproj`, so binaries and installers both pick it up.
 
-## One-Click Installer (ClickOnce)
+## One-Click Installer Payload
 
 1. Open a **Developer PowerShell** or Command Prompt that exposes `MSBuild.exe` from Visual Studio / Build Tools.
 2. From the repo root, run the deployment script:
@@ -177,17 +179,17 @@ The custom neon "LV" mark lives in `Assets/lifeviz.ico` and is referenced via `<
      ```
 
      while stamping a time-based ClickOnce version so updates are always detected.
-   - Launches the newly published `lifeviz.application` manifest to trigger the ClickOnce update/install flow.
+   - Runs `Install-ClickOnce.ps1` against the newly published output to stage the payload, refresh shortcuts, and launch the staged exe directly.
 
 3. Artifacts land in `bin\Release\net9.0-windows\publish\`:
-   - `lifeviz.application` - ClickOnce manifest (what the deploy script launches).
+   - `lifeviz.application` - ClickOnce manifest used as publish metadata.
 - `Application Files\lifeviz_<version>\` - versioned payload.
 - `setup.exe` - optional bootstrapper for first-time installs.
-- `Install-ClickOnce.ps1` - helper script that stages the payload to `%LOCALAPPDATA%\lifeviz-clickonce`, clears the old ClickOnce cache, and launches the manifest from that stable path (prevents the "already installed from a different location" error when you install from different folders).
+- `Install-ClickOnce.ps1` - helper script that stages the payload to `%LOCALAPPDATA%\lifeviz-clickonce`, removes stale ClickOnce `.appref-ms` shortcuts, creates direct `LifeViz` Start Menu/Desktop shortcuts to the current staged exe, and launches that exe. Pass `-RegisterClickOnce` only if you explicitly need legacy appref registration.
 
 ## Updating Existing Installs
 
-Because `deploy.ps1` embeds a unique version for every publish and opens `lifeviz.application`, the installed app always refreshes to the latest build. Use `setup.exe` only when onboarding a clean machine that lacks prerequisites.
+Because `deploy.ps1` embeds a unique version for every publish and restages the payload before refreshing shortcuts, Start Menu launches point at the latest staged build. Use `setup.exe` only when onboarding a clean machine that lacks prerequisites.
 
 For end users, the context menu now includes **Update to Latest Release...**, which downloads the newest GitHub release `lifeviz_installer.exe` and launches it to upgrade in place (LifeViz closes while the installer runs).
 
@@ -207,13 +209,13 @@ What it does:
 - Bundles the publish payload into a single self-extracting `lifeviz_installer.exe` (stored in `artifacts/github-release/`).
 - Creates a GitHub release for the supplied tag (draftable via `-Draft`) and uploads only that exe as the release asset. If the tag does not yet exist, `gh release create` will create it.
 
-Downloaders should grab the single `lifeviz_installer.exe` from the release and run it; it self-extracts the payload and launches `Install-ClickOnce.ps1` from a stable location (the manifest is rewritten to `%LOCALAPPDATA%\lifeviz-clickonce\lifeviz.application` to avoid "installed from a different location" warnings on future updates).
+Downloaders should grab the single `lifeviz_installer.exe` from the release and run it; it self-extracts the payload and launches `Install-ClickOnce.ps1` from a stable location. The helper rewrites the staged manifest for consistency, removes old `.appref-ms` shortcuts, and creates normal `LifeViz` shortcuts to the staged exe.
 
 ## Troubleshooting
 
 - `MSB4803` or similar errors usually mean you ran `dotnet publish` instead of full MSBuild; re-run through `Publish-Installer.ps1`/`deploy.ps1` (or the **lifeviz: Publish Installer (MSBuild.exe)** run config in Rider).
 - If Rider/VS doesn't see the run configs, ensure the `.run/` folder and `.idea` contents are checked out.
 - Window capture requires desktop composition (Aero); minimized or hidden windows cannot be sampled.
-- ClickOnce "already installed from a different location" error: use `Install-ClickOnce.ps1` to stage to `%LOCALAPPDATA%\lifeviz-clickonce`, which uses a stable deployment URI and clears the cache before installing. If you prefer manual cleanup, uninstall the previous LifeViz entry first.
+- ClickOnce `.appref-ms` entries or "already installed from a different location" errors: rerun `Install-ClickOnce.ps1` without `-RegisterClickOnce`. The default flow stages to `%LOCALAPPDATA%\lifeviz-clickonce`, removes stale appref shortcuts, and replaces them with a direct `LifeViz.lnk`.
 
 

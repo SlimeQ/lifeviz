@@ -52,13 +52,8 @@ public partial class MainWindow
                 var downscaledTransform = _owner.BuildAnimationTransform(source, downscaledWidth, downscaledHeight, animationTime);
                 double animationOpacity = _owner.BuildAnimationOpacity(source, animationTime);
                 double effectiveOpacity = Math.Clamp(source.Opacity * animationOpacity, 0.0, 1.0);
-                var keying = new KeyingSettings(
-                    source.KeyEnabled && source.BlendMode == BlendMode.Normal,
-                    source.BlendMode == BlendMode.Normal,
-                    source.KeyColorR,
-                    source.KeyColorG,
-                    source.KeyColorB,
-                    source.KeyTolerance);
+                var compositeSettings = MainWindow.ResolveSourceCompositeSettings(source);
+                var keying = compositeSettings.Keying;
 
                 if (!primedDownscaled)
                 {
@@ -86,7 +81,7 @@ public partial class MainWindow
                         frame.Downscaled,
                         frame.DownscaledWidth,
                         frame.DownscaledHeight,
-                        source.BlendMode,
+                        compositeSettings.BlendMode,
                         effectiveOpacity,
                         source.Mirror && source.Type == CaptureSource.SourceType.Webcam,
                         source.FitMode,
@@ -121,13 +116,8 @@ public partial class MainWindow
             var transform = _owner.BuildAnimationTransform(source, destWidth, destHeight, animationTime);
             double animationOpacity = _owner.BuildAnimationOpacity(source, animationTime);
             double effectiveOpacity = Math.Clamp(source.Opacity * animationOpacity, 0.0, 1.0);
-            var keying = new KeyingSettings(
-                source.KeyEnabled && source.BlendMode == BlendMode.Normal,
-                source.BlendMode == BlendMode.Normal,
-                source.KeyColorR,
-                source.KeyColorG,
-                source.KeyColorB,
-                source.KeyTolerance);
+            var compositeSettings = MainWindow.ResolveSourceCompositeSettings(source);
+            var keying = compositeSettings.Keying;
 
             if (firstLayer)
             {
@@ -153,7 +143,7 @@ public partial class MainWindow
                 frame.Downscaled,
                 frame.DownscaledWidth,
                 frame.DownscaledHeight,
-                source.BlendMode,
+                compositeSettings.BlendMode,
                 effectiveOpacity,
                 source.Mirror && source.Type == CaptureSource.SourceType.Webcam,
                 source.FitMode,
@@ -172,13 +162,40 @@ public partial class MainWindow
             int dg = sg - keying.G;
             int db = sb - keying.B;
             double distance = Math.Sqrt((dr * dr) + (dg * dg) + (db * db)) / MaxColorDistance;
-            double tolerance = Math.Clamp(keying.Tolerance, 0.0, 1.0);
-            if (tolerance <= 0.0)
+            double range = Math.Clamp(keying.Tolerance, 0.0, 1.0);
+            if (range <= 0.0)
             {
                 return distance <= 0.0 ? 0.0 : 1.0;
             }
 
-            return Math.Clamp(distance / tolerance, 0.0, 1.0);
+            // A linear 0..max-RGB radius makes high UI ranges swallow distant dark
+            // colors (for example black when keying bright green). Curve the range
+            // so users still get a broad compressed-video key without crossing the
+            // green-to-black distance, even at the slider maximum.
+            double effectiveTolerance = 0.01 + (0.50 * range * range);
+            double featherStart = effectiveTolerance * 0.82;
+            if (distance <= featherStart)
+            {
+                return 0.0;
+            }
+            if (distance >= effectiveTolerance)
+            {
+                return 1.0;
+            }
+
+            double edge = (distance - featherStart) / Math.Max(0.000001, effectiveTolerance - featherStart);
+            return edge * edge * (3.0 - (2.0 * edge));
+        }
+
+        internal static bool RunChromaKeyMathSmoke()
+        {
+            var keying = new KeyingSettings(enabled: true, useAlpha: false, r: 0x0C, g: 0xED, b: 0x07, tolerance: 0.70);
+            double keyedGreen = ComputeKeyAlpha(0x07, 0xED, 0x0C, keying);
+            double nearGreen = ComputeKeyAlpha(0x20, 0xD8, 0x20, keying);
+            double black = ComputeKeyAlpha(0x00, 0x00, 0x00, keying);
+            bool ok = keyedGreen < 0.0001 && nearGreen < 0.0001 && black > 0.9999;
+            Logger.Info($"Chroma-key math smoke: green={keyedGreen:0.###}, nearGreen={nearGreen:0.###}, black={black:0.###}, ok={ok}.");
+            return ok;
         }
 
         private static void CopyIntoBuffer(byte[] destination, int destWidth, int destHeight, byte[] source, int sourceWidth, int sourceHeight,

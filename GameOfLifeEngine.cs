@@ -9,7 +9,8 @@ namespace lifeviz;
         internal enum LifeMode
         {
             NaiveGrayscale,
-            RgbChannels
+            RgbChannels,
+            Bitwise
         }
 
     internal enum BinningMode
@@ -31,6 +32,7 @@ namespace lifeviz;
         private const int MaxColumns = 4096;
         private const int MinDepth = 3;
         private const int MaxDepth = 96;
+        private const int BitwisePlaneCount = 24;
         private const double DefaultAspectRatio = 16d / 9d;
         private readonly Random _random = new();
         private readonly List<bool[,]> _history = new();
@@ -106,7 +108,7 @@ namespace lifeviz;
     {
         EnsureInitialized();
 
-        if (_mode == LifeMode.NaiveGrayscale)
+        if (_mode == LifeMode.NaiveGrayscale || _mode == LifeMode.Bitwise)
         {
             foreach (var frame in _history)
             {
@@ -128,6 +130,10 @@ namespace lifeviz;
         if (_mode == LifeMode.NaiveGrayscale)
         {
             StepChannel(_history, Depth);
+        }
+        else if (_mode == LifeMode.Bitwise)
+        {
+            StepIndependentPlanes(_history, BitwisePlaneCount);
         }
         else
         {
@@ -155,6 +161,14 @@ namespace lifeviz;
             byte b = EvaluateSlice(row, col, bSlice.start, bSlice.length);
 
             return (r, g, b);
+        }
+
+        if (_mode == LifeMode.Bitwise)
+        {
+            return (
+                EvaluateBitwiseChannel(row, col, 0),
+                EvaluateBitwiseChannel(row, col, 8),
+                EvaluateBitwiseChannel(row, col, 16));
         }
 
         byte rChannel = EvaluateChannel(row, col, _historyR, _rDepth);
@@ -198,6 +212,23 @@ namespace lifeviz;
             return;
         }
 
+        if (_mode == LifeMode.Bitwise)
+        {
+            Parallel.For(0, Rows, row =>
+            {
+                int rowOffset = row * Columns * 4;
+                for (int col = 0; col < Columns; col++)
+                {
+                    int index = rowOffset + (col * 4);
+                    targetBuffer[index] = EvaluateBitwiseChannel(row, col, 0);
+                    targetBuffer[index + 1] = EvaluateBitwiseChannel(row, col, 8);
+                    targetBuffer[index + 2] = EvaluateBitwiseChannel(row, col, 16);
+                    targetBuffer[index + 3] = 255;
+                }
+            });
+            return;
+        }
+
         int rFramesRgb = Math.Min(_rDepth, _historyR.Count);
         int gFramesRgb = Math.Min(_gDepth, _historyG.Count);
         int bFramesRgb = Math.Min(_bDepth, _historyB.Count);
@@ -232,6 +263,10 @@ namespace lifeviz;
             var current = EnsureTopFrame(_history, Rows, Columns);
             ApplyMask(current, frame);
         }
+        else if (_mode == LifeMode.Bitwise)
+        {
+            InjectRgbFrame(frame, frame, frame);
+        }
         else
         {
             // Duplicate grayscale into all channels when in RGB mode without per-channel data.
@@ -241,7 +276,7 @@ namespace lifeviz;
 
     public void InjectRgbFrame(bool[,] red, bool[,] green, bool[,] blue)
     {
-        if (_mode != LifeMode.RgbChannels)
+        if (_mode != LifeMode.RgbChannels && _mode != LifeMode.Bitwise)
         {
             return;
         }
@@ -252,6 +287,12 @@ namespace lifeviz;
         }
 
         EnsureInitialized();
+
+        if (_mode == LifeMode.Bitwise)
+        {
+            InjectBitwiseMask(red, green, blue);
+            return;
+        }
 
         var currentR = EnsureTopFrame(_historyR, Rows, Columns);
         var currentG = EnsureTopFrame(_historyG, Rows, Columns);
@@ -264,7 +305,7 @@ namespace lifeviz;
 
     private void EnsureInitialized()
     {
-        if (_mode == LifeMode.NaiveGrayscale && _history.Count > 0)
+        if ((_mode == LifeMode.NaiveGrayscale || _mode == LifeMode.Bitwise) && _history.Count > 0)
         {
             return;
         }
@@ -337,6 +378,13 @@ namespace lifeviz;
         if (_mode == LifeMode.NaiveGrayscale)
         {
             for (int i = 0; i < Depth; i++)
+            {
+                _history.Add(CreateFrame());
+            }
+        }
+        else if (_mode == LifeMode.Bitwise)
+        {
+            for (int i = 0; i < BitwisePlaneCount; i++)
             {
                 _history.Add(CreateFrame());
             }
@@ -481,6 +529,75 @@ namespace lifeviz;
         {
             history.Insert(0, next);
             TrimChannel(history, depth);
+        }
+    }
+
+    private void StepIndependentPlanes(List<bool[,]> history, int planeCount)
+    {
+        if (history.Count == 0)
+        {
+            for (int i = 0; i < planeCount; i++)
+            {
+                history.Add(CreateFrame());
+            }
+        }
+
+        int activePlanes = Math.Min(planeCount, history.Count);
+        for (int plane = 0; plane < activePlanes; plane++)
+        {
+            var current = history[plane];
+            var next = CreateFrame();
+
+            Parallel.For(0, Rows, row =>
+            {
+                if (Columns == 1 || row == 0 || row == Rows - 1)
+                {
+                    for (int col = 0; col < Columns; col++)
+                    {
+                        int neighbors = CountNeighborsEdge(current, row, col);
+                        bool alive = current[row, col];
+                        next[row, col] = neighbors == 3 || (alive && neighbors == 2);
+                    }
+                    return;
+                }
+
+                int lastCol = Columns - 1;
+                int prev = row - 1;
+                int nextRow = row + 1;
+
+                {
+                    int neighbors = CountNeighborsEdge(current, row, 0);
+                    bool alive = current[row, 0];
+                    next[row, 0] = neighbors == 3 || (alive && neighbors == 2);
+                }
+
+                for (int col = 1; col < lastCol; col++)
+                {
+                    int left = col - 1;
+                    int right = col + 1;
+                    int neighbors =
+                        (current[prev, left] ? 1 : 0) +
+                        (current[prev, col] ? 1 : 0) +
+                        (current[prev, right] ? 1 : 0) +
+                        (current[row, left] ? 1 : 0) +
+                        (current[row, right] ? 1 : 0) +
+                        (current[nextRow, left] ? 1 : 0) +
+                        (current[nextRow, col] ? 1 : 0) +
+                        (current[nextRow, right] ? 1 : 0);
+
+                    bool alive = current[row, col];
+                    next[row, col] = neighbors == 3 || (alive && neighbors == 2);
+                }
+
+                if (lastCol > 0)
+                {
+                    int neighbors = CountNeighborsEdge(current, row, lastCol);
+                    bool alive = current[row, lastCol];
+                    next[row, lastCol] = neighbors == 3 || (alive && neighbors == 2);
+                }
+            });
+
+            history[plane] = next;
         }
     }
 
@@ -693,10 +810,72 @@ namespace lifeviz;
         return (byte)Math.Round((alive / (double)frames) * 255);
     }
 
+    private byte EvaluateBitwiseChannel(int row, int col, int sliceStart)
+    {
+        int activePlanes = Math.Min(BitwisePlaneCount, _history.Count);
+        int available = Math.Max(0, activePlanes - sliceStart);
+        int planes = Math.Min(8, available);
+        if (planes <= 0)
+        {
+            return 0;
+        }
+
+        int value = 0;
+        for (int bit = 0; bit < planes; bit++)
+        {
+            if (_history[sliceStart + bit][row, col])
+            {
+                value |= 1 << (7 - bit);
+            }
+        }
+
+        return (byte)value;
+    }
+
+    private void InjectBitwiseMask(bool[,] red, bool[,] green, bool[,] blue)
+    {
+        while (_history.Count < BitwisePlaneCount)
+        {
+            _history.Add(CreateFrame());
+        }
+
+        for (int row = 0; row < Rows; row++)
+        {
+            for (int col = 0; col < Columns; col++)
+            {
+                bool r = red[row, col];
+                bool g = green[row, col];
+                bool b = blue[row, col];
+                for (int bit = 0; bit < 8; bit++)
+                {
+                    if (r)
+                    {
+                        _history[bit][row, col] = true;
+                    }
+
+                    if (g)
+                    {
+                        _history[8 + bit][row, col] = true;
+                    }
+
+                    if (b)
+                    {
+                        _history[16 + bit][row, col] = true;
+                    }
+                }
+            }
+        }
+    }
+
     private bool ValidateFrame(bool[,] frame) => frame.GetLength(0) == Rows && frame.GetLength(1) == Columns;
 
     private (int r, int g, int b) CalculateChannelDepths()
     {
+        if (_mode == LifeMode.Bitwise)
+        {
+            return (8, 8, 8);
+        }
+
         var (r, g, b) = CalculateSlices();
         return (r.length, g.length, b.length);
     }

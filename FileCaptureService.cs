@@ -42,9 +42,13 @@ internal sealed class FileCaptureService : IDisposable
     private readonly object _lock = new();
     private bool _masterVideoAudioEnabled = true;
     private double _masterVideoAudioVolume = 1.0;
+    private bool _liveVideoAudioAnalysisEnabled;
     private bool _lowContentionMode;
     private int _decoderThreadLimit;
     private int _videoDecodeFpsLimit;
+    private bool _offlineRenderEnabled;
+    private int _offlineRenderFps;
+    private double _offlineRenderTimeSeconds;
 
     private static Task RunBackgroundLongRunning(Action action, string threadName)
     {
@@ -65,7 +69,7 @@ internal sealed class FileCaptureService : IDisposable
         {
             IsBackground = true,
             Name = threadName,
-            Priority = ThreadPriority.BelowNormal
+            Priority = ThreadPriority.Normal
         };
 
         thread.Start();
@@ -90,7 +94,7 @@ internal sealed class FileCaptureService : IDisposable
         {
             IsBackground = true,
             Name = threadName,
-            Priority = ThreadPriority.BelowNormal
+            Priority = ThreadPriority.Normal
         };
 
         thread.Start();
@@ -101,7 +105,7 @@ internal sealed class FileCaptureService : IDisposable
     {
         try
         {
-            Thread.CurrentThread.Priority = ThreadPriority.BelowNormal;
+            Thread.CurrentThread.Priority = ThreadPriority.Normal;
         }
         catch
         {
@@ -119,12 +123,16 @@ internal sealed class FileCaptureService : IDisposable
         }
     }
 
-    private static void TryLowerChildProcessPriority(Process process, string label, bool lowContentionMode)
+    private static void TryLowerChildProcessPriority(
+        Process process,
+        string label,
+        bool lowContentionMode,
+        bool preferThroughput = false)
     {
         try
         {
-            process.PriorityClass = lowContentionMode
-                ? ProcessPriorityClass.Idle
+            process.PriorityClass = preferThroughput || !lowContentionMode
+                ? ProcessPriorityClass.Normal
                 : ProcessPriorityClass.BelowNormal;
         }
         catch (Exception ex)
@@ -174,6 +182,26 @@ internal sealed class FileCaptureService : IDisposable
         }
     }
 
+    public void SetLiveVideoAudioAnalysisEnabled(bool enabled)
+    {
+        List<FileSession> sessionsToUpdate;
+        lock (_lock)
+        {
+            if (_liveVideoAudioAnalysisEnabled == enabled)
+            {
+                return;
+            }
+
+            _liveVideoAudioAnalysisEnabled = enabled;
+            sessionsToUpdate = _sessions.Values.ToList();
+        }
+
+        foreach (var session in sessionsToUpdate)
+        {
+            ApplyLiveAudioAnalysisSettingsToSession(session);
+        }
+    }
+
     public void SetPerformanceSettings(bool lowContentionMode, int decoderThreadLimit, int videoDecodeFpsLimit)
     {
         decoderThreadLimit = Math.Clamp(decoderThreadLimit, 0, 8);
@@ -200,6 +228,64 @@ internal sealed class FileCaptureService : IDisposable
         }
     }
 
+    public void BeginOfflineRender(int fps, double startTimeSeconds)
+    {
+        List<FileSession> sessions;
+        lock (_lock)
+        {
+            _offlineRenderEnabled = true;
+            _offlineRenderFps = Math.Clamp(fps, 1, 144);
+            _offlineRenderTimeSeconds = Math.Max(0, startTimeSeconds);
+            sessions = _sessions.Values.ToList();
+        }
+
+        foreach (var session in sessions)
+        {
+            ApplyOfflineRenderSettingsToSession(session);
+        }
+    }
+
+    public void SetOfflineRenderTime(double timeSeconds)
+    {
+        List<ImageSequenceSession> imageSessions;
+        lock (_lock)
+        {
+            if (!_offlineRenderEnabled)
+            {
+                return;
+            }
+
+            _offlineRenderTimeSeconds = Math.Max(0, timeSeconds);
+            imageSessions = _sessions.Values.OfType<ImageSequenceSession>().ToList();
+        }
+
+        foreach (var session in imageSessions)
+        {
+            session.SetOfflineRenderTime(_offlineRenderTimeSeconds);
+        }
+    }
+
+    public void EndOfflineRender()
+    {
+        List<FileSession> sessions;
+        lock (_lock)
+        {
+            if (!_offlineRenderEnabled)
+            {
+                return;
+            }
+
+            _offlineRenderEnabled = false;
+            _offlineRenderFps = 0;
+            sessions = _sessions.Values.ToList();
+        }
+
+        foreach (var session in sessions)
+        {
+            ApplyOfflineRenderSettingsToSession(session);
+        }
+    }
+
     private void ApplyMasterAudioSettingsToSession(object session)
     {
         if (session is VideoSession videoSession)
@@ -211,6 +297,32 @@ internal sealed class FileCaptureService : IDisposable
         if (session is VideoSequenceSession videoSequenceSession)
         {
             videoSequenceSession.SetAudioMaster(_masterVideoAudioEnabled, _masterVideoAudioVolume);
+            return;
+        }
+
+        if (session is AutoClipSession autoClipSession)
+        {
+            autoClipSession.SetAudioMaster(_masterVideoAudioEnabled, _masterVideoAudioVolume);
+        }
+    }
+
+    private void ApplyLiveAudioAnalysisSettingsToSession(object session)
+    {
+        if (session is VideoSession videoSession)
+        {
+            videoSession.SetLiveAudioAnalysisEnabled(_liveVideoAudioAnalysisEnabled);
+            return;
+        }
+
+        if (session is VideoSequenceSession videoSequenceSession)
+        {
+            videoSequenceSession.SetLiveAudioAnalysisEnabled(_liveVideoAudioAnalysisEnabled);
+            return;
+        }
+
+        if (session is AutoClipSession autoClipSession)
+        {
+            autoClipSession.SetLiveAudioAnalysisEnabled(_liveVideoAudioAnalysisEnabled);
         }
     }
 
@@ -219,12 +331,33 @@ internal sealed class FileCaptureService : IDisposable
         if (session is VideoSession videoSession)
         {
             videoSession.SetPerformanceSettings(_lowContentionMode, _decoderThreadLimit, _videoDecodeFpsLimit);
+            videoSession.SetOfflineRenderMode(_offlineRenderEnabled, _offlineRenderFps);
             return;
         }
 
         if (session is VideoSequenceSession videoSequenceSession)
         {
             videoSequenceSession.SetPerformanceSettings(_lowContentionMode, _decoderThreadLimit, _videoDecodeFpsLimit);
+            videoSequenceSession.SetOfflineRenderMode(_offlineRenderEnabled, _offlineRenderFps);
+            return;
+        }
+
+        if (session is AutoClipSession autoClipSession)
+        {
+            autoClipSession.SetPerformanceSettings(_lowContentionMode, _decoderThreadLimit, _videoDecodeFpsLimit);
+            autoClipSession.SetOfflineRenderMode(_offlineRenderEnabled, _offlineRenderFps);
+        }
+    }
+
+    private void ApplyOfflineRenderSettingsToSession(FileSession session)
+    {
+        if (session is ImageSequenceSession imageSession)
+        {
+            imageSession.SetOfflineRenderMode(_offlineRenderEnabled, _offlineRenderTimeSeconds);
+        }
+        else if (session is VideoSession videoSession)
+        {
+            videoSession.SetOfflineRenderMode(_offlineRenderEnabled, _offlineRenderFps);
         }
     }
 
@@ -292,6 +425,7 @@ internal sealed class FileCaptureService : IDisposable
         {
             var session = CreateSession(fullPath);
             ApplyMasterAudioSettingsToSession(session);
+            ApplyLiveAudioAnalysisSettingsToSession(session);
             ApplyPerformanceSettingsToSession(session);
             info = session.GetInfo();
             lock (_lock)
@@ -350,6 +484,7 @@ internal sealed class FileCaptureService : IDisposable
             
             var session = new VideoSession(key, title, loopPlayback: true, resolver);
             ApplyMasterAudioSettingsToSession(session);
+            ApplyLiveAudioAnalysisSettingsToSession(session);
             ApplyPerformanceSettingsToSession(session);
             
             lock (_lock)
@@ -420,6 +555,58 @@ internal sealed class FileCaptureService : IDisposable
 
         session = new VideoSequenceSession(normalized);
         ApplyMasterAudioSettingsToSession(session);
+        ApplyLiveAudioAnalysisSettingsToSession(session);
+        ApplyPerformanceSettingsToSession(session);
+        return true;
+    }
+
+    public bool TryCreateAutoClip(
+        IReadOnlyList<string>? paths,
+        double minClipSeconds,
+        double maxClipSeconds,
+        double minDelaySeconds,
+        double maxDelaySeconds,
+        out AutoClipSession? session,
+        out string? error)
+    {
+        session = null;
+        error = null;
+        var normalized = new List<string>();
+
+        foreach (string path in paths ?? Array.Empty<string>())
+        {
+            if (string.IsNullOrWhiteSpace(path))
+            {
+                continue;
+            }
+
+            if (!TryNormalizePath(path, out string fullPath))
+            {
+                error = "Invalid file path.";
+                return false;
+            }
+
+            if (!File.Exists(fullPath))
+            {
+                error = $"File not found: {fullPath}";
+                return false;
+            }
+
+            if (!VideoExtensions.Contains(Path.GetExtension(fullPath)))
+            {
+                error = $"AutoClip only supports video files. ({Path.GetFileName(fullPath)})";
+                return false;
+            }
+
+            if (!normalized.Any(existing => string.Equals(existing, fullPath, StringComparison.OrdinalIgnoreCase)))
+            {
+                normalized.Add(fullPath);
+            }
+        }
+
+        session = new AutoClipSession(normalized, minClipSeconds, maxClipSeconds, minDelaySeconds, maxDelaySeconds);
+        ApplyMasterAudioSettingsToSession(session);
+        ApplyLiveAudioAnalysisSettingsToSession(session);
         ApplyPerformanceSettingsToSession(session);
         return true;
     }
@@ -514,6 +701,21 @@ internal sealed class FileCaptureService : IDisposable
         }
 
         return false;
+    }
+
+    public bool MixOfflineVideoAudioFrame(string path, Span<float> destination)
+    {
+        return !string.IsNullOrWhiteSpace(path) &&
+               TryResolveVideoSession(path, out var session) &&
+               session.MixOfflineAudioFrame(destination);
+    }
+
+    public int MixLiveVideoAudioSamples(string path, Span<float> destination)
+    {
+        return !string.IsNullOrWhiteSpace(path) &&
+               TryResolveVideoSession(path, out var session)
+            ? session.MixLiveAudioSamples(destination)
+            : 0;
     }
 
     private bool TryResolveVideoSession(string path, out VideoSession session)
@@ -687,6 +889,36 @@ internal sealed class FileCaptureService : IDisposable
         return session?.CaptureFrame(targetWidth, targetHeight, fitMode, includeSource);
     }
 
+    internal double? GetVideoPlaybackOffsetSecondsForDiagnostics(string path)
+    {
+        if (!TryNormalizePath(path, out string fullPath))
+        {
+            return null;
+        }
+
+        lock (_lock)
+        {
+            return _sessions.TryGetValue(fullPath, out FileSession? session) && session is VideoSession videoSession
+                ? videoSession.GetPlaybackOffsetSecondsForDiagnostics()
+                : null;
+        }
+    }
+
+    internal double? GetVideoPlaybackBaseOffsetSecondsForDiagnostics(string path)
+    {
+        if (!TryNormalizePath(path, out string fullPath))
+        {
+            return null;
+        }
+
+        lock (_lock)
+        {
+            return _sessions.TryGetValue(fullPath, out FileSession? session) && session is VideoSession videoSession
+                ? videoSession.GetPlaybackBaseOffsetSecondsForDiagnostics()
+                : null;
+        }
+    }
+
     public FileCaptureState GetState(string path)
     {
         if (string.IsNullOrWhiteSpace(path))
@@ -847,6 +1079,10 @@ internal sealed class FileCaptureService : IDisposable
         private readonly double[] _frameEndTimesMs;
         private readonly double _totalDurationMs;
         private readonly Stopwatch _clock = Stopwatch.StartNew();
+        private bool _offlineRenderEnabled;
+        private double _offlineRenderTimeSeconds;
+        private double _offlineTimelineStartSeconds;
+        private double _offlineSequenceStartMilliseconds;
         private byte[]? _downscaledBuffer;
         private int _cachedTargetWidth = -1;
         private int _cachedTargetHeight = -1;
@@ -932,6 +1168,26 @@ internal sealed class FileCaptureService : IDisposable
             // No unmanaged resources to clean up.
         }
 
+        public void SetOfflineRenderMode(bool enabled, double timeSeconds)
+        {
+            if (enabled && !_offlineRenderEnabled)
+            {
+                _offlineTimelineStartSeconds = Math.Max(0, timeSeconds);
+                _offlineSequenceStartMilliseconds = _clock.Elapsed.TotalMilliseconds;
+            }
+
+            _offlineRenderEnabled = enabled;
+            _offlineRenderTimeSeconds = Math.Max(0, timeSeconds);
+        }
+
+        public void SetOfflineRenderTime(double timeSeconds)
+        {
+            if (_offlineRenderEnabled)
+            {
+                _offlineRenderTimeSeconds = Math.Max(0, timeSeconds);
+            }
+        }
+
         private int GetCurrentFrameIndex()
         {
             if (_frames.Length == 1)
@@ -939,7 +1195,11 @@ internal sealed class FileCaptureService : IDisposable
                 return 0;
             }
 
-            double mod = _totalDurationMs <= 0 ? 0 : _clock.Elapsed.TotalMilliseconds % _totalDurationMs;
+            double elapsedMs = _offlineRenderEnabled
+                ? _offlineSequenceStartMilliseconds +
+                  (Math.Max(0, _offlineRenderTimeSeconds - _offlineTimelineStartSeconds) * 1000.0)
+                : _clock.Elapsed.TotalMilliseconds;
+            double mod = _totalDurationMs <= 0 ? 0 : elapsedMs % _totalDurationMs;
             for (int i = 0; i < _frameEndTimesMs.Length; i++)
             {
                 if (mod <= _frameEndTimesMs[i])
@@ -1048,6 +1308,13 @@ internal sealed class FileCaptureService : IDisposable
         private Task? _audioDecodeTask;
         private WaveOutEvent? _audioOutput;
         private BufferedWaveProvider? _audioBuffer;
+        private const int LiveAudioAnalysisBufferCapacity = 48000 * 2;
+        private readonly object _liveAudioAnalysisLock = new();
+        private readonly float[] _liveAudioAnalysisBuffer = new float[LiveAudioAnalysisBufferCapacity];
+        private int _liveAudioAnalysisReadIndex;
+        private int _liveAudioAnalysisWriteIndex;
+        private int _liveAudioAnalysisCount;
+        private bool _liveAudioAnalysisEnabled;
         private readonly Stopwatch _playbackClock = new();
         private double _playbackBaseOffsetSeconds;
         private double _pausedOffsetSeconds;
@@ -1062,7 +1329,8 @@ internal sealed class FileCaptureService : IDisposable
         private string? _audioPlaybackUrl;
         
         // Buffers
-        private const int MaxQueuedRawFrames = 16;
+        private const int MaxQueuedOfflineRawFrames = 16;
+        private const int MaxQueuedLiveRawFrames = 2;
         private const int ParallelDownscalePixelThreshold = 640 * 360;
         private byte[]? _readerBuffer;      // Worker writes here
         private byte[]? _readyDownscaled;   // Ready for UI
@@ -1080,6 +1348,15 @@ internal sealed class FileCaptureService : IDisposable
         private bool _lowContentionMode;
         private int _decoderThreadLimit;
         private int _videoDecodeFpsLimit;
+        private volatile bool _offlineRenderEnabled;
+        private volatile int _offlineRenderFps;
+        private long _offlineFramesConsumed;
+        private double _offlineStartOffsetSeconds;
+        private readonly object _offlineAudioLock = new();
+        private Process? _offlineAudioProcess;
+        private Stream? _offlineAudioStream;
+        private byte[]? _offlineAudioReadBuffer;
+        private bool _offlineAudioUnavailable;
 
         private int _nativeWidth;
         private int _nativeHeight;
@@ -1281,11 +1558,69 @@ internal sealed class FileCaptureService : IDisposable
                 shouldPause = _playbackPaused;
             }
 
-            if (_workerTask != null || _process != null || !string.IsNullOrWhiteSpace(_videoPlaybackUrl))
+            if (_workerTask != null || _process != null)
             {
                 RestartVideoPipeline(seekOffset, shouldPause, forceReResolve: false);
             }
             else if (!shouldPause)
+            {
+                RefreshAudioPlayback();
+            }
+        }
+
+        public void SetOfflineRenderMode(bool enabled, int fps)
+        {
+            fps = enabled ? Math.Clamp(fps, 1, 144) : 0;
+            if (_offlineRenderEnabled == enabled && _offlineRenderFps == fps)
+            {
+                return;
+            }
+
+            bool wasOffline = _offlineRenderEnabled;
+            int priorOfflineFps = _offlineRenderFps;
+            double seekOffset;
+            bool shouldPause;
+            lock (_audioLock)
+            {
+                // Offline rendering is a temporary timeline fork. Resume live playback at the
+                // position where the export began instead of seeking it forward by the rendered
+                // duration; otherwise the preview visibly jumps when the export finishes.
+                seekOffset = !enabled && wasOffline && priorOfflineFps > 0
+                    ? NormalizeOffsetNoLock(_offlineStartOffsetSeconds)
+                    : GetEstimatedPlaybackOffsetSecondsNoLock();
+                shouldPause = _playbackPaused;
+                _playbackBaseOffsetSeconds = seekOffset;
+                _pausedOffsetSeconds = seekOffset;
+                if (!shouldPause)
+                {
+                    _playbackClock.Restart();
+                }
+            }
+
+            _offlineRenderEnabled = enabled;
+            _offlineRenderFps = fps;
+            StopOfflineAudioDecoder();
+            _offlineAudioUnavailable = false;
+            if (enabled)
+            {
+                _offlineStartOffsetSeconds = seekOffset;
+                _offlineFramesConsumed = 0;
+            }
+            if (_isDisposed)
+            {
+                return;
+            }
+
+            if (enabled)
+            {
+                StopAudioPlayback();
+            }
+
+            if (_workerTask != null || _process != null)
+            {
+                RestartVideoPipeline(seekOffset, shouldPause, forceReResolve: false);
+            }
+            else if (!enabled && !shouldPause)
             {
                 RefreshAudioPlayback();
             }
@@ -1304,6 +1639,19 @@ internal sealed class FileCaptureService : IDisposable
             bool rebuildDownscaledFromReadyRaw = false;
             lock (_lock)
             {
+                if (_offlineRenderEnabled && !_playbackPaused)
+                {
+                    long waitDeadline = Stopwatch.GetTimestamp() + (Stopwatch.Frequency * 30L);
+                    while (_pendingRawFrames.Count == 0 &&
+                           !_hasError &&
+                           !_ended &&
+                           !_isDisposed &&
+                           Stopwatch.GetTimestamp() < waitDeadline)
+                    {
+                        Monitor.Wait(_lock, millisecondsTimeout: 100);
+                    }
+                }
+
                 if (_pendingRawFrames.Count > 0)
                 {
                     int requiredSize = _processWidth * _processHeight * 4;
@@ -1315,7 +1663,7 @@ internal sealed class FileCaptureService : IDisposable
                         }
 
                         _readyRaw = _pendingRawFrames.Dequeue();
-                        while (_pendingRawFrames.Count > 0)
+                        while (!_offlineRenderEnabled && _pendingRawFrames.Count > 0)
                         {
                             RecycleRawFrameBufferNoLock(_readyRaw, requiredSize);
                             _readyRaw = _pendingRawFrames.Dequeue();
@@ -1330,7 +1678,7 @@ internal sealed class FileCaptureService : IDisposable
                     else
                     {
                         byte[] nextInput = _pendingRawFrames.Dequeue();
-                        while (_pendingRawFrames.Count > 0)
+                        while (!_offlineRenderEnabled && _pendingRawFrames.Count > 0)
                         {
                             RecycleRawFrameBufferNoLock(nextInput, requiredSize);
                             nextInput = _pendingRawFrames.Dequeue();
@@ -1353,6 +1701,12 @@ internal sealed class FileCaptureService : IDisposable
                         _readyDownscaledHeight = _processHeight;
                         _readyFrameToken++;
                         _readyFramePublishTimestamp = Stopwatch.GetTimestamp();
+                    }
+
+                    Monitor.PulseAll(_lock);
+                    if (_offlineRenderEnabled)
+                    {
+                        _offlineFramesConsumed++;
                     }
                 }
             }
@@ -1516,6 +1870,17 @@ internal sealed class FileCaptureService : IDisposable
                 threadLimit = 1;
             }
 
+            // ffmpeg's automatic decoder fanout is wasteful when several file layers
+            // are playing concurrently: every process can create a large codec thread
+            // pool and retain a correspondingly large set of reference frames. Two
+            // threads comfortably sustain normal HD playback while keeping live scenes
+            // from oversubscribing the machine. Offline rendering keeps ffmpeg's full
+            // automatic fanout because throughput, rather than latency, is the goal.
+            if (!_offlineRenderEnabled && threadLimit <= 0)
+            {
+                threadLimit = 2;
+            }
+
             if (threadLimit <= 0)
             {
                 return string.Empty;
@@ -1530,8 +1895,9 @@ internal sealed class FileCaptureService : IDisposable
                 ? BuildDirectOutputVideoFilter(processOutputFitMode, processWidth, processHeight)
                 : null;
 
-            string? fpsFilter = _videoDecodeFpsLimit > 0
-                ? $"fps={_videoDecodeFpsLimit}"
+            int decodeFps = _offlineRenderEnabled ? _offlineRenderFps : _videoDecodeFpsLimit;
+            string? fpsFilter = decodeFps > 0
+                ? $"fps={decodeFps}"
                 : null;
 
             if (string.IsNullOrWhiteSpace(directFilter))
@@ -1604,8 +1970,182 @@ internal sealed class FileCaptureService : IDisposable
                 _audioEnabled = false;
             }
 
+            StopOfflineAudioDecoder();
             StopVideoPipeline();
             StopAudioPlayback();
+        }
+
+        public bool MixOfflineAudioFrame(Span<float> destination)
+        {
+            if (!_offlineRenderEnabled || destination.Length == 0 || _offlineAudioUnavailable)
+            {
+                return false;
+            }
+
+            double volume;
+            bool shouldDecode;
+            lock (_audioLock)
+            {
+                volume = GetEffectiveVolumeNoLock();
+                shouldDecode = _audioEnabled &&
+                               !_playbackPaused &&
+                               !_isDisposed &&
+                               volume > 0.0001;
+            }
+
+            if (!shouldDecode || !EnsureOfflineAudioDecoder())
+            {
+                return false;
+            }
+
+            int bytesNeeded = destination.Length * sizeof(float);
+            byte[] buffer;
+            Stream? stream;
+            lock (_offlineAudioLock)
+            {
+                if (_offlineAudioReadBuffer == null || _offlineAudioReadBuffer.Length < bytesNeeded)
+                {
+                    _offlineAudioReadBuffer = new byte[bytesNeeded];
+                }
+
+                buffer = _offlineAudioReadBuffer;
+                stream = _offlineAudioStream;
+            }
+
+            if (stream == null)
+            {
+                return false;
+            }
+
+            int totalRead = 0;
+            try
+            {
+                while (totalRead < bytesNeeded)
+                {
+                    int read = stream.Read(buffer, totalRead, bytesNeeded - totalRead);
+                    if (read <= 0)
+                    {
+                        break;
+                    }
+                    totalRead += read;
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.Warn($"Offline audio decode failed for {DisplayName}: {ex.Message}");
+            }
+
+            int sampleCount = Math.Min(destination.Length, totalRead / sizeof(float));
+            for (int i = 0; i < sampleCount; i++)
+            {
+                destination[i] += BitConverter.ToSingle(buffer, i * sizeof(float)) * (float)volume;
+            }
+
+            if (sampleCount == 0)
+            {
+                _offlineAudioUnavailable = true;
+                StopOfflineAudioDecoder();
+                return false;
+            }
+
+            return true;
+        }
+
+        private bool EnsureOfflineAudioDecoder()
+        {
+            lock (_offlineAudioLock)
+            {
+                if (_offlineAudioStream != null && _offlineAudioProcess != null)
+                {
+                    return true;
+                }
+            }
+
+            string? playbackUrl;
+            lock (_audioLock)
+            {
+                playbackUrl = _audioPlaybackUrl ?? _videoPlaybackUrl;
+            }
+            if (string.IsNullOrWhiteSpace(playbackUrl))
+            {
+                return false;
+            }
+
+            string args = "-hide_banner -loglevel warning";
+            if (_offlineStartOffsetSeconds > 0.05)
+            {
+                args += $" -ss {_offlineStartOffsetSeconds.ToString("0.###", CultureInfo.InvariantCulture)}";
+            }
+            args += BuildDecoderThreadArgs();
+            if (_loopPlayback)
+            {
+                args += " -stream_loop -1";
+            }
+            args += $" -i \"{playbackUrl}\"";
+            args += " -map 0:a:0? -vn -ac 1 -ar 48000 -acodec pcm_f32le -f f32le -";
+
+            try
+            {
+                Logger.Info($"Starting offline audio analysis decode for {DisplayName}.");
+                var process = Process.Start(new ProcessStartInfo
+                {
+                    FileName = "ffmpeg",
+                    Arguments = args,
+                    UseShellExecute = false,
+                    CreateNoWindow = true,
+                    RedirectStandardError = true,
+                    RedirectStandardOutput = true
+                });
+                if (process == null)
+                {
+                    return false;
+                }
+
+                TryLowerChildProcessPriority(
+                    process,
+                    $"ffmpeg offline audio decode for {DisplayName}",
+                    _lowContentionMode,
+                    preferThroughput: true);
+                process.ErrorDataReceived += (_, e) =>
+                {
+                    if (!string.IsNullOrWhiteSpace(e.Data))
+                    {
+                        Logger.Warn($"[ffmpeg-offline-audio:{DisplayName}] {e.Data}");
+                    }
+                };
+                process.BeginErrorReadLine();
+
+                lock (_offlineAudioLock)
+                {
+                    _offlineAudioProcess = process;
+                    _offlineAudioStream = process.StandardOutput.BaseStream;
+                }
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Logger.Warn($"Offline audio analysis unavailable for {DisplayName}: {ex.Message}");
+                _offlineAudioUnavailable = true;
+                return false;
+            }
+        }
+
+        private void StopOfflineAudioDecoder()
+        {
+            Process? process;
+            Stream? stream;
+            lock (_offlineAudioLock)
+            {
+                process = _offlineAudioProcess;
+                stream = _offlineAudioStream;
+                _offlineAudioProcess = null;
+                _offlineAudioStream = null;
+                _offlineAudioReadBuffer = null;
+            }
+
+            try { stream?.Dispose(); } catch { }
+            SafeKillProcess(process);
+            try { process?.Dispose(); } catch { }
         }
 
         private void FfmpegWorker(string url, CancellationToken token, double startOffsetSeconds)
@@ -1616,18 +2156,31 @@ internal sealed class FileCaptureService : IDisposable
                 int processHeight = _processHeight;
                 bool produceExactTargetFrames = _processProducesExactTargetFrames;
                 FitMode processOutputFitMode = _processOutputFitMode;
+                int maxQueuedRawFrames = _offlineRenderEnabled
+                    ? MaxQueuedOfflineRawFrames
+                    : MaxQueuedLiveRawFrames;
                 string args = $"-hide_banner -loglevel warning{BuildDecoderThreadArgs()}"; // increased verbosity for debug
                 if (startOffsetSeconds > 0.05)
                 {
                     args += $" -ss {startOffsetSeconds.ToString("0.###", CultureInfo.InvariantCulture)}";
                 }
                 if (_loopPlayback) args += " -stream_loop -1";
-                args += " -re"; // Realtime reading
-                args += $" -i \"{url}\"";
+                if (!_offlineRenderEnabled)
+                {
+                    args += " -re"; // Realtime reading for interactive playback.
+                }
+                args += $" -i \"{url}\" -map 0:v:0 -an -sn -dn";
                 string videoFilter = BuildVideoOutputFilter(produceExactTargetFrames, processOutputFitMode, processWidth, processHeight);
                 if (!string.IsNullOrWhiteSpace(videoFilter))
                 {
                     args += $" -vf \"{videoFilter}\"";
+                }
+                if (!_offlineRenderEnabled)
+                {
+                    // Scaling a single live stream does not benefit enough from a
+                    // second filter pool to justify multiplying worker threads across
+                    // every active video layer.
+                    args += " -filter_threads 1";
                 }
                 args += $" -f rawvideo -pix_fmt bgra -s {processWidth}x{processHeight} -";
 
@@ -1645,10 +2198,14 @@ internal sealed class FileCaptureService : IDisposable
 
                 var process = Process.Start(psi);
                 if (process == null) throw new InvalidOperationException("Failed to start ffmpeg.");
-                TryLowerChildProcessPriority(process, "ffmpeg video decode", _lowContentionMode);
+                TryLowerChildProcessPriority(
+                    process,
+                    "ffmpeg video decode",
+                    _lowContentionMode,
+                    preferThroughput: _offlineRenderEnabled);
                 _process = process;
 
-                process.ErrorDataReceived += (s, e) => 
+                process.ErrorDataReceived += (s, e) =>
                 {
                     if (!string.IsNullOrWhiteSpace(e.Data)) Logger.Warn($"[ffmpeg] {e.Data}");
                 };
@@ -1683,6 +2240,10 @@ internal sealed class FileCaptureService : IDisposable
                         if (!token.IsCancellationRequested && exited && TryGetProcessExitCode(process, out int exitCode) && exitCode == 0)
                         {
                             _ended = true;
+                            lock (_lock)
+                            {
+                                Monitor.PulseAll(_lock);
+                            }
                         }
                         break; 
                     }
@@ -1692,13 +2253,26 @@ internal sealed class FileCaptureService : IDisposable
                     // We have a full frame. Publish it.
                     lock (_lock)
                     {
-                        if (_pendingRawFrames.Count >= MaxQueuedRawFrames)
+                        while (_offlineRenderEnabled &&
+                               _pendingRawFrames.Count >= maxQueuedRawFrames &&
+                               !token.IsCancellationRequested)
+                        {
+                            Monitor.Wait(_lock, millisecondsTimeout: 100);
+                        }
+
+                        if (token.IsCancellationRequested)
+                        {
+                            break;
+                        }
+
+                        if (_pendingRawFrames.Count >= maxQueuedRawFrames)
                         {
                             RecycleRawFrameBufferNoLock(_pendingRawFrames.Dequeue(), frameSize);
                         }
 
                         _pendingRawFrames.Enqueue(readBuffer);
                         _readerBuffer = AcquireRawFrameBufferNoLock(frameSize);
+                        Monitor.PulseAll(_lock);
                     }
                 }
             }
@@ -1706,6 +2280,10 @@ internal sealed class FileCaptureService : IDisposable
             {
                 Logger.Error($"FFmpeg worker error: {ex.Message}", ex);
                 _hasError = true;
+                lock (_lock)
+                {
+                    Monitor.PulseAll(_lock);
+                }
             }
         }
 
@@ -1830,6 +2408,24 @@ internal sealed class FileCaptureService : IDisposable
             }
 
             RestartVideoPipeline(seekOffset, shouldPause: paused, forceReResolve: false);
+        }
+
+        internal void SetInitialPlaybackOffsetSeconds(double offsetSeconds)
+        {
+            lock (_audioLock)
+            {
+                double normalized = NormalizeOffsetNoLock(offsetSeconds);
+                _pausedOffsetSeconds = normalized;
+                _playbackBaseOffsetSeconds = normalized;
+                if (_playbackPaused)
+                {
+                    _playbackClock.Reset();
+                }
+                else
+                {
+                    _playbackClock.Restart();
+                }
+            }
         }
 
         public bool TryGetPlaybackState(out VideoPlaybackState playbackState)
@@ -1966,7 +2562,10 @@ internal sealed class FileCaptureService : IDisposable
 
         private void RecycleRawFrameBufferNoLock(byte[] buffer, int requiredSize)
         {
-            if (buffer.Length == requiredSize && _rawFramePool.Count < MaxQueuedRawFrames * 2)
+            int maxPooledFrames = (_offlineRenderEnabled
+                ? MaxQueuedOfflineRawFrames
+                : MaxQueuedLiveRawFrames) * 2;
+            if (buffer.Length == requiredSize && _rawFramePool.Count < maxPooledFrames)
             {
                 _rawFramePool.Push(buffer);
             }
@@ -1982,6 +2581,63 @@ internal sealed class FileCaptureService : IDisposable
             RefreshAudioPlayback();
         }
 
+        public void SetLiveAudioAnalysisEnabled(bool enabled)
+        {
+            bool changed;
+            lock (_audioLock)
+            {
+                changed = _liveAudioAnalysisEnabled != enabled;
+                _liveAudioAnalysisEnabled = enabled;
+            }
+
+            if (!changed)
+            {
+                return;
+            }
+
+            StopAudioPlayback();
+            RefreshAudioPlayback();
+        }
+
+        public int MixLiveAudioSamples(Span<float> destination)
+        {
+            if (destination.Length == 0)
+            {
+                return 0;
+            }
+
+            double volume;
+            lock (_audioLock)
+            {
+                if (!_liveAudioAnalysisEnabled || !_audioEnabled || _playbackPaused || _isDisposed)
+                {
+                    return 0;
+                }
+
+                volume = GetEffectiveVolumeNoLock();
+            }
+
+            if (volume <= 0.0001)
+            {
+                return 0;
+            }
+
+            int sampleCount;
+            lock (_liveAudioAnalysisLock)
+            {
+                sampleCount = Math.Min(destination.Length, _liveAudioAnalysisCount);
+                for (int i = 0; i < sampleCount; i++)
+                {
+                    destination[i] += _liveAudioAnalysisBuffer[_liveAudioAnalysisReadIndex] * (float)volume;
+                    _liveAudioAnalysisReadIndex = (_liveAudioAnalysisReadIndex + 1) % LiveAudioAnalysisBufferCapacity;
+                }
+
+                _liveAudioAnalysisCount -= sampleCount;
+            }
+
+            return sampleCount;
+        }
+
         public void SetMasterAudio(bool enabled, double volume)
         {
             bool shouldRefresh;
@@ -1993,7 +2649,7 @@ internal sealed class FileCaptureService : IDisposable
                 ApplyOutputVolumeNoLock();
                 shouldStop = GetEffectiveVolumeNoLock() <= 0.0001;
                 shouldRefresh = !shouldStop && _audioEnabled && !_isDisposed &&
-                                (_audioDecodeProcess == null || _audioOutput == null || _audioOutput.PlaybackState != PlaybackState.Playing);
+                                !IsAudioPipelineRunningNoLock();
             }
 
             if (shouldStop)
@@ -2018,7 +2674,7 @@ internal sealed class FileCaptureService : IDisposable
                 ApplyOutputVolumeNoLock();
                 shouldStop = GetEffectiveVolumeNoLock() <= 0.0001;
                 shouldRefresh = !shouldStop && _audioEnabled && !_isDisposed &&
-                                (_audioDecodeProcess == null || _audioOutput == null || _audioOutput.PlaybackState != PlaybackState.Playing);
+                                !IsAudioPipelineRunningNoLock();
             }
 
             if (shouldStop)
@@ -2043,6 +2699,17 @@ internal sealed class FileCaptureService : IDisposable
             return Math.Clamp(_masterAudioVolume * _sourceAudioVolume, 0, 1);
         }
 
+        private bool IsAudioPipelineRunningNoLock()
+        {
+            if (_audioDecodeProcess == null || _audioDecodeProcess.HasExited)
+            {
+                return false;
+            }
+
+            return _liveAudioAnalysisEnabled ||
+                   (_audioOutput != null && _audioOutput.PlaybackState == PlaybackState.Playing);
+        }
+
         private void ApplyOutputVolumeNoLock()
         {
             if (_audioOutput == null)
@@ -2061,6 +2728,7 @@ internal sealed class FileCaptureService : IDisposable
             {
                 playbackUrl = _audioPlaybackUrl ?? _videoPlaybackUrl;
                 shouldBeEnabled = !_isDisposed &&
+                                  !_offlineRenderEnabled &&
                                   _audioEnabled &&
                                   !_playbackPaused &&
                                   !string.IsNullOrWhiteSpace(playbackUrl) &&
@@ -2075,10 +2743,7 @@ internal sealed class FileCaptureService : IDisposable
 
             lock (_audioLock)
             {
-                if (_audioDecodeProcess != null &&
-                    !_audioDecodeProcess.HasExited &&
-                    _audioOutput != null &&
-                    _audioOutput.PlaybackState == PlaybackState.Playing)
+                if (IsAudioPipelineRunningNoLock())
                 {
                     return;
                 }
@@ -2097,6 +2762,11 @@ internal sealed class FileCaptureService : IDisposable
             StopAudioPlayback();
 
             int fatalAudioError = 0;
+            bool analysisOnly;
+            lock (_audioLock)
+            {
+                analysisOnly = _liveAudioAnalysisEnabled;
+            }
             var seekSeconds = GetEstimatedPlaybackOffsetSeconds();
             string args = "-hide_banner -loglevel warning";
             if (seekSeconds > 0.05)
@@ -2143,22 +2813,27 @@ internal sealed class FileCaptureService : IDisposable
                 };
                 process.BeginErrorReadLine();
 
-                var bufferProvider = new BufferedWaveProvider(new WaveFormat(48000, 16, 2))
+                BufferedWaveProvider? bufferProvider = null;
+                WaveOutEvent? output = null;
+                if (!analysisOnly)
                 {
-                    BufferDuration = TimeSpan.FromSeconds(1.5),
-                    DiscardOnBufferOverflow = true
-                };
-                var output = new WaveOutEvent
-                {
-                    DesiredLatency = 80,
-                    NumberOfBuffers = 2
-                };
-                output.Init(bufferProvider);
-                lock (_audioLock)
-                {
-                    output.Volume = (float)GetEffectiveVolumeNoLock();
+                    bufferProvider = new BufferedWaveProvider(new WaveFormat(48000, 16, 2))
+                    {
+                        BufferDuration = TimeSpan.FromSeconds(1.5),
+                        DiscardOnBufferOverflow = true
+                    };
+                    output = new WaveOutEvent
+                    {
+                        DesiredLatency = 80,
+                        NumberOfBuffers = 2
+                    };
+                    output.Init(bufferProvider);
+                    lock (_audioLock)
+                    {
+                        output.Volume = (float)GetEffectiveVolumeNoLock();
+                    }
+                    output.Play();
                 }
-                output.Play();
 
                 var audioCts = new CancellationTokenSource();
                 var decodeTask = RunBackgroundLongRunning(
@@ -2168,7 +2843,11 @@ internal sealed class FileCaptureService : IDisposable
                 bool shouldAbort = false;
                 lock (_audioLock)
                 {
-                    shouldAbort = _isDisposed || !_audioEnabled || _playbackPaused || GetEffectiveVolumeNoLock() <= 0.0001;
+                    shouldAbort = _isDisposed ||
+                                  !_audioEnabled ||
+                                  _playbackPaused ||
+                                  GetEffectiveVolumeNoLock() <= 0.0001 ||
+                                  _liveAudioAnalysisEnabled != analysisOnly;
                     if (!shouldAbort)
                     {
                         _audioDecodeProcess = process;
@@ -2188,7 +2867,9 @@ internal sealed class FileCaptureService : IDisposable
                     return;
                 }
 
-                Logger.Info($"Started in-app audio for {DisplayName}.");
+                Logger.Info(analysisOnly
+                    ? $"Started silent video-stack audio analysis for {DisplayName}."
+                    : $"Started in-app audio for {DisplayName}.");
             }
             catch (Exception ex)
             {
@@ -2217,11 +2898,27 @@ internal sealed class FileCaptureService : IDisposable
             }
         }
 
+        internal double GetPlaybackOffsetSecondsForDiagnostics() => GetEstimatedPlaybackOffsetSeconds();
+
+        internal double GetPlaybackBaseOffsetSecondsForDiagnostics()
+        {
+            lock (_audioLock)
+            {
+                return NormalizeOffsetNoLock(_playbackBaseOffsetSeconds);
+            }
+        }
+
         private double GetEstimatedPlaybackOffsetSecondsNoLock()
         {
             if (_playbackPaused)
             {
                 return NormalizeOffsetNoLock(_pausedOffsetSeconds);
+            }
+
+            if (_offlineRenderEnabled && _offlineRenderFps > 0)
+            {
+                return NormalizeOffsetNoLock(
+                    _offlineStartOffsetSeconds + (_offlineFramesConsumed / (double)_offlineRenderFps));
             }
 
             double elapsed = _playbackClock.Elapsed.TotalSeconds;
@@ -2268,12 +2965,21 @@ internal sealed class FileCaptureService : IDisposable
                     }
 
                     BufferedWaveProvider? provider;
+                    bool analyzeSilently;
                     lock (_audioLock)
                     {
                         provider = _audioBuffer;
+                        analyzeSilently = _liveAudioAnalysisEnabled;
                     }
 
-                    provider?.AddSamples(buffer, 0, read);
+                    if (analyzeSilently)
+                    {
+                        AppendLiveAudioAnalysisSamples(buffer.AsSpan(0, read));
+                    }
+                    else
+                    {
+                        provider?.AddSamples(buffer, 0, read);
+                    }
                 }
             }
             catch (Exception ex)
@@ -2332,6 +3038,48 @@ internal sealed class FileCaptureService : IDisposable
             }
         }
 
+        private void AppendLiveAudioAnalysisSamples(ReadOnlySpan<byte> pcm16Stereo)
+        {
+            int frameCount = pcm16Stereo.Length / 4;
+            if (frameCount <= 0)
+            {
+                return;
+            }
+
+            lock (_liveAudioAnalysisLock)
+            {
+                for (int frame = 0; frame < frameCount; frame++)
+                {
+                    int offset = frame * 4;
+                    short left = (short)(pcm16Stereo[offset] | (pcm16Stereo[offset + 1] << 8));
+                    short right = (short)(pcm16Stereo[offset + 2] | (pcm16Stereo[offset + 3] << 8));
+                    float mono = ((left + right) * 0.5f) / 32768f;
+
+                    if (_liveAudioAnalysisCount == LiveAudioAnalysisBufferCapacity)
+                    {
+                        _liveAudioAnalysisReadIndex =
+                            (_liveAudioAnalysisReadIndex + 1) % LiveAudioAnalysisBufferCapacity;
+                        _liveAudioAnalysisCount--;
+                    }
+
+                    _liveAudioAnalysisBuffer[_liveAudioAnalysisWriteIndex] = mono;
+                    _liveAudioAnalysisWriteIndex =
+                        (_liveAudioAnalysisWriteIndex + 1) % LiveAudioAnalysisBufferCapacity;
+                    _liveAudioAnalysisCount++;
+                }
+            }
+        }
+
+        private void ClearLiveAudioAnalysisBuffer()
+        {
+            lock (_liveAudioAnalysisLock)
+            {
+                _liveAudioAnalysisReadIndex = 0;
+                _liveAudioAnalysisWriteIndex = 0;
+                _liveAudioAnalysisCount = 0;
+            }
+        }
+
         private void StopAudioPlayback()
         {
             Process? processToStop;
@@ -2350,6 +3098,8 @@ internal sealed class FileCaptureService : IDisposable
                 _audioOutput = null;
                 _audioBuffer = null;
             }
+
+            ClearLiveAudioAnalysisBuffer();
 
             try
             {
@@ -2543,10 +3293,13 @@ internal sealed class FileCaptureService : IDisposable
         private double _audioVolume = 1.0;
         private bool _masterAudioEnabled = true;
         private double _masterAudioVolume = 1.0;
+        private bool _liveAudioAnalysisEnabled;
         private bool _playbackPaused;
         private bool _lowContentionMode;
         private int _decoderThreadLimit;
         private int _videoDecodeFpsLimit;
+        private bool _offlineRenderEnabled;
+        private int _offlineRenderFps;
         private FileCaptureFrame? _lastFrame;
             
         public VideoSequenceSession(IReadOnlyList<string> paths)
@@ -2557,10 +3310,12 @@ internal sealed class FileCaptureService : IDisposable
             TryCacheProbe(_paths[_index]);
             _current = new VideoSession(_paths[_index], loopPlayback: false, GetCachedProbe(_paths[_index]));
             _current.SetMasterAudio(_masterAudioEnabled, _masterAudioVolume);
+            _current.SetLiveAudioAnalysisEnabled(_liveAudioAnalysisEnabled);
             _current.SetAudioVolume(_audioVolume);
             _current.SetAudioEnabled(_audioEnabled);
             _current.SetPlaybackPaused(_playbackPaused);
             _current.SetPerformanceSettings(_lowContentionMode, _decoderThreadLimit, _videoDecodeFpsLimit);
+            _current.SetOfflineRenderMode(_offlineRenderEnabled, _offlineRenderFps);
             _ = RunBackgroundLongRunning(
                 PrimeProbeCache,
                 "LifeViz.SequenceProbePrime");
@@ -2600,6 +3355,28 @@ internal sealed class FileCaptureService : IDisposable
                     public FileCaptureFrame? CaptureFrame(int targetWidth, int targetHeight, FitMode fitMode, bool includeSource)
                     {
                         TryPromotePendingAdvance();
+                        if (_offlineRenderEnabled)
+                        {
+                            Task<VideoSession?>? pendingTask;
+                            lock (_lock)
+                            {
+                                pendingTask = _pendingAdvanceTask;
+                            }
+
+                            if (pendingTask != null && !pendingTask.IsCompleted)
+                            {
+                                try
+                                {
+                                    pendingTask.Wait(TimeSpan.FromSeconds(30));
+                                }
+                                catch (AggregateException)
+                                {
+                                    // TryPromotePendingAdvance records the underlying failure.
+                                }
+
+                                TryPromotePendingAdvance();
+                            }
+                        }
 
                         if (_hasError)
                         {
@@ -2657,10 +3434,12 @@ internal sealed class FileCaptureService : IDisposable
             _index = 0;
             _current = new VideoSession(_paths[_index], loopPlayback: false);
             _current.SetMasterAudio(_masterAudioEnabled, _masterAudioVolume);
+            _current.SetLiveAudioAnalysisEnabled(_liveAudioAnalysisEnabled);
             _current.SetAudioVolume(_audioVolume);
             _current.SetAudioEnabled(_audioEnabled);
             _current.SetPlaybackPaused(_playbackPaused);
             _current.SetPerformanceSettings(_lowContentionMode, _decoderThreadLimit, _videoDecodeFpsLimit);
+            _current.SetOfflineRenderMode(_offlineRenderEnabled, _offlineRenderFps);
         }
 
         public void SetAudioEnabled(bool enabled)
@@ -2682,6 +3461,12 @@ internal sealed class FileCaptureService : IDisposable
             _current?.SetMasterAudio(_masterAudioEnabled, _masterAudioVolume);
         }
 
+        public void SetLiveAudioAnalysisEnabled(bool enabled)
+        {
+            _liveAudioAnalysisEnabled = enabled;
+            _current?.SetLiveAudioAnalysisEnabled(enabled);
+        }
+
         public void SetPlaybackPaused(bool paused)
         {
             _playbackPaused = paused;
@@ -2694,6 +3479,41 @@ internal sealed class FileCaptureService : IDisposable
             _decoderThreadLimit = Math.Clamp(decoderThreadLimit, 0, 8);
             _videoDecodeFpsLimit = videoDecodeFpsLimit == 15 || videoDecodeFpsLimit == 30 ? videoDecodeFpsLimit : 0;
             _current?.SetPerformanceSettings(_lowContentionMode, _decoderThreadLimit, _videoDecodeFpsLimit);
+        }
+
+        public void SetOfflineRenderMode(bool enabled, int fps)
+        {
+            _offlineRenderEnabled = enabled;
+            _offlineRenderFps = enabled ? Math.Clamp(fps, 1, 144) : 0;
+            _current?.SetOfflineRenderMode(_offlineRenderEnabled, _offlineRenderFps);
+        }
+
+        public bool MixOfflineAudioFrame(Span<float> destination)
+        {
+            if (!_offlineRenderEnabled)
+            {
+                return false;
+            }
+
+            TryPromotePendingAdvance();
+            Task<VideoSession?>? pendingTask;
+            lock (_lock)
+            {
+                pendingTask = _pendingAdvanceTask;
+            }
+            if (pendingTask != null && !pendingTask.IsCompleted)
+            {
+                try { pendingTask.Wait(TimeSpan.FromSeconds(30)); } catch (AggregateException) { }
+                TryPromotePendingAdvance();
+            }
+
+            return _current?.MixOfflineAudioFrame(destination) == true;
+        }
+
+        public int MixLiveAudioSamples(Span<float> destination)
+        {
+            TryPromotePendingAdvance();
+            return _current?.MixLiveAudioSamples(destination) ?? 0;
         }
 
         public void SeekNormalized(double normalizedPosition)
@@ -2815,10 +3635,12 @@ internal sealed class FileCaptureService : IDisposable
         {
             var session = new VideoSession(path, loopPlayback: false, GetCachedProbe(path));
             session.SetMasterAudio(_masterAudioEnabled, _masterAudioVolume);
+            session.SetLiveAudioAnalysisEnabled(_liveAudioAnalysisEnabled);
             session.SetAudioVolume(_audioVolume);
             session.SetAudioEnabled(_audioEnabled);
             session.SetPlaybackPaused(_playbackPaused);
             session.SetPerformanceSettings(_lowContentionMode, _decoderThreadLimit, _videoDecodeFpsLimit);
+            session.SetOfflineRenderMode(_offlineRenderEnabled, _offlineRenderFps);
             return session;
         }
 
@@ -2876,6 +3698,571 @@ internal sealed class FileCaptureService : IDisposable
                 return $"{baseName} (+{paths.Count - 1})";
                     }
                 }
+
+    internal sealed class AutoClipSession : IDisposable
+    {
+        private enum Phase
+        {
+            Uninitialized,
+            Playing,
+            Delaying,
+            Empty
+        }
+
+        private readonly List<string> _paths = new();
+        private readonly object _pathsLock = new();
+        private readonly Dictionary<string, VideoSession.VideoProbeInfo> _probeCache = new(StringComparer.OrdinalIgnoreCase);
+        private readonly Stopwatch _clock = Stopwatch.StartNew();
+        private readonly int _offlineSeed = Random.Shared.Next();
+        private Random _random = new();
+        private VideoSession? _current;
+        private FileCaptureFrame? _lastFrame;
+        private string? _currentPath;
+        private Phase _phase = Phase.Uninitialized;
+        private double _phaseStartSeconds;
+        private double _phaseEndSeconds;
+        private double _lastCaptureTimelineSeconds;
+        private double _minClipSeconds;
+        private double _maxClipSeconds;
+        private double _minDelaySeconds;
+        private double _maxDelaySeconds;
+        private bool _loopSelectedFile;
+        private bool _audioEnabled;
+        private double _audioVolume = 1.0;
+        private bool _masterAudioEnabled = true;
+        private double _masterAudioVolume = 1.0;
+        private bool _liveAudioAnalysisEnabled;
+        private bool _lowContentionMode;
+        private int _decoderThreadLimit;
+        private int _videoDecodeFpsLimit;
+        private bool _offlineRenderEnabled;
+        private int _offlineRenderFps;
+        private long _offlineFrameIndex;
+        private Phase _savedLivePhase;
+        private string? _savedLivePath;
+        private double _savedLivePlaybackSeconds;
+        private double _savedLivePhaseRemainingSeconds;
+        private double _savedLivePhaseElapsedSeconds;
+        private double _savedLiveClipDurationSeconds;
+        private bool _disposed;
+
+        public AutoClipSession(
+            IReadOnlyList<string> paths,
+            double minClipSeconds,
+            double maxClipSeconds,
+            double minDelaySeconds,
+            double maxDelaySeconds)
+        {
+            ApplySettings(paths, minClipSeconds, maxClipSeconds, minDelaySeconds, maxDelaySeconds);
+            _ = RunBackgroundLongRunning(PrimeProbeCache, "LifeViz.AutoClipProbePrime");
+        }
+
+        public IReadOnlyList<string> Paths
+        {
+            get
+            {
+                lock (_pathsLock)
+                {
+                    return _paths.ToArray();
+                }
+            }
+        }
+        public string DisplayName => _paths.Count == 0 ? "AutoClip" : $"AutoClip ({_paths.Count})";
+        public string? CurrentPath => _currentPath;
+        public bool IsDelaying => _phase == Phase.Delaying;
+        public bool IsEmpty => _paths.Count == 0;
+        public FileCaptureState State => _paths.Count == 0
+            ? FileCaptureState.Ready
+            : _current?.State ?? FileCaptureState.Pending;
+
+        public double GetVisualOpacity(double fadeSeconds)
+        {
+            if (_phase != Phase.Playing || _current == null)
+            {
+                return 0;
+            }
+
+            double duration = Math.Max(0, _phaseEndSeconds - _phaseStartSeconds);
+            double effectiveFade = Math.Min(Math.Clamp(fadeSeconds, 0, 10), duration / 2.0);
+            if (effectiveFade <= 0.0001)
+            {
+                return 1;
+            }
+
+            double elapsed = Math.Max(0, _lastCaptureTimelineSeconds - _phaseStartSeconds);
+            double remaining = Math.Max(0, _phaseEndSeconds - _lastCaptureTimelineSeconds);
+            return Math.Clamp(Math.Min(elapsed / effectiveFade, remaining / effectiveFade), 0, 1);
+        }
+
+        public void UpdateSettings(
+            IReadOnlyList<string> paths,
+            double minClipSeconds,
+            double maxClipSeconds,
+            double minDelaySeconds,
+            double maxDelaySeconds)
+        {
+            if (_disposed)
+            {
+                return;
+            }
+
+            ApplySettings(paths, minClipSeconds, maxClipSeconds, minDelaySeconds, maxDelaySeconds);
+            ResetSchedule();
+            _ = RunBackgroundLongRunning(PrimeProbeCache, "LifeViz.AutoClipProbePrime");
+        }
+
+        public void SetLoopSelectedFile(bool enabled)
+        {
+            if (_loopSelectedFile == enabled)
+            {
+                return;
+            }
+
+            _loopSelectedFile = enabled;
+            ResetSchedule();
+        }
+
+        public FileCaptureFrame? CaptureFrame(int targetWidth, int targetHeight, FitMode fitMode, bool includeSource)
+        {
+            double now = GetTimelineSeconds();
+            EnsurePhase(now);
+            _lastCaptureTimelineSeconds = now;
+            if (_phase == Phase.Delaying || _phase == Phase.Empty || _current == null)
+            {
+                AdvanceOfflineFrame();
+                return null;
+            }
+
+            FileCaptureFrame? frame = _current.CaptureFrame(targetWidth, targetHeight, fitMode, includeSource);
+            if (frame.HasValue)
+            {
+                _lastFrame = frame;
+            }
+            else if (_current.State == FileCaptureState.Error)
+            {
+                BeginNextPhase(now);
+            }
+
+            AdvanceOfflineFrame();
+            return frame ?? _lastFrame;
+        }
+
+        public void Restart()
+        {
+            ResetSchedule();
+        }
+
+        public void SetAudioEnabled(bool enabled)
+        {
+            _audioEnabled = enabled;
+            _current?.SetAudioEnabled(enabled);
+        }
+
+        public void SetAudioVolume(double volume)
+        {
+            _audioVolume = Math.Clamp(volume, 0, 1);
+            _current?.SetAudioVolume(_audioVolume);
+        }
+
+        public void SetAudioMaster(bool enabled, double volume)
+        {
+            _masterAudioEnabled = enabled;
+            _masterAudioVolume = Math.Clamp(volume, 0, 1);
+            _current?.SetMasterAudio(_masterAudioEnabled, _masterAudioVolume);
+        }
+
+        public void SetLiveAudioAnalysisEnabled(bool enabled)
+        {
+            _liveAudioAnalysisEnabled = enabled;
+            _current?.SetLiveAudioAnalysisEnabled(enabled);
+        }
+
+        public void SetPerformanceSettings(bool lowContentionMode, int decoderThreadLimit, int videoDecodeFpsLimit)
+        {
+            _lowContentionMode = lowContentionMode;
+            _decoderThreadLimit = Math.Clamp(decoderThreadLimit, 0, 8);
+            _videoDecodeFpsLimit = videoDecodeFpsLimit == 15 || videoDecodeFpsLimit == 30 ? videoDecodeFpsLimit : 0;
+            _current?.SetPerformanceSettings(_lowContentionMode, _decoderThreadLimit, _videoDecodeFpsLimit);
+        }
+
+        public void SetOfflineRenderMode(bool enabled, int fps)
+        {
+            fps = enabled ? Math.Clamp(fps, 1, 144) : 0;
+            if (_offlineRenderEnabled == enabled && _offlineRenderFps == fps)
+            {
+                return;
+            }
+
+            if (enabled)
+            {
+                double liveNow = _clock.Elapsed.TotalSeconds;
+                _savedLivePhase = _phase;
+                _savedLivePath = _currentPath;
+                _savedLivePhaseRemainingSeconds = Math.Max(0, _phaseEndSeconds - liveNow);
+                _savedLivePhaseElapsedSeconds = Math.Max(0, liveNow - _phaseStartSeconds);
+                _savedLiveClipDurationSeconds = Math.Max(0, _phaseEndSeconds - _phaseStartSeconds);
+                _savedLivePlaybackSeconds = 0;
+                if (_current?.TryGetPlaybackState(out VideoPlaybackState playbackState) == true)
+                {
+                    _savedLivePlaybackSeconds = playbackState.PositionSeconds;
+                }
+
+                DisposeCurrent(background: false);
+                _offlineRenderEnabled = true;
+                _offlineRenderFps = fps;
+                _offlineFrameIndex = 0;
+                _random = new Random(_offlineSeed);
+                _phase = Phase.Uninitialized;
+                _phaseStartSeconds = 0;
+                _phaseEndSeconds = 0;
+                _lastCaptureTimelineSeconds = 0;
+                _lastFrame = null;
+                return;
+            }
+
+            DisposeCurrent(background: false);
+            _offlineRenderEnabled = false;
+            _offlineRenderFps = 0;
+            _clock.Restart();
+            _random = new Random();
+            _lastFrame = null;
+
+            if (_savedLivePhase == Phase.Delaying && _savedLivePhaseRemainingSeconds > 0.0001)
+            {
+                _phase = Phase.Delaying;
+                _phaseEndSeconds = _savedLivePhaseRemainingSeconds;
+                return;
+            }
+
+            if (_savedLivePhase == Phase.Playing &&
+                !string.IsNullOrWhiteSpace(_savedLivePath) &&
+                _paths.Any(path => string.Equals(path, _savedLivePath, StringComparison.OrdinalIgnoreCase)))
+            {
+                double restoredDuration = Math.Max(
+                    _savedLiveClipDurationSeconds,
+                    _savedLivePhaseElapsedSeconds + _savedLivePhaseRemainingSeconds);
+                StartSpecificClip(
+                    _savedLivePath,
+                    _savedLivePlaybackSeconds,
+                    0,
+                    Math.Max(0.05, restoredDuration),
+                    _savedLivePhaseElapsedSeconds);
+                return;
+            }
+
+            _phase = Phase.Uninitialized;
+            _phaseStartSeconds = 0;
+            _phaseEndSeconds = 0;
+        }
+
+        public bool MixOfflineAudioFrame(Span<float> destination)
+        {
+            if (!_offlineRenderEnabled)
+            {
+                return false;
+            }
+
+            EnsurePhase(GetTimelineSeconds());
+            return _phase == Phase.Playing && _current?.MixOfflineAudioFrame(destination) == true;
+        }
+
+        public int MixLiveAudioSamples(Span<float> destination)
+        {
+            if (_offlineRenderEnabled)
+            {
+                return 0;
+            }
+
+            EnsurePhase(GetTimelineSeconds());
+            return _phase == Phase.Playing ? _current?.MixLiveAudioSamples(destination) ?? 0 : 0;
+        }
+
+        public void Dispose()
+        {
+            if (_disposed)
+            {
+                return;
+            }
+
+            _disposed = true;
+            DisposeCurrent(background: false);
+            lock (_pathsLock)
+            {
+                _paths.Clear();
+            }
+            _probeCache.Clear();
+        }
+
+        private void ApplySettings(
+            IReadOnlyList<string> paths,
+            double minClipSeconds,
+            double maxClipSeconds,
+            double minDelaySeconds,
+            double maxDelaySeconds)
+        {
+            lock (_pathsLock)
+            {
+                _paths.Clear();
+                foreach (string path in paths)
+                {
+                    if (!_paths.Any(existing => string.Equals(existing, path, StringComparison.OrdinalIgnoreCase)))
+                    {
+                        _paths.Add(path);
+                    }
+                }
+            }
+
+            NormalizeRange(minClipSeconds, maxClipSeconds, minimum: 0.05, out _minClipSeconds, out _maxClipSeconds);
+            NormalizeRange(minDelaySeconds, maxDelaySeconds, minimum: 0, out _minDelaySeconds, out _maxDelaySeconds);
+        }
+
+        private static void NormalizeRange(double min, double max, double minimum, out double normalizedMin, out double normalizedMax)
+        {
+            min = double.IsFinite(min) ? Math.Clamp(min, minimum, 86400) : minimum;
+            max = double.IsFinite(max) ? Math.Clamp(max, minimum, 86400) : min;
+            normalizedMin = Math.Min(min, max);
+            normalizedMax = Math.Max(min, max);
+        }
+
+        private void EnsurePhase(double now)
+        {
+            if (_disposed)
+            {
+                return;
+            }
+
+            if (_paths.Count == 0)
+            {
+                DisposeCurrent(background: true);
+                _phase = Phase.Empty;
+                _lastFrame = null;
+                return;
+            }
+
+            for (int transitions = 0; transitions < 4; transitions++)
+            {
+                if (_phase == Phase.Uninitialized || _phase == Phase.Empty)
+                {
+                    StartRandomClip(now);
+                    return;
+                }
+
+                if (now < _phaseEndSeconds)
+                {
+                    return;
+                }
+
+                if (_phase == Phase.Playing)
+                {
+                    BeginNextPhase(now);
+                }
+                else if (_phase == Phase.Delaying)
+                {
+                    StartRandomClip(now);
+                }
+            }
+        }
+
+        private void BeginNextPhase(double now)
+        {
+            DisposeCurrent(background: true);
+            double delay = NextRange(_minDelaySeconds, _maxDelaySeconds);
+            if (delay > 0.0001)
+            {
+                _lastFrame = null;
+                _phase = Phase.Delaying;
+                _phaseStartSeconds = now;
+                _phaseEndSeconds = now + delay;
+                return;
+            }
+
+            _phase = Phase.Uninitialized;
+            StartRandomClip(now);
+        }
+
+        private void StartRandomClip(double now)
+        {
+            if (_paths.Count == 0)
+            {
+                _phase = Phase.Empty;
+                return;
+            }
+
+            int index = _random.Next(_paths.Count);
+            if (_paths.Count > 1 && string.Equals(_paths[index], _currentPath, StringComparison.OrdinalIgnoreCase))
+            {
+                index = (index + 1 + _random.Next(_paths.Count - 1)) % _paths.Count;
+            }
+
+            string path = _paths[index];
+            TryCacheProbe(path);
+            double sourceDuration = GetCachedProbe(path)?.DurationSeconds ?? 0;
+            double requestedClipSeconds = NextRange(_minClipSeconds, _maxClipSeconds);
+            (double startSeconds, double clipSeconds) = SelectClipWindow(
+                sourceDuration,
+                requestedClipSeconds,
+                _random.NextDouble(),
+                _loopSelectedFile);
+            StartSpecificClip(path, startSeconds, now, clipSeconds);
+        }
+
+        internal static (double StartSeconds, double ClipSeconds) SelectClipWindow(
+            double sourceDurationSeconds,
+            double requestedClipSeconds,
+            double randomUnit,
+            bool loopSelectedFile)
+        {
+            double requested = double.IsFinite(requestedClipSeconds)
+                ? Math.Max(0.05, requestedClipSeconds)
+                : 0.05;
+            return loopSelectedFile
+                ? (0, requested)
+                : FitClipWindowToSource(sourceDurationSeconds, requested, randomUnit);
+        }
+
+        internal static (double StartSeconds, double ClipSeconds) FitClipWindowToSource(
+            double sourceDurationSeconds,
+            double requestedClipSeconds,
+            double randomUnit)
+        {
+            double requested = double.IsFinite(requestedClipSeconds)
+                ? Math.Max(0.05, requestedClipSeconds)
+                : 0.05;
+            if (!double.IsFinite(sourceDurationSeconds) || sourceDurationSeconds <= 0.001)
+            {
+                return (0, requested);
+            }
+
+            double sourceDuration = Math.Max(0.001, sourceDurationSeconds);
+            // Probe durations and decoder endpoints are not always sample-exact. Leave
+            // up to 250 ms (or 2% for short media) unused at the tail so ffmpeg never
+            // has to cross EOF while an AutoClip phase is still supposed to be playing.
+            double endGuard = Math.Min(0.25, sourceDuration * 0.02);
+            double usableDuration = Math.Max(0.001, sourceDuration - endGuard);
+            double clipSeconds = Math.Min(requested, usableDuration);
+            double maxStartSeconds = Math.Max(0, usableDuration - clipSeconds);
+            double unit = double.IsFinite(randomUnit) ? Math.Clamp(randomUnit, 0, 1) : 0;
+            double startSeconds = maxStartSeconds * unit;
+            return (startSeconds, clipSeconds);
+        }
+
+        private void StartSpecificClip(string path, double startSeconds, double now, double clipSeconds, double elapsedSeconds = 0)
+        {
+            DisposeCurrent(background: true);
+            TryCacheProbe(path);
+            var session = new VideoSession(path, loopPlayback: true, GetCachedProbe(path));
+            session.SetInitialPlaybackOffsetSeconds(startSeconds);
+            session.SetMasterAudio(_masterAudioEnabled, _masterAudioVolume);
+            session.SetLiveAudioAnalysisEnabled(_liveAudioAnalysisEnabled);
+            session.SetAudioVolume(_audioVolume);
+            session.SetPerformanceSettings(_lowContentionMode, _decoderThreadLimit, _videoDecodeFpsLimit);
+            session.SetOfflineRenderMode(_offlineRenderEnabled, _offlineRenderFps);
+            session.SetAudioEnabled(_audioEnabled);
+            _current = session;
+            _currentPath = path;
+            _phase = Phase.Playing;
+            double duration = Math.Max(0.001, clipSeconds);
+            double elapsed = Math.Clamp(elapsedSeconds, 0, duration);
+            _phaseStartSeconds = now - elapsed;
+            _phaseEndSeconds = _phaseStartSeconds + duration;
+            _lastCaptureTimelineSeconds = now;
+            Logger.Info($"AutoClip selected {Path.GetFileName(path)} at {startSeconds:0.###}s for {clipSeconds:0.###}s.");
+        }
+
+        private void ResetSchedule()
+        {
+            DisposeCurrent(background: true);
+            _lastFrame = null;
+            _currentPath = null;
+            _phase = _paths.Count == 0 ? Phase.Empty : Phase.Uninitialized;
+            _phaseStartSeconds = 0;
+            _phaseEndSeconds = 0;
+            _lastCaptureTimelineSeconds = 0;
+            _offlineFrameIndex = 0;
+        }
+
+        private double GetTimelineSeconds() => _offlineRenderEnabled && _offlineRenderFps > 0
+            ? _offlineFrameIndex / (double)_offlineRenderFps
+            : _clock.Elapsed.TotalSeconds;
+
+        private void AdvanceOfflineFrame()
+        {
+            if (_offlineRenderEnabled)
+            {
+                _offlineFrameIndex++;
+            }
+        }
+
+        private double NextRange(double min, double max) => max <= min + 0.000001
+            ? min
+            : min + (_random.NextDouble() * (max - min));
+
+        private void DisposeCurrent(bool background)
+        {
+            VideoSession? previous = _current;
+            _current = null;
+            if (previous == null)
+            {
+                return;
+            }
+
+            if (background)
+            {
+                _ = RunBackgroundLongRunning(previous.Dispose, "LifeViz.AutoClipDispose");
+            }
+            else
+            {
+                previous.Dispose();
+            }
+        }
+
+        private void PrimeProbeCache()
+        {
+            string[] paths;
+            lock (_pathsLock)
+            {
+                paths = _paths.ToArray();
+            }
+
+            foreach (string path in paths)
+            {
+                if (_disposed)
+                {
+                    return;
+                }
+                TryCacheProbe(path);
+            }
+        }
+
+        private void TryCacheProbe(string path)
+        {
+            lock (_probeCache)
+            {
+                if (_probeCache.ContainsKey(path))
+                {
+                    return;
+                }
+            }
+
+            if (!VideoSession.ProbeVideo(path, out int width, out int height, out double durationSeconds))
+            {
+                return;
+            }
+
+            lock (_probeCache)
+            {
+                _probeCache[path] = new VideoSession.VideoProbeInfo(width, height, durationSeconds);
+            }
+        }
+
+        private VideoSession.VideoProbeInfo? GetCachedProbe(string path)
+        {
+            lock (_probeCache)
+            {
+                return _probeCache.TryGetValue(path, out VideoSession.VideoProbeInfo probe) ? probe : null;
+            }
+        }
+    }
 
     internal readonly struct VideoPlaybackState
     {

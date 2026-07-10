@@ -200,13 +200,8 @@ public partial class MainWindow
                     var downscaledTransform = _owner.BuildAnimationTransform(source, downscaledWidth, downscaledHeight, animationTime);
                     double animationOpacity = _owner.BuildAnimationOpacity(source, animationTime);
                     double effectiveOpacity = Math.Clamp(source.Opacity * animationOpacity, 0.0, 1.0);
-                    var keying = new KeyingSettings(
-                        source.KeyEnabled && source.BlendMode == BlendMode.Normal,
-                        source.BlendMode == BlendMode.Normal,
-                        source.KeyColorR,
-                        source.KeyColorG,
-                        source.KeyColorB,
-                        source.KeyTolerance);
+                    var compositeSettings = MainWindow.ResolveSourceCompositeSettings(source);
+                    var keying = compositeSettings.Keying;
 
                     int sourceWidth = frame.Source != null ? frame.SourceWidth : frame.DownscaledWidth;
                     int sourceHeight = frame.Source != null ? frame.SourceHeight : frame.DownscaledHeight;
@@ -230,7 +225,7 @@ public partial class MainWindow
                         sourceHeight,
                         downscaledWidth,
                         downscaledHeight,
-                        source.BlendMode,
+                        compositeSettings.BlendMode,
                         effectiveOpacity,
                         source.Mirror && source.Type == CaptureSource.SourceType.Webcam,
                         source.FitMode,
@@ -443,6 +438,7 @@ public partial class MainWindow
                     var source = layer.Source;
                     double animationOpacity = _owner.BuildAnimationOpacity(source, animationTime);
                     double effectiveOpacity = Math.Clamp(source.Opacity * animationOpacity, 0.0, 1.0);
+                    var compositeSettings = MainWindow.ResolveSourceCompositeSettings(source);
                     DrawSourceIntoComposite(
                         currentCompositeSrv,
                         targetRtv,
@@ -451,18 +447,12 @@ public partial class MainWindow
                         layer.Height,
                         destWidth,
                         destHeight,
-                        source.BlendMode,
+                        compositeSettings.BlendMode,
                         effectiveOpacity,
                         source.Mirror && source.Type == CaptureSource.SourceType.Webcam,
                         source.FitMode,
                         _owner.BuildAnimationTransform(source, destWidth, destHeight, animationTime),
-                        new KeyingSettings(
-                            source.KeyEnabled && source.BlendMode == BlendMode.Normal,
-                            source.BlendMode == BlendMode.Normal,
-                            source.KeyColorR,
-                            source.KeyColorG,
-                            source.KeyColorB,
-                            source.KeyTolerance),
+                        compositeSettings.Keying,
                         isFirstLayer: !wroteAny && (firstLayer || !useExistingSurface));
 
                     currentTexture = targetTexture;
@@ -638,6 +628,7 @@ public partial class MainWindow
                 ID3D11ShaderResourceView targetSrv = drawIntoA ? _compositeSrvA : _compositeSrvB;
                 ID3D11RenderTargetView targetRtv = drawIntoA ? _compositeRtvA : _compositeRtvB;
                 IntPtr targetSharedHandle = drawIntoA ? _compositeSharedHandleA : _compositeSharedHandleB;
+                var compositeSettings = MainWindow.ResolveSourceCompositeSettings(source);
 
                 DrawSourceIntoComposite(
                     currentCompositeSrv,
@@ -647,18 +638,12 @@ public partial class MainWindow
                     sourceHeight,
                     destWidth,
                     destHeight,
-                    source.BlendMode,
+                    compositeSettings.BlendMode,
                     source.Opacity * _owner.BuildAnimationOpacity(source, animationTime),
                     source.Mirror && source.Type == CaptureSource.SourceType.Webcam,
                     source.FitMode,
                     _owner.BuildAnimationTransform(source, destWidth, destHeight, animationTime),
-                    new KeyingSettings(
-                        source.KeyEnabled && source.BlendMode == BlendMode.Normal,
-                        source.BlendMode == BlendMode.Normal,
-                        source.KeyColorR,
-                        source.KeyColorG,
-                        source.KeyColorB,
-                        source.KeyTolerance),
+                    compositeSettings.Keying,
                     isFirstLayer: firstLayer || !useExistingSurface);
 
                 _context.OMSetRenderTargets(new ID3D11RenderTargetView[] { null! }, null);

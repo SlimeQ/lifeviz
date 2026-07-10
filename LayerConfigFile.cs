@@ -7,7 +7,7 @@ namespace lifeviz;
 
 internal sealed class LayerConfigFile
 {
-    public int Version { get; set; } = 7;
+    public int Version { get; set; } = 10;
     public DateTime SavedUtc { get; set; } = DateTime.UtcNow;
     public LayerConfigProjectSettings ProjectSettings { get; set; } = new();
     public List<LayerConfigSimulationLayer> SimulationLayers { get; set; } = new();
@@ -158,15 +158,34 @@ internal sealed class LayerConfigFile
             BlendMode = source.BlendMode,
             FitMode = source.FitMode,
             Opacity = source.Opacity,
+            Scale = source.Scale,
             VideoAudioEnabled = source.VideoAudioEnabled,
             VideoAudioVolume = source.VideoAudioVolume,
             Mirror = source.Mirror,
             KeyEnabled = source.KeyEnabled,
             KeyColor = source.KeyColorHex,
-            KeyTolerance = source.KeyTolerance
+            KeyTolerance = source.KeyTolerance,
+            AutoClipMinClipSeconds = source.AutoClipMinClipSeconds,
+            AutoClipMaxClipSeconds = source.AutoClipMaxClipSeconds,
+            AutoClipMinDelaySeconds = source.AutoClipMinDelaySeconds,
+            AutoClipMaxDelaySeconds = source.AutoClipMaxDelaySeconds,
+            AutoClipFadeSeconds = source.AutoClipFadeSeconds,
+            AutoClipLoopSelectedFile = source.AutoClipLoopSelectedFile,
+            AutoClipVideoOverrides = source.AutoClipVideoOverrides.Select(item => new LayerConfigAutoClipVideoOverride
+            {
+                FilePath = item.FilePath,
+                BlendMode = item.BlendMode,
+                KeyMode = item.KeyMode,
+                KeyColor = item.KeyColorHex,
+                KeyTolerance = item.KeyTolerance
+            }).ToList()
         };
 
-        if (source.FilePaths.Count > 0)
+        if (source.IsAutoClip && source.AutoClipVideoPaths.Count > 0)
+        {
+            config.FilePaths = new List<string>(source.AutoClipVideoPaths);
+        }
+        else if (source.FilePaths.Count > 0)
         {
             config.FilePaths = new List<string>(source.FilePaths);
         }
@@ -180,6 +199,7 @@ internal sealed class LayerConfigFile
                 Speed = animation.Speed,
                 TranslateDirection = animation.TranslateDirection,
                 RotationDirection = animation.RotationDirection,
+                StartAngleDegrees = animation.StartAngleDegrees,
                 RotationDegrees = animation.RotationDegrees,
                 DvdScale = animation.DvdScale,
                 BeatShakeIntensity = animation.BeatShakeIntensity,
@@ -265,18 +285,42 @@ internal sealed class LayerConfigFile
             BlendMode = string.IsNullOrWhiteSpace(config.BlendMode) ? "Additive" : config.BlendMode,
             FitMode = string.IsNullOrWhiteSpace(config.FitMode) ? "Fill" : config.FitMode,
             Opacity = Math.Clamp(config.Opacity, 0, 1),
+            Scale = Math.Clamp(config.Scale, 0.1, 4.0),
             VideoAudioEnabled = config.VideoAudioEnabled,
             VideoAudioVolume = Math.Clamp(config.VideoAudioVolume, 0, 1),
             Mirror = config.Mirror,
             KeyEnabled = config.KeyEnabled,
             KeyColorHex = string.IsNullOrWhiteSpace(config.KeyColor) ? "#000000" : config.KeyColor,
             KeyTolerance = Math.Clamp(config.KeyTolerance, 0, 1),
+            AutoClipMinClipSeconds = config.AutoClipMinClipSeconds,
+            AutoClipMaxClipSeconds = config.AutoClipMaxClipSeconds,
+            AutoClipMinDelaySeconds = config.AutoClipMinDelaySeconds,
+            AutoClipMaxDelaySeconds = config.AutoClipMaxDelaySeconds,
+            AutoClipFadeSeconds = Math.Clamp(config.AutoClipFadeSeconds, 0, 10),
+            AutoClipLoopSelectedFile = config.AutoClipLoopSelectedFile,
             Parent = parent
         };
 
         if (config.FilePaths.Count > 0)
         {
             model.FilePaths.AddRange(config.FilePaths);
+            if (kind == LayerEditorSourceKind.AutoClip)
+            {
+                foreach (string path in config.FilePaths)
+                {
+                    model.AutoClipVideoPaths.Add(path);
+                    LayerConfigAutoClipVideoOverride? saved = config.AutoClipVideoOverrides.FirstOrDefault(
+                        item => string.Equals(item.FilePath, path, StringComparison.OrdinalIgnoreCase));
+                    model.AutoClipVideoOverrides.Add(new LayerEditorAutoClipVideoOverride
+                    {
+                        FilePath = path,
+                        BlendMode = string.IsNullOrWhiteSpace(saved?.BlendMode) ? "Inherit" : saved.BlendMode,
+                        KeyMode = string.IsNullOrWhiteSpace(saved?.KeyMode) ? "Inherit" : saved.KeyMode,
+                        KeyColorHex = string.IsNullOrWhiteSpace(saved?.KeyColor) ? "#000000" : saved.KeyColor,
+                        KeyTolerance = Math.Clamp(saved?.KeyTolerance ?? 0.1, 0, 1)
+                    });
+                }
+            }
         }
 
         if (kind == LayerEditorSourceKind.Window &&
@@ -296,6 +340,7 @@ internal sealed class LayerConfigFile
                 Speed = string.IsNullOrWhiteSpace(animation.Speed) ? "Normal" : animation.Speed,
                 TranslateDirection = string.IsNullOrWhiteSpace(animation.TranslateDirection) ? "Right" : animation.TranslateDirection,
                 RotationDirection = string.IsNullOrWhiteSpace(animation.RotationDirection) ? "Clockwise" : animation.RotationDirection,
+                StartAngleDegrees = Math.Clamp(animation.StartAngleDegrees, 0, 360),
                 RotationDegrees = animation.RotationDegrees,
                 DvdScale = animation.DvdScale,
                 BeatShakeIntensity = animation.BeatShakeIntensity,
@@ -604,8 +649,16 @@ internal sealed class LayerConfigSource
     public string? BlendMode { get; set; }
     public string? FitMode { get; set; }
     public double Opacity { get; set; } = 1.0;
+    public double Scale { get; set; } = 1.0;
     public bool VideoAudioEnabled { get; set; }
     public double VideoAudioVolume { get; set; } = 1.0;
+    public double AutoClipMinClipSeconds { get; set; } = 2.0;
+    public double AutoClipMaxClipSeconds { get; set; } = 5.0;
+    public double AutoClipMinDelaySeconds { get; set; }
+    public double AutoClipMaxDelaySeconds { get; set; }
+    public double AutoClipFadeSeconds { get; set; }
+    public bool AutoClipLoopSelectedFile { get; set; }
+    public List<LayerConfigAutoClipVideoOverride> AutoClipVideoOverrides { get; set; } = new();
     public bool Mirror { get; set; }
     public bool KeyEnabled { get; set; }
     public string? KeyColor { get; set; }
@@ -615,6 +668,15 @@ internal sealed class LayerConfigSource
     public List<LayerConfigSource> Children { get; set; } = new();
 }
 
+internal sealed class LayerConfigAutoClipVideoOverride
+{
+    public string? FilePath { get; set; }
+    public string? BlendMode { get; set; } = "Inherit";
+    public string? KeyMode { get; set; } = "Inherit";
+    public string? KeyColor { get; set; } = "#000000";
+    public double KeyTolerance { get; set; } = 0.1;
+}
+
 internal sealed class LayerConfigAnimation
 {
     public string? Type { get; set; }
@@ -622,6 +684,7 @@ internal sealed class LayerConfigAnimation
     public string? Speed { get; set; }
     public string? TranslateDirection { get; set; }
     public string? RotationDirection { get; set; }
+    public double StartAngleDegrees { get; set; }
     public double RotationDegrees { get; set; } = 12.0;
     public double DvdScale { get; set; } = 0.2;
     public double BeatShakeIntensity { get; set; } = 1.0;

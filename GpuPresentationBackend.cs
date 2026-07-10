@@ -289,13 +289,22 @@ internal sealed class GpuPresentationBackend : IDisposable
 
     public void UpdateEffectState(bool useOverlay, double blendModeValue)
     {
+        bool changed;
         lock (_sync)
         {
+            PresentationBlendMode blendMode = ToBlendMode(blendModeValue);
+            changed = _useOverlay != useOverlay || _overlayBlendMode != blendMode;
             _useOverlay = useOverlay;
-            _overlayBlendMode = ToBlendMode(blendModeValue);
+            _overlayBlendMode = blendMode;
         }
 
-        _drawingSurface.Invalidate();
+        // A frame submission already invalidates the DrawingSurface. Re-invalidating it every
+        // tick for identical effect state makes WPF draw each logical frame twice, adding an
+        // unsynchronised duplicate presentation between otherwise evenly paced frame updates.
+        if (changed)
+        {
+            _drawingSurface.Invalidate();
+        }
     }
 
     public bool PresentSimulationComposition(

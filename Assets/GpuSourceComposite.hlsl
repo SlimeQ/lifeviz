@@ -130,59 +130,68 @@ float ComputeKeyAlpha(float3 sourceBgr)
         return distance <= 0.0f ? 0.0f : 1.0f;
     }
 
-    return saturate(distance / Tolerance);
+    // Keep the UI range useful for compressed chroma backgrounds without letting
+    // a high setting reach distant dark colors such as black from a bright-green key.
+    float effectiveTolerance = 0.01f + (0.50f * Tolerance * Tolerance);
+    float featherStart = effectiveTolerance * 0.82f;
+    float edge = saturate((distance - featherStart) / max(0.000001f, effectiveTolerance - featherStart));
+    return edge * edge * (3.0f - (2.0f * edge));
 }
 
-float4 Blend(float4 currentColor, float4 sourceColor)
+float4 BlendColors(float4 currentColor, float4 sourceColor)
 {
+    float4 result = float4(currentColor.rgb, 1.0f);
     if ((Flags & FlagFirstLayer) != 0u)
     {
         float keyAlpha = ComputeKeyAlpha(sourceColor.rgb);
         float alpha = ((Flags & FlagUseAlpha) != 0u) ? sourceColor.a : 1.0f;
         float effectiveOpacity = Opacity * keyAlpha * alpha;
-        return float4(sourceColor.rgb * effectiveOpacity, 1.0f);
+        result = float4(sourceColor.rgb * effectiveOpacity, 1.0f);
     }
-
-    if (BlendMode == 1u) // Normal
+    else if (BlendMode == 1u) // Normal
     {
         float keyAlpha = ComputeKeyAlpha(sourceColor.rgb);
         float alpha = (((Flags & FlagUseAlpha) != 0u) ? sourceColor.a : 1.0f) * Opacity * keyAlpha;
-        return float4(lerp(currentColor.rgb, sourceColor.rgb, saturate(alpha)), 1.0f);
+        result = float4(lerp(currentColor.rgb, sourceColor.rgb, saturate(alpha)), 1.0f);
+    }
+    else
+    {
+        float3 blended = sourceColor.rgb;
+        if (BlendMode == 0u) // Additive
+        {
+            blended = currentColor.rgb + sourceColor.rgb;
+        }
+        else if (BlendMode == 2u) // Multiply
+        {
+            blended = currentColor.rgb * sourceColor.rgb;
+        }
+        else if (BlendMode == 3u) // Screen
+        {
+            blended = 1.0f - ((1.0f - currentColor.rgb) * (1.0f - sourceColor.rgb));
+        }
+        else if (BlendMode == 4u) // Overlay
+        {
+            blended = lerp(2.0f * currentColor.rgb * sourceColor.rgb,
+                           1.0f - (2.0f * (1.0f - currentColor.rgb) * (1.0f - sourceColor.rgb)),
+                           step(0.5f, currentColor.rgb));
+        }
+        else if (BlendMode == 5u) // Lighten
+        {
+            blended = max(currentColor.rgb, sourceColor.rgb);
+        }
+        else if (BlendMode == 6u) // Darken
+        {
+            blended = min(currentColor.rgb, sourceColor.rgb);
+        }
+        else if (BlendMode == 7u) // Subtractive
+        {
+            blended = currentColor.rgb - sourceColor.rgb;
+        }
+
+        result = float4(saturate(lerp(currentColor.rgb, blended, Opacity)), 1.0f);
     }
 
-    float3 blended = sourceColor.rgb;
-    if (BlendMode == 0u) // Additive
-    {
-        blended = currentColor.rgb + sourceColor.rgb;
-    }
-    else if (BlendMode == 2u) // Multiply
-    {
-        blended = currentColor.rgb * sourceColor.rgb;
-    }
-    else if (BlendMode == 3u) // Screen
-    {
-        blended = 1.0f - ((1.0f - currentColor.rgb) * (1.0f - sourceColor.rgb));
-    }
-    else if (BlendMode == 4u) // Overlay
-    {
-        blended = lerp(2.0f * currentColor.rgb * sourceColor.rgb,
-                       1.0f - (2.0f * (1.0f - currentColor.rgb) * (1.0f - sourceColor.rgb)),
-                       step(0.5f, currentColor.rgb));
-    }
-    else if (BlendMode == 5u) // Lighten
-    {
-        blended = max(currentColor.rgb, sourceColor.rgb);
-    }
-    else if (BlendMode == 6u) // Darken
-    {
-        blended = min(currentColor.rgb, sourceColor.rgb);
-    }
-    else if (BlendMode == 7u) // Subtractive
-    {
-        blended = currentColor.rgb - sourceColor.rgb;
-    }
-
-    return float4(saturate(lerp(currentColor.rgb, blended, Opacity)), 1.0f);
+    return result;
 }
 
 float4 PSMain(PSInput input) : SV_TARGET
@@ -211,5 +220,5 @@ float4 PSMain(PSInput input) : SV_TARGET
         ? SourceTexture.SampleLevel(LinearWrapSampler, uv, 0.0f)
         : SourceTexture.SampleLevel(LinearClampSampler, uv, 0.0f);
 
-    return Blend(currentColor, sourceColor);
+    return BlendColors(currentColor, sourceColor);
 }

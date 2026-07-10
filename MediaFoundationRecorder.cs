@@ -112,23 +112,51 @@ internal sealed class RecordingSession : IDisposable
     private readonly BlockingCollection<byte[]> _frames;
     private readonly Task _writerTask;
     private readonly string _path;
+    private readonly string _videoPath;
+    private readonly string? _tempDirectory;
+    private readonly string? _audioPath;
     private readonly int _width;
     private readonly int _height;
     private readonly int _fps;
     private readonly RecordingSettings _settings;
+    private AudioRecordingCapture? _audioCapture;
     private readonly object _errorLock = new();
     private string? _errorMessage;
     private bool _completed;
 
-    public RecordingSession(string path, int width, int height, int fps, RecordingSettings settings)
+    public RecordingSession(string path, int width, int height, int fps, RecordingSettings settings, string? audioDeviceId = null)
     {
         _frameSize = width * height * 4;
         _path = path;
+        _videoPath = path;
         _width = width;
         _height = height;
         _fps = fps;
         _settings = settings;
-        _frames = new BlockingCollection<byte[]>(boundedCapacity: 4);
+
+        if (!string.IsNullOrWhiteSpace(audioDeviceId))
+        {
+            _tempDirectory = Path.Combine(Path.GetTempPath(), "lifeviz_recording_" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(_tempDirectory);
+            string extension = Path.GetExtension(path);
+            _videoPath = Path.Combine(_tempDirectory, "video" + (string.IsNullOrWhiteSpace(extension) ? ".tmp" : extension));
+            _audioPath = Path.Combine(_tempDirectory, "audio.wav");
+
+            try
+            {
+                _audioCapture = AudioRecordingCapture.Start(audioDeviceId, _audioPath);
+                Logger.Info("Recording audio capture started for selected audio source.");
+            }
+            catch (Exception ex)
+            {
+                Logger.Error("Recording audio capture could not start; continuing video-only.", ex);
+                _audioCapture = null;
+                _videoPath = _path;
+                TryRemoveTempDirectory();
+            }
+        }
+
+        _frames = new BlockingCollection<byte[]>(boundedCapacity: 120);
         _writerTask = Task.Run(ProcessFrames);
     }
 
@@ -146,7 +174,11 @@ internal sealed class RecordingSession : IDisposable
             return false;
         }
 
-        if (!_frames.TryAdd(buffer))
+        try
+        {
+            _frames.Add(buffer);
+        }
+        catch (InvalidOperationException)
         {
             ArrayPool<byte>.Shared.Return(buffer);
             return false;
@@ -161,8 +193,8 @@ internal sealed class RecordingSession : IDisposable
         try
         {
             recorder = _settings.UseFfmpeg
-                ? new FfmpegRecorder(_path, _width, _height, _fps, _settings)
-                : new MediaFoundationRecorder(_path, _width, _height, _fps, _settings);
+                ? new FfmpegRecorder(_videoPath, _width, _height, _fps, _settings)
+                : new MediaFoundationRecorder(_videoPath, _width, _height, _fps, _settings);
             foreach (var buffer in _frames.GetConsumingEnumerable())
             {
                 try
@@ -218,10 +250,13 @@ internal sealed class RecordingSession : IDisposable
             {
                 SetError(ex.InnerException ?? ex);
             }
+
+            StopAudioCaptureAndMux();
             _completed = true;
         }
 
         _frames.Dispose();
+        TryRemoveTempDirectory();
     }
 
     private void SetError(Exception ex)
@@ -240,6 +275,129 @@ internal sealed class RecordingSession : IDisposable
             {
                 return _errorMessage != null;
             }
+        }
+    }
+
+    private void StopAudioCaptureAndMux()
+    {
+        var audioCapture = _audioCapture;
+        _audioCapture = null;
+        if (audioCapture == null || string.IsNullOrWhiteSpace(_audioPath) || string.Equals(_videoPath, _path, StringComparison.OrdinalIgnoreCase))
+        {
+            return;
+        }
+
+        bool hasAudio;
+        try
+        {
+            hasAudio = audioCapture.HasAudio;
+        }
+        finally
+        {
+            audioCapture.Dispose();
+        }
+
+        if (HasError)
+        {
+            return;
+        }
+
+        try
+        {
+            if (hasAudio && File.Exists(_audioPath))
+            {
+                MuxAudioIntoVideo(_videoPath, _audioPath, _path, _settings);
+                Logger.Info($"Recording audio muxed into output: {_path}");
+            }
+            else
+            {
+                Logger.Warn("Recording audio capture produced no samples; saving video-only output.");
+                CopyVideoOnlyOutput();
+            }
+        }
+        catch (Exception ex)
+        {
+            Logger.Error("Recording audio mux failed; saving video-only output.", ex);
+            try
+            {
+                CopyVideoOnlyOutput();
+            }
+            catch (Exception copyEx)
+            {
+                SetError(copyEx);
+            }
+        }
+    }
+
+    private void CopyVideoOnlyOutput()
+    {
+        if (!File.Exists(_videoPath))
+        {
+            throw new FileNotFoundException("Temporary recording video is missing.", _videoPath);
+        }
+
+        File.Copy(_videoPath, _path, overwrite: true);
+    }
+
+    private static void MuxAudioIntoVideo(string videoPath, string audioPath, string outputPath, RecordingSettings settings)
+    {
+        string audioCodec = settings.FileExtension.Equals("avi", StringComparison.OrdinalIgnoreCase)
+            ? "pcm_s16le"
+            : "aac";
+
+        var startInfo = new ProcessStartInfo
+        {
+            FileName = "ffmpeg",
+            UseShellExecute = false,
+            RedirectStandardError = true,
+            CreateNoWindow = true
+        };
+
+        startInfo.ArgumentList.Add("-hide_banner");
+        startInfo.ArgumentList.Add("-loglevel");
+        startInfo.ArgumentList.Add("error");
+        startInfo.ArgumentList.Add("-y");
+        startInfo.ArgumentList.Add("-i");
+        startInfo.ArgumentList.Add(videoPath);
+        startInfo.ArgumentList.Add("-i");
+        startInfo.ArgumentList.Add(audioPath);
+        startInfo.ArgumentList.Add("-map");
+        startInfo.ArgumentList.Add("0:v:0");
+        startInfo.ArgumentList.Add("-map");
+        startInfo.ArgumentList.Add("1:a:0");
+        startInfo.ArgumentList.Add("-c:v");
+        startInfo.ArgumentList.Add("copy");
+        startInfo.ArgumentList.Add("-c:a");
+        startInfo.ArgumentList.Add(audioCodec);
+        startInfo.ArgumentList.Add("-shortest");
+        startInfo.ArgumentList.Add(outputPath);
+
+        using var process = Process.Start(startInfo) ?? throw new InvalidOperationException("Failed to start ffmpeg for audio mux.");
+        string error = process.StandardError.ReadToEnd();
+        process.WaitForExit();
+        if (process.ExitCode != 0)
+        {
+            string trimmed = error.Trim();
+            throw new InvalidOperationException(string.IsNullOrWhiteSpace(trimmed)
+                ? $"ffmpeg audio mux exited with code {process.ExitCode}."
+                : trimmed);
+        }
+    }
+
+    private void TryRemoveTempDirectory()
+    {
+        if (string.IsNullOrWhiteSpace(_tempDirectory) || !Directory.Exists(_tempDirectory))
+        {
+            return;
+        }
+
+        try
+        {
+            Directory.Delete(_tempDirectory, recursive: true);
+        }
+        catch
+        {
+            // Best-effort cleanup only.
         }
     }
 }

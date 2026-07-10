@@ -177,6 +177,17 @@ float3 BuildCompositeRgbInput(int2 coord)
     return ApplyInjectHueRotation(sample);
 }
 
+uint QuantizeChannelToByte(float value)
+{
+    return (uint)round(Clamp01(value) * 255.0);
+}
+
+uint ExtractBitFromByte(uint value, uint bitIndex)
+{
+    uint clampedBit = min(bitIndex, 7u);
+    return (value >> (7u - clampedBit)) & 1u;
+}
+
 bool EvaluateInjectedAlive(float value, uint period, float randomGate)
 {
     bool alive = EvaluateThresholdValue(value);
@@ -364,9 +375,67 @@ void InjectCompositeCS(uint3 id : SV_DispatchThreadID)
     }
 
     float3 inputValue = BuildCompositeRgbInput(coord);
+    if (LifeMode == 2u)
+    {
+        bool noiseFail = NoiseProbability > 0.0 &&
+            Random01(uint2(coord.y, coord.x), PulseStep * 22695477u + 1u) < NoiseProbability;
+        uint rByte = QuantizeChannelToByte(inputValue.r);
+        uint gByte = QuantizeChannelToByte(inputValue.g);
+        uint bByte = QuantizeChannelToByte(inputValue.b);
+
+        [loop]
+        for (uint rBit = 0u; rBit < min(8u, Depth); rBit++)
+        {
+            uint mask = !noiseFail ? ExtractBitFromByte(rByte, rBit) : 0u;
+            HistoryOutput[uint3(id.xy, rBit)] = max(ReadHistory(coord, rBit), mask);
+        }
+
+        [loop]
+        for (uint gBit = 0u; gBit < min(8u, max(Depth - 8u, 0u)); gBit++)
+        {
+            uint gSlice = 8u + gBit;
+            uint mask = !noiseFail ? ExtractBitFromByte(gByte, gBit) : 0u;
+            HistoryOutput[uint3(id.xy, gSlice)] = max(ReadHistory(coord, gSlice), mask);
+        }
+
+        [loop]
+        for (uint bBit = 0u; bBit < min(8u, max(Depth - 16u, 0u)); bBit++)
+        {
+            uint bSlice = 16u + bBit;
+            uint mask = !noiseFail ? ExtractBitFromByte(bByte, bBit) : 0u;
+            HistoryOutput[uint3(id.xy, bSlice)] = max(ReadHistory(coord, bSlice), mask);
+        }
+
+        [loop]
+        for (uint trailingSlice = 24u; trailingSlice < Depth; trailingSlice++)
+        {
+            HistoryOutput[uint3(id.xy, trailingSlice)] = ReadHistory(coord, trailingSlice) != 0 ? 1u : 0u;
+        }
+        return;
+    }
+
     float randomGate = Random01(uint2(coord), PulseStep * 1664525u + 1013904223u);
     bool noiseFail = NoiseProbability > 0.0 &&
         Random01(uint2(coord.y, coord.x), PulseStep * 22695477u + 1u) < NoiseProbability;
+
+    if (LifeMode == 2u)
+    {
+        uint activeSlices = min(24u, Depth);
+        [loop]
+        for (uint activeSlice = 0u; activeSlice < activeSlices; activeSlice++)
+        {
+            uint neighbors = CountNeighborsAt(coord, activeSlice);
+            uint alive = ReadHistory(coord, activeSlice) != 0 ? 1u : 0u;
+            HistoryOutput[uint3(id.xy, activeSlice)] = (neighbors == 3u || (alive != 0 && neighbors == 2u)) ? 1u : 0u;
+        }
+
+        [loop]
+        for (uint clearedSlice = activeSlices; clearedSlice < Depth; clearedSlice++)
+        {
+            HistoryOutput[uint3(id.xy, clearedSlice)] = 0u;
+        }
+        return;
+    }
 
     uint rStart = 0u;
     uint gStart = RDepth;
@@ -422,6 +491,25 @@ void StepCS(uint3 id : SV_DispatchThreadID)
         return;
     }
 
+    if (LifeMode == 2u)
+    {
+        uint activeSlices = min(24u, Depth);
+        [loop]
+        for (uint activeSlice = 0u; activeSlice < activeSlices; activeSlice++)
+        {
+            uint neighbors = CountNeighborsAt(coord, activeSlice);
+            uint alive = ReadHistory(coord, activeSlice) != 0 ? 1u : 0u;
+            HistoryOutput[uint3(id.xy, activeSlice)] = (neighbors == 3u || (alive != 0 && neighbors == 2u)) ? 1u : 0u;
+        }
+
+        [loop]
+        for (uint clearedSlice = activeSlices; clearedSlice < Depth; clearedSlice++)
+        {
+            HistoryOutput[uint3(id.xy, clearedSlice)] = 0u;
+        }
+        return;
+    }
+
     uint rStart = 0u;
     uint gStart = RDepth;
     uint bStart = RDepth + GDepth;
@@ -463,6 +551,43 @@ void RenderCS(uint3 id : SV_DispatchThreadID)
     }
 
     int2 coord = int2(id.xy);
+    if (LifeMode == 2u)
+    {
+        uint r = 0u;
+        uint g = 0u;
+        uint b = 0u;
+
+        [loop]
+        for (uint rBit = 0u; rBit < min(8u, Depth); rBit++)
+        {
+            if (ReadHistory(coord, rBit) != 0)
+            {
+                r |= 1u << (7u - rBit);
+            }
+        }
+
+        [loop]
+        for (uint gBit = 0u; gBit < min(8u, max(Depth - 8u, 0u)); gBit++)
+        {
+            if (ReadHistory(coord, 8u + gBit) != 0)
+            {
+                g |= 1u << (7u - gBit);
+            }
+        }
+
+        [loop]
+        for (uint bBit = 0u; bBit < min(8u, max(Depth - 16u, 0u)); bBit++)
+        {
+            if (ReadHistory(coord, 16u + bBit) != 0)
+            {
+                b |= 1u << (7u - bBit);
+            }
+        }
+
+        ColorOutput[id.xy] = uint4(r, g, b, 255u);
+        return;
+    }
+
     uint r = EvaluateSlice(coord, 0u, RDepth);
     uint g = EvaluateSlice(coord, RDepth, GDepth);
     uint b = EvaluateSlice(coord, RDepth + GDepth, BDepth);

@@ -901,6 +901,20 @@ public partial class LayerEditorWindow : Window
         }
     }
 
+    private void Scale_Changed(object sender, RoutedPropertyChangedEventArgs<double> e)
+    {
+        if (!ShouldApplyLive())
+        {
+            return;
+        }
+
+        var source = ResolveSourceContext(sender);
+        if (source != null)
+        {
+            _owner.UpdateSourceScale(source.Id, source.Scale);
+        }
+    }
+
     private void Mirror_Changed(object sender, RoutedEventArgs e)
     {
         if (!ShouldApplyLive())
@@ -1542,6 +1556,28 @@ public partial class LayerEditorWindow : Window
 
     private void KeyColorHex_LostFocus(object sender, RoutedEventArgs e)
     {
+        CommitKeyColor(sender);
+    }
+
+    private void KeyColorHex_KeyDown(object sender, KeyEventArgs e)
+    {
+        if (e.Key != Key.Enter)
+        {
+            return;
+        }
+
+        CommitKeyColor(sender);
+        e.Handled = true;
+        Keyboard.ClearFocus();
+    }
+
+    private void CommitKeyColor(object sender)
+    {
+        if (sender is TextBox textBox)
+        {
+            textBox.GetBindingExpression(TextBox.TextProperty)?.UpdateSource();
+        }
+
         if (!ShouldApplyLive())
         {
             return;
@@ -1790,6 +1826,8 @@ public partial class LayerEditorWindow : Window
 
     private void AnimationRotateDegrees_Changed(object sender, RoutedPropertyChangedEventArgs<double> e) => ApplyAnimationChange(sender);
 
+    private void AnimationRotateStartAngle_Changed(object sender, RoutedPropertyChangedEventArgs<double> e) => ApplyAnimationChange(sender);
+
     private void AnimationSize_Changed(object sender, RoutedPropertyChangedEventArgs<double> e) => ApplyAnimationChange(sender);
 
     private void AnimationBeatShakeIntensity_Changed(object sender, RoutedPropertyChangedEventArgs<double> e) => ApplyAnimationChange(sender);
@@ -1818,6 +1856,166 @@ public partial class LayerEditorWindow : Window
         _owner.UpdateAnimationFromEditor(parent.Id, animation);
     }
 
+    private void AutoClipAddVideos_Click(object sender, RoutedEventArgs e)
+    {
+        LayerEditorSource? source = ResolveSourceContext(sender);
+        if (source?.IsAutoClip != true)
+        {
+            return;
+        }
+
+        string[]? paths = PromptForAutoClipVideos();
+        if (paths == null)
+        {
+            return;
+        }
+
+        foreach (string path in paths)
+        {
+            if (!source.AutoClipVideoPaths.Any(existing => string.Equals(existing, path, StringComparison.OrdinalIgnoreCase)))
+            {
+                source.AutoClipVideoPaths.Add(path);
+                source.AutoClipVideoOverrides.Add(new LayerEditorAutoClipVideoOverride
+                {
+                    FilePath = path,
+                    KeyColorHex = source.KeyColorHex,
+                    KeyTolerance = source.KeyTolerance
+                });
+            }
+        }
+        SyncAutoClipFilePaths(source);
+        ApplyAutoClipChange(source);
+    }
+
+    private void AutoClipRemoveVideo_Click(object sender, RoutedEventArgs e)
+    {
+        LayerEditorSource? source = ResolveSourceContext(sender);
+        if (source?.IsAutoClip != true || source.SelectedAutoClipVideoOverride == null)
+        {
+            return;
+        }
+
+        string path = source.SelectedAutoClipVideoOverride.FilePath;
+        source.AutoClipVideoPaths.Remove(path);
+        source.AutoClipVideoOverrides.Remove(source.SelectedAutoClipVideoOverride);
+        source.SelectedAutoClipVideoOverride = null;
+        SyncAutoClipFilePaths(source);
+        ApplyAutoClipChange(source);
+    }
+
+    private void AutoClipTiming_LostFocus(object sender, RoutedEventArgs e)
+    {
+        if (sender is TextBox textBox)
+        {
+            textBox.GetBindingExpression(TextBox.TextProperty)?.UpdateSource();
+        }
+
+        LayerEditorSource? source = ResolveSourceContext(sender);
+        if (source?.IsAutoClip != true)
+        {
+            return;
+        }
+
+        NormalizeAutoClipTiming(source);
+        ApplyAutoClipChange(source);
+    }
+
+    private void AutoClipFade_Changed(object sender, RoutedPropertyChangedEventArgs<double> e)
+    {
+        LayerEditorSource? source = ResolveSourceContext(sender);
+        if (source?.IsAutoClip != true)
+        {
+            return;
+        }
+
+        source.AutoClipFadeSeconds = Math.Clamp(source.AutoClipFadeSeconds, 0, 10);
+        if (ShouldApplyLive())
+        {
+            _owner.UpdateAutoClipFadeFromEditor(source.Id, source.AutoClipFadeSeconds);
+        }
+    }
+
+    private void AutoClipLoopSelectedFile_Changed(object sender, RoutedEventArgs e)
+    {
+        LayerEditorSource? source = ResolveSourceContext(sender);
+        if (source?.IsAutoClip == true && ShouldApplyLive())
+        {
+            _owner.UpdateAutoClipLoopSelectedFileFromEditor(source.Id, source.AutoClipLoopSelectedFile);
+        }
+    }
+
+    private void AutoClipVideoOverride_Changed(object sender, EventArgs e)
+    {
+        LayerEditorSource? source = ResolveSourceContext(sender);
+        LayerEditorAutoClipVideoOverride? item = sender is FrameworkElement { DataContext: LayerEditorAutoClipVideoOverride value }
+            ? value
+            : source?.SelectedAutoClipVideoOverride;
+        if (source?.IsAutoClip == true && item != null && ShouldApplyLive())
+        {
+            _owner.UpdateAutoClipVideoOverrideFromEditor(source.Id, item);
+        }
+    }
+
+    private void AutoClipVideoOverrideColor_LostFocus(object sender, RoutedEventArgs e)
+    {
+        CommitAutoClipVideoOverrideColor(sender);
+    }
+
+    private void AutoClipVideoOverrideColor_KeyDown(object sender, KeyEventArgs e)
+    {
+        if (e.Key == Key.Enter)
+        {
+            CommitAutoClipVideoOverrideColor(sender);
+            e.Handled = true;
+            Keyboard.ClearFocus();
+        }
+    }
+
+    private void CommitAutoClipVideoOverrideColor(object sender)
+    {
+        if (sender is TextBox textBox)
+        {
+            textBox.GetBindingExpression(TextBox.TextProperty)?.UpdateSource();
+        }
+        AutoClipVideoOverride_Changed(sender, EventArgs.Empty);
+    }
+
+    private void ApplyAutoClipChange(LayerEditorSource source)
+    {
+        if (!ShouldApplyLive())
+        {
+            return;
+        }
+
+        _owner.UpdateAutoClipFromEditor(
+            source.Id,
+            source.AutoClipVideoPaths.ToArray(),
+            source.AutoClipMinClipSeconds,
+            source.AutoClipMaxClipSeconds,
+            source.AutoClipMinDelaySeconds,
+            source.AutoClipMaxDelaySeconds,
+            source.AutoClipVideoOverrides.ToArray());
+    }
+
+    private static void SyncAutoClipFilePaths(LayerEditorSource source)
+    {
+        source.FilePaths.Clear();
+        source.FilePaths.AddRange(source.AutoClipVideoPaths);
+    }
+
+    private static void NormalizeAutoClipTiming(LayerEditorSource source)
+    {
+        double minClip = double.IsFinite(source.AutoClipMinClipSeconds) ? Math.Clamp(source.AutoClipMinClipSeconds, 0.05, 86400) : 2.0;
+        double maxClip = double.IsFinite(source.AutoClipMaxClipSeconds) ? Math.Clamp(source.AutoClipMaxClipSeconds, 0.05, 86400) : minClip;
+        source.AutoClipMinClipSeconds = Math.Min(minClip, maxClip);
+        source.AutoClipMaxClipSeconds = Math.Max(minClip, maxClip);
+
+        double minDelay = double.IsFinite(source.AutoClipMinDelaySeconds) ? Math.Clamp(source.AutoClipMinDelaySeconds, 0, 86400) : 0;
+        double maxDelay = double.IsFinite(source.AutoClipMaxDelaySeconds) ? Math.Clamp(source.AutoClipMaxDelaySeconds, 0, 86400) : minDelay;
+        source.AutoClipMinDelaySeconds = Math.Min(minDelay, maxDelay);
+        source.AutoClipMaxDelaySeconds = Math.Max(minDelay, maxDelay);
+    }
+
     private void AddRootGroup_Click(object sender, RoutedEventArgs e) => AddSource(null, LayerEditorSourceKind.Group);
     private void AddRootSimGroup_Click(object sender, RoutedEventArgs e) => AddSource(null, LayerEditorSourceKind.SimGroup);
 
@@ -1830,6 +2028,7 @@ public partial class LayerEditorWindow : Window
     private void AddRootYoutube_Click(object sender, RoutedEventArgs e) => AddSource(null, LayerEditorSourceKind.Youtube);
 
     private void AddRootSequence_Click(object sender, RoutedEventArgs e) => AddSource(null, LayerEditorSourceKind.VideoSequence);
+    private void AddRootAutoClip_Click(object sender, RoutedEventArgs e) => AddSource(null, LayerEditorSourceKind.AutoClip);
 
     private void AddChildGroup_Click(object sender, RoutedEventArgs e)
     {
@@ -1891,6 +2090,15 @@ public partial class LayerEditorWindow : Window
         if (parent != null)
         {
             AddSource(parent, LayerEditorSourceKind.VideoSequence);
+        }
+    }
+
+    private void AddChildAutoClip_Click(object sender, RoutedEventArgs e)
+    {
+        var parent = ResolveSelectedGroup(sender);
+        if (parent != null)
+        {
+            AddSource(parent, LayerEditorSourceKind.AutoClip);
         }
     }
 
@@ -2002,6 +2210,10 @@ public partial class LayerEditorWindow : Window
                 _owner.AddVideoSequenceFromEditor(paths, parentId);
                 return true;
             }
+
+            case LayerEditorSourceKind.AutoClip:
+                _owner.AddAutoClipFromEditor(parentId);
+                return true;
         }
 
         return false;
@@ -2151,6 +2363,25 @@ public partial class LayerEditorWindow : Window
                 source.FilePaths.AddRange(paths);
                 return source;
             }
+
+            case LayerEditorSourceKind.AutoClip:
+                return new LayerEditorSource
+                {
+                    Id = Guid.NewGuid(),
+                    Kind = LayerEditorSourceKind.AutoClip,
+                    DisplayName = "AutoClip",
+                    BlendMode = "Additive",
+                    FitMode = "Fill",
+                    Opacity = 1.0,
+                    KeyColorHex = "#000000",
+                    KeyTolerance = 0.1,
+                    AutoClipMinClipSeconds = 2.0,
+                    AutoClipMaxClipSeconds = 5.0,
+                    AutoClipMinDelaySeconds = 0,
+                    AutoClipMaxDelaySeconds = 0,
+                    AutoClipFadeSeconds = 0,
+                    AutoClipLoopSelectedFile = false
+                };
         }
 
         return null;
@@ -2438,6 +2669,19 @@ public partial class LayerEditorWindow : Window
         var dialog = new OpenFileDialog
         {
             Title = "Select Video Sequence",
+            Filter = "Video Files|*.mp4;*.mov;*.wmv;*.avi;*.mkv;*.webm;*.mpg;*.mpeg|All Files|*.*",
+            Multiselect = true,
+            CheckFileExists = true
+        };
+
+        return dialog.ShowDialog(this) == true ? dialog.FileNames : null;
+    }
+
+    private string[]? PromptForAutoClipVideos()
+    {
+        var dialog = new OpenFileDialog
+        {
+            Title = "Add AutoClip Videos",
             Filter = "Video Files|*.mp4;*.mov;*.wmv;*.avi;*.mkv;*.webm;*.mpg;*.mpeg|All Files|*.*",
             Multiselect = true,
             CheckFileExists = true

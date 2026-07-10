@@ -350,6 +350,22 @@
                         </StackPanel>
                         <StackPanel Orientation="Horizontal"
                                     Margin="0,0,12,6"
+                                    Visibility="{Binding IsRotate, Converter={StaticResource BoolToVisibility}}">
+                            <TextBlock Text="Start angle" VerticalAlignment="Center" />
+                            <Slider Minimum="0"
+                                    Maximum="360"
+                                    Value="{Binding StartAngleDegrees}"
+                                    Width="160"
+                                    SmallChange="1"
+                                    LargeChange="15"
+                                    Margin="6,0,0,0"
+                                    ValueChanged="AnimationRotateStartAngle_Changed" />
+                            <TextBlock Text="{Binding StartAngleDegrees, StringFormat={}{0:0}°}"
+                                       Margin="6,0,0,0"
+                                       VerticalAlignment="Center" />
+                        </StackPanel>
+                        <StackPanel Orientation="Horizontal"
+                                    Margin="0,0,12,6"
                                     Visibility="{Binding IsDvd, Converter={StaticResource BoolToVisibility}}">
                             <TextBlock Text="Size" VerticalAlignment="Center" />
                             <Slider Minimum="0.05"
@@ -513,6 +529,7 @@
                         <Button Content="File" Click="AddRootFile_Click" />
                         <Button Content="YouTube" Click="AddRootYoutube_Click" />
                         <Button Content="Sequence" Click="AddRootSequence_Click" />
+                        <Button Content="AutoClip" Click="AddRootAutoClip_Click" />
                     </WrapPanel>
 
                     <WrapPanel Grid.Row="1" Margin="0,0,0,8">
@@ -526,6 +543,7 @@
                         <Button Content="File" Click="AddChildFile_Click" />
                         <Button Content="YouTube" Click="AddChildYoutube_Click" />
                         <Button Content="Sequence" Click="AddChildSequence_Click" />
+                        <Button Content="AutoClip" Click="AddChildAutoClip_Click" />
                     </WrapPanel>
 
                     <Border Grid.Row="2"
@@ -699,6 +717,21 @@
                                                            Margin="6,0,0,0"
                                                            VerticalAlignment="Center" />
                                             </StackPanel>
+                                            <StackPanel Orientation="Horizontal" Margin="0,0,12,6">
+                                                <TextBlock Text="Scale"
+                                                           VerticalAlignment="Center" />
+                                                <Slider Minimum="0.1"
+                                                        Maximum="4"
+                                                        Value="{Binding Scale}"
+                                                        Width="150"
+                                                        SmallChange="0.05"
+                                                        LargeChange="0.25"
+                                                        Margin="6,0,0,0"
+                                                        ValueChanged="Scale_Changed" />
+                                                <TextBlock Text="{Binding Scale, StringFormat={}{0:0.00}×}"
+                                                           Margin="6,0,0,0"
+                                                           VerticalAlignment="Center" />
+                                            </StackPanel>
                                         </WrapPanel>
 
                                         <WrapPanel Margin="0,0,0,4">
@@ -729,7 +762,7 @@
                                             <Button Content="{Binding VideoPlaybackToggleLabel}"
                                                     Padding="8,2"
                                                     Margin="0,0,8,6"
-                                                    IsEnabled="{Binding IsVideo}"
+                                                    IsEnabled="{Binding SupportsVideoTransport}"
                                                     Click="VideoPlayPause_Click" />
                                             <StackPanel Orientation="Horizontal" Margin="0,0,12,6">
                                                 <TextBlock Text="Scrub"
@@ -767,9 +800,131 @@
                                                      Visibility="{Binding IsContainerGroup, Converter={StaticResource BoolToVisibility}}" />
                                         </WrapPanel>
 
+                                        <GroupBox Header="AutoClip Settings"
+                                                  Margin="0,8,0,8"
+                                                  Visibility="{Binding IsAutoClip, Converter={StaticResource BoolToVisibility}}">
+                                            <StackPanel Margin="8">
+                                                <TextBlock Text="Videos are selected randomly, begin at a random timeline point, and disappear during non-zero delays."
+                                                           Foreground="#AFAFAF"
+                                                           TextWrapping="Wrap"
+                                                           Margin="0,0,0,8" />
+                                                <ListBox ItemsSource="{Binding AutoClipVideoOverrides}"
+                                                         SelectedItem="{Binding SelectedAutoClipVideoOverride}"
+                                                         DisplayMemberPath="DisplayName"
+                                                         Height="110"
+                                                         HorizontalContentAlignment="Stretch"
+                                                         Margin="0,0,0,6" />
+                                                <WrapPanel Margin="0,0,0,8">
+                                                    <Button Content="Add Videos..." Click="AutoClipAddVideos_Click" />
+                                                    <Button Content="Remove Selected" Click="AutoClipRemoveVideo_Click" />
+                                                </WrapPanel>
+                                                <GroupBox Header="Selected Video Overrides"
+                                                          Margin="0,0,0,8"
+                                                          DataContext="{Binding SelectedAutoClipVideoOverride}">
+                                                    <WrapPanel Margin="8">
+                                                        <StackPanel Orientation="Horizontal" Margin="0,0,12,6">
+                                                            <TextBlock Text="Blend" VerticalAlignment="Center" />
+                                                            <ComboBox ItemsSource="{Binding BlendModeOptions}"
+                                                                      DisplayMemberPath="Label"
+                                                                      SelectedValuePath="Value"
+                                                                      SelectedValue="{Binding BlendMode}"
+                                                                      Width="140"
+                                                                      Margin="6,0,0,0"
+                                                                      SelectionChanged="AutoClipVideoOverride_Changed" />
+                                                        </StackPanel>
+                                                        <StackPanel Orientation="Horizontal" Margin="0,0,12,6">
+                                                            <TextBlock Text="Keying" VerticalAlignment="Center" />
+                                                            <ComboBox ItemsSource="{Binding KeyModeOptions}"
+                                                                      DisplayMemberPath="Label"
+                                                                      SelectedValuePath="Value"
+                                                                      SelectedValue="{Binding KeyMode}"
+                                                                      Width="140"
+                                                                      Margin="6,0,0,0"
+                                                                      SelectionChanged="AutoClipVideoOverride_Changed" />
+                                                        </StackPanel>
+                                                        <StackPanel Orientation="Horizontal" Margin="0,0,12,6"
+                                                                    IsEnabled="{Binding KeyControlsEnabled}">
+                                                            <TextBlock Text="Key Color" VerticalAlignment="Center" />
+                                                            <TextBox Text="{Binding KeyColorHex, UpdateSourceTrigger=PropertyChanged}"
+                                                                     Width="90"
+                                                                     Margin="6,0,0,0"
+                                                                     LostFocus="AutoClipVideoOverrideColor_LostFocus"
+                                                                     KeyDown="AutoClipVideoOverrideColor_KeyDown" />
+                                                            <Border Width="18" Height="18" Margin="6,0,0,0"
+                                                                    BorderBrush="#808080" BorderThickness="1"
+                                                                    Background="{Binding KeyColorHex}" />
+                                                        </StackPanel>
+                                                        <StackPanel Orientation="Horizontal" Margin="0,0,12,6"
+                                                                    IsEnabled="{Binding KeyControlsEnabled}">
+                                                            <TextBlock Text="Key Range" VerticalAlignment="Center" />
+                                                            <Slider Minimum="0" Maximum="1"
+                                                                    Value="{Binding KeyTolerance}"
+                                                                    Width="140" SmallChange="0.01" LargeChange="0.05"
+                                                                    Margin="6,0,0,0"
+                                                                    ValueChanged="AutoClipVideoOverride_Changed" />
+                                                            <TextBlock Text="{Binding KeyTolerance, StringFormat={}{0:P0}}"
+                                                                       Margin="6,0,0,0" VerticalAlignment="Center" />
+                                                        </StackPanel>
+                                                    </WrapPanel>
+                                                </GroupBox>
+                                                <WrapPanel>
+                                                    <TextBlock Text="Clip length (seconds)"
+                                                               VerticalAlignment="Center"
+                                                               Margin="0,0,8,6" />
+                                                    <TextBox Text="{Binding AutoClipMinClipSeconds}"
+                                                             Width="70"
+                                                             Margin="0,0,6,6"
+                                                             ToolTip="Minimum clip length"
+                                                             LostFocus="AutoClipTiming_LostFocus" />
+                                                    <TextBlock Text="to" VerticalAlignment="Center" Margin="0,0,6,6" />
+                                                    <TextBox Text="{Binding AutoClipMaxClipSeconds}"
+                                                             Width="70"
+                                                             Margin="0,0,18,6"
+                                                             ToolTip="Maximum clip length"
+                                                             LostFocus="AutoClipTiming_LostFocus" />
+                                                    <TextBlock Text="Delay (seconds)"
+                                                               VerticalAlignment="Center"
+                                                               Margin="0,0,8,6" />
+                                                    <TextBox Text="{Binding AutoClipMinDelaySeconds}"
+                                                             Width="70"
+                                                             Margin="0,0,6,6"
+                                                             ToolTip="Minimum off time"
+                                                             LostFocus="AutoClipTiming_LostFocus" />
+                                                    <TextBlock Text="to" VerticalAlignment="Center" Margin="0,0,6,6" />
+                                                    <TextBox Text="{Binding AutoClipMaxDelaySeconds}"
+                                                             Width="70"
+                                                             Margin="0,0,0,6"
+                                                             ToolTip="Maximum off time"
+                                                             LostFocus="AutoClipTiming_LostFocus" />
+                                                </WrapPanel>
+                                                <StackPanel Orientation="Horizontal" Margin="0,2,0,0">
+                                                    <TextBlock Text="Fade in / out"
+                                                               VerticalAlignment="Center"
+                                                               Margin="0,0,8,6" />
+                                                    <Slider Minimum="0"
+                                                            Maximum="10"
+                                                            Value="{Binding AutoClipFadeSeconds}"
+                                                            Width="180"
+                                                            SmallChange="0.05"
+                                                            LargeChange="0.5"
+                                                            Margin="0,0,6,6"
+                                                            ValueChanged="AutoClipFade_Changed"
+                                                            ToolTip="Symmetric visual fade duration in seconds; 0 disables fading" />
+                                                    <TextBlock Text="{Binding AutoClipFadeSeconds, StringFormat={}{0:0.00} s}"
+                                                               VerticalAlignment="Center"
+                                                               Margin="0,0,0,6" />
+                                                </StackPanel>
+                                                <CheckBox Content="Loop selected file until clip time expires"
+                                                          IsChecked="{Binding AutoClipLoopSelectedFile}"
+                                                          Checked="AutoClipLoopSelectedFile_Changed"
+                                                          Unchecked="AutoClipLoopSelectedFile_Changed"
+                                                          ToolTip="Starts the randomly selected file at the beginning and loops it for the complete selected clip duration" />
+                                            </StackPanel>
+                                        </GroupBox>
+
                                         <WrapPanel Margin="0,0,0,0"
                                                   IsEnabled="{Binding IsNormalBlend}">
-                                            <CheckBox Content="Enable Keying (Normal)"
+                                            <CheckBox Content="Enable Color Mask / Keying (Normal)"
                                                       Margin="0,0,12,6"
                                                       IsChecked="{Binding KeyEnabled}"
                                                       Checked="KeyEnabled_Changed"
@@ -777,10 +932,18 @@
                                             <StackPanel Orientation="Horizontal" Margin="0,0,12,6">
                                                 <TextBlock Text="Key Color"
                                                            VerticalAlignment="Center" />
-                                                <TextBox Text="{Binding KeyColorHex}"
+                                                <TextBox Text="{Binding KeyColorHex, UpdateSourceTrigger=PropertyChanged}"
                                                          Width="90"
                                                          Margin="6,0,0,0"
-                                                         LostFocus="KeyColorHex_LostFocus" />
+                                                         LostFocus="KeyColorHex_LostFocus"
+                                                         KeyDown="KeyColorHex_KeyDown" />
+                                                <Border Width="18"
+                                                        Height="18"
+                                                        Margin="6,0,0,0"
+                                                        BorderBrush="#808080"
+                                                        BorderThickness="1"
+                                                        Background="{Binding KeyColorHex}"
+                                                        ToolTip="Current key color" />
                                             </StackPanel>
                                             <StackPanel Orientation="Horizontal" Margin="0,0,12,6">
                                                 <TextBlock Text="Key Range"

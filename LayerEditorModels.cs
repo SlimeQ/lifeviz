@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.ComponentModel;
+using System.IO;
 using System.Runtime.CompilerServices;
 
 namespace lifeviz;
@@ -12,6 +13,7 @@ internal enum LayerEditorSourceKind
     Webcam,
     File,
     VideoSequence,
+    AutoClip,
     Group,
     SimGroup,
     Youtube
@@ -53,7 +55,8 @@ internal static class LayerEditorOptions
     public static readonly IReadOnlyList<LayerEditorOption> SimulationLifeModes = new[]
     {
         new LayerEditorOption("NaiveGrayscale", "Naive Grayscale"),
-        new LayerEditorOption("RgbChannels", "RGB Channel Bins")
+        new LayerEditorOption("RgbChannels", "RGB Channel Bins"),
+        new LayerEditorOption("Bitwise", "Bitwise RGB")
     };
 
     public static readonly IReadOnlyList<LayerEditorOption> SimulationBinningModes = new[]
@@ -72,6 +75,26 @@ internal static class LayerEditorOptions
         new LayerEditorOption("Lighten", "Lighten"),
         new LayerEditorOption("Darken", "Darken"),
         new LayerEditorOption("Subtractive", "Subtractive")
+    };
+
+    public static readonly IReadOnlyList<LayerEditorOption> AutoClipOverrideBlendModes = new[]
+    {
+        new LayerEditorOption("Inherit", "Inherit layer"),
+        new LayerEditorOption("Additive", "Additive"),
+        new LayerEditorOption("Normal", "Normal"),
+        new LayerEditorOption("Multiply", "Multiply"),
+        new LayerEditorOption("Screen", "Screen"),
+        new LayerEditorOption("Overlay", "Overlay"),
+        new LayerEditorOption("Lighten", "Lighten"),
+        new LayerEditorOption("Darken", "Darken"),
+        new LayerEditorOption("Subtractive", "Subtractive")
+    };
+
+    public static readonly IReadOnlyList<LayerEditorOption> AutoClipKeyModes = new[]
+    {
+        new LayerEditorOption("Inherit", "Inherit layer"),
+        new LayerEditorOption("Enabled", "Enabled"),
+        new LayerEditorOption("Disabled", "Disabled")
     };
 
     public static readonly IReadOnlyList<LayerEditorOption> FitModes = new[]
@@ -193,6 +216,7 @@ internal sealed class LayerEditorAnimation : LayerEditorNotify
     private string _speed = "Normal";
     private string _translateDirection = "Right";
     private string _rotationDirection = "Clockwise";
+    private double _startAngleDegrees;
     private double _rotationDegrees = 12.0;
     private double _dvdScale = 0.2;
     private double _beatShakeIntensity = 1.0;
@@ -259,6 +283,12 @@ internal sealed class LayerEditorAnimation : LayerEditorNotify
     {
         get => _rotationDegrees;
         set => SetField(ref _rotationDegrees, value);
+    }
+
+    public double StartAngleDegrees
+    {
+        get => _startAngleDegrees;
+        set => SetField(ref _startAngleDegrees, value);
     }
 
     public double DvdScale
@@ -328,6 +358,63 @@ internal sealed class LayerEditorAnimation : LayerEditorNotify
     public IReadOnlyList<LayerEditorOption> RotationDirectionOptions => LayerEditorOptions.RotationDirections;
 }
 
+internal sealed class LayerEditorAutoClipVideoOverride : LayerEditorNotify
+{
+    private string _filePath = string.Empty;
+    private string _blendMode = "Inherit";
+    private string _keyMode = "Inherit";
+    private string _keyColorHex = "#000000";
+    private double _keyTolerance = 0.1;
+
+    public string FilePath
+    {
+        get => _filePath;
+        set
+        {
+            if (SetField(ref _filePath, value))
+            {
+                OnPropertyChanged(nameof(DisplayName));
+            }
+        }
+    }
+
+    public string DisplayName => string.IsNullOrWhiteSpace(FilePath) ? "Video" : Path.GetFileName(FilePath);
+
+    public string BlendMode
+    {
+        get => _blendMode;
+        set => SetField(ref _blendMode, value);
+    }
+
+    public string KeyMode
+    {
+        get => _keyMode;
+        set
+        {
+            if (SetField(ref _keyMode, value))
+            {
+                OnPropertyChanged(nameof(KeyControlsEnabled));
+            }
+        }
+    }
+
+    public string KeyColorHex
+    {
+        get => _keyColorHex;
+        set => SetField(ref _keyColorHex, value);
+    }
+
+    public double KeyTolerance
+    {
+        get => _keyTolerance;
+        set => SetField(ref _keyTolerance, value);
+    }
+
+    public bool KeyControlsEnabled => !string.Equals(KeyMode, "Disabled", StringComparison.OrdinalIgnoreCase);
+    public IReadOnlyList<LayerEditorOption> BlendModeOptions => LayerEditorOptions.AutoClipOverrideBlendModes;
+    public IReadOnlyList<LayerEditorOption> KeyModeOptions => LayerEditorOptions.AutoClipKeyModes;
+}
+
 internal sealed class LayerEditorSource : LayerEditorNotify
 {
     private Guid _id;
@@ -340,12 +427,20 @@ internal sealed class LayerEditorSource : LayerEditorNotify
     private string _blendMode = "Additive";
     private string _fitMode = "Fill";
     private double _opacity = 1.0;
+    private double _scale = 1.0;
     private bool _videoAudioEnabled;
     private double _videoAudioVolume = 1.0;
     private bool _videoPlaybackPaused;
     private double _videoPlaybackPosition;
     private double _videoPlaybackPositionSeconds;
     private double _videoPlaybackDurationSeconds;
+    private LayerEditorAutoClipVideoOverride? _selectedAutoClipVideoOverride;
+    private double _autoClipMinClipSeconds = 2.0;
+    private double _autoClipMaxClipSeconds = 5.0;
+    private double _autoClipMinDelaySeconds;
+    private double _autoClipMaxDelaySeconds;
+    private double _autoClipFadeSeconds;
+    private bool _autoClipLoopSelectedFile;
     private bool _mirror;
     private bool _keyEnabled;
     private string _keyColorHex = "#000000";
@@ -356,6 +451,12 @@ internal sealed class LayerEditorSource : LayerEditorNotify
     private LayerEditorSimulationLayer? _selectedSimulationLayer;
     private bool _isExpanded = true;
     private bool _isSelected;
+
+    public LayerEditorSource()
+    {
+        AutoClipVideoPaths.CollectionChanged += (_, _) => OnPropertyChanged(nameof(Details));
+        AutoClipVideoOverrides.CollectionChanged += (_, _) => OnPropertyChanged(nameof(Details));
+    }
 
     public Guid Id
     {
@@ -376,6 +477,8 @@ internal sealed class LayerEditorSource : LayerEditorNotify
                 OnPropertyChanged(nameof(IsWebcam));
                 OnPropertyChanged(nameof(IsWindow));
                 OnPropertyChanged(nameof(IsVideo));
+                OnPropertyChanged(nameof(IsAutoClip));
+                OnPropertyChanged(nameof(SupportsVideoTransport));
                 OnPropertyChanged(nameof(KindLabel));
                 OnPropertyChanged(nameof(DisplayLabel));
                 OnPropertyChanged(nameof(Details));
@@ -441,6 +544,50 @@ internal sealed class LayerEditorSource : LayerEditorNotify
     }
 
     public List<string> FilePaths { get; } = new();
+    public ObservableCollection<string> AutoClipVideoPaths { get; } = new();
+    public ObservableCollection<LayerEditorAutoClipVideoOverride> AutoClipVideoOverrides { get; } = new();
+
+    public LayerEditorAutoClipVideoOverride? SelectedAutoClipVideoOverride
+    {
+        get => _selectedAutoClipVideoOverride;
+        set => SetField(ref _selectedAutoClipVideoOverride, value);
+    }
+
+    public double AutoClipMinClipSeconds
+    {
+        get => _autoClipMinClipSeconds;
+        set => SetField(ref _autoClipMinClipSeconds, value);
+    }
+
+    public double AutoClipMaxClipSeconds
+    {
+        get => _autoClipMaxClipSeconds;
+        set => SetField(ref _autoClipMaxClipSeconds, value);
+    }
+
+    public double AutoClipMinDelaySeconds
+    {
+        get => _autoClipMinDelaySeconds;
+        set => SetField(ref _autoClipMinDelaySeconds, value);
+    }
+
+    public double AutoClipMaxDelaySeconds
+    {
+        get => _autoClipMaxDelaySeconds;
+        set => SetField(ref _autoClipMaxDelaySeconds, value);
+    }
+
+    public double AutoClipFadeSeconds
+    {
+        get => _autoClipFadeSeconds;
+        set => SetField(ref _autoClipFadeSeconds, value);
+    }
+
+    public bool AutoClipLoopSelectedFile
+    {
+        get => _autoClipLoopSelectedFile;
+        set => SetField(ref _autoClipLoopSelectedFile, value);
+    }
 
     public string BlendMode
     {
@@ -464,6 +611,12 @@ internal sealed class LayerEditorSource : LayerEditorNotify
     {
         get => _opacity;
         set => SetField(ref _opacity, value);
+    }
+
+    public double Scale
+    {
+        get => _scale;
+        set => SetField(ref _scale, value);
     }
 
     public bool VideoAudioEnabled
@@ -599,13 +752,16 @@ internal sealed class LayerEditorSource : LayerEditorNotify
     public bool IsContainerGroup => IsGroup || IsSimulationGroup;
     public bool IsWebcam => Kind == LayerEditorSourceKind.Webcam;
     public bool IsWindow => Kind == LayerEditorSourceKind.Window;
+    public bool IsAutoClip => Kind == LayerEditorSourceKind.AutoClip;
     public bool IsNormalBlend => string.Equals(BlendMode, "Normal", StringComparison.OrdinalIgnoreCase);
     public bool IsVideo =>
         Kind == LayerEditorSourceKind.VideoSequence ||
+        Kind == LayerEditorSourceKind.AutoClip ||
         Kind == LayerEditorSourceKind.Youtube ||
         (Kind == LayerEditorSourceKind.File && !string.IsNullOrWhiteSpace(FilePath) && 
             (FileCaptureService.IsVideoPath(FilePath) || FilePath.StartsWith("youtube:")));
     public bool VideoSeekAvailable => VideoPlaybackDurationSeconds > 0.001;
+    public bool SupportsVideoTransport => IsVideo && !IsAutoClip;
     public string VideoPlaybackToggleLabel => VideoPlaybackPaused ? "Play" : "Pause";
     public string VideoPlaybackTimeLabel => $"{FormatPlaybackTime(VideoPlaybackPositionSeconds)} / {FormatPlaybackTime(VideoPlaybackDurationSeconds)}";
 
@@ -615,6 +771,7 @@ internal sealed class LayerEditorSource : LayerEditorNotify
         LayerEditorSourceKind.File => "File",
         LayerEditorSourceKind.Youtube => "YouTube",
         LayerEditorSourceKind.VideoSequence => "Video Sequence",
+        LayerEditorSourceKind.AutoClip => "AutoClip",
         LayerEditorSourceKind.Group => "Group",
         LayerEditorSourceKind.SimGroup => "Sim Group",
         LayerEditorSourceKind.Window => "Window",
@@ -632,6 +789,7 @@ internal sealed class LayerEditorSource : LayerEditorNotify
         LayerEditorSourceKind.File => string.IsNullOrWhiteSpace(FilePath) ? "File source" : FilePath,
         LayerEditorSourceKind.Youtube => string.IsNullOrWhiteSpace(FilePath) ? "YouTube source" : FilePath,
         LayerEditorSourceKind.VideoSequence => FilePaths.Count > 0 ? $"{FilePaths.Count} files" : "Video sequence",
+        LayerEditorSourceKind.AutoClip => $"{AutoClipVideoPaths.Count} video{(AutoClipVideoPaths.Count == 1 ? string.Empty : "s")}",
         LayerEditorSourceKind.Group => "Layer group",
         LayerEditorSourceKind.SimGroup => $"{(Enabled ? "Enabled" : "Disabled")} | {SimulationLayers.Count} sim layer{(SimulationLayers.Count == 1 ? string.Empty : "s")}",
         _ => string.Empty
