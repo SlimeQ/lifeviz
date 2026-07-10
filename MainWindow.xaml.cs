@@ -10083,6 +10083,14 @@ public partial class MainWindow : Window
 
                     if (source.AutoClip?.State == FileCaptureService.FileCaptureState.Pending)
                     {
+                        // A schedule reset or offline/live transition can invalidate the
+                        // session-owned retained frame while SourceFrame still references
+                        // the old pixels. Do not composite that orphaned frame without a
+                        // matching per-file override.
+                        if (string.IsNullOrWhiteSpace(source.AutoClip.CurrentFramePath))
+                        {
+                            source.LastFrame = null;
+                        }
                         continue;
                     }
 
@@ -12357,6 +12365,14 @@ public partial class MainWindow : Window
 
     private static (BlendMode BlendMode, KeyingSettings Keying) ResolveSourceCompositeSettings(CaptureSource source)
     {
+        string? framePath = source.Type == CaptureSource.SourceType.AutoClip ? source.AutoClip?.CurrentFramePath : null;
+        return ResolveSourceCompositeSettingsForPath(source, framePath);
+    }
+
+    private static (BlendMode BlendMode, KeyingSettings Keying) ResolveSourceCompositeSettingsForPath(
+        CaptureSource source,
+        string? framePath)
+    {
         BlendMode blendMode = source.BlendMode;
         bool keyEnabled = source.KeyEnabled;
         byte keyR = source.KeyColorR;
@@ -12364,9 +12380,8 @@ public partial class MainWindow : Window
         byte keyB = source.KeyColorB;
         double keyTolerance = source.KeyTolerance;
 
-        string? currentPath = source.Type == CaptureSource.SourceType.AutoClip ? source.AutoClip?.CurrentPath : null;
-        if (!string.IsNullOrWhiteSpace(currentPath) &&
-            source.AutoClipVideoOverrides.TryGetValue(currentPath, out var fileOverride))
+        if (!string.IsNullOrWhiteSpace(framePath) &&
+            source.AutoClipVideoOverrides.TryGetValue(framePath, out var fileOverride))
         {
             blendMode = fileOverride.BlendMode ?? blendMode;
             if (fileOverride.KeyEnabled.HasValue)
@@ -12400,7 +12415,7 @@ public partial class MainWindow : Window
             KeyColorB = 0x07,
             KeyTolerance = 0.7
         };
-        var keyed = ResolveSourceCompositeSettings(source);
+        var keyed = ResolveSourceCompositeSettingsForPath(source, path);
         bool keyedOk = keyed.BlendMode == BlendMode.Normal && keyed.Keying.Enabled &&
                        keyed.Keying.R == 0x0C && keyed.Keying.G == 0xED && keyed.Keying.B == 0x07 &&
                        Math.Abs(keyed.Keying.Tolerance - 0.7) < 0.0001;
@@ -12410,10 +12425,28 @@ public partial class MainWindow : Window
             BlendMode = BlendMode.Additive,
             KeyEnabled = false
         };
-        var additive = ResolveSourceCompositeSettings(source);
+        var additive = ResolveSourceCompositeSettingsForPath(source, path);
         bool additiveOk = additive.BlendMode == BlendMode.Additive && !additive.Keying.Enabled;
-        Logger.Info($"AutoClip override resolution smoke: keyed={keyedOk}, additive={additiveOk}.");
-        return keyedOk && additiveOk;
+
+        string priorFramePath = path + ".prior-frame";
+        source.AutoClipVideoOverrides[priorFramePath] = new AutoClipVideoCompositeOverride
+        {
+            BlendMode = BlendMode.Normal,
+            KeyEnabled = true,
+            KeyColorR = 0x00,
+            KeyColorG = 0x00,
+            KeyColorB = 0x00,
+            KeyTolerance = 0.25
+        };
+        var retainedPriorFrame = ResolveSourceCompositeSettingsForPath(source, priorFramePath);
+        bool retainedFrameOwnerOk = retainedPriorFrame.BlendMode == BlendMode.Normal &&
+                                    retainedPriorFrame.Keying.Enabled &&
+                                    retainedPriorFrame.Keying.R == 0x00 &&
+                                    retainedPriorFrame.Keying.G == 0x00 &&
+                                    retainedPriorFrame.Keying.B == 0x00 &&
+                                    Math.Abs(retainedPriorFrame.Keying.Tolerance - 0.25) < 0.0001;
+        Logger.Info($"AutoClip override resolution smoke: keyed={keyedOk}, additive={additiveOk}, retainedFrameOwner={retainedFrameOwnerOk}.");
+        return keyedOk && additiveOk && retainedFrameOwnerOk;
     }
 
     private CompositeFrame? BuildCompositeFrame(List<CaptureSource> sources, ref byte[]? downscaledBuffer, bool useEngineDimensions, double animationTime, bool includeCpuReadback = true)

@@ -3717,6 +3717,7 @@ internal sealed class FileCaptureService : IDisposable
         private Random _random = new();
         private VideoSession? _current;
         private FileCaptureFrame? _lastFrame;
+        private string? _lastFramePath;
         private string? _currentPath;
         private Phase _phase = Phase.Uninitialized;
         private double _phaseStartSeconds;
@@ -3769,6 +3770,7 @@ internal sealed class FileCaptureService : IDisposable
         }
         public string DisplayName => _paths.Count == 0 ? "AutoClip" : $"AutoClip ({_paths.Count})";
         public string? CurrentPath => _currentPath;
+        public string? CurrentFramePath => _lastFramePath;
         public bool IsDelaying => _phase == Phase.Delaying;
         public bool IsEmpty => _paths.Count == 0;
         public FileCaptureState State => _paths.Count == 0
@@ -3837,6 +3839,7 @@ internal sealed class FileCaptureService : IDisposable
             if (frame.HasValue)
             {
                 _lastFrame = frame;
+                _lastFramePath = _currentPath;
             }
             else if (_current.State == FileCaptureState.Error)
             {
@@ -3917,6 +3920,7 @@ internal sealed class FileCaptureService : IDisposable
                 _phaseEndSeconds = 0;
                 _lastCaptureTimelineSeconds = 0;
                 _lastFrame = null;
+                _lastFramePath = null;
                 return;
             }
 
@@ -3926,6 +3930,7 @@ internal sealed class FileCaptureService : IDisposable
             _clock.Restart();
             _random = new Random();
             _lastFrame = null;
+            _lastFramePath = null;
 
             if (_savedLivePhase == Phase.Delaying && _savedLivePhaseRemainingSeconds > 0.0001)
             {
@@ -4036,6 +4041,7 @@ internal sealed class FileCaptureService : IDisposable
                 DisposeCurrent(background: true);
                 _phase = Phase.Empty;
                 _lastFrame = null;
+                _lastFramePath = null;
                 return;
             }
 
@@ -4070,6 +4076,7 @@ internal sealed class FileCaptureService : IDisposable
             if (delay > 0.0001)
             {
                 _lastFrame = null;
+                _lastFramePath = null;
                 _phase = Phase.Delaying;
                 _phaseStartSeconds = now;
                 _phaseEndSeconds = now + delay;
@@ -4173,6 +4180,7 @@ internal sealed class FileCaptureService : IDisposable
         {
             DisposeCurrent(background: true);
             _lastFrame = null;
+            _lastFramePath = null;
             _currentPath = null;
             _phase = _paths.Count == 0 ? Phase.Empty : Phase.Uninitialized;
             _phaseStartSeconds = 0;
