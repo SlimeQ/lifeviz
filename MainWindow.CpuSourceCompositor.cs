@@ -38,6 +38,11 @@ public partial class MainWindow
 
             foreach (var source in sources)
             {
+                if (!source.Enabled)
+                {
+                    continue;
+                }
+
                 var frame = source.LastFrame;
                 if (frame == null)
                 {

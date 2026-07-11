@@ -725,7 +725,6 @@ public partial class LayerEditorWindow : Window
         _updatingVideoTransportUi = true;
         try
         {
-            source.VideoPlaybackPaused = playbackState.IsPaused;
             source.VideoPlaybackPosition = playbackState.NormalizedPosition;
             source.VideoPlaybackPositionSeconds = playbackState.PositionSeconds;
             source.VideoPlaybackDurationSeconds = playbackState.DurationSeconds;
@@ -972,6 +971,7 @@ public partial class LayerEditorWindow : Window
 
         bool pause = !source.VideoPlaybackPaused;
         _owner.UpdateSourceVideoPlaybackPaused(source.Id, pause);
+        source.VideoPlaybackPaused = pause;
         RefreshSelectedVideoTransportState();
     }
 

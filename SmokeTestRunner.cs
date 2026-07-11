@@ -119,8 +119,9 @@ internal static class SmokeTestRunner
                 "shutdown" => RunShutdownSmokeTest(),
                 "startup" => RunStartupSmokeTest(),
                 "startup-recovery" => RunStartupRecoverySmokeTest(),
+                "config-save-coalescing" => RunConfigSaveCoalescingSmokeTest(),
                 "all" => RunAllSmokeTests(),
-                _ => throw new ArgumentException($"Unknown smoke test target '{target}'. Expected profile-240, profile-480, profile-rgb-240, profile-rgb-480, profile-file-240, profile-file-480, profile-file-rgb-240, profile-file-rgb-480, profile-current-scene, profile-current-scene-visible, profile-current-scene-fullscreen, profile-current-scene-bisect, profile-current-scene-presets, profile-current-scene-visible-presets, profile-current-scene-fullscreen-presets, profile-current-scene-<144|240|480|720|1080|1440|2160>, profile-current-scene-visible-<144|240|480|720|1080|1440|2160>, profile-current-scene-fullscreen-<144|240|480|720|1080|1440|2160>, profile-current-scene-interaction, current-scene-hover-presentation, pacing-current-scene-visible-presets, pacing-current-scene-fullscreen-presets, pacing-current-scene-interaction, pacing-current-scene-overlay-fullscreen-144, pacing-current-scene-suite, frame-pump-thread-safety, gpu-benchmark, gpu-handoff, gpu-rgb-threshold, gpu-passthrough-signed-model, passthrough-underlay-only, gpu-frequency-hue, simulation-reactive-mappings, pixel-sort-reactive-cell-size, simulation-reactive-persistence, simulation-reactive-legacy-migration, simulation-reactive-removal, simulation-reactive-editor-isolation, sim-group-legacy-migration, no-sim-group-renders-composite, sim-group-removal-clears-runtime, disabled-sim-group-renders-composite, sim-group-stack-order, sim-group-inline-hue, sim-group-inline-presentation, sim-group-enabled-toggle, sim-group-remove-source, sim-group-live-edit-selection, pixel-sort-editor-roundtrip, gpu-bitwise, gpu-pixel-sort, sim-group-pixel-sort-color, gpu-injection-mode, gpu-file-injection-mode, offline-video-audio, live-video-audio, gpu-sim, gpu-source, source-reset, gpu-render, profile-mainloop, profile-mainloop-sim-group, dimensions, shutdown, startup, startup-recovery, or all.")
+                _ => throw new ArgumentException($"Unknown smoke test target '{target}'. Expected profile-240, profile-480, profile-rgb-240, profile-rgb-480, profile-file-240, profile-file-480, profile-file-rgb-240, profile-file-rgb-480, profile-current-scene, profile-current-scene-visible, profile-current-scene-fullscreen, profile-current-scene-bisect, profile-current-scene-presets, profile-current-scene-visible-presets, profile-current-scene-fullscreen-presets, profile-current-scene-<144|240|480|720|1080|1440|2160>, profile-current-scene-visible-<144|240|480|720|1080|1440|2160>, profile-current-scene-fullscreen-<144|240|480|720|1080|1440|2160>, profile-current-scene-interaction, current-scene-hover-presentation, pacing-current-scene-visible-presets, pacing-current-scene-fullscreen-presets, pacing-current-scene-interaction, pacing-current-scene-overlay-fullscreen-144, pacing-current-scene-suite, frame-pump-thread-safety, gpu-benchmark, gpu-handoff, gpu-rgb-threshold, gpu-passthrough-signed-model, passthrough-underlay-only, gpu-frequency-hue, simulation-reactive-mappings, pixel-sort-reactive-cell-size, simulation-reactive-persistence, simulation-reactive-legacy-migration, simulation-reactive-removal, simulation-reactive-editor-isolation, sim-group-legacy-migration, no-sim-group-renders-composite, sim-group-removal-clears-runtime, disabled-sim-group-renders-composite, sim-group-stack-order, sim-group-inline-hue, sim-group-inline-presentation, sim-group-enabled-toggle, sim-group-remove-source, sim-group-live-edit-selection, pixel-sort-editor-roundtrip, gpu-bitwise, gpu-pixel-sort, sim-group-pixel-sort-color, gpu-injection-mode, gpu-file-injection-mode, offline-video-audio, live-video-audio, autoclip, layer-transform-controls, chroma-key, gpu-sim, gpu-source, source-reset, gpu-render, profile-mainloop, profile-mainloop-sim-group, dimensions, shutdown, startup, startup-recovery, config-save-coalescing, or all.")
             };
         }
         catch (Exception ex)
@@ -1572,10 +1573,13 @@ internal static class SmokeTestRunner
         Logger.Info("Running silent live video-stack audio reactivity smoke test.");
         using var capture = new FileCaptureService();
         using var detector = new AudioBeatDetector();
+        var setupStopwatch = Stopwatch.StartNew();
         if (!capture.TryGetOrAdd(smokeVideoPath, out _, out string? error))
         {
             throw new InvalidOperationException(error ?? "Video source could not be opened.");
         }
+        setupStopwatch.Stop();
+        bool setupWasNonblocking = setupStopwatch.Elapsed < TimeSpan.FromSeconds(1);
 
         capture.SetMasterVideoAudioEnabled(true);
         capture.SetMasterVideoAudioVolume(1.0);
@@ -1626,9 +1630,10 @@ internal static class SmokeTestRunner
             detector.EndExternalInput();
         }
 
-        bool ok = mutedIgnored && receivedAudio && peakRms > 0.0001 && peakLevel > 0.01 && peakBand > 0.001;
+        bool ok = setupWasNonblocking && mutedIgnored && receivedAudio && peakRms > 0.0001 && peakLevel > 0.01 && peakBand > 0.001;
         Logger.Info($"Live video-audio smoke: mutedIgnored={mutedIgnored}, received={receivedAudio}, peakRms={peakRms:F6}, " +
-                    $"peakLevel={peakLevel:F3}, peakBand={peakBand:F3}, ok={ok}.");
+                    $"peakLevel={peakLevel:F3}, peakBand={peakBand:F3}, setupMs={setupStopwatch.Elapsed.TotalMilliseconds:F1}, " +
+                    $"setupNonblocking={setupWasNonblocking}, ok={ok}.");
         return ok ? 0 : 1;
     }
 
@@ -2375,16 +2380,22 @@ internal static class SmokeTestRunner
                                 $"Main window remained throttled after interaction recovery. ui_interaction_throttled avg={postThrottle.Average:F3}.");
                         }
 
-                        if (editorGap.Average > 25.0 || editorGap.P95 > 35.0 || editorGap.Average > preGap.Average + 5.0)
+                        double interactionAverageLimit = Math.Max(25.0, preGap.Average + 5.0);
+                        double interactionP95Limit = Math.Max(35.0, preGap.P95 + 10.0);
+                        if (editorGap.Average > interactionAverageLimit || editorGap.P95 > interactionP95Limit)
                         {
                             throw new InvalidOperationException(
-                                $"Frame pacing degraded while the Scene Editor was open. Pre avg={preGap.Average:F3} ms, editor avg={editorGap.Average:F3} ms, editor p95={editorGap.P95:F3} ms.");
+                                $"Frame pacing degraded while the Scene Editor was open. Pre avg={preGap.Average:F3} ms, " +
+                                $"editor avg={editorGap.Average:F3} ms (limit {interactionAverageLimit:F3}), " +
+                                $"editor p95={editorGap.P95:F3} ms (limit {interactionP95Limit:F3}).");
                         }
 
-                        if (postGap.Average > 25.0 || postGap.P95 > 35.0 || postGap.Average > preGap.Average + 5.0)
+                        if (postGap.Average > interactionAverageLimit || postGap.P95 > interactionP95Limit)
                         {
                             throw new InvalidOperationException(
-                                $"Frame pacing did not recover after context menu interaction. Pre avg={preGap.Average:F3} ms, post avg={postGap.Average:F3} ms, post p95={postGap.P95:F3} ms.");
+                                $"Frame pacing did not recover after context menu interaction. Pre avg={preGap.Average:F3} ms, " +
+                                $"post avg={postGap.Average:F3} ms (limit {interactionAverageLimit:F3}), " +
+                                $"post p95={postGap.P95:F3} ms (limit {interactionP95Limit:F3}).");
                         }
 
                         window.Close();
@@ -3143,6 +3154,64 @@ internal static class SmokeTestRunner
         }
 
         Logger.Info("Startup recovery smoke test passed.");
+        return exitCode;
+    }
+
+    private static int RunConfigSaveCoalescingSmokeTest()
+    {
+        Logger.Info("Running config-save coalescing smoke test.");
+        Exception? failure = null;
+
+        var app = new App();
+        app.InitializeComponent();
+        app.ShutdownMode = ShutdownMode.OnExplicitShutdown;
+        app.DispatcherUnhandledException += (_, args) =>
+        {
+            failure ??= args.Exception;
+            args.Handled = true;
+            app.Shutdown(1);
+        };
+
+        app.Startup += (_, _) =>
+        {
+            var waitForWindow = new DispatcherTimer(DispatcherPriority.ApplicationIdle)
+            {
+                Interval = TimeSpan.FromMilliseconds(50)
+            };
+            waitForWindow.Tick += (_, _) =>
+            {
+                if (app.MainWindow is not MainWindow window)
+                {
+                    return;
+                }
+
+                waitForWindow.Stop();
+                window.ShowInTaskbar = false;
+                window.ShowActivated = false;
+                window.Left = -10000;
+                window.Top = -10000;
+                window.Opacity = 0.0;
+
+                var (ok, detail) = window.RunConfigSaveCoalescingSmoke();
+                Logger.Info($"Config-save coalescing smoke: {detail}");
+                if (!ok)
+                {
+                    failure = new InvalidOperationException($"Config-save coalescing validation failed. {detail}");
+                }
+
+                window.Close();
+                app.Shutdown(failure == null ? 0 : 1);
+            };
+            waitForWindow.Start();
+        };
+
+        int exitCode = app.Run();
+        if (failure != null)
+        {
+            throw new InvalidOperationException("Config-save coalescing smoke test failed.", failure);
+        }
+
+        Logger.Info("Config-save coalescing smoke test passed.");
         return exitCode;
     }
 

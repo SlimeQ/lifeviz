@@ -21,6 +21,19 @@ namespace lifeviz;
 
 internal sealed class AudioBeatDetector : IDisposable
 {
+    private struct DebugHistorySample
+    {
+        public float Waveform;
+        public float WaveformMin;
+        public float WaveformMax;
+        public float Envelope;
+        public float BassEnergy;
+        public float MainFrequency;
+        public float BassFrequency;
+        public float MidFrequency;
+        public float HighFrequency;
+    }
+
     private const double MinInputGain = 0.0;
     private const double MaxInputGain = 2.0;
     private const int AudioDebugHistorySeconds = 30;
@@ -74,6 +87,8 @@ internal sealed class AudioBeatDetector : IDisposable
     private readonly float[] _bassFrequencyHistory = new float[WaveformHistorySize];
     private readonly float[] _midFrequencyHistory = new float[WaveformHistorySize];
     private readonly float[] _highFrequencyHistory = new float[WaveformHistorySize];
+    private DebugHistorySample[] _pendingDebugHistory = new DebugHistorySample[32];
+    private readonly Complex[] _fftBuffer = new Complex[1024];
     private int _waveformHistoryWriteIndex;
     private int _waveformHistoryCount;
     private double _waveformHistoryAccumulator;
@@ -676,7 +691,7 @@ internal sealed class AudioBeatDetector : IDisposable
 
             if (fftSize >= 256)
             {
-                var fftBuffer = new Complex[fftSize];
+                var fftBuffer = _fftBuffer;
                 int start = samples.Length - fftSize;
                 for (int i = 0; i < fftSize; i++)
                 {
@@ -685,7 +700,7 @@ internal sealed class AudioBeatDetector : IDisposable
                     fftBuffer[i] = new Complex(sample * window, 0);
                 }
 
-                CalculateFFT(fftBuffer);
+                CalculateFFT(fftBuffer, fftSize);
                 AnalyzeSpectrum(fftBuffer, fftSize);
             }
         }
@@ -715,15 +730,7 @@ internal sealed class AudioBeatDetector : IDisposable
             return;
         }
 
-        var appendedWaveform = new List<float>(Math.Max(4, samples.Length / 256));
-        var appendedWaveformMin = new List<float>(Math.Max(4, samples.Length / 256));
-        var appendedWaveformMax = new List<float>(Math.Max(4, samples.Length / 256));
-        var appendedEnvelope = new List<float>(Math.Max(4, samples.Length / 256));
-        var appendedBassEnergy = new List<float>(Math.Max(4, samples.Length / 256));
-        var appendedMainFrequency = new List<float>(Math.Max(4, samples.Length / 256));
-        var appendedBassFrequency = new List<float>(Math.Max(4, samples.Length / 256));
-        var appendedMidFrequency = new List<float>(Math.Max(4, samples.Length / 256));
-        var appendedHighFrequency = new List<float>(Math.Max(4, samples.Length / 256));
+        int appendedCount = 0;
         for (int i = 0; i < samples.Length; i++)
         {
             double scaledSample = Math.Clamp(samples[i] * inputGain, -1.0, 1.0);
@@ -733,16 +740,23 @@ internal sealed class AudioBeatDetector : IDisposable
             _waveformHistoryAccumulator += AudioDebugHistorySampleRate;
             if (_waveformHistoryAccumulator >= _sampleRate)
             {
-                appendedWaveform.Add((float)scaledSample);
-                appendedWaveformMin.Add((float)_waveformBucketMin);
-                appendedWaveformMax.Add((float)_waveformBucketMax);
-                float envelope = (float)_waveformBucketAbsMax;
-                appendedEnvelope.Add(envelope);
-                appendedBassEnergy.Add((float)BassEnergy);
-                appendedMainFrequency.Add((float)MainFrequency);
-                appendedBassFrequency.Add((float)BassFrequency);
-                appendedMidFrequency.Add((float)MidFrequency);
-                appendedHighFrequency.Add((float)HighFrequency);
+                if (appendedCount == _pendingDebugHistory.Length)
+                {
+                    Array.Resize(ref _pendingDebugHistory, _pendingDebugHistory.Length * 2);
+                }
+
+                _pendingDebugHistory[appendedCount++] = new DebugHistorySample
+                {
+                    Waveform = (float)scaledSample,
+                    WaveformMin = (float)_waveformBucketMin,
+                    WaveformMax = (float)_waveformBucketMax,
+                    Envelope = (float)_waveformBucketAbsMax,
+                    BassEnergy = (float)BassEnergy,
+                    MainFrequency = (float)MainFrequency,
+                    BassFrequency = (float)BassFrequency,
+                    MidFrequency = (float)MidFrequency,
+                    HighFrequency = (float)HighFrequency
+                };
                 _waveformHistoryAccumulator -= _sampleRate;
                 _waveformBucketAbsMax = 0;
                 _waveformBucketMin = 1.0;
@@ -750,24 +764,25 @@ internal sealed class AudioBeatDetector : IDisposable
             }
         }
 
-        if (appendedWaveform.Count == 0)
+        if (appendedCount == 0)
         {
             return;
         }
 
         lock (_waveformLock)
         {
-            for (int i = 0; i < appendedWaveform.Count; i++)
+            for (int i = 0; i < appendedCount; i++)
             {
-                _waveformHistory[_waveformHistoryWriteIndex] = appendedWaveform[i];
-                _waveformMinHistory[_waveformHistoryWriteIndex] = appendedWaveformMin[i];
-                _waveformMaxHistory[_waveformHistoryWriteIndex] = appendedWaveformMax[i];
-                _envelopeHistory[_waveformHistoryWriteIndex] = appendedEnvelope[i];
-                _bassEnergyHistory[_waveformHistoryWriteIndex] = appendedBassEnergy[i];
-                _mainFrequencyHistory[_waveformHistoryWriteIndex] = appendedMainFrequency[i];
-                _bassFrequencyHistory[_waveformHistoryWriteIndex] = appendedBassFrequency[i];
-                _midFrequencyHistory[_waveformHistoryWriteIndex] = appendedMidFrequency[i];
-                _highFrequencyHistory[_waveformHistoryWriteIndex] = appendedHighFrequency[i];
+                DebugHistorySample sample = _pendingDebugHistory[i];
+                _waveformHistory[_waveformHistoryWriteIndex] = sample.Waveform;
+                _waveformMinHistory[_waveformHistoryWriteIndex] = sample.WaveformMin;
+                _waveformMaxHistory[_waveformHistoryWriteIndex] = sample.WaveformMax;
+                _envelopeHistory[_waveformHistoryWriteIndex] = sample.Envelope;
+                _bassEnergyHistory[_waveformHistoryWriteIndex] = sample.BassEnergy;
+                _mainFrequencyHistory[_waveformHistoryWriteIndex] = sample.MainFrequency;
+                _bassFrequencyHistory[_waveformHistoryWriteIndex] = sample.BassFrequency;
+                _midFrequencyHistory[_waveformHistoryWriteIndex] = sample.MidFrequency;
+                _highFrequencyHistory[_waveformHistoryWriteIndex] = sample.HighFrequency;
                 _waveformHistoryWriteIndex = (_waveformHistoryWriteIndex + 1) % WaveformHistorySize;
                 if (_waveformHistoryCount < WaveformHistorySize)
                 {
@@ -870,9 +885,8 @@ internal sealed class AudioBeatDetector : IDisposable
         HighFrequencyNormalized = highMaxMagnitude > 0 && HighNormalizedLevel > 0.001 ? NormalizeLogFrequencyWithinBand(HighFrequency, 2000.0, 8000.0) : 0;
     }
 
-    private static void CalculateFFT(Complex[] buffer)
+    private static void CalculateFFT(Complex[] buffer, int n)
     {
-        int n = buffer.Length;
         int m = (int)Math.Log2(n);
 
         // Bit reversal

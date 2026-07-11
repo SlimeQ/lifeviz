@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Globalization;
@@ -20,6 +21,36 @@ namespace lifeviz;
 
 internal sealed class FileCaptureService : IDisposable
 {
+    private const int VideoProbeConcurrency = 2;
+    private const int VideoProbeTimeoutMilliseconds = 15_000;
+    private const int VideoProbeWaitGraceMilliseconds = 1_000;
+    private const int VideoProbeCacheCapacity = 256;
+    private const int VideoProbeCacheTrimTarget = 224;
+    private const int VideoProbeFailureRetryMilliseconds = 10_000;
+    private static readonly SemaphoreSlim VideoProbeGate = new(VideoProbeConcurrency, VideoProbeConcurrency);
+    private static readonly ConcurrentDictionary<string, VideoProbeCacheEntry> VideoProbeTasks =
+        new(StringComparer.OrdinalIgnoreCase);
+    private static readonly object VideoProbeCacheTrimSync = new();
+    private static long _videoProbeUseCounter;
+
+    private sealed class VideoProbeCacheEntry
+    {
+        public VideoProbeCacheEntry(string path)
+        {
+            CreatedTimestamp = Stopwatch.GetTimestamp();
+            long deadlineTimestamp = CreatedTimestamp +
+                                     (long)Math.Ceiling(VideoProbeTimeoutMilliseconds * Stopwatch.Frequency / 1000.0);
+            Probe = new Lazy<Task<VideoSession.VideoProbeInfo?>>(
+                () => RunVideoProbeAsync(path, deadlineTimestamp),
+                LazyThreadSafetyMode.ExecutionAndPublication);
+        }
+
+        public Lazy<Task<VideoSession.VideoProbeInfo?>> Probe { get; }
+        public long CreatedTimestamp { get; }
+        public long LastUse { get; set; }
+        public long FailureObservedTimestamp;
+    }
+
     private static readonly HashSet<string> VideoExtensions = new(StringComparer.OrdinalIgnoreCase)
     {
         ".mp4", ".mov", ".wmv", ".avi", ".mkv", ".webm", ".mpg", ".mpeg"
@@ -50,6 +81,145 @@ internal sealed class FileCaptureService : IDisposable
     private int _offlineRenderFps;
     private double _offlineRenderTimeSeconds;
 
+    private static Task<VideoSession.VideoProbeInfo?> GetVideoProbeAsync(string path)
+    {
+        if (string.IsNullOrWhiteSpace(path))
+        {
+            return Task.FromResult<VideoSession.VideoProbeInfo?>(null);
+        }
+
+        string cacheKey = BuildVideoProbeCacheKey(path);
+        while (true)
+        {
+            VideoProbeCacheEntry entry = VideoProbeTasks.GetOrAdd(
+                cacheKey,
+                _ => new VideoProbeCacheEntry(path));
+            entry.LastUse = Interlocked.Increment(ref _videoProbeUseCounter);
+            Task<VideoSession.VideoProbeInfo?> probeTask = entry.Probe.Value;
+
+            if (probeTask.IsCompletedSuccessfully && !probeTask.Result.HasValue)
+            {
+                long failureTimestamp = Volatile.Read(ref entry.FailureObservedTimestamp);
+                if (failureTimestamp == 0)
+                {
+                    failureTimestamp = Stopwatch.GetTimestamp();
+                    Interlocked.CompareExchange(ref entry.FailureObservedTimestamp, failureTimestamp, 0);
+                }
+
+                if (Stopwatch.GetElapsedTime(failureTimestamp).TotalMilliseconds < VideoProbeFailureRetryMilliseconds)
+                {
+                    TrimVideoProbeCacheIfNeeded();
+                    return probeTask;
+                }
+
+                if (VideoProbeTasks.TryGetValue(cacheKey, out var current) &&
+                    ReferenceEquals(current, entry))
+                {
+                    VideoProbeTasks.TryRemove(cacheKey, out _);
+                }
+                continue;
+            }
+
+            TrimVideoProbeCacheIfNeeded();
+            return probeTask;
+        }
+    }
+
+    private static string BuildVideoProbeCacheKey(string path)
+    {
+        try
+        {
+            string fullPath = Path.GetFullPath(path);
+            if (File.Exists(fullPath))
+            {
+                var info = new FileInfo(fullPath);
+                return $"{fullPath}\0{info.Length}\0{info.LastWriteTimeUtc.Ticks}";
+            }
+        }
+        catch
+        {
+            // Remote URLs and malformed paths fall back to their original cache key.
+        }
+
+        return path;
+    }
+
+    private static void TrimVideoProbeCacheIfNeeded()
+    {
+        if (VideoProbeTasks.Count <= VideoProbeCacheCapacity)
+        {
+            return;
+        }
+
+        lock (VideoProbeCacheTrimSync)
+        {
+            int removeCount = Math.Max(0, VideoProbeTasks.Count - VideoProbeCacheTrimTarget);
+            if (removeCount == 0)
+            {
+                return;
+            }
+
+            foreach (var candidate in VideoProbeTasks
+                         .Where(pair => pair.Value.Probe.IsValueCreated && pair.Value.Probe.Value.IsCompleted)
+                         .OrderBy(pair => pair.Value.LastUse)
+                         .Take(removeCount)
+                         .ToArray())
+            {
+                if (VideoProbeTasks.TryGetValue(candidate.Key, out var current) &&
+                    ReferenceEquals(current, candidate.Value))
+                {
+                    VideoProbeTasks.TryRemove(candidate.Key, out _);
+                }
+            }
+        }
+    }
+
+    private static async Task<VideoSession.VideoProbeInfo?> RunVideoProbeAsync(string path, long deadlineTimestamp)
+    {
+        int remainingMilliseconds = GetRemainingProbeMilliseconds(deadlineTimestamp);
+        if (remainingMilliseconds <= 0 ||
+            !await VideoProbeGate.WaitAsync(remainingMilliseconds).ConfigureAwait(false))
+        {
+            Logger.Warn($"Video probe expired while waiting for a probe slot: {Path.GetFileName(path)}");
+            return null;
+        }
+
+        try
+        {
+            return await Task.Run(() =>
+            {
+                int processTimeoutMilliseconds = GetRemainingProbeMilliseconds(deadlineTimestamp);
+                if (processTimeoutMilliseconds <= 0)
+                {
+                    Logger.Warn($"Video probe expired before launch: {Path.GetFileName(path)}");
+                    return null;
+                }
+
+                return VideoSession.ProbeVideoUncached(path, processTimeoutMilliseconds);
+            }).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            Logger.Warn($"Video probe failed for {Path.GetFileName(path)}. {ex.Message}");
+            return null;
+        }
+        finally
+        {
+            VideoProbeGate.Release();
+        }
+    }
+
+    private static int GetRemainingProbeMilliseconds(long deadlineTimestamp)
+    {
+        long remainingTicks = deadlineTimestamp - Stopwatch.GetTimestamp();
+        if (remainingTicks <= 0)
+        {
+            return 0;
+        }
+
+        return Math.Max(1, (int)Math.Ceiling(remainingTicks * 1000.0 / Stopwatch.Frequency));
+    }
+
     private static Task RunBackgroundLongRunning(Action action, string threadName)
     {
         var tcs = new TaskCompletionSource<object?>(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -60,31 +230,6 @@ internal sealed class FileCaptureService : IDisposable
             {
                 action();
                 tcs.TrySetResult(null);
-            }
-            catch (Exception ex)
-            {
-                tcs.TrySetException(ex);
-            }
-        })
-        {
-            IsBackground = true,
-            Name = threadName,
-            Priority = ThreadPriority.Normal
-        };
-
-        thread.Start();
-        return tcs.Task;
-    }
-
-    private static Task<T> RunBackgroundLongRunning<T>(Func<T> action, string threadName)
-    {
-        var tcs = new TaskCompletionSource<T>(TaskCreationOptions.RunContinuationsAsynchronously);
-        var thread = new Thread(() =>
-        {
-            ConfigureBackgroundWorkerThread(threadName);
-            try
-            {
-                tcs.TrySetResult(action());
             }
             catch (Exception ex)
             {
@@ -486,13 +631,26 @@ internal sealed class FileCaptureService : IDisposable
             ApplyMasterAudioSettingsToSession(session);
             ApplyLiveAudioAnalysisSettingsToSession(session);
             ApplyPerformanceSettingsToSession(session);
-            
+
+            FileSession selectedSession = session;
             lock (_lock)
             {
-                _sessions[key] = session;
+                if (_sessions.TryGetValue(key, out var existing))
+                {
+                    selectedSession = existing;
+                }
+                else
+                {
+                    _sessions[key] = session;
+                }
             }
 
-            return (true, session.GetInfo(), null);
+            if (!ReferenceEquals(selectedSession, session))
+            {
+                session.Dispose();
+            }
+
+            return (true, selectedSession.GetInfo(), null);
         }
         catch (Exception ex)
         {
@@ -1320,7 +1478,7 @@ internal sealed class FileCaptureService : IDisposable
         private double _pausedOffsetSeconds;
         private bool _playbackPaused;
         private bool _audioEnabled;
-        private bool _isDisposed;
+        private volatile bool _isDisposed;
         private bool _masterAudioEnabled = true;
         private double _masterAudioVolume = 1.0;
         private double _sourceAudioVolume = 1.0;
@@ -1341,7 +1499,7 @@ internal sealed class FileCaptureService : IDisposable
         private readonly Stack<byte[]> _rawFramePool = new();
 
         private readonly object _lock = new();
-        private bool _hasError;
+        private volatile bool _hasError;
         private volatile bool _ended;
         private string? _errorMessage;
         private bool _preferNativeProcessFrames;
@@ -1370,6 +1528,8 @@ internal sealed class FileCaptureService : IDisposable
         private int _readyHeight;
         private int _readyDownscaledWidth;
         private int _readyDownscaledHeight;
+        private Task _initializationTask = Task.CompletedTask;
+        private bool _offlineInitializationWaitWarningLogged;
         public VideoSession(string path, string displayName, bool loopPlayback, Func<Task<ResolvedPlayback>>? urlResolver = null, VideoProbeInfo? cachedProbe = null)
             : base(path, displayName, 0, 0)
         {
@@ -1378,13 +1538,21 @@ internal sealed class FileCaptureService : IDisposable
 
             if (_urlResolver == null)
             {
-                // Local file: Initialize immediately (blocking probe)
-                InitializeSync(path, cachedProbe);
+                if (cachedProbe.HasValue)
+                {
+                    InitializeSync(path, cachedProbe);
+                }
+                else
+                {
+                    // The source can enter the scene immediately in Pending state. Metadata
+                    // probing is shared and bounded, and no longer blocks the WPF/UI caller.
+                    _initializationTask = InitializeLocalAsync(path);
+                }
             }
             else
             {
                 // Remote/Async: Initialize background
-                _ = RunBackgroundLongRunning(
+                _initializationTask = RunBackgroundLongRunning(
                     () => InitializeAsync().GetAwaiter().GetResult(),
                     "LifeViz.VideoInitialize");
             }
@@ -1396,10 +1564,48 @@ internal sealed class FileCaptureService : IDisposable
         {
         }
 
+        private async Task InitializeLocalAsync(string path)
+        {
+            try
+            {
+                VideoProbeInfo? probe = await GetVideoProbeAsync(path).ConfigureAwait(false);
+                if (_isDisposed)
+                {
+                    return;
+                }
+
+                if (!probe.HasValue)
+                {
+                    _hasError = true;
+                    _errorMessage = "Failed to probe video dimensions.";
+                    Logger.Error($"{_errorMessage} {path}");
+                    return;
+                }
+
+                InitializeSync(path, probe);
+            }
+            catch (Exception ex)
+            {
+                if (_isDisposed)
+                {
+                    return;
+                }
+
+                _hasError = true;
+                _errorMessage = ex.Message;
+                Logger.Error($"Failed to initialize video session: {path}", ex);
+            }
+        }
+
         private void InitializeSync(string path, VideoProbeInfo? cachedProbe)
         {
             try
             {
+                if (_isDisposed)
+                {
+                    return;
+                }
+
                 Logger.Info($"Initializing local video: {path}");
 
                 double durationSeconds;
@@ -1631,6 +1837,30 @@ internal sealed class FileCaptureService : IDisposable
 
         public override FileCaptureFrame? CaptureFrame(int targetWidth, int targetHeight, FitMode fitMode, bool includeSource)
         {
+            if (_offlineRenderEnabled && !_initializationTask.IsCompleted)
+            {
+                bool initialized = false;
+                try
+                {
+                    initialized = _initializationTask.Wait(
+                        VideoProbeTimeoutMilliseconds + VideoProbeWaitGraceMilliseconds);
+                }
+                catch (AggregateException)
+                {
+                    initialized = true;
+                }
+
+                if (!initialized)
+                {
+                    if (!_offlineInitializationWaitWarningLogged)
+                    {
+                        _offlineInitializationWaitWarningLogged = true;
+                        Logger.Warn($"Offline video initialization wait expired: {DisplayName}");
+                    }
+                    return null;
+                }
+            }
+
             if (_hasError) return null;
 
             EnsureProcessDimensionsForRequest(targetWidth, targetHeight, fitMode, includeSource);
@@ -2071,7 +2301,7 @@ internal sealed class FileCaptureService : IDisposable
                 return false;
             }
 
-            string args = "-hide_banner -loglevel warning";
+            string args = "-hide_banner -nostats -loglevel warning";
             if (_offlineStartOffsetSeconds > 0.05)
             {
                 args += $" -ss {_offlineStartOffsetSeconds.ToString("0.###", CultureInfo.InvariantCulture)}";
@@ -2082,7 +2312,9 @@ internal sealed class FileCaptureService : IDisposable
                 args += " -stream_loop -1";
             }
             args += $" -i \"{playbackUrl}\"";
-            args += " -map 0:a:0? -vn -ac 1 -ar 48000 -acodec pcm_f32le -f f32le -";
+            // stream_loop restarts source timestamps. Rebase PCM timestamps to the emitted
+            // sample count so the raw output muxer never receives non-monotonic DTS values.
+            args += " -map 0:a:0? -vn -af \"asetpts=N/SR/TB\" -ac 1 -ar 48000 -acodec pcm_f32le -f f32le -";
 
             try
             {
@@ -2106,26 +2338,33 @@ internal sealed class FileCaptureService : IDisposable
                     $"ffmpeg offline audio decode for {DisplayName}",
                     _lowContentionMode,
                     preferThroughput: true);
-                process.ErrorDataReceived += (_, e) =>
-                {
-                    if (!string.IsNullOrWhiteSpace(e.Data))
-                    {
-                        Logger.Warn($"[ffmpeg-offline-audio:{DisplayName}] {e.Data}");
-                    }
-                };
-                process.BeginErrorReadLine();
-
                 lock (_offlineAudioLock)
                 {
                     _offlineAudioProcess = process;
                     _offlineAudioStream = process.StandardOutput.BaseStream;
                 }
+
+                process.ErrorDataReceived += (_, e) =>
+                {
+                    bool isCurrentDecoder;
+                    lock (_offlineAudioLock)
+                    {
+                        isCurrentDecoder = ReferenceEquals(_offlineAudioProcess, process);
+                    }
+
+                    if (isCurrentDecoder && !string.IsNullOrWhiteSpace(e.Data))
+                    {
+                        Logger.Warn($"[ffmpeg-offline-audio:{DisplayName}] {e.Data}");
+                    }
+                };
+                process.BeginErrorReadLine();
                 return true;
             }
             catch (Exception ex)
             {
                 Logger.Warn($"Offline audio analysis unavailable for {DisplayName}: {ex.Message}");
                 _offlineAudioUnavailable = true;
+                StopOfflineAudioDecoder();
                 return false;
             }
         }
@@ -3233,24 +3472,82 @@ internal sealed class FileCaptureService : IDisposable
             width = 0;
             height = 0;
             durationSeconds = 0;
+
+            Task<VideoProbeInfo?> probeTask = GetVideoProbeAsync(path);
+            VideoProbeInfo? probe;
             try
             {
+                if (!probeTask.Wait(VideoProbeTimeoutMilliseconds + VideoProbeWaitGraceMilliseconds))
+                {
+                    Logger.Warn($"Timed out waiting for video probe result: {System.IO.Path.GetFileName(path)}");
+                    return false;
+                }
+
+                probe = probeTask.GetAwaiter().GetResult();
+            }
+            catch (Exception ex)
+            {
+                Logger.Warn($"Failed while waiting for video probe: {System.IO.Path.GetFileName(path)}. {ex.Message}");
+                return false;
+            }
+
+            if (!probe.HasValue)
+            {
+                return false;
+            }
+
+            width = probe.Value.Width;
+            height = probe.Value.Height;
+            durationSeconds = probe.Value.DurationSeconds;
+            return width > 0 && height > 0;
+        }
+
+        internal static VideoProbeInfo? ProbeVideoUncached(string path, int timeoutMilliseconds = VideoProbeTimeoutMilliseconds)
+        {
+            try
+            {
+                timeoutMilliseconds = Math.Clamp(timeoutMilliseconds, 1, VideoProbeTimeoutMilliseconds);
                 var psi = new ProcessStartInfo
                 {
                     FileName = "ffmpeg",
-                    Arguments = $"-hide_banner -i \"{path}\"",
                     UseShellExecute = false,
                     RedirectStandardError = true,
                     CreateNoWindow = true
                 };
-                
+                psi.ArgumentList.Add("-hide_banner");
+                psi.ArgumentList.Add("-nostats");
+                psi.ArgumentList.Add("-i");
+                psi.ArgumentList.Add(path);
+
                 using var p = Process.Start(psi);
-                if (p == null) return false;
-                
-                string output = p.StandardError.ReadToEnd();
-                p.WaitForExit();
+                if (p == null)
+                {
+                    return null;
+                }
+
+                TryLowerChildProcessPriority(p, "ffmpeg video probe", lowContentionMode: true);
+                Task<string> stderrTask = p.StandardError.ReadToEndAsync();
+                if (!p.WaitForExit(timeoutMilliseconds))
+                {
+                    try
+                    {
+                        p.Kill(entireProcessTree: true);
+                    }
+                    catch
+                    {
+                        // Best effort; disposing the process below still releases our handles.
+                    }
+
+                    try { p.WaitForExit(500); } catch { }
+                    try { stderrTask.Wait(TimeSpan.FromMilliseconds(500)); } catch { }
+                    Logger.Warn($"Video probe timed out after {timeoutMilliseconds} ms: {System.IO.Path.GetFileName(path)}");
+                    return null;
+                }
+
+                string output = stderrTask.ConfigureAwait(false).GetAwaiter().GetResult();
 
                 var durationMatch = Regex.Match(output, @"Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)");
+                double durationSeconds = 0;
                 if (durationMatch.Success &&
                     int.TryParse(durationMatch.Groups[1].Value, out int hours) &&
                     int.TryParse(durationMatch.Groups[2].Value, out int minutes) &&
@@ -3261,20 +3558,23 @@ internal sealed class FileCaptureService : IDisposable
                 
                 // Regex for "Video: ..., 1920x1080"
                 var match = Regex.Match(output, @"Video:.*?, (\d+)x(\d+)");
-                if (match.Success)
+                if (match.Success &&
+                    int.TryParse(match.Groups[1].Value, NumberStyles.Integer, CultureInfo.InvariantCulture, out int width) &&
+                    int.TryParse(match.Groups[2].Value, NumberStyles.Integer, CultureInfo.InvariantCulture, out int height) &&
+                    width > 0 &&
+                    height > 0)
                 {
-                    width = int.Parse(match.Groups[1].Value);
-                    height = int.Parse(match.Groups[2].Value);
-                    return width > 0 && height > 0;
+                    return new VideoProbeInfo(width, height, durationSeconds);
                 }
             }
-                        catch (Exception ex)
-                        {
-                            Logger.Warn($"Probe failed: {ex.Message}");
-                        }
-                        return false;
-                    }
-                }
+            catch (Exception ex)
+            {
+                Logger.Warn($"Probe failed: {ex.Message}");
+            }
+
+            return null;
+        }
+    }
             
     internal sealed class VideoSequenceSession : IDisposable
     {
@@ -3282,10 +3582,9 @@ internal sealed class FileCaptureService : IDisposable
         private readonly List<string> _paths;
         private readonly string _displayName;
         private readonly object _lock = new();
-        private readonly Dictionary<string, VideoSession.VideoProbeInfo> _probeCache = new(StringComparer.OrdinalIgnoreCase);
         private int _index;
         private VideoSession? _current;
-        private Task<VideoSession?>? _pendingAdvanceTask;
+        private Task<VideoSession.VideoProbeInfo?>? _pendingAdvanceTask;
         private int _pendingAdvanceIndex = -1;
         private int _errorStreak;
         private bool _hasError;
@@ -3300,6 +3599,8 @@ internal sealed class FileCaptureService : IDisposable
         private int _videoDecodeFpsLimit;
         private bool _offlineRenderEnabled;
         private int _offlineRenderFps;
+        private long _offlineProbeDeadlineTimestamp;
+        private bool _offlineProbeBudgetExhausted;
         private FileCaptureFrame? _lastFrame;
             
         public VideoSequenceSession(IReadOnlyList<string> paths)
@@ -3307,18 +3608,7 @@ internal sealed class FileCaptureService : IDisposable
             _paths = new List<string>(paths);
             _displayName = BuildDisplayName(_paths);
             _index = 0;
-            TryCacheProbe(_paths[_index]);
-            _current = new VideoSession(_paths[_index], loopPlayback: false, GetCachedProbe(_paths[_index]));
-            _current.SetMasterAudio(_masterAudioEnabled, _masterAudioVolume);
-            _current.SetLiveAudioAnalysisEnabled(_liveAudioAnalysisEnabled);
-            _current.SetAudioVolume(_audioVolume);
-            _current.SetAudioEnabled(_audioEnabled);
-            _current.SetPlaybackPaused(_playbackPaused);
-            _current.SetPerformanceSettings(_lowContentionMode, _decoderThreadLimit, _videoDecodeFpsLimit);
-            _current.SetOfflineRenderMode(_offlineRenderEnabled, _offlineRenderFps);
-            _ = RunBackgroundLongRunning(
-                PrimeProbeCache,
-                "LifeViz.SequenceProbePrime");
+            ScheduleProbe(_index);
         }
             
                     public IReadOnlyList<string> Paths => _paths;
@@ -3328,7 +3618,7 @@ internal sealed class FileCaptureService : IDisposable
                     {
                         get
                         {
-                            if (_hasError)
+                            if (_hasError || _offlineProbeBudgetExhausted)
                             {
                                 return FileCaptureState.Error;
                             }
@@ -3357,28 +3647,10 @@ internal sealed class FileCaptureService : IDisposable
                         TryPromotePendingAdvance();
                         if (_offlineRenderEnabled)
                         {
-                            Task<VideoSession?>? pendingTask;
-                            lock (_lock)
-                            {
-                                pendingTask = _pendingAdvanceTask;
-                            }
-
-                            if (pendingTask != null && !pendingTask.IsCompleted)
-                            {
-                                try
-                                {
-                                    pendingTask.Wait(TimeSpan.FromSeconds(30));
-                                }
-                                catch (AggregateException)
-                                {
-                                    // TryPromotePendingAdvance records the underlying failure.
-                                }
-
-                                TryPromotePendingAdvance();
-                            }
+                            WaitForPendingAdvanceForOffline();
                         }
 
-                        if (_hasError)
+                        if (_hasError || _offlineProbeBudgetExhausted)
                         {
                             return _lastFrame;
                         }
@@ -3425,21 +3697,17 @@ internal sealed class FileCaptureService : IDisposable
         {
             _hasError = false;
             _errorStreak = 0;
+            _offlineProbeDeadlineTimestamp = 0;
+            _offlineProbeBudgetExhausted = false;
             lock (_lock)
             {
                 _pendingAdvanceTask = null;
                 _pendingAdvanceIndex = -1;
             }
             _current?.Dispose();
+            _current = null;
             _index = 0;
-            _current = new VideoSession(_paths[_index], loopPlayback: false);
-            _current.SetMasterAudio(_masterAudioEnabled, _masterAudioVolume);
-            _current.SetLiveAudioAnalysisEnabled(_liveAudioAnalysisEnabled);
-            _current.SetAudioVolume(_audioVolume);
-            _current.SetAudioEnabled(_audioEnabled);
-            _current.SetPlaybackPaused(_playbackPaused);
-            _current.SetPerformanceSettings(_lowContentionMode, _decoderThreadLimit, _videoDecodeFpsLimit);
-            _current.SetOfflineRenderMode(_offlineRenderEnabled, _offlineRenderFps);
+            ScheduleProbe(_index);
         }
 
         public void SetAudioEnabled(bool enabled)
@@ -3483,9 +3751,18 @@ internal sealed class FileCaptureService : IDisposable
 
         public void SetOfflineRenderMode(bool enabled, int fps)
         {
+            bool restartAfterBudgetFailure = !enabled &&
+                                             _offlineProbeBudgetExhausted &&
+                                             _current == null;
             _offlineRenderEnabled = enabled;
             _offlineRenderFps = enabled ? Math.Clamp(fps, 1, 144) : 0;
+            _offlineProbeDeadlineTimestamp = 0;
+            _offlineProbeBudgetExhausted = false;
             _current?.SetOfflineRenderMode(_offlineRenderEnabled, _offlineRenderFps);
+            if (restartAfterBudgetFailure)
+            {
+                ScheduleProbe(_index);
+            }
         }
 
         public bool MixOfflineAudioFrame(Span<float> destination)
@@ -3496,16 +3773,7 @@ internal sealed class FileCaptureService : IDisposable
             }
 
             TryPromotePendingAdvance();
-            Task<VideoSession?>? pendingTask;
-            lock (_lock)
-            {
-                pendingTask = _pendingAdvanceTask;
-            }
-            if (pendingTask != null && !pendingTask.IsCompleted)
-            {
-                try { pendingTask.Wait(TimeSpan.FromSeconds(30)); } catch (AggregateException) { }
-                TryPromotePendingAdvance();
-            }
+            WaitForPendingAdvanceForOffline();
 
             return _current?.MixOfflineAudioFrame(destination) == true;
         }
@@ -3573,11 +3841,8 @@ internal sealed class FileCaptureService : IDisposable
                 previous = _current;
                 _current = null;
                 nextIndex = (_index + 1) % _paths.Count;
-                _pendingAdvanceIndex = nextIndex;
-                _pendingAdvanceTask = RunBackgroundLongRunning<VideoSession?>(
-                    () => CreateSequenceVideoSession(_paths[nextIndex]),
-                    "LifeViz.SequenceAdvance");
             }
+            ScheduleProbe(nextIndex);
 
             if (previous != null)
             {
@@ -3591,49 +3856,155 @@ internal sealed class FileCaptureService : IDisposable
 
         private void TryPromotePendingAdvance()
         {
-            Task<VideoSession?>? pendingTask;
-            int pendingIndex;
-            lock (_lock)
+            for (int attempts = 0; attempts < _paths.Count; attempts++)
             {
-                pendingTask = _pendingAdvanceTask;
-                pendingIndex = _pendingAdvanceIndex;
-            }
+                Task<VideoSession.VideoProbeInfo?>? pendingTask;
+                int pendingIndex;
+                lock (_lock)
+                {
+                    pendingTask = _pendingAdvanceTask;
+                    pendingIndex = _pendingAdvanceIndex;
+                }
 
-            if (pendingTask == null || !pendingTask.IsCompleted)
+                if (pendingTask == null || !pendingTask.IsCompleted)
+                {
+                    return;
+                }
+
+                VideoSession.VideoProbeInfo? probe = null;
+                try
+                {
+                    probe = pendingTask.GetAwaiter().GetResult();
+                }
+                catch (Exception ex)
+                {
+                    Logger.Warn($"Failed to prepare video sequence {_displayName}. {ex.Message}");
+                }
+
+                lock (_lock)
+                {
+                    if (!ReferenceEquals(_pendingAdvanceTask, pendingTask))
+                    {
+                        continue;
+                    }
+
+                    _pendingAdvanceTask = null;
+                    _pendingAdvanceIndex = -1;
+                }
+
+                if (probe.HasValue)
+                {
+                    var nextSession = CreateSequenceVideoSession(_paths[pendingIndex], probe.Value);
+                    lock (_lock)
+                    {
+                        _current = nextSession;
+                        _index = pendingIndex;
+                    }
+                    _hasError = false;
+                    _offlineProbeDeadlineTimestamp = 0;
+                    _offlineProbeBudgetExhausted = false;
+                    return;
+                }
+
+                _errorStreak++;
+                if (_errorStreak >= _paths.Count)
+                {
+                    _hasError = true;
+                    Logger.Warn($"All videos in sequence failed to probe: {_displayName}");
+                    return;
+                }
+
+                ScheduleProbe((pendingIndex + 1) % _paths.Count);
+            }
+        }
+
+        private void WaitForPendingAdvanceForOffline()
+        {
+            if (_offlineProbeBudgetExhausted)
             {
                 return;
             }
 
-            VideoSession? nextSession = null;
-            try
+            if (_offlineProbeDeadlineTimestamp == 0)
             {
-                nextSession = pendingTask.GetAwaiter().GetResult();
-            }
-            catch (Exception ex)
-            {
-                Logger.Warn($"Failed to advance video sequence {_displayName}. {ex.Message}");
+                _offlineProbeDeadlineTimestamp = Stopwatch.GetTimestamp() +
+                                                 (long)Math.Ceiling(
+                                                     (VideoProbeTimeoutMilliseconds + VideoProbeWaitGraceMilliseconds) *
+                                                     Stopwatch.Frequency / 1000.0);
             }
 
+            long deadlineTimestamp = _offlineProbeDeadlineTimestamp;
+            for (int attempts = 0; attempts < _paths.Count; attempts++)
+            {
+                TryPromotePendingAdvance();
+
+                Task<VideoSession.VideoProbeInfo?>? pendingTask;
+                lock (_lock)
+                {
+                    if (_current != null || _hasError)
+                    {
+                        return;
+                    }
+                    pendingTask = _pendingAdvanceTask;
+                }
+
+                if (pendingTask == null)
+                {
+                    return;
+                }
+
+                int remainingMilliseconds = GetRemainingProbeMilliseconds(deadlineTimestamp);
+                if (remainingMilliseconds <= 0)
+                {
+                    ExhaustOfflineProbeBudget();
+                    return;
+                }
+
+                bool completed = false;
+                try
+                {
+                    completed = pendingTask.Wait(remainingMilliseconds);
+                }
+                catch (AggregateException)
+                {
+                    // TryPromotePendingAdvance records the underlying failure.
+                    completed = true;
+                }
+
+                if (!completed)
+                {
+                    ExhaustOfflineProbeBudget();
+                    return;
+                }
+            }
+
+            TryPromotePendingAdvance();
+        }
+
+        private void ExhaustOfflineProbeBudget()
+        {
+            _offlineProbeBudgetExhausted = true;
             lock (_lock)
             {
                 _pendingAdvanceTask = null;
                 _pendingAdvanceIndex = -1;
-                if (nextSession != null)
-                {
-                    _current = nextSession;
-                    _index = pendingIndex;
-                }
             }
+            Logger.Warn($"Offline sequence probe budget expired; skipping source for this render: {_displayName}");
+        }
 
-            if (nextSession == null)
+        private void ScheduleProbe(int index)
+        {
+            Task<VideoSession.VideoProbeInfo?> probeTask = GetVideoProbeAsync(_paths[index]);
+            lock (_lock)
             {
-                _hasError = true;
+                _pendingAdvanceIndex = index;
+                _pendingAdvanceTask = probeTask;
             }
         }
 
-        private VideoSession CreateSequenceVideoSession(string path)
+        private VideoSession CreateSequenceVideoSession(string path, VideoSession.VideoProbeInfo probe)
         {
-            var session = new VideoSession(path, loopPlayback: false, GetCachedProbe(path));
+            var session = new VideoSession(path, loopPlayback: false, probe);
             session.SetMasterAudio(_masterAudioEnabled, _masterAudioVolume);
             session.SetLiveAudioAnalysisEnabled(_liveAudioAnalysisEnabled);
             session.SetAudioVolume(_audioVolume);
@@ -3642,44 +4013,6 @@ internal sealed class FileCaptureService : IDisposable
             session.SetPerformanceSettings(_lowContentionMode, _decoderThreadLimit, _videoDecodeFpsLimit);
             session.SetOfflineRenderMode(_offlineRenderEnabled, _offlineRenderFps);
             return session;
-        }
-
-        private void PrimeProbeCache()
-        {
-            foreach (string path in _paths)
-            {
-                TryCacheProbe(path);
-            }
-        }
-
-        private void TryCacheProbe(string path)
-        {
-            lock (_lock)
-            {
-                if (_probeCache.ContainsKey(path))
-                {
-                    return;
-                }
-            }
-
-            if (!VideoSession.ProbeVideo(path, out int width, out int height, out double durationSeconds))
-            {
-                return;
-            }
-
-            var probe = new VideoSession.VideoProbeInfo(width, height, durationSeconds);
-            lock (_lock)
-            {
-                _probeCache[path] = probe;
-            }
-        }
-
-        private VideoSession.VideoProbeInfo? GetCachedProbe(string path)
-        {
-            lock (_lock)
-            {
-                return _probeCache.TryGetValue(path, out var probe) ? probe : null;
-            }
         }
             
                     private static string BuildDisplayName(IReadOnlyList<string> paths)
@@ -3704,18 +4037,48 @@ internal sealed class FileCaptureService : IDisposable
         private enum Phase
         {
             Uninitialized,
+            Preparing,
             Playing,
             Delaying,
             Empty
         }
 
+        private sealed class PendingClipRequest
+        {
+            public PendingClipRequest(
+                string path,
+                Task<VideoSession.VideoProbeInfo?> probeTask,
+                double requestedClipSeconds,
+                double randomUnit,
+                bool loopSelectedFile,
+                double? explicitStartSeconds = null,
+                double elapsedSeconds = 0)
+            {
+                Path = path;
+                ProbeTask = probeTask;
+                RequestedClipSeconds = requestedClipSeconds;
+                RandomUnit = randomUnit;
+                LoopSelectedFile = loopSelectedFile;
+                ExplicitStartSeconds = explicitStartSeconds;
+                ElapsedSeconds = elapsedSeconds;
+            }
+
+            public string Path { get; }
+            public Task<VideoSession.VideoProbeInfo?> ProbeTask { get; }
+            public double RequestedClipSeconds { get; }
+            public double RandomUnit { get; }
+            public bool LoopSelectedFile { get; }
+            public double? ExplicitStartSeconds { get; }
+            public double ElapsedSeconds { get; }
+        }
+
         private readonly List<string> _paths = new();
         private readonly object _pathsLock = new();
-        private readonly Dictionary<string, VideoSession.VideoProbeInfo> _probeCache = new(StringComparer.OrdinalIgnoreCase);
         private readonly Stopwatch _clock = Stopwatch.StartNew();
         private readonly int _offlineSeed = Random.Shared.Next();
         private Random _random = new();
         private VideoSession? _current;
+        private PendingClipRequest? _pendingClip;
         private FileCaptureFrame? _lastFrame;
         private string? _lastFramePath;
         private string? _currentPath;
@@ -3728,17 +4091,21 @@ internal sealed class FileCaptureService : IDisposable
         private double _minDelaySeconds;
         private double _maxDelaySeconds;
         private bool _loopSelectedFile;
+        private int _probeFailureStreak;
         private bool _audioEnabled;
         private double _audioVolume = 1.0;
         private bool _masterAudioEnabled = true;
         private double _masterAudioVolume = 1.0;
         private bool _liveAudioAnalysisEnabled;
+        private bool _playbackPaused;
         private bool _lowContentionMode;
         private int _decoderThreadLimit;
         private int _videoDecodeFpsLimit;
         private bool _offlineRenderEnabled;
         private int _offlineRenderFps;
         private long _offlineFrameIndex;
+        private long _offlineProbeDeadlineTimestamp;
+        private bool _offlineProbeBudgetExhausted;
         private Phase _savedLivePhase;
         private string? _savedLivePath;
         private double _savedLivePlaybackSeconds;
@@ -3755,7 +4122,6 @@ internal sealed class FileCaptureService : IDisposable
             double maxDelaySeconds)
         {
             ApplySettings(paths, minClipSeconds, maxClipSeconds, minDelaySeconds, maxDelaySeconds);
-            _ = RunBackgroundLongRunning(PrimeProbeCache, "LifeViz.AutoClipProbePrime");
         }
 
         public IReadOnlyList<string> Paths
@@ -3773,7 +4139,9 @@ internal sealed class FileCaptureService : IDisposable
         public string? CurrentFramePath => _lastFramePath;
         public bool IsDelaying => _phase == Phase.Delaying;
         public bool IsEmpty => _paths.Count == 0;
-        public FileCaptureState State => _paths.Count == 0
+        public FileCaptureState State => _offlineProbeBudgetExhausted
+            ? FileCaptureState.Error
+            : _paths.Count == 0
             ? FileCaptureState.Ready
             : _current?.State ?? FileCaptureState.Pending;
 
@@ -3810,7 +4178,6 @@ internal sealed class FileCaptureService : IDisposable
 
             ApplySettings(paths, minClipSeconds, maxClipSeconds, minDelaySeconds, maxDelaySeconds);
             ResetSchedule();
-            _ = RunBackgroundLongRunning(PrimeProbeCache, "LifeViz.AutoClipProbePrime");
         }
 
         public void SetLoopSelectedFile(bool enabled)
@@ -3828,7 +4195,17 @@ internal sealed class FileCaptureService : IDisposable
         {
             double now = GetTimelineSeconds();
             EnsurePhase(now);
+            if (_offlineRenderEnabled && _phase == Phase.Preparing)
+            {
+                WaitForPendingClipForOffline(now);
+            }
             _lastCaptureTimelineSeconds = now;
+            if (_phase == Phase.Preparing)
+            {
+                // Keep the deterministic offline timeline pinned while media metadata is prepared.
+                return null;
+            }
+
             if (_phase == Phase.Delaying || _phase == Phase.Empty || _current == null)
             {
                 AdvanceOfflineFrame();
@@ -3880,6 +4257,12 @@ internal sealed class FileCaptureService : IDisposable
             _current?.SetLiveAudioAnalysisEnabled(enabled);
         }
 
+        public void SetPlaybackPaused(bool paused)
+        {
+            _playbackPaused = paused;
+            _current?.SetPlaybackPaused(paused);
+        }
+
         public void SetPerformanceSettings(bool lowContentionMode, int decoderThreadLimit, int videoDecodeFpsLimit)
         {
             _lowContentionMode = lowContentionMode;
@@ -3910,10 +4293,13 @@ internal sealed class FileCaptureService : IDisposable
                     _savedLivePlaybackSeconds = playbackState.PositionSeconds;
                 }
 
+                ClearPendingClip();
                 DisposeCurrent(background: false);
                 _offlineRenderEnabled = true;
                 _offlineRenderFps = fps;
                 _offlineFrameIndex = 0;
+                _offlineProbeDeadlineTimestamp = 0;
+                _offlineProbeBudgetExhausted = false;
                 _random = new Random(_offlineSeed);
                 _phase = Phase.Uninitialized;
                 _phaseStartSeconds = 0;
@@ -3924,9 +4310,12 @@ internal sealed class FileCaptureService : IDisposable
                 return;
             }
 
+            ClearPendingClip();
             DisposeCurrent(background: false);
             _offlineRenderEnabled = false;
             _offlineRenderFps = 0;
+            _offlineProbeDeadlineTimestamp = 0;
+            _offlineProbeBudgetExhausted = false;
             _clock.Restart();
             _random = new Random();
             _lastFrame = null;
@@ -3946,12 +4335,12 @@ internal sealed class FileCaptureService : IDisposable
                 double restoredDuration = Math.Max(
                     _savedLiveClipDurationSeconds,
                     _savedLivePhaseElapsedSeconds + _savedLivePhaseRemainingSeconds);
-                StartSpecificClip(
+                QueueSpecificClip(
                     _savedLivePath,
                     _savedLivePlaybackSeconds,
-                    0,
                     Math.Max(0.05, restoredDuration),
                     _savedLivePhaseElapsedSeconds);
+                TryPromotePendingClip(now: 0);
                 return;
             }
 
@@ -3967,7 +4356,12 @@ internal sealed class FileCaptureService : IDisposable
                 return false;
             }
 
-            EnsurePhase(GetTimelineSeconds());
+            double now = GetTimelineSeconds();
+            EnsurePhase(now);
+            if (_phase == Phase.Preparing)
+            {
+                WaitForPendingClipForOffline(now);
+            }
             return _phase == Phase.Playing && _current?.MixOfflineAudioFrame(destination) == true;
         }
 
@@ -3990,12 +4384,12 @@ internal sealed class FileCaptureService : IDisposable
             }
 
             _disposed = true;
+            ClearPendingClip();
             DisposeCurrent(background: false);
             lock (_pathsLock)
             {
                 _paths.Clear();
             }
-            _probeCache.Clear();
         }
 
         private void ApplySettings(
@@ -4032,6 +4426,17 @@ internal sealed class FileCaptureService : IDisposable
         private void EnsurePhase(double now)
         {
             if (_disposed)
+            {
+                return;
+            }
+
+            if (_offlineRenderEnabled && _offlineProbeBudgetExhausted)
+            {
+                return;
+            }
+
+            TryPromotePendingClip(now);
+            if (_phase == Phase.Preparing)
             {
                 return;
             }
@@ -4102,15 +4507,15 @@ internal sealed class FileCaptureService : IDisposable
             }
 
             string path = _paths[index];
-            TryCacheProbe(path);
-            double sourceDuration = GetCachedProbe(path)?.DurationSeconds ?? 0;
             double requestedClipSeconds = NextRange(_minClipSeconds, _maxClipSeconds);
-            (double startSeconds, double clipSeconds) = SelectClipWindow(
-                sourceDuration,
-                requestedClipSeconds,
-                _random.NextDouble(),
-                _loopSelectedFile);
-            StartSpecificClip(path, startSeconds, now, clipSeconds);
+            double randomUnit = _random.NextDouble();
+            QueueClipPreparation(
+                new PendingClipRequest(
+                    path,
+                    GetVideoProbeAsync(path),
+                    requestedClipSeconds,
+                    randomUnit,
+                    _loopSelectedFile));
         }
 
         internal static (double StartSeconds, double ClipSeconds) SelectClipWindow(
@@ -4153,11 +4558,98 @@ internal sealed class FileCaptureService : IDisposable
             return (startSeconds, clipSeconds);
         }
 
-        private void StartSpecificClip(string path, double startSeconds, double now, double clipSeconds, double elapsedSeconds = 0)
+        private void QueueSpecificClip(string path, double startSeconds, double clipSeconds, double elapsedSeconds = 0)
+        {
+            QueueClipPreparation(
+                new PendingClipRequest(
+                    path,
+                    GetVideoProbeAsync(path),
+                    clipSeconds,
+                    randomUnit: 0,
+                    loopSelectedFile: true,
+                    explicitStartSeconds: startSeconds,
+                    elapsedSeconds));
+        }
+
+        private void QueueClipPreparation(PendingClipRequest request)
         {
             DisposeCurrent(background: true);
-            TryCacheProbe(path);
-            var session = new VideoSession(path, loopPlayback: true, GetCachedProbe(path));
+            _pendingClip = request;
+            _currentPath = request.Path;
+            _phase = Phase.Preparing;
+        }
+
+        private bool TryPromotePendingClip(double now)
+        {
+            PendingClipRequest? pending = _pendingClip;
+            if (pending == null || !pending.ProbeTask.IsCompleted)
+            {
+                return false;
+            }
+
+            VideoSession.VideoProbeInfo? probe = null;
+            try
+            {
+                probe = pending.ProbeTask.GetAwaiter().GetResult();
+            }
+            catch (Exception ex)
+            {
+                Logger.Warn($"Failed to prepare AutoClip source {Path.GetFileName(pending.Path)}. {ex.Message}");
+            }
+
+            if (!ReferenceEquals(_pendingClip, pending))
+            {
+                return false;
+            }
+
+            _pendingClip = null;
+            if (!probe.HasValue)
+            {
+                if (_paths.Count == 0)
+                {
+                    _phase = Phase.Empty;
+                }
+                else
+                {
+                    _probeFailureStreak = Math.Min(_probeFailureStreak + 1, 8);
+                    double retryDelaySeconds = Math.Min(2.0, 0.1 * Math.Pow(2, _probeFailureStreak - 1));
+                    _phase = Phase.Delaying;
+                    _phaseStartSeconds = now;
+                    _phaseEndSeconds = now + retryDelaySeconds;
+                }
+                return false;
+            }
+
+            double startSeconds;
+            double clipSeconds;
+            if (pending.ExplicitStartSeconds.HasValue)
+            {
+                startSeconds = Math.Max(0, pending.ExplicitStartSeconds.Value);
+                clipSeconds = Math.Max(0.05, pending.RequestedClipSeconds);
+            }
+            else
+            {
+                (startSeconds, clipSeconds) = SelectClipWindow(
+                    probe.Value.DurationSeconds,
+                    pending.RequestedClipSeconds,
+                    pending.RandomUnit,
+                    pending.LoopSelectedFile);
+            }
+
+            StartPreparedClip(pending.Path, probe.Value, startSeconds, now, clipSeconds, pending.ElapsedSeconds);
+            return true;
+        }
+
+        private void StartPreparedClip(
+            string path,
+            VideoSession.VideoProbeInfo probe,
+            double startSeconds,
+            double now,
+            double clipSeconds,
+            double elapsedSeconds = 0)
+        {
+            DisposeCurrent(background: true);
+            var session = new VideoSession(path, loopPlayback: true, probe);
             session.SetInitialPlaybackOffsetSeconds(startSeconds);
             session.SetMasterAudio(_masterAudioEnabled, _masterAudioVolume);
             session.SetLiveAudioAnalysisEnabled(_liveAudioAnalysisEnabled);
@@ -4165,7 +4657,11 @@ internal sealed class FileCaptureService : IDisposable
             session.SetPerformanceSettings(_lowContentionMode, _decoderThreadLimit, _videoDecodeFpsLimit);
             session.SetOfflineRenderMode(_offlineRenderEnabled, _offlineRenderFps);
             session.SetAudioEnabled(_audioEnabled);
+            session.SetPlaybackPaused(_playbackPaused);
             _current = session;
+            _probeFailureStreak = 0;
+            _offlineProbeDeadlineTimestamp = 0;
+            _offlineProbeBudgetExhausted = false;
             _currentPath = path;
             _phase = Phase.Playing;
             double duration = Math.Max(0.001, clipSeconds);
@@ -4178,6 +4674,7 @@ internal sealed class FileCaptureService : IDisposable
 
         private void ResetSchedule()
         {
+            ClearPendingClip();
             DisposeCurrent(background: true);
             _lastFrame = null;
             _lastFramePath = null;
@@ -4187,6 +4684,74 @@ internal sealed class FileCaptureService : IDisposable
             _phaseEndSeconds = 0;
             _lastCaptureTimelineSeconds = 0;
             _offlineFrameIndex = 0;
+            _probeFailureStreak = 0;
+            _offlineProbeDeadlineTimestamp = 0;
+            _offlineProbeBudgetExhausted = false;
+        }
+
+        private void WaitForPendingClipForOffline(double now)
+        {
+            int maxAttempts = Math.Max(1, _paths.Count);
+            if (_offlineProbeDeadlineTimestamp == 0)
+            {
+                _offlineProbeDeadlineTimestamp = Stopwatch.GetTimestamp() +
+                                                 (long)Math.Ceiling(
+                                                     (VideoProbeTimeoutMilliseconds + VideoProbeWaitGraceMilliseconds) *
+                                                     Stopwatch.Frequency / 1000.0);
+            }
+
+            long deadlineTimestamp = _offlineProbeDeadlineTimestamp;
+            for (int attempts = 0; attempts < maxAttempts && _phase == Phase.Preparing; attempts++)
+            {
+                PendingClipRequest? pending = _pendingClip;
+                if (pending == null)
+                {
+                    return;
+                }
+
+                int remainingMilliseconds = GetRemainingProbeMilliseconds(deadlineTimestamp);
+                if (remainingMilliseconds <= 0)
+                {
+                    ExhaustOfflineProbeBudget();
+                    return;
+                }
+
+                bool completed = false;
+                try
+                {
+                    completed = pending.ProbeTask.Wait(remainingMilliseconds);
+                }
+                catch (AggregateException)
+                {
+                    // TryPromotePendingClip records the underlying failure.
+                    completed = true;
+                }
+
+                if (!completed)
+                {
+                    ExhaustOfflineProbeBudget();
+                    return;
+                }
+
+                TryPromotePendingClip(now);
+                if (_phase == Phase.Uninitialized)
+                {
+                    EnsurePhase(now);
+                }
+            }
+        }
+
+        private void ExhaustOfflineProbeBudget()
+        {
+            _offlineProbeBudgetExhausted = true;
+            ClearPendingClip();
+            _phase = Phase.Empty;
+            Logger.Warn($"Offline AutoClip probe budget expired; skipping source for this render: {DisplayName}");
+        }
+
+        private void ClearPendingClip()
+        {
+            _pendingClip = null;
         }
 
         private double GetTimelineSeconds() => _offlineRenderEnabled && _offlineRenderFps > 0
@@ -4224,52 +4789,6 @@ internal sealed class FileCaptureService : IDisposable
             }
         }
 
-        private void PrimeProbeCache()
-        {
-            string[] paths;
-            lock (_pathsLock)
-            {
-                paths = _paths.ToArray();
-            }
-
-            foreach (string path in paths)
-            {
-                if (_disposed)
-                {
-                    return;
-                }
-                TryCacheProbe(path);
-            }
-        }
-
-        private void TryCacheProbe(string path)
-        {
-            lock (_probeCache)
-            {
-                if (_probeCache.ContainsKey(path))
-                {
-                    return;
-                }
-            }
-
-            if (!VideoSession.ProbeVideo(path, out int width, out int height, out double durationSeconds))
-            {
-                return;
-            }
-
-            lock (_probeCache)
-            {
-                _probeCache[path] = new VideoSession.VideoProbeInfo(width, height, durationSeconds);
-            }
-        }
-
-        private VideoSession.VideoProbeInfo? GetCachedProbe(string path)
-        {
-            lock (_probeCache)
-            {
-                return _probeCache.TryGetValue(path, out VideoSession.VideoProbeInfo probe) ? probe : null;
-            }
-        }
     }
 
     internal readonly struct VideoPlaybackState

@@ -7,6 +7,7 @@ Welcome to the documentation hub for LifeViz, a minimalist Windows 11 WPF experi
 - [Rendering Pipeline](Rendering-Pipeline.md)
 - [Configuration & Controls](Configuration-and-Controls.md)
 - [Build & Install](Build-and-Install.md)
+- [Optimizations](Optimizations.md)
 
 ## Quick Facts
 

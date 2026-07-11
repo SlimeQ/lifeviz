@@ -77,6 +77,7 @@ public partial class MainWindow : Window
     private const int AudioDebugHistorySize = AudioDebugHistorySeconds * AudioDebugHistorySampleRate;
     private const double DebugTimingOverlayRefreshRateHz = 6.0;
     private const double DebugAudioOverlayRefreshRateHz = 3.0;
+    private const double DebugTextOverlayRefreshRateHz = 6.0;
     private const int DebugOverlayMaxPoints = 640;
     private const double FrameTimingOverlayMaxMs = 50.0;
     private const int DefaultAudioReactiveSeedsPerBeat = 2;
@@ -86,6 +87,7 @@ public partial class MainWindow : Window
     private const double MaxRgbHueShiftSpeedDegreesPerSecond = 180.0;
     private const int DefaultDecoderThreadLimit = 0;
     private const int DefaultVideoDecodeFpsLimit = 0;
+    private const int ConfigSaveDebounceMilliseconds = 500;
     private const string VideoStackAudioSourceId = "video-stack:silent";
     private const int LiveVideoAudioMixSampleCount = 4096;
     private const double MinReactiveHueFrequencyHz = 27.5;
@@ -102,6 +104,8 @@ public partial class MainWindow : Window
         Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "lifeviz", "startup-recovery.flag");
     private static readonly Uri GitHubLatestReleaseUri = new($"https://api.github.com/repos/{GitHubRepoOwner}/{GitHubRepoName}/releases/latest");
     private static readonly JsonSerializerOptions GitHubJsonOptions = new() { PropertyNameCaseInsensitive = true };
+    private static readonly JsonSerializerOptions ConfigJsonOptions = new() { WriteIndented = true };
+    private static readonly UTF8Encoding ConfigUtf8Encoding = new(encoderShouldEmitUTF8Identifier: false);
     private static readonly (int rowOffset, int colOffset)[] GliderPattern =
     {
         (0, 1), (1, 2), (2, 0), (2, 1), (2, 2)
@@ -166,6 +170,10 @@ public partial class MainWindow : Window
     private int _displayHeight;
     private int[] _rowMap = Array.Empty<int>();
     private int[] _colMap = Array.Empty<int>();
+    private int _mappedWidth = -1;
+    private int _mappedHeight = -1;
+    private int _mappedEngineColumns = -1;
+    private int _mappedEngineRows = -1;
     private bool _isShuttingDown;
     private Exception? _shutdownException;
     private bool _renderLoopAttached;
@@ -204,7 +212,17 @@ public partial class MainWindow : Window
     private double _injectionNoise = 0.0;
     private int _pulseStep;
     private bool _webcamErrorShown;
+    private bool _primaryAspectRefreshPending;
     private bool _configReady;
+    private readonly DispatcherTimer _configSaveTimer;
+    private readonly object _configWriteSync = new();
+    private string? _pendingConfigJson;
+    private string? _inFlightConfigJson;
+    private string? _lastPersistedConfigJson;
+    private Task? _configWriteTask;
+    private int _configWriteDelayForSmokeMilliseconds;
+    private bool _configSaveDirty;
+    private int _configPersistedWriteCount;
     private bool _isFullscreen;
     private bool _pendingFullscreen;
     private WindowState _previousWindowState = WindowState.Normal;
@@ -243,6 +261,7 @@ public partial class MainWindow : Window
     private double _frameGapHistoryAccumulator;
     private double _lastTimingOverlayUpdateTime = double.NegativeInfinity;
     private double _lastAudioOverlayUpdateTime = double.NegativeInfinity;
+    private double _lastFpsTextUpdateTime = double.NegativeInfinity;
     private readonly Random _audioReactiveRandom = new();
     private bool _audioReactiveEnabled;
     private bool _audioReactiveLevelToFpsEnabled = true;
@@ -300,6 +319,11 @@ public partial class MainWindow : Window
         MarkStartupPending();
 
         _uiThreadLatencyProbe = new UiThreadLatencyProbe(Dispatcher, _frameProfiler);
+        _configSaveTimer = new DispatcherTimer(DispatcherPriority.Background, Dispatcher)
+        {
+            Interval = TimeSpan.FromMilliseconds(ConfigSaveDebounceMilliseconds)
+        };
+        _configSaveTimer.Tick += ConfigSaveTimer_Tick;
         InitializeComponent();
         _renderBackend = CreateRenderBackend(this, RenderSurfaceHost, GameImage);
         bool allowFullSmokeStartup = App.IsSmokeTestMode && App.LoadUserConfigInSmokeTest;
@@ -358,6 +382,8 @@ public partial class MainWindow : Window
                 _layerEditorWindow = null;
             }
 
+            FlushPendingConfigSave();
+
             try
             {
                 StopRecording(showMessage: false);
@@ -397,6 +423,93 @@ public partial class MainWindow : Window
     }
 
     internal string? GetShutdownErrorMessage() => _shutdownException?.ToString();
+
+    internal (bool ok, string detail) RunConfigSaveCoalescingSmoke()
+    {
+        string path = ConfigPath;
+        try
+        {
+            if (File.Exists(path))
+            {
+                File.Delete(path);
+            }
+
+            _configReady = true;
+            _configSaveDirty = false;
+            _lastPersistedConfigJson = null;
+            _inFlightConfigJson = null;
+            Interlocked.Exchange(ref _configPersistedWriteCount, 0);
+
+            for (int i = 0; i < 100; i++)
+            {
+                SaveConfig();
+            }
+            ConfigSaveTimer_Tick(null, EventArgs.Empty);
+            FlushPendingConfigSave();
+            int afterBurst = Volatile.Read(ref _configPersistedWriteCount);
+
+            for (int i = 0; i < 100; i++)
+            {
+                SaveConfig();
+            }
+            ConfigSaveTimer_Tick(null, EventArgs.Empty);
+            FlushPendingConfigSave();
+            int afterDuplicateBurst = Volatile.Read(ref _configPersistedWriteCount);
+
+            _showFps = !_showFps;
+            SaveConfig();
+            ConfigSaveTimer_Tick(null, EventArgs.Empty);
+            FlushPendingConfigSave();
+            int afterChange = Volatile.Read(ref _configPersistedWriteCount);
+
+            string expectedRaceJson = File.ReadAllText(path);
+            bool expectedRaceShowFps = _showFps;
+            _configWriteDelayForSmokeMilliseconds = 150;
+            _showFps = !_showFps;
+            QueueConfigWrite(SerializeCurrentConfig());
+            bool observedInFlight = SpinWait.SpinUntil(() =>
+            {
+                lock (_configWriteSync)
+                {
+                    return _inFlightConfigJson != null;
+                }
+            }, millisecondsTimeout: 1000);
+            _showFps = expectedRaceShowFps;
+            QueueConfigWrite(SerializeCurrentConfig());
+            FlushPendingConfigSave();
+            int afterInFlightRevert = Volatile.Read(ref _configPersistedWriteCount);
+
+            string persistedJson = File.ReadAllText(path);
+            using JsonDocument document = JsonDocument.Parse(persistedJson);
+            bool ok = afterBurst == 1 &&
+                      afterDuplicateBurst == 1 &&
+                      afterChange == 2 &&
+                      observedInFlight &&
+                      afterInFlightRevert == 4 &&
+                      string.Equals(persistedJson, expectedRaceJson, StringComparison.Ordinal) &&
+                      document.RootElement.TryGetProperty("ShowFps", out var showFpsProperty) &&
+                      showFpsProperty.GetBoolean() == _showFps;
+            return (ok,
+                $"burst={afterBurst}, duplicate={afterDuplicateBurst}, changed={afterChange}, " +
+                $"inFlightRevert={afterInFlightRevert}, observedInFlight={observedInFlight}, bytes={persistedJson.Length}");
+        }
+        catch (Exception ex)
+        {
+            return (false, ex.ToString());
+        }
+        finally
+        {
+            _configWriteDelayForSmokeMilliseconds = 0;
+            try
+            {
+                if (File.Exists(path)) File.Delete(path);
+                if (File.Exists(path + ".tmp")) File.Delete(path + ".tmp");
+            }
+            catch
+            {
+            }
+        }
+    }
 
     private void UpdateChromeUi()
     {
@@ -707,7 +820,9 @@ public partial class MainWindow : Window
         return null;
     }
 
-    private long BeginProfileStamp() => Stopwatch.GetTimestamp();
+    private long BeginProfileStamp() => _frameProfiler.IsActive || _showFps
+        ? Stopwatch.GetTimestamp()
+        : 0;
 
     private void EndProfileStamp(string metricName, long startTimestamp)
     {
@@ -727,6 +842,11 @@ public partial class MainWindow : Window
 
     private void RecordLiveMetric(string metricName, double value)
     {
+        if (!_showFps)
+        {
+            return;
+        }
+
         if (string.IsNullOrWhiteSpace(metricName) || double.IsNaN(value) || double.IsInfinity(value))
         {
             return;
@@ -6362,10 +6482,6 @@ public partial class MainWindow : Window
             if (source.Type != CaptureSource.SourceType.AutoClip)
             {
                 bool hasPlaybackState = TryGetSourceVideoPlaybackState(source, out var playbackState);
-                if (hasPlaybackState)
-                {
-                    source.VideoPlaybackPaused = playbackState.IsPaused;
-                }
                 videoPlaybackItem = new MenuItem
                 {
                     Header = source.VideoPlaybackPaused ? "Play" : "Pause"
@@ -6414,7 +6530,6 @@ public partial class MainWindow : Window
 
                     if (TryGetSourceVideoPlaybackState(source, out var updatedState))
                     {
-                        source.VideoPlaybackPaused = updatedState.IsPaused;
                         videoSeekValueItem.Header =
                             $"{FormatPlaybackTime(updatedState.PositionSeconds)} / {FormatPlaybackTime(updatedState.DurationSeconds)}";
                     }
@@ -7075,6 +7190,7 @@ public partial class MainWindow : Window
             Logger.Info($"Inserted new window source (appended): {info.Title}");
         }
 
+        ApplySourceDecodeActivation();
         UpdatePrimaryAspectIfNeeded();
         RenderFrame();
         SaveConfig();
@@ -7094,6 +7210,7 @@ public partial class MainWindow : Window
             Logger.Info($"Inserted new webcam source (appended): {camera.Name}");
         }
 
+        ApplySourceDecodeActivation();
         UpdatePrimaryAspectIfNeeded();
         RenderFrame();
         SaveConfig();
@@ -7123,6 +7240,7 @@ public partial class MainWindow : Window
             Logger.Info($"Inserted new file source (appended): {info.Path}");
         }
 
+        ApplySourceDecodeActivation();
         UpdatePrimaryAspectIfNeeded();
         RenderFrame();
         SaveConfig();
@@ -7152,6 +7270,7 @@ public partial class MainWindow : Window
             Logger.Info($"Inserted new video sequence (appended): {sequence!.DisplayName}");
         }
 
+        ApplySourceDecodeActivation();
         UpdatePrimaryAspectIfNeeded();
         RenderFrame();
         SaveConfig();
@@ -7173,6 +7292,7 @@ public partial class MainWindow : Window
 
         targetList.Add(CaptureSource.CreateAutoClip(session!, minClipSeconds, maxClipSeconds, minDelaySeconds, maxDelaySeconds));
         Logger.Info("Inserted new AutoClip layer.");
+        ApplySourceDecodeActivation();
         UpdatePrimaryAspectIfNeeded();
         RenderFrame();
         SaveConfig();
@@ -7420,6 +7540,8 @@ public partial class MainWindow : Window
             return false;
         }
 
+        source.VideoPlaybackPaused = paused;
+        bool decoderPaused = paused || !IsSourceEffectivelyEnabled(source.Id);
         bool applied;
         if (source.Type == CaptureSource.SourceType.VideoSequence)
         {
@@ -7428,12 +7550,22 @@ public partial class MainWindow : Window
                 return false;
             }
 
-            source.VideoSequence.SetPlaybackPaused(paused);
+            source.VideoSequence.SetPlaybackPaused(decoderPaused);
+            applied = true;
+        }
+        else if (source.Type == CaptureSource.SourceType.AutoClip)
+        {
+            if (source.AutoClip == null)
+            {
+                return false;
+            }
+
+            source.AutoClip.SetPlaybackPaused(decoderPaused);
             applied = true;
         }
         else if (!string.IsNullOrWhiteSpace(source.FilePath))
         {
-            applied = _fileCapture.SetVideoPaused(source.FilePath, paused);
+            applied = _fileCapture.SetVideoPaused(source.FilePath, decoderPaused);
         }
         else
         {
@@ -7442,11 +7574,89 @@ public partial class MainWindow : Window
 
         if (applied)
         {
-            source.VideoPlaybackPaused = paused;
             RenderFrame();
         }
 
         return applied;
+    }
+
+    private bool IsSourceEffectivelyEnabled(Guid sourceId)
+    {
+        static bool Find(IEnumerable<CaptureSource> sources, Guid id, bool ancestorsEnabled, out bool enabled)
+        {
+            foreach (var candidate in sources)
+            {
+                bool candidateEnabled = ancestorsEnabled && candidate.Enabled;
+                if (candidate.Id == id)
+                {
+                    enabled = candidateEnabled;
+                    return true;
+                }
+
+                if (candidate.Children.Count > 0 && Find(candidate.Children, id, candidateEnabled, out enabled))
+                {
+                    return true;
+                }
+            }
+
+            enabled = false;
+            return false;
+        }
+
+        return Find(_sources, sourceId, ancestorsEnabled: true, out bool enabled) && enabled;
+    }
+
+    private void ApplySourceDecodeActivation()
+    {
+        foreach (var source in _sources)
+        {
+            ApplySourceDecodeActivation(source, ancestorsEnabled: true);
+        }
+    }
+
+    private void ApplySourceDecodeActivation(CaptureSource source, bool ancestorsEnabled)
+    {
+        bool effectivelyEnabled = ancestorsEnabled && source.Enabled;
+        if (source.Type == CaptureSource.SourceType.Group)
+        {
+            foreach (var child in source.Children)
+            {
+                ApplySourceDecodeActivation(child, effectivelyEnabled);
+            }
+            return;
+        }
+
+        if (!effectivelyEnabled && source.Type == CaptureSource.SourceType.Window && source.Window != null)
+        {
+            _windowCapture.RemoveCache(source.Window.Handle);
+            return;
+        }
+
+        if (!effectivelyEnabled && source.Type == CaptureSource.SourceType.Webcam && source.WebcamId != null)
+        {
+            _webcamCapture.Reset(source.WebcamId);
+            source.IsInitialized = false;
+            return;
+        }
+
+        if (!IsVideoSource(source))
+        {
+            return;
+        }
+
+        bool paused = !effectivelyEnabled || source.VideoPlaybackPaused;
+        if (source.Type == CaptureSource.SourceType.VideoSequence)
+        {
+            source.VideoSequence?.SetPlaybackPaused(paused);
+        }
+        else if (source.Type == CaptureSource.SourceType.AutoClip)
+        {
+            source.AutoClip?.SetPlaybackPaused(paused);
+        }
+        else if (!string.IsNullOrWhiteSpace(source.FilePath))
+        {
+            _fileCapture.SetVideoPaused(source.FilePath, paused);
+        }
     }
 
     private bool SeekSourceVideo(CaptureSource source, double normalizedPosition)
@@ -8026,12 +8236,7 @@ public partial class MainWindow : Window
             return false;
         }
 
-        bool success = TryGetSourceVideoPlaybackState(source, out playbackState);
-        if (success)
-        {
-            source.VideoPlaybackPaused = playbackState.IsPaused;
-        }
-        return success;
+        return TryGetSourceVideoPlaybackState(source, out playbackState);
     }
 
     internal void UpdateSourceVideoPlaybackPaused(Guid sourceId, bool paused)
@@ -8324,6 +8529,7 @@ public partial class MainWindow : Window
                 ApplySimulationLayersFromSourceStack(fallbackToDefault: false);
             }
 
+            ApplySourceDecodeActivation();
             RenderFrame();
             SaveConfig();
         });
@@ -8729,7 +8935,11 @@ public partial class MainWindow : Window
             return;
         }
 
-        if (removedAny && UpdatePrimaryAspectIfNeeded())
+        // Async media metadata may become available on the first decoded frame. Refresh once,
+        // but do not resize the whole simulation every time an AutoClip selects a new aspect.
+        bool refreshPrimaryAspect = removedAny || _primaryAspectRefreshPending;
+        _primaryAspectRefreshPending = false;
+        if (refreshPrimaryAspect && UpdatePrimaryAspectIfNeeded())
         {
             _lastCompositeFrame = null;
             return;
@@ -9495,14 +9705,22 @@ public partial class MainWindow : Window
         }
 
         double[] values = _frameGapHistory.ToArray();
-        double average = values.Average();
-        int over25 = values.Count(value => value > 25.0);
-        int over33 = values.Count(value => value > 33.333);
-        int over50 = values.Count(value => value > 50.0);
+        double total = 0;
+        int over25 = 0;
+        int over33 = 0;
+        int over50 = 0;
+        foreach (double value in values)
+        {
+            total += value;
+            if (value > 25.0) over25++;
+            if (value > 33.333) over33++;
+            if (value > 50.0) over50++;
+        }
+
         Array.Sort(values);
         int index = (int)Math.Round((values.Length - 1) * 0.95);
         index = Math.Clamp(index, 0, values.Length - 1);
-        return (average, values[index], over25, over33, over50);
+        return (total / values.Length, values[index], over25, over33, over50);
     }
 
     private void ApplyAudioReactiveLifeOpacity()
@@ -9825,10 +10043,15 @@ public partial class MainWindow : Window
     private bool CaptureSourceList(List<CaptureSource> sources, double animationTime)
     {
         bool removedAny = false;
-        var removed = new List<CaptureSource>();
+        List<CaptureSource>? removed = null;
 
-        foreach (var source in sources.ToList())
+        foreach (var source in sources)
         {
+            if (!source.Enabled)
+            {
+                continue;
+            }
+
             if (source.UsePinnedFrameForSmoke && source.LastFrame != null)
             {
                 source.HasError = false;
@@ -9867,6 +10090,7 @@ public partial class MainWindow : Window
                     source.MissedFrames = 0;
                     if (!source.FirstFrameReceived)
                     {
+                        _primaryAspectRefreshPending = true;
                         source.FirstFrameReceived = true;
                         Logger.Info($"Layer group composite ready: {source.DisplayName}");
                     }
@@ -9908,6 +10132,7 @@ public partial class MainWindow : Window
                         source.MissedFrames = 0;
                         if (!source.FirstFrameReceived)
                         {
+                            _primaryAspectRefreshPending = true;
                             source.FirstFrameReceived = true;
                             Logger.Info($"Window frame acquired for {source.DisplayName}: {windowFrame.SourceWidth}x{windowFrame.SourceHeight}");
                         }
@@ -9927,6 +10152,7 @@ public partial class MainWindow : Window
                         source.MissedFrames = 0;
                         if (!source.FirstFrameReceived)
                         {
+                            _primaryAspectRefreshPending = true;
                             source.FirstFrameReceived = true;
                             Logger.Info($"Webcam frame acquired for {source.DisplayName}: {webcamFrame.SourceWidth}x{webcamFrame.SourceHeight}");
                         }
@@ -9948,6 +10174,7 @@ public partial class MainWindow : Window
                         source.MissedFrames = 0;
                         if (!source.FirstFrameReceived)
                         {
+                            _primaryAspectRefreshPending = true;
                             source.FirstFrameReceived = true;
                             Logger.Info($"Video sequence frame acquired for {source.DisplayName}: {value.SourceWidth}x{value.SourceHeight}");
                         }
@@ -9969,6 +10196,7 @@ public partial class MainWindow : Window
                         source.MissedFrames = 0;
                         if (!source.FirstFrameReceived)
                         {
+                            _primaryAspectRefreshPending = true;
                             source.FirstFrameReceived = true;
                             Logger.Info($"AutoClip frame acquired for {source.DisplayName}: {value.SourceWidth}x{value.SourceHeight}");
                         }
@@ -9990,6 +10218,7 @@ public partial class MainWindow : Window
                         source.MissedFrames = 0;
                         if (!source.FirstFrameReceived)
                         {
+                            _primaryAspectRefreshPending = true;
                             source.FirstFrameReceived = true;
                             Logger.Info($"File frame acquired for {source.DisplayName}: {value.SourceWidth}x{value.SourceHeight}");
                         }
@@ -10038,7 +10267,7 @@ public partial class MainWindow : Window
                         continue;
                     }
                     Logger.Warn($"Webcam frames never arrived; removing source {source.DisplayName} after {source.MissedFrames} misses.");
-                    removed.Add(source);
+                    (removed ??= new List<CaptureSource>()).Add(source);
                     continue;
                 }
 
@@ -10122,7 +10351,7 @@ public partial class MainWindow : Window
                 }
 
                 Logger.Warn($"Source frame missing; removing source {source.DisplayName} ({source.Type})");
-                removed.Add(source);
+                (removed ??= new List<CaptureSource>()).Add(source);
                 continue;
             }
 
@@ -10131,7 +10360,7 @@ public partial class MainWindow : Window
             source.LastFrame = frame;
         }
 
-        if (removed.Count > 0)
+        if (removed is { Count: > 0 })
         {
             foreach (var source in removed)
             {
@@ -10791,6 +11020,10 @@ public partial class MainWindow : Window
 
         bool isFreshFrame = frame.FrameToken != source.LastObservedFrameToken;
         source.LastObservedFrameToken = frame.FrameToken;
+        if (!_frameProfiler.IsActive)
+        {
+            return;
+        }
 
         string ratioMetricName = source.Type switch
         {
@@ -12482,7 +12715,10 @@ public partial class MainWindow : Window
         ref bool injectedAnyLayer,
         ref int steppedPassCount)
     {
-        bool includeCpuReadback = _isRecording || App.IsSmokeTestMode || App.IsDiagnosticTestMode;
+        bool includeCpuReadback =
+            _isRecording ||
+            App.IsDiagnosticTestMode ||
+            (App.IsSmokeTestMode && App.CaptureGpuFallbackBuffersInSmokeTest);
         if (_inlineGpuSourceCompositor.IsAvailable &&
             _gpuSimulationGroupCompositor.IsAvailable)
         {
@@ -12984,7 +13220,12 @@ public partial class MainWindow : Window
             width,
             height,
             ref groupBuffer,
-            includeCpuReadback: _isRecording || App.IsDiagnosticTestMode || (App.IsSmokeTestMode && !_suppressSmokeIntermediateSimGroupReadback));
+            includeCpuReadback:
+                _isRecording ||
+                App.IsDiagnosticTestMode ||
+                (App.IsSmokeTestMode &&
+                 App.CaptureGpuFallbackBuffersInSmokeTest &&
+                 !_suppressSmokeIntermediateSimGroupReadback));
         source.CompositeDownscaledBuffer = groupBuffer;
         if (composite != null &&
             composite.Downscaled.Length >= composite.DownscaledWidth * composite.DownscaledHeight * 4)
@@ -13265,6 +13506,9 @@ public partial class MainWindow : Window
     internal static (int passCount, long buildCount, double uploadMs, double drawMs, double readbackMs) GetGpuSourceCompositeSmokeStats()
         => GpuSourceCompositor.GetSmokeStats();
 
+    internal static (long createCount, long reuseCount, long evictionCount) GetGpuSourceResourceCacheSmokeStats()
+        => GpuSourceCompositor.GetSourceResourceCacheStats();
+
     internal bool RunGpuSourceCompositeSmoke()
     {
         ResetGpuSourceCompositeSmokeCounters();
@@ -13276,13 +13520,20 @@ public partial class MainWindow : Window
         first.BlendMode = BlendMode.Additive;
         first.Opacity = 1.0;
 
-        var second = CaptureSource.CreateFile("smoke-source-b", "Smoke B", width, height);
-        second.LastFrame = new SourceFrame(BuildSmokeSolidBgra(width, height, 180, 24, 32), width, height, null, width, height);
+        const int secondWidth = 32;
+        const int secondHeight = 18;
+        var second = CaptureSource.CreateFile("smoke-source-b", "Smoke B", secondWidth, secondHeight);
+        second.LastFrame = new SourceFrame(BuildSmokeSolidBgra(secondWidth, secondHeight, 180, 24, 32), secondWidth, secondHeight, null, secondWidth, secondHeight);
         second.BlendMode = BlendMode.Additive;
         second.Opacity = 0.5;
 
+        var third = CaptureSource.CreateFile("smoke-source-c", "Smoke C", width, height);
+        third.LastFrame = new SourceFrame(BuildSmokeSolidBgra(width, height, 32, 160, 96), width, height, null, width, height);
+        third.BlendMode = BlendMode.Screen;
+        third.Opacity = 0.25;
+
         byte[]? compositeBuffer = null;
-        var composite = BuildCompositeFrame(new List<CaptureSource> { first, second }, ref compositeBuffer, useEngineDimensions: true, animationTime: 0.0);
+        var composite = BuildCompositeFrame(new List<CaptureSource> { first, second, third }, ref compositeBuffer, useEngineDimensions: true, animationTime: 0.0);
         if (composite == null || composite.Downscaled.Length != composite.DownscaledWidth * composite.DownscaledHeight * 4)
         {
             Logger.Warn("GPU source composite smoke: composite frame was null or wrong size.");
@@ -13294,8 +13545,11 @@ public partial class MainWindow : Window
         byte g = composite.Downscaled[centerIndex + 1];
         byte r = composite.Downscaled[centerIndex + 2];
         int passCount = GetGpuSourceCompositePassCount();
-        Logger.Info($"GPU source composite smoke: passes={passCount}, center=({b},{g},{r}).");
+        var (resourceCreates, resourceReuses, resourceEvictions) = GetGpuSourceResourceCacheSmokeStats();
+        Logger.Info($"GPU source composite smoke: passes={passCount}, center=({b},{g},{r}), resourceCreates={resourceCreates}, resourceReuses={resourceReuses}, resourceEvictions={resourceEvictions}.");
         return passCount > 0 &&
+               resourceCreates <= 2 &&
+               resourceReuses >= 1 &&
                (b != 24 || g != 48 || r != 180) &&
                (b != 0 || g != 0 || r != 0);
     }
@@ -16325,42 +16579,47 @@ public partial class MainWindow : Window
         if (_showFps)
         {
             double now = _lifetimeStopwatch.Elapsed.TotalSeconds;
-            var pacingStats = GetRecentFrameGapStats();
-            string audioStats;
-            if (!string.IsNullOrWhiteSpace(_selectedAudioDeviceId))
-            {
-                double displayedAudioLevel = GetDisplayedAudioLevel();
-                string signalState = displayedAudioLevel >= 0.02 ? "Signal" : "Low/No Signal";
-                string sourceName = IsVideoStackAudioSelection(_selectedAudioDeviceId) ? "Video Stack" : "Device";
-                audioStats = $"\nAudio ({sourceName}): {displayedAudioLevel * 100:0}% ({signalState}) | Bass: {_smoothedBass:0.0} | Freq: {_smoothedFreq:0}Hz";
-            }
-            else
-            {
-                audioStats = "\nAudio: None (Select Device)";
-            }
-
-            string pacingStatsText = $"\nPacing: avg {pacingStats.averageMs:0.0}ms | p95 {pacingStats.p95Ms:0.0}ms | >25 {pacingStats.over25Ms} | >33 {pacingStats.over33Ms} | >50 {pacingStats.over50Ms}";
-            string stageStatsText =
-                $"\nWork: frame {GetLiveMetricAverage("frame_total_ms"):0.0}ms | capture {GetLiveMetricAverage("capture_sources_ms"):0.0} | composite {GetLiveMetricAverage("build_composite_ms"):0.0} | surface {GetLiveMetricAverage("update_display_surface_ms"):0.0} | inject {GetLiveMetricAverage("inject_layers_ms"):0.0} | sim {GetLiveMetricAverage("simulation_total_ms"):0.0} | render {GetLiveMetricAverage("render_call_ms"):0.0}";
-
-            string reactiveStats = string.Empty;
-            if (_audioReactiveEnabled)
-            {
-                string deviceState = string.IsNullOrWhiteSpace(_selectedAudioDeviceId)
-                    ? "No Source"
-                    : IsVideoStackAudioSelection(_selectedAudioDeviceId)
-                        ? "Video Stack"
-                        : "Device";
-                reactiveStats = $"\nReactive: {deviceState} | InGain x{_audioInputGain:0.00} | FPS x{_audioReactiveFpsMultiplier:0.00} (min {_audioReactiveFpsMinPercent * 100.0:0}%) | Opacity {_effectiveLifeOpacity:0.00} | Beats: {_audioBeatDetector.BeatCount} | Seeds L:{_audioReactiveLevelSeedBurstsLastStep} B:{_audioReactiveBeatSeedBurstsLastStep}";
-            }
-
-            FpsText.Text = $"Present {_presentationDisplayFps:0.0} fps (target {_currentFpsFromConfig:0.0}) | Loop {_renderDisplayFps:0.0} fps | Sim {_simulationDisplayFps:0.0} sps (target {_currentSimulationTargetFps:0.0}) | Steps/frame {_lastSimulationStepsThisFrame}{pacingStatsText}{stageStatsText}{audioStats}{reactiveStats}";
             FpsText.Visibility = Visibility.Visible;
+            if (now - _lastFpsTextUpdateTime >= (1.0 / DebugTextOverlayRefreshRateHz))
+            {
+                _lastFpsTextUpdateTime = now;
+                var pacingStats = GetRecentFrameGapStats();
+                string audioStats;
+                if (!string.IsNullOrWhiteSpace(_selectedAudioDeviceId))
+                {
+                    double displayedAudioLevel = GetDisplayedAudioLevel();
+                    string signalState = displayedAudioLevel >= 0.02 ? "Signal" : "Low/No Signal";
+                    string sourceName = IsVideoStackAudioSelection(_selectedAudioDeviceId) ? "Video Stack" : "Device";
+                    audioStats = $"\nAudio ({sourceName}): {displayedAudioLevel * 100:0}% ({signalState}) | Bass: {_smoothedBass:0.0} | Freq: {_smoothedFreq:0}Hz";
+                }
+                else
+                {
+                    audioStats = "\nAudio: None (Select Device)";
+                }
+
+                string pacingStatsText = $"\nPacing: avg {pacingStats.averageMs:0.0}ms | p95 {pacingStats.p95Ms:0.0}ms | >25 {pacingStats.over25Ms} | >33 {pacingStats.over33Ms} | >50 {pacingStats.over50Ms}";
+                string stageStatsText =
+                    $"\nWork: frame {GetLiveMetricAverage("frame_total_ms"):0.0}ms | capture {GetLiveMetricAverage("capture_sources_ms"):0.0} | composite {GetLiveMetricAverage("build_composite_ms"):0.0} | surface {GetLiveMetricAverage("update_display_surface_ms"):0.0} | inject {GetLiveMetricAverage("inject_layers_ms"):0.0} | sim {GetLiveMetricAverage("simulation_total_ms"):0.0} | render {GetLiveMetricAverage("render_call_ms"):0.0}";
+
+                string reactiveStats = string.Empty;
+                if (_audioReactiveEnabled)
+                {
+                    string deviceState = string.IsNullOrWhiteSpace(_selectedAudioDeviceId)
+                        ? "No Source"
+                        : IsVideoStackAudioSelection(_selectedAudioDeviceId)
+                            ? "Video Stack"
+                            : "Device";
+                    reactiveStats = $"\nReactive: {deviceState} | InGain x{_audioInputGain:0.00} | FPS x{_audioReactiveFpsMultiplier:0.00} (min {_audioReactiveFpsMinPercent * 100.0:0}%) | Opacity {_effectiveLifeOpacity:0.00} | Beats: {_audioBeatDetector.BeatCount} | Seeds L:{_audioReactiveLevelSeedBurstsLastStep} B:{_audioReactiveBeatSeedBurstsLastStep}";
+                }
+
+                FpsText.Text = $"Present {_presentationDisplayFps:0.0} fps (target {_currentFpsFromConfig:0.0}) | Loop {_renderDisplayFps:0.0} fps | Sim {_simulationDisplayFps:0.0} sps (target {_currentSimulationTargetFps:0.0}) | Steps/frame {_lastSimulationStepsThisFrame}{pacingStatsText}{stageStatsText}{audioStats}{reactiveStats}";
+            }
 
             UpdateDebugOverlays(now);
         }
         else
         {
+            _lastFpsTextUpdateTime = double.NegativeInfinity;
             FpsText.Visibility = Visibility.Collapsed;
             UpdateDebugOverlayVisibility(false);
         }
@@ -17777,6 +18036,7 @@ public partial class MainWindow : Window
             }
 
             string json = File.ReadAllText(ConfigPath);
+            _lastPersistedConfigJson = json;
             var config = JsonSerializer.Deserialize<AppConfig>(json);
             if (config == null)
             {
@@ -17987,14 +18247,9 @@ public partial class MainWindow : Window
             config.OscillationEnabled = false;
             config.AudioReactiveLevelToFpsEnabled = false;
 
-            string directory = Path.GetDirectoryName(ConfigPath) ?? string.Empty;
-            if (!Directory.Exists(directory))
-            {
-                Directory.CreateDirectory(directory);
-            }
-
-            string updatedJson = JsonSerializer.Serialize(config, new JsonSerializerOptions { WriteIndented = true });
-            File.WriteAllText(ConfigPath, updatedJson);
+            string updatedJson = JsonSerializer.Serialize(config, ConfigJsonOptions);
+            WriteTextAtomically(ConfigPath, updatedJson);
+            _lastPersistedConfigJson = updatedJson;
         }
         catch (Exception ex)
         {
@@ -18009,82 +18264,252 @@ public partial class MainWindow : Window
             return;
         }
 
+        _configSaveDirty = true;
+        _configSaveTimer.Stop();
+        _configSaveTimer.Start();
+    }
+
+    private void ConfigSaveTimer_Tick(object? sender, EventArgs e)
+    {
+        _configSaveTimer.Stop();
+        if (!_configSaveDirty || !_configReady)
+        {
+            return;
+        }
+
         try
         {
-            bool hasEmbeddedSimulationGroups = EnumerateSources(_sources).Any(source => source.Type == CaptureSource.SourceType.SimGroup);
-            var config = new AppConfig
-            {
-                CaptureThresholdMin = _captureThresholdMin,
-                CaptureThresholdMax = _captureThresholdMax,
-                InvertThreshold = _invertThreshold,
-                Framerate = _currentFpsFromConfig,
-                LifeMode = _lifeMode.ToString(),
-                BinningMode = _binningMode.ToString(),
-                InjectionMode = _injectionMode.ToString(),
-                InjectionNoise = _injectionNoise,
-                LifeOpacity = _lifeOpacity,
-                RgbHueShiftDegrees = 0,
-                RgbHueShiftSpeedDegreesPerSecond = 0,
-                InvertComposite = _invertComposite,
-                ShowFps = _showFps,
-                AnimationBpm = _animationBpm,
-                AnimationAudioSyncEnabled = _animationAudioSyncEnabled,
-                RecordingQuality = _recordingQuality.ToString(),
-                Height = _configuredRows,
-                Depth = _configuredDepth,
-                Passthrough = _passthroughEnabled,
-                OscillationEnabled = _fpsOscillationEnabled,
-                OscillationBpm = _oscillationBpm,
-                OscillationMinFps = _oscillationMinFps,
-                OscillationMaxFps = _oscillationMaxFps,
-                AudioSyncEnabled = _audioSyncEnabled,
-                AudioReactiveEnabled = _audioReactiveEnabled,
-                AudioReactiveLevelToFpsEnabled = _audioReactiveLevelToFpsEnabled,
-                AudioReactiveLevelToLifeOpacityEnabled = _audioReactiveLevelToLifeOpacityEnabled,
-                AudioReactiveLevelSeedEnabled = _audioReactiveLevelSeedEnabled,
-                AudioInputGain = _audioInputGainCapture,
-                AudioInputGainCapture = _audioInputGainCapture,
-                AudioInputGainRender = _audioInputGainRender,
-                AudioReactiveEnergyGain = _audioReactiveEnergyGain,
-                AudioReactiveFpsBoost = _audioReactiveFpsBoost,
-                AudioReactiveFpsMinPercent = _audioReactiveFpsMinPercent,
-                AudioReactiveLifeOpacityMinScalar = _audioReactiveLifeOpacityMinScalar,
-                AudioReactiveLevelSeedMaxBursts = _audioReactiveLevelSeedMaxBursts,
-                AudioReactiveBeatSeedEnabled = _audioReactiveBeatSeedEnabled,
-                AudioReactiveSeedsPerBeat = _audioReactiveSeedsPerBeat,
-                AudioReactiveSeedCooldownMs = _audioReactiveSeedCooldownMs,
-                AudioReactiveSeedPattern = _audioReactiveSeedPattern.ToString(),
-                AudioDeviceId = _selectedAudioDeviceId,
-                SourceAudioMasterEnabled = _sourceAudioMasterEnabled,
-                SourceAudioMasterVolume = _sourceAudioMasterVolume,
-                LowContentionMode = _lowContentionMode,
-                DecoderThreadLimit = _decoderThreadLimit,
-                VideoDecodeFpsLimit = _videoDecodeFpsLimit,
-                BlendMode = _blendMode.ToString(),
-                SimulationLayers = hasEmbeddedSimulationGroups ? new List<AppConfig.SimulationLayerConfig>() : BuildSimulationLayerConfigs(),
-                PositiveLayerBlendMode = BuildLegacyPositiveLayerBlendMode(),
-                NegativeLayerBlendMode = BuildLegacyNegativeLayerBlendMode(),
-                PositiveLayerEnabled = BuildLegacyPositiveLayerEnabled(),
-                NegativeLayerEnabled = BuildLegacyNegativeLayerEnabled(),
-                SimulationLayerOrder = BuildLegacySimulationLayerOrder(),
-                Fullscreen = _isFullscreen,
-                AspectRatioLocked = _aspectRatioLocked,
-                LockedAspectRatio = _lockedAspectRatio,
-                Sources = BuildSourceConfigs()
-            };
+            _configSaveDirty = false;
+            QueueConfigWrite(SerializeCurrentConfig());
+        }
+        catch (Exception ex)
+        {
+            _configSaveDirty = true;
+            Logger.Warn($"Failed to prepare the app configuration for saving. {ex.Message}");
+        }
+    }
 
-            string directory = Path.GetDirectoryName(ConfigPath) ?? string.Empty;
-            if (!Directory.Exists(directory))
+    private string SerializeCurrentConfig()
+    {
+        bool hasEmbeddedSimulationGroups = EnumerateSources(_sources).Any(source => source.Type == CaptureSource.SourceType.SimGroup);
+        var config = new AppConfig
+        {
+            CaptureThresholdMin = _captureThresholdMin,
+            CaptureThresholdMax = _captureThresholdMax,
+            InvertThreshold = _invertThreshold,
+            Framerate = _currentFpsFromConfig,
+            LifeMode = _lifeMode.ToString(),
+            BinningMode = _binningMode.ToString(),
+            InjectionMode = _injectionMode.ToString(),
+            InjectionNoise = _injectionNoise,
+            LifeOpacity = _lifeOpacity,
+            RgbHueShiftDegrees = 0,
+            RgbHueShiftSpeedDegreesPerSecond = 0,
+            InvertComposite = _invertComposite,
+            ShowFps = _showFps,
+            AnimationBpm = _animationBpm,
+            AnimationAudioSyncEnabled = _animationAudioSyncEnabled,
+            RecordingQuality = _recordingQuality.ToString(),
+            Height = _configuredRows,
+            Depth = _configuredDepth,
+            Passthrough = _passthroughEnabled,
+            OscillationEnabled = _fpsOscillationEnabled,
+            OscillationBpm = _oscillationBpm,
+            OscillationMinFps = _oscillationMinFps,
+            OscillationMaxFps = _oscillationMaxFps,
+            AudioSyncEnabled = _audioSyncEnabled,
+            AudioReactiveEnabled = _audioReactiveEnabled,
+            AudioReactiveLevelToFpsEnabled = _audioReactiveLevelToFpsEnabled,
+            AudioReactiveLevelToLifeOpacityEnabled = _audioReactiveLevelToLifeOpacityEnabled,
+            AudioReactiveLevelSeedEnabled = _audioReactiveLevelSeedEnabled,
+            AudioInputGain = _audioInputGainCapture,
+            AudioInputGainCapture = _audioInputGainCapture,
+            AudioInputGainRender = _audioInputGainRender,
+            AudioReactiveEnergyGain = _audioReactiveEnergyGain,
+            AudioReactiveFpsBoost = _audioReactiveFpsBoost,
+            AudioReactiveFpsMinPercent = _audioReactiveFpsMinPercent,
+            AudioReactiveLifeOpacityMinScalar = _audioReactiveLifeOpacityMinScalar,
+            AudioReactiveLevelSeedMaxBursts = _audioReactiveLevelSeedMaxBursts,
+            AudioReactiveBeatSeedEnabled = _audioReactiveBeatSeedEnabled,
+            AudioReactiveSeedsPerBeat = _audioReactiveSeedsPerBeat,
+            AudioReactiveSeedCooldownMs = _audioReactiveSeedCooldownMs,
+            AudioReactiveSeedPattern = _audioReactiveSeedPattern.ToString(),
+            AudioDeviceId = _selectedAudioDeviceId,
+            SourceAudioMasterEnabled = _sourceAudioMasterEnabled,
+            SourceAudioMasterVolume = _sourceAudioMasterVolume,
+            LowContentionMode = _lowContentionMode,
+            DecoderThreadLimit = _decoderThreadLimit,
+            VideoDecodeFpsLimit = _videoDecodeFpsLimit,
+            BlendMode = _blendMode.ToString(),
+            SimulationLayers = hasEmbeddedSimulationGroups ? new List<AppConfig.SimulationLayerConfig>() : BuildSimulationLayerConfigs(),
+            PositiveLayerBlendMode = BuildLegacyPositiveLayerBlendMode(),
+            NegativeLayerBlendMode = BuildLegacyNegativeLayerBlendMode(),
+            PositiveLayerEnabled = BuildLegacyPositiveLayerEnabled(),
+            NegativeLayerEnabled = BuildLegacyNegativeLayerEnabled(),
+            SimulationLayerOrder = BuildLegacySimulationLayerOrder(),
+            Fullscreen = _isFullscreen,
+            AspectRatioLocked = _aspectRatioLocked,
+            LockedAspectRatio = _lockedAspectRatio,
+            Sources = BuildSourceConfigs()
+        };
+
+        return JsonSerializer.Serialize(config, ConfigJsonOptions);
+    }
+
+    private void QueueConfigWrite(string json)
+    {
+        lock (_configWriteSync)
+        {
+            if (string.Equals(json, _pendingConfigJson, StringComparison.Ordinal))
             {
-                Directory.CreateDirectory(directory);
+                return;
             }
 
-            string json = JsonSerializer.Serialize(config, new JsonSerializerOptions { WriteIndented = true });
-            File.WriteAllText(ConfigPath, json);
+            if (_inFlightConfigJson != null)
+            {
+                // The in-flight payload is the state that will exist on disk next, not the
+                // last completed payload. Reverting to it cancels any superseded pending
+                // revision; reverting to the last completed payload must remain pending.
+                _pendingConfigJson = string.Equals(json, _inFlightConfigJson, StringComparison.Ordinal)
+                    ? null
+                    : json;
+                return;
+            }
+
+            if (string.Equals(json, _lastPersistedConfigJson, StringComparison.Ordinal))
+            {
+                return;
+            }
+
+            _pendingConfigJson = json;
+            if (_configWriteTask == null || _configWriteTask.IsCompleted)
+            {
+                string path = ConfigPath;
+                _configWriteTask = Task.Run(() => ProcessConfigWrites(path));
+            }
         }
-        catch
+    }
+
+    private void ProcessConfigWrites(string path)
+    {
+        while (true)
         {
-            // Ignore config save errors.
+            string? json;
+            lock (_configWriteSync)
+            {
+                json = _pendingConfigJson;
+                _pendingConfigJson = null;
+                if (json == null)
+                {
+                    _configWriteTask = null;
+                    return;
+                }
+
+                _inFlightConfigJson = json;
+            }
+
+            bool persisted = false;
+            try
+            {
+                int smokeDelay = Volatile.Read(ref _configWriteDelayForSmokeMilliseconds);
+                if (smokeDelay > 0)
+                {
+                    Thread.Sleep(smokeDelay);
+                }
+                WriteTextAtomically(path, json);
+                Interlocked.Increment(ref _configPersistedWriteCount);
+                persisted = true;
+            }
+            catch (Exception ex)
+            {
+                Logger.Warn($"Failed to save the app configuration. {ex.Message}");
+            }
+
+            lock (_configWriteSync)
+            {
+                _inFlightConfigJson = null;
+                if (persisted)
+                {
+                    _lastPersistedConfigJson = json;
+                }
+
+                if (_pendingConfigJson == null)
+                {
+                    _configWriteTask = null;
+                    return;
+                }
+            }
+        }
+    }
+
+    private static void WriteTextAtomically(string path, string contents)
+    {
+        string directory = Path.GetDirectoryName(path) ?? string.Empty;
+        if (!Directory.Exists(directory))
+        {
+            Directory.CreateDirectory(directory);
+        }
+
+        string temporaryPath = path + ".tmp";
+        try
+        {
+            File.WriteAllText(temporaryPath, contents, ConfigUtf8Encoding);
+            File.Move(temporaryPath, path, overwrite: true);
+        }
+        finally
+        {
+            try
+            {
+                if (File.Exists(temporaryPath))
+                {
+                    File.Delete(temporaryPath);
+                }
+            }
+            catch
+            {
+                // A stale temp file is harmless and can be replaced by the next save.
+            }
+        }
+    }
+
+    private void FlushPendingConfigSave()
+    {
+        _configSaveTimer.Stop();
+        if (_configReady && _configSaveDirty)
+        {
+            try
+            {
+                _configSaveDirty = false;
+                QueueConfigWrite(SerializeCurrentConfig());
+            }
+            catch (Exception ex)
+            {
+                Logger.Warn($"Failed to prepare the final app configuration save. {ex.Message}");
+            }
+        }
+
+        while (true)
+        {
+            Task? writeTask;
+            lock (_configWriteSync)
+            {
+                writeTask = _configWriteTask;
+            }
+
+            if (writeTask == null)
+            {
+                return;
+            }
+
+            try
+            {
+                writeTask.GetAwaiter().GetResult();
+            }
+            catch (Exception ex)
+            {
+                Logger.Warn($"Failed while flushing the app configuration. {ex.Message}");
+                return;
+            }
         }
     }
 
@@ -18421,6 +18846,7 @@ public partial class MainWindow : Window
                 Scale = source.Scale,
                 VideoAudioEnabled = source.VideoAudioEnabled,
                 VideoAudioVolume = source.VideoAudioVolume,
+                VideoPlaybackPaused = source.VideoPlaybackPaused,
                 Mirror = source.Mirror,
                 KeyEnabled = source.KeyEnabled,
                 KeyTolerance = source.KeyTolerance,
@@ -18436,11 +18862,9 @@ public partial class MainWindow : Window
 
             if (TryGetSourceVideoPlaybackState(source, out var playbackState))
             {
-                model.VideoPlaybackPaused = playbackState.IsPaused;
                 model.VideoPlaybackPosition = playbackState.NormalizedPosition;
                 model.VideoPlaybackPositionSeconds = playbackState.PositionSeconds;
                 model.VideoPlaybackDurationSeconds = playbackState.DurationSeconds;
-                source.VideoPlaybackPaused = playbackState.IsPaused;
             }
 
             if (source.Type == CaptureSource.SourceType.VideoSequence && source.FilePaths.Count > 0)
@@ -18545,6 +18969,7 @@ public partial class MainWindow : Window
         _sources.Clear();
         _sources.AddRange(rebuilt);
         ApplySimulationLayersFromSourceStack(fallbackToDefault: false);
+        ApplySourceDecodeActivation();
 
         UpdatePrimaryAspectIfNeeded();
         RenderFrame();
@@ -18924,6 +19349,14 @@ public partial class MainWindow : Window
         {
             if (FindSourceById(source.Id) == null)
             {
+                bool sessionStillReferenced = EnumerateSources(_sources).Any(candidate =>
+                    candidate.Type == CaptureSource.SourceType.File &&
+                    !string.IsNullOrWhiteSpace(candidate.FilePath) &&
+                    string.Equals(candidate.FilePath, info.Path, StringComparison.OrdinalIgnoreCase));
+                if (!sessionStillReferenced)
+                {
+                    _fileCapture.Remove(info.Path);
+                }
                 return;
             }
 
@@ -18934,6 +19367,7 @@ public partial class MainWindow : Window
                 source.SetDisplayName(info.DisplayName);
             }
             ApplySourceVideoAudioState(source);
+            ApplySourceDecodeActivation();
 
             UpdatePrimaryAspectIfNeeded();
             RenderFrame();
@@ -18953,6 +19387,7 @@ public partial class MainWindow : Window
         var windows = _windowCapture.EnumerateWindows(_windowHandle);
         var webcams = _webcamCapture.EnumerateCameras();
         RestoreSourceList(configs, _sources, windows, webcams);
+        ApplySourceDecodeActivation();
         if (EnumerateSources(_sources).Any(source => source.Type == CaptureSource.SourceType.SimGroup))
         {
             ApplySimulationLayersFromSourceStack(fallbackToDefault: false);
@@ -19178,8 +19613,9 @@ public partial class MainWindow : Window
         }
     }
 
-    private string ConfigPath =>
-        Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "lifeviz", "config.json");
+    private string ConfigPath => App.IsSmokeTestMode && !App.LoadUserConfigInSmokeTest
+        ? Path.Combine(AppContext.BaseDirectory, "smoke-config.json")
+        : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "lifeviz", "config.json");
 
     private sealed class AppConfig
     {
@@ -19359,6 +19795,14 @@ public partial class MainWindow : Window
 
     private void BuildMappings(int width, int height, int engineCols, int engineRows)
     {
+        if (_mappedWidth == width &&
+            _mappedHeight == height &&
+            _mappedEngineColumns == engineCols &&
+            _mappedEngineRows == engineRows)
+        {
+            return;
+        }
+
         for (int row = 0; row < height; row++)
         {
             _rowMap[row] = Math.Min(engineRows - 1, (int)((row / (double)height) * engineRows));
@@ -19368,6 +19812,11 @@ public partial class MainWindow : Window
         {
             _colMap[col] = Math.Min(engineCols - 1, (int)((col / (double)width) * engineCols));
         }
+
+        _mappedWidth = width;
+        _mappedHeight = height;
+        _mappedEngineColumns = engineCols;
+        _mappedEngineRows = engineRows;
     }
 
     private sealed class CaptureSource

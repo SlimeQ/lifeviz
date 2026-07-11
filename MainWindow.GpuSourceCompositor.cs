@@ -55,6 +55,8 @@ public partial class MainWindow
         private const uint FlagUseAlpha = 1u << 1;
         private const uint FlagKeyEnabled = 1u << 2;
         private const uint FlagFirstLayer = 1u << 3;
+        private const int MaxCachedSourceResources = 8;
+        private const long MaxCachedSourceResourceBytes = 64L * 1024 * 1024;
 
         private readonly MainWindow _owner;
         private object _sync = new();
@@ -68,10 +70,9 @@ public partial class MainWindow
         private ID3D11SamplerState? _linearClampSampler;
         private ID3D11SamplerState? _linearWrapSampler;
 
-        private ID3D11Texture2D? _sourceTexture;
-        private ID3D11ShaderResourceView? _sourceSrv;
-        private int _sourceWidth;
-        private int _sourceHeight;
+        private readonly Dictionary<(int Width, int Height), SourceUploadResource> _sourceResources = new();
+        private long _sourceResourceUseCounter;
+        private long _sourceResourceBytes;
 
         private ID3D11Texture2D? _compositeTextureA;
         private ID3D11Texture2D? _compositeTextureB;
@@ -92,7 +93,39 @@ public partial class MainWindow
         private static long _uploadTicks;
         private static long _drawTicks;
         private static long _readbackTicks;
+        private static long _sourceResourceCreateCount;
+        private static long _sourceResourceReuseCount;
+        private static long _sourceResourceEvictionCount;
         internal static int CompositePassCount => _compositePassCount;
+
+        private sealed class SourceUploadResource : IDisposable
+        {
+            public SourceUploadResource(
+                ID3D11Texture2D texture,
+                ID3D11ShaderResourceView shaderResourceView,
+                long lastUse,
+                long byteSize)
+            {
+                Texture = texture;
+                ShaderResourceView = shaderResourceView;
+                LastUse = lastUse;
+                ByteSize = byteSize;
+            }
+
+            public ID3D11Texture2D Texture { get; }
+
+            public ID3D11ShaderResourceView ShaderResourceView { get; }
+
+            public long LastUse { get; set; }
+
+            public long ByteSize { get; }
+
+            public void Dispose()
+            {
+                ShaderResourceView.Dispose();
+                Texture.Dispose();
+            }
+        }
 
         internal static void ResetSmokeCounters()
         {
@@ -101,6 +134,9 @@ public partial class MainWindow
             Interlocked.Exchange(ref _uploadTicks, 0);
             Interlocked.Exchange(ref _drawTicks, 0);
             Interlocked.Exchange(ref _readbackTicks, 0);
+            Interlocked.Exchange(ref _sourceResourceCreateCount, 0);
+            Interlocked.Exchange(ref _sourceResourceReuseCount, 0);
+            Interlocked.Exchange(ref _sourceResourceEvictionCount, 0);
         }
 
         internal static (int passCount, long buildCount, double uploadMs, double drawMs, double readbackMs) GetSmokeStats()
@@ -113,6 +149,12 @@ public partial class MainWindow
                 _drawTicks * tickScale,
                 _readbackTicks * tickScale);
         }
+
+        internal static (long createCount, long reuseCount, long evictionCount) GetSourceResourceCacheStats()
+            => (
+                Interlocked.Read(ref _sourceResourceCreateCount),
+                Interlocked.Read(ref _sourceResourceReuseCount),
+                Interlocked.Read(ref _sourceResourceEvictionCount));
 
         internal readonly struct PreparedLayerInput
         {
@@ -186,6 +228,11 @@ public partial class MainWindow
 
                 foreach (var source in sources)
                 {
+                    if (!source.Enabled)
+                    {
+                        continue;
+                    }
+
                     var frame = source.LastFrame;
                     if (frame == null)
                     {
@@ -205,22 +252,22 @@ public partial class MainWindow
 
                     int sourceWidth = frame.Source != null ? frame.SourceWidth : frame.DownscaledWidth;
                     int sourceHeight = frame.Source != null ? frame.SourceHeight : frame.DownscaledHeight;
-                    EnsureSourceResource(sourceWidth, sourceHeight);
-                    if (_sourceTexture == null || _sourceSrv == null)
+                    SourceUploadResource? sourceResource = EnsureSourceResource(sourceWidth, sourceHeight);
+                    if (sourceResource == null)
                     {
                         continue;
                     }
                     byte[] sourcePixels = frame.Source ?? frame.Downscaled;
 
                     long uploadStart = Stopwatch.GetTimestamp();
-                    UploadTexture(_context, _sourceTexture, sourcePixels, sourceWidth, sourceHeight);
+                    UploadTexture(_context, sourceResource.Texture, sourcePixels, sourceWidth, sourceHeight);
                     Interlocked.Add(ref _uploadTicks, Stopwatch.GetTimestamp() - uploadStart);
 
                     long drawStart = Stopwatch.GetTimestamp();
                     DrawSourceIntoComposite(
                         currentIsA ? _compositeSrvA : _compositeSrvB,
                         currentIsA ? _compositeRtvB : _compositeRtvA,
-                        _sourceSrv,
+                        sourceResource.ShaderResourceView,
                         sourceWidth,
                         sourceHeight,
                         downscaledWidth,
@@ -530,16 +577,16 @@ public partial class MainWindow
             lock (_sync)
             {
                 EnsureCompositeResources(destWidth, destHeight);
-                EnsureSourceResource(sourceWidth, sourceHeight);
-                if (_context == null || _sourceTexture == null || _sourceSrv == null)
+                SourceUploadResource? sourceResource = EnsureSourceResource(sourceWidth, sourceHeight);
+                if (_context == null || sourceResource == null)
                 {
                     return null;
                 }
 
-                UploadTexture(_context, _sourceTexture, sourcePixels, sourceWidth, sourceHeight);
+                UploadTexture(_context, sourceResource.Texture, sourcePixels, sourceWidth, sourceHeight);
                 return ComposeShaderResourceOntoSurface(
                     currentSurface,
-                    _sourceSrv,
+                    sourceResource.ShaderResourceView,
                     sourceWidth,
                     sourceHeight,
                     source,
@@ -564,16 +611,16 @@ public partial class MainWindow
                 return null;
             }
 
-            EnsureSourceResource(layer.Width, layer.Height);
-            if (_context == null || _sourceTexture == null || _sourceSrv == null)
+            SourceUploadResource? sourceResource = EnsureSourceResource(layer.Width, layer.Height);
+            if (_context == null || sourceResource == null)
             {
                 return null;
             }
 
             long uploadStart = Stopwatch.GetTimestamp();
-            UploadTexture(_context, _sourceTexture, layer.SourcePixels, layer.Width, layer.Height);
+            UploadTexture(_context, sourceResource.Texture, layer.SourcePixels, layer.Width, layer.Height);
             Interlocked.Add(ref _uploadTicks, Stopwatch.GetTimestamp() - uploadStart);
-            return _sourceSrv;
+            return sourceResource.ShaderResourceView;
         }
 
         private CompositeFrame? ComposeShaderResourceOntoSurface(
@@ -710,21 +757,32 @@ public partial class MainWindow
             }
         }
 
-        private void EnsureSourceResource(int width, int height)
+        private SourceUploadResource? EnsureSourceResource(int width, int height)
         {
             if (_device == null || width <= 0 || height <= 0)
             {
-                return;
+                return null;
             }
 
-            if (_sourceTexture != null && _sourceWidth == width && _sourceHeight == height)
+            var key = (Width: width, Height: height);
+            long useStamp = ++_sourceResourceUseCounter;
+            if (_sourceResources.TryGetValue(key, out SourceUploadResource? cached))
             {
-                return;
+                cached.LastUse = useStamp;
+                Interlocked.Increment(ref _sourceResourceReuseCount);
+                return cached;
             }
 
-            DisposeSourceResources();
-            _sourceWidth = width;
-            _sourceHeight = height;
+            long resourceBytes = (long)width * height * 4;
+            while (_sourceResources.Count > 0 &&
+                   (_sourceResources.Count >= MaxCachedSourceResources ||
+                    _sourceResourceBytes + resourceBytes > MaxCachedSourceResourceBytes))
+            {
+                if (!EvictOldestSourceResource())
+                {
+                    break;
+                }
+            }
 
             var description = new Texture2DDescription(
                 Format.B8G8R8A8_UNorm,
@@ -738,8 +796,49 @@ public partial class MainWindow
                 1,
                 0,
                 ResourceOptionFlags.None);
-            _sourceTexture = _device.CreateTexture2D(description);
-            _sourceSrv = _device.CreateShaderResourceView(_sourceTexture);
+
+            ID3D11Texture2D? texture = null;
+            ID3D11ShaderResourceView? shaderResourceView = null;
+            try
+            {
+                texture = _device.CreateTexture2D(description);
+                shaderResourceView = _device.CreateShaderResourceView(texture);
+                var resource = new SourceUploadResource(texture, shaderResourceView, useStamp, resourceBytes);
+                _sourceResources.Add(key, resource);
+                _sourceResourceBytes += resourceBytes;
+                Interlocked.Increment(ref _sourceResourceCreateCount);
+                return resource;
+            }
+            catch
+            {
+                shaderResourceView?.Dispose();
+                texture?.Dispose();
+                throw;
+            }
+        }
+
+        private bool EvictOldestSourceResource()
+        {
+            KeyValuePair<(int Width, int Height), SourceUploadResource> oldest = default;
+            bool foundOldest = false;
+            foreach (var candidate in _sourceResources)
+            {
+                if (!foundOldest || candidate.Value.LastUse < oldest.Value.LastUse)
+                {
+                    oldest = candidate;
+                    foundOldest = true;
+                }
+            }
+
+            if (!foundOldest || !_sourceResources.Remove(oldest.Key))
+            {
+                return false;
+            }
+
+            _sourceResourceBytes = Math.Max(0, _sourceResourceBytes - oldest.Value.ByteSize);
+            oldest.Value.Dispose();
+            Interlocked.Increment(ref _sourceResourceEvictionCount);
+            return true;
         }
 
         private void EnsureCompositeResources(int width, int height)
@@ -965,12 +1064,14 @@ public partial class MainWindow
 
         private void DisposeSourceResources()
         {
-            _sourceSrv?.Dispose();
-            _sourceSrv = null;
-            _sourceTexture?.Dispose();
-            _sourceTexture = null;
-            _sourceWidth = 0;
-            _sourceHeight = 0;
+            foreach (SourceUploadResource resource in _sourceResources.Values)
+            {
+                resource.Dispose();
+            }
+
+            _sourceResources.Clear();
+            _sourceResourceUseCounter = 0;
+            _sourceResourceBytes = 0;
         }
 
         private void DisposeCompositeResources()

@@ -2,6 +2,7 @@ using System;
 using System.Buffers;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
@@ -145,11 +146,13 @@ internal sealed class WindowCaptureService : IDisposable
 
     private sealed class WindowCaptureSession : IDisposable
     {
+        private const int CaptureIntervalMilliseconds = 33;
         private readonly IntPtr _handle;
         private readonly CancellationTokenSource _cts = new();
         private readonly Task _captureTask;
         private readonly object _lock = new();
         private readonly FrameCache _cache = new();
+        private int _disposeStarted;
         
         private byte[]? _latestBuffer;
         private int _latestWidth;
@@ -166,17 +169,27 @@ internal sealed class WindowCaptureService : IDisposable
 
         public void Dispose()
         {
+            if (Interlocked.Exchange(ref _disposeStarted, 1) != 0)
+            {
+                return;
+            }
+
             _cts.Cancel();
-            try
-            {
-                _captureTask.Wait(500);
-            }
-            catch
-            {
-                // Ignore shutdown errors
-            }
-            _cts.Dispose();
-            _cache.Dispose();
+            _ = _captureTask.ContinueWith(
+                _ =>
+                {
+                    try
+                    {
+                        _cache.Dispose();
+                    }
+                    finally
+                    {
+                        _cts.Dispose();
+                    }
+                },
+                CancellationToken.None,
+                TaskContinuationOptions.ExecuteSynchronously,
+                TaskScheduler.Default);
         }
 
         public WindowCaptureFrame? GetFrame(int targetColumns, int targetRows, FitMode fitMode, bool includeSource)
@@ -209,6 +222,8 @@ internal sealed class WindowCaptureService : IDisposable
         {
             Logger.Info($"Starting CaptureLoop for handle {_handle}");
             int successCount = 0;
+            long captureIntervalTicks = Math.Max(1L, Stopwatch.Frequency * CaptureIntervalMilliseconds / 1000L);
+            long nextCaptureTimestamp = Stopwatch.GetTimestamp();
             while (!_cts.IsCancellationRequested)
             {
                 try
@@ -241,8 +256,18 @@ internal sealed class WindowCaptureService : IDisposable
                          // Optional: log failure if needed, but avoid spam
                     }
                     
-                    // Target high FPS capture
-                    await Task.Delay(1, _cts.Token);
+                    nextCaptureTimestamp += captureIntervalTicks;
+                    long remainingTicks = nextCaptureTimestamp - Stopwatch.GetTimestamp();
+                    if (remainingTicks <= 0)
+                    {
+                        nextCaptureTimestamp = Stopwatch.GetTimestamp();
+                        await Task.Yield();
+                    }
+                    else
+                    {
+                        int delayMilliseconds = Math.Max(1, (int)Math.Ceiling(remainingTicks * 1000.0 / Stopwatch.Frequency));
+                        await Task.Delay(delayMilliseconds, _cts.Token);
+                    }
                 }
                 catch (OperationCanceledException)
                 {
@@ -252,6 +277,7 @@ internal sealed class WindowCaptureService : IDisposable
                 {
                     Logger.Error($"Error in CaptureLoop for {_handle}: {ex}", ex);
                     await Task.Delay(100, _cts.Token); // Backoff on error
+                    nextCaptureTimestamp = Stopwatch.GetTimestamp();
                 }
             }
             Logger.Info($"Exiting CaptureLoop for {_handle}");
