@@ -325,6 +325,7 @@ public partial class MainWindow : Window
         };
         _configSaveTimer.Tick += ConfigSaveTimer_Tick;
         InitializeComponent();
+        ApplyVersionIdentity();
         _renderBackend = CreateRenderBackend(this, RenderSurfaceHost, GameImage);
         bool allowFullSmokeStartup = App.IsSmokeTestMode && App.LoadUserConfigInSmokeTest;
         if (!App.IsSmokeTestMode || allowFullSmokeStartup)
@@ -4107,6 +4108,26 @@ public partial class MainWindow : Window
         }
     }
 
+    private void ApplyVersionIdentity()
+    {
+        Title = AppVersionInfo.WindowTitle;
+        ChromeTitleText.Text = AppVersionInfo.WindowTitle;
+        ChromeTitleText.ToolTip = AppVersionInfo.DiagnosticVersion;
+        VersionMenuItem.Header = $"Current version: {AppVersionInfo.DisplayVersion}";
+        VersionMenuItem.ToolTip = AppVersionInfo.DiagnosticVersion;
+        Logger.Info($"Starting {AppVersionInfo.DiagnosticVersion}.");
+    }
+
+    internal (string WindowTitle, string ChromeTitle, string VersionMenuHeader, bool VersionMenuDisabled)
+        GetVersionIndicatorStateForSmoke()
+    {
+        return (
+            Title,
+            ChromeTitleText.Text,
+            VersionMenuItem.Header?.ToString() ?? string.Empty,
+            !VersionMenuItem.IsEnabled);
+    }
+
     private async void UpdateToLatestRelease_Click(object sender, RoutedEventArgs e)
     {
         if (_updateInProgress)
@@ -4115,6 +4136,7 @@ public partial class MainWindow : Window
         }
 
         var confirm = MessageBox.Show(this,
+            $"Current version: {AppVersionInfo.DisplayVersion}\n\n" +
             "Download and install the latest LifeViz release from GitHub? LifeViz will close while the installer runs.",
             "Update LifeViz",
             MessageBoxButton.YesNo,
@@ -4169,6 +4191,7 @@ public partial class MainWindow : Window
             Process.Start(new ProcessStartInfo
             {
                 FileName = installerPath,
+                Arguments = $"--wait-for-pid {Environment.ProcessId}",
                 UseShellExecute = true
             });
 

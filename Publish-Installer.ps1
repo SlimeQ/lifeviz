@@ -1,7 +1,9 @@
 param(
+    [ValidatePattern('^[A-Za-z0-9_.-]+$')]
     [string]$Configuration = 'Release',
     [string]$PublishProfile = 'Properties/PublishProfiles/WinClickOnce.pubxml',
     [string]$ApplicationVersion,
+    [string]$ProductVersion,
     [int]$ApplicationRevision
 )
 
@@ -85,11 +87,27 @@ function Resolve-MsBuild {
     throw 'MSBuild.exe not found. Install Visual Studio Build Tools or Visual Studio with the MSBuild component.'
 }
 
+$root = Split-Path -Parent $MyInvocation.MyCommand.Path
+$projectPath = Join-Path $root 'lifeviz.csproj'
+$publishDirectory = Join-Path $root "bin\$Configuration\net9.0-windows\publish"
+$rootPrefix = [IO.Path]::GetFullPath($root).TrimEnd(
+    [IO.Path]::DirectorySeparatorChar,
+    [IO.Path]::AltDirectorySeparatorChar) + [IO.Path]::DirectorySeparatorChar
+$publishDirectory = [IO.Path]::GetFullPath($publishDirectory)
+if (-not $publishDirectory.StartsWith($rootPrefix, [StringComparison]::OrdinalIgnoreCase)) {
+    throw "Refusing to clean publish directory outside the repository: $publishDirectory"
+}
+
 $msbuild = Resolve-MsBuild
 Write-Host "Using MSBuild at $msbuild" -ForegroundColor Cyan
 
+if (Test-Path -LiteralPath $publishDirectory) {
+    Write-Host "Removing stale publish payload at $publishDirectory" -ForegroundColor Cyan
+    Remove-Item -LiteralPath $publishDirectory -Recurse -Force
+}
+
 $arguments = @(
-    (Resolve-Path 'lifeviz.csproj').Path,
+    $projectPath,
     '/t:Publish',
     "/p:PublishProfile=$PublishProfile",
     "/p:Configuration=$Configuration"
@@ -97,6 +115,10 @@ $arguments = @(
 
 if ($ApplicationVersion) {
     $arguments += "/p:ApplicationVersion=$ApplicationVersion"
+}
+
+if ($ProductVersion) {
+    $arguments += "/p:Version=$ProductVersion"
 }
 
 if ($PSBoundParameters.ContainsKey('ApplicationRevision')) {

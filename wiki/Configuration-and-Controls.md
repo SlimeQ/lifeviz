@@ -2,7 +2,7 @@
 
 The UI stays invisible until you right-click anywhere on the canvas, revealing the context menu.
 
-- The main output window now uses a custom chrome strip instead of the native title bar. The strip includes buttons for the root app menu (`...`), Scene Editor (`SE`), minimize, fullscreen, and close. Dragging anywhere on the output background moves the window, double-clicking that background toggles fullscreen, and resizing from the left/right/bottom edges stays inside LifeViz's own pointer handling instead of entering the OS non-client drag loop. Custom resize now preserves the active aspect ratio during the drag itself, so the window does not snap back when you release the mouse.
+- The main output window now uses a custom chrome strip instead of the native title bar. Its title includes the running semantic release (for example `LifeViz v4.4.1`); ordinary IDE/CLI builds display `dev` plus their short commit instead of pretending to be a release. The strip also includes buttons for the root app menu (`...`), Scene Editor (`SE`), minimize, fullscreen, and close. Dragging anywhere on the output background moves the window, double-clicking that background toggles fullscreen, and resizing from the left/right/bottom edges stays inside LifeViz's own pointer handling instead of entering the OS non-client drag loop. Custom resize now preserves the active aspect ratio during the drag itself, so the window does not snap back when you release the mouse.
 
 ## Menu Actions
 
@@ -60,7 +60,8 @@ The UI stays invisible until you right-click anywhere on the canvas, revealing t
 - **Injection Noise** - slider (0-1) that randomly skips injection per pixel to introduce noise.
 - **Fullscreen** - toggles a topmost, borderless view sized to the active monitor (covers the taskbar); state is remembered between runs.
 - **Export Live Profile...** - records a six-second profile of the currently loaded session, writes it to the normal profile output directory, and copies the path to the clipboard. Use this when the running scene diverges from saved-scene smoke/diagnostic runs.
-- **Update to Latest Release...** - downloads the newest GitHub release installer and launches it to upgrade the current installation in place (LifeViz closes while the installer runs).
+- **Current version** - a disabled identity row above the updater repeats the same release/dev version shown in the custom title, including while fullscreen hides that title strip.
+- **Update to Latest Release...** - shows the current version in its confirmation, downloads the newest GitHub release installer, closes LifeViz, waits for the old staged process to release its files, and then upgrades the installation in place.
 - **Animation BPM** - global tempo for layer animations (Zoom/Translate/Rotate/Fade/DVD Bounce). Each animation can run at expanded speeds (1/8x–8x), loop forward or reverse, and set a cycle length in beats for long durations (e.g., 10-minute fades). Use **Sync to Audio BPM** to align all animations to detected audio tempo when a device is selected.
 
 ## AutoClip layers

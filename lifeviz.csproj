@@ -11,6 +11,8 @@
     <GenerateBootstrapper Condition="'$(MSBuildRuntimeType)' == 'Core'">false</GenerateBootstrapper>
     <StartupObject>lifeviz.Program</StartupObject>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <!-- Release scripts override this with the semantic release tag. Ordinary builds must identify as development builds. -->
+    <Version>0.0.0-dev</Version>
   </PropertyGroup>
 
   <PropertyGroup>
