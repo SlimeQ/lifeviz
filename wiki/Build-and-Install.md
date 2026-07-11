@@ -191,7 +191,7 @@ The custom neon "LV" mark lives in `Assets/lifeviz.ico` and is referenced via `<
 
 Because `deploy.ps1` embeds a unique version for every publish and restages the payload before refreshing shortcuts, Start Menu launches point at the latest staged build. Use `setup.exe` only when onboarding a clean machine that lacks prerequisites.
 
-For end users, the custom title and a disabled context-menu row show the running release identity. **Update to Latest Release...** downloads the newest GitHub release `lifeviz_installer.exe`, passes the current process identity into the installer, and closes LifeViz. The installer also detects legacy staged instances itself, waits for their executable handles to close, and only then replaces the payload and shortcuts; this prevents an update from silently losing a race with shutdown.
+For end users, the custom title and a disabled context-menu row show the running release identity. **Update to Latest Release...** downloads the newest GitHub release `lifeviz_installer.exe`, passes the current process identity into the installer, and closes LifeViz. The installer copies and validates the new release in a sibling transaction directory first, retries transient `robocopy` failures, detects legacy staged instances itself, waits for their executable handles to close, and only then swaps the validated payload into place. A pre-swap copy failure leaves the previous install intact. The bootstrapper waits for completion, writes `%TEMP%\lifeviz-install.log`, and presents failures instead of silently disappearing.
 
 ## Publish a Windows Release to GitHub
 
@@ -209,7 +209,7 @@ What it does:
 - Bundles the publish payload into a single self-extracting `lifeviz_installer.exe` (stored in `artifacts/github-release/`).
 - Creates a GitHub release for the supplied tag (draftable via `-Draft`) and uploads only that exe as the release asset. If the tag does not yet exist, `gh release create` will create it.
 
-Downloaders should grab the single `lifeviz_installer.exe` from the release and run it; it self-extracts the payload and launches `Install-ClickOnce.ps1` from a stable location. The helper waits for any running staged LifeViz instance, rewrites the staged manifest for consistency, removes old `.appref-ms` shortcuts, and creates normal `LifeViz` shortcuts to the staged exe.
+Downloaders should grab the single `lifeviz_installer.exe` from the release and run it; it self-extracts the payload and launches `Install-ClickOnce.ps1` from a stable location. The helper transactionally stages and validates the new payload, waits for any running staged LifeViz instance, swaps the validated directory into place, rewrites the manifest for consistency, removes old `.appref-ms` shortcuts, and creates normal `LifeViz` shortcuts to the staged exe. The bootstrapper removes its extracted temp payload after success and retains an install log/error message on failure.
 
 ## Troubleshooting
 

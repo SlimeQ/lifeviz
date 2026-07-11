@@ -171,6 +171,146 @@ function Wait-ForStagedLifeVizProcesses {
     }
 }
 
+function Remove-DirectoryWithRetry {
+    param(
+        [string]$Path,
+        [int]$MaxAttempts = 20
+    )
+
+    for ($attempt = 1; $attempt -le $MaxAttempts; $attempt++) {
+        if (-not (Test-Path -LiteralPath $Path)) {
+            return
+        }
+
+        try {
+            Remove-Item -Recurse -Force -LiteralPath $Path
+            return
+        } catch {
+            if (-not (Test-Path -LiteralPath $Path)) {
+                return
+            }
+            if ($attempt -eq $MaxAttempts) {
+                throw
+            }
+            Start-Sleep -Milliseconds 250
+        }
+    }
+}
+
+function Move-DirectoryWithRetry {
+    param(
+        [string]$Source,
+        [string]$Destination,
+        [int]$MaxAttempts = 10
+    )
+
+    for ($attempt = 1; $attempt -le $MaxAttempts; $attempt++) {
+        try {
+            Move-Item -LiteralPath $Source -Destination $Destination
+            return
+        } catch {
+            if ($attempt -eq $MaxAttempts) {
+                throw "Failed to move '$Source' to '$Destination' after $MaxAttempts attempts: $_"
+            }
+            Start-Sleep -Milliseconds 250
+        }
+    }
+}
+
+function Copy-PayloadWithRetry {
+    param(
+        [string]$Source,
+        [string]$Destination,
+        [int]$MaxAttempts = 5
+    )
+
+    for ($attempt = 1; $attempt -le $MaxAttempts; $attempt++) {
+        $robocopyLog = [IO.Path]::GetTempFileName()
+        $robocode = 16
+        $details = ''
+        try {
+            $robocopyArgs = @(
+                $Source,
+                $Destination,
+                '/E',
+                '/R:1',
+                '/W:1',
+                '/NFL',
+                '/NDL',
+                '/NC',
+                '/NS',
+                '/NP',
+                '/XF',
+                'payload.zip'
+            )
+            robocopy @robocopyArgs | Tee-Object -FilePath $robocopyLog | Out-Null
+            $robocode = $LASTEXITCODE
+            if (Test-Path -LiteralPath $robocopyLog) {
+                $details = Get-Content -Raw -LiteralPath $robocopyLog
+            }
+        } finally {
+            if (Test-Path -LiteralPath $robocopyLog) {
+                Remove-Item -LiteralPath $robocopyLog -Force -ErrorAction SilentlyContinue
+            }
+        }
+
+        if ($robocode -le 7) {
+            return
+        }
+
+        if ($attempt -eq $MaxAttempts) {
+            throw "robocopy failed with exit code $robocode after $MaxAttempts attempts.`n$details"
+        }
+
+        Write-Warning "Payload copy attempt $attempt failed with robocopy exit code $robocode; retrying."
+        Start-Sleep -Milliseconds (500 * $attempt)
+    }
+}
+
+function Promote-ValidatedPayload {
+    param(
+        [string]$StagingRoot,
+        [string]$InstallRoot,
+        [string]$BackupRoot
+    )
+
+    $backupCreated = $false
+    if (Test-Path -LiteralPath $InstallRoot) {
+        Write-Host "[install] Moving previous install to rollback backup: $BackupRoot" -ForegroundColor Cyan
+        Move-DirectoryWithRetry -Source $InstallRoot -Destination $BackupRoot
+        $backupCreated = $true
+    }
+
+    try {
+        Move-DirectoryWithRetry -Source $StagingRoot -Destination $InstallRoot
+
+        $promotedManifest = Join-Path $InstallRoot 'lifeviz.application'
+        if (-not (Test-Path -LiteralPath $promotedManifest)) {
+            throw "Promoted payload is missing its manifest at $promotedManifest"
+        }
+        $null = Resolve-StagedApplicationExe -ManifestPath $promotedManifest
+    } catch {
+        $promotionError = $_
+        if ($backupCreated) {
+            Write-Warning "New payload promotion failed; restoring the previous install from $BackupRoot."
+            if (Test-Path -LiteralPath $InstallRoot) {
+                Remove-DirectoryWithRetry -Path $InstallRoot
+            }
+            Move-DirectoryWithRetry -Source $BackupRoot -Destination $InstallRoot
+            $backupCreated = $false
+        }
+        throw $promotionError
+    }
+
+    if ($backupCreated -and (Test-Path -LiteralPath $BackupRoot)) {
+        try {
+            Remove-DirectoryWithRetry -Path $BackupRoot
+        } catch {
+            Write-Warning "The new install is active, but rollback-backup cleanup failed at ${BackupRoot}: $_"
+        }
+    }
+}
+
 $payloadRoot = Resolve-Source $SourcePath
 $manifest = Join-Path $payloadRoot 'lifeviz.application'
 if (-not (Test-Path $manifest)) {
@@ -180,52 +320,51 @@ if (-not (Test-Path $manifest)) {
 Write-Host "[install] Payload root: $payloadRoot" -ForegroundColor Cyan
 Write-Host "[install] Target location: $InstallRoot" -ForegroundColor Cyan
 
-Wait-ForStagedLifeVizProcesses -StagedRoot $InstallRoot -ExplicitProcessId $WaitForProcessId
-
-if ($RegisterClickOnce -and -not $SkipCacheClear) {
-    $mage = Resolve-Mage
-    if ($mage) {
-        Write-Host "[install] Clearing ClickOnce cache (mage -cc) to avoid prior subscription conflicts..." -ForegroundColor Cyan
-        & $mage -cc | Out-Null
-    } else {
-        Write-Warning "mage.exe not found; skipping ClickOnce cache clear. If install complains about a different location, re-run with mage installed or uninstall the previous LifeViz entry first."
-    }
+$InstallRoot = [IO.Path]::GetFullPath($InstallRoot).TrimEnd(
+    [IO.Path]::DirectorySeparatorChar,
+    [IO.Path]::AltDirectorySeparatorChar)
+$stagingPrefix = "$InstallRoot.installing-"
+$stagingRoot = $stagingPrefix + [Guid]::NewGuid().ToString('N')
+$backupPrefix = "$InstallRoot.backup-"
+$backupRoot = $backupPrefix + [Guid]::NewGuid().ToString('N')
+if (-not $stagingRoot.StartsWith($stagingPrefix, [StringComparison]::OrdinalIgnoreCase)) {
+    throw "Refusing to stage outside the install-root sibling path: $stagingRoot"
+}
+if (-not $backupRoot.StartsWith($backupPrefix, [StringComparison]::OrdinalIgnoreCase)) {
+    throw "Refusing to back up outside the install-root sibling path: $backupRoot"
 }
 
-if (Test-Path $InstallRoot) {
-    Write-Host "[install] Removing previous staged payload at $InstallRoot" -ForegroundColor Cyan
-    for ($attempt = 1; $attempt -le 20; $attempt++) {
-        if (-not (Test-Path -LiteralPath $InstallRoot)) {
-            break
-        }
-        try {
-            Remove-Item -Recurse -Force -LiteralPath $InstallRoot
-            break
-        } catch {
-            if (-not (Test-Path -LiteralPath $InstallRoot)) {
-                break
-            }
-            if ($attempt -eq 20) {
-                throw
-            }
-            Start-Sleep -Milliseconds 250
-        }
-    }
-}
-
-New-Item -ItemType Directory -Force -Path $InstallRoot | Out-Null
-
-# Use robocopy for speed and to preserve structure.
-$robocopyLog = New-TemporaryFile
+$promoted = $false
 try {
-    $robocopyArgs = @($payloadRoot, $InstallRoot, '/E', '/NFL', '/NDL', '/NJH', '/NJS', '/NC', '/NS')
-    robocopy @robocopyArgs | Tee-Object -FilePath $robocopyLog | Out-Null
-    $robocode = $LASTEXITCODE
-    if ($robocode -gt 7) {
-        throw "robocopy failed with exit code $robocode. See $robocopyLog for details."
+    New-Item -ItemType Directory -Force -Path $stagingRoot | Out-Null
+    Write-Host "[install] Copying new payload to transaction staging: $stagingRoot" -ForegroundColor Cyan
+    Copy-PayloadWithRetry -Source $payloadRoot -Destination $stagingRoot
+
+    $candidateManifest = Join-Path $stagingRoot 'lifeviz.application'
+    if (-not (Test-Path -LiteralPath $candidateManifest)) {
+        throw "Copied payload is missing its manifest at $candidateManifest"
     }
-} finally {
-    if (Test-Path $robocopyLog) { Remove-Item $robocopyLog -Force }
+    $null = Resolve-StagedApplicationExe -ManifestPath $candidateManifest
+
+    Wait-ForStagedLifeVizProcesses -StagedRoot $InstallRoot -ExplicitProcessId $WaitForProcessId
+
+    if ($RegisterClickOnce -and -not $SkipCacheClear) {
+        $mage = Resolve-Mage
+        if ($mage) {
+            Write-Host "[install] Clearing ClickOnce cache (mage -cc) to avoid prior subscription conflicts..." -ForegroundColor Cyan
+            & $mage -cc | Out-Null
+        } else {
+            Write-Warning "mage.exe not found; skipping ClickOnce cache clear. If install complains about a different location, re-run with mage installed or uninstall the previous LifeViz entry first."
+        }
+    }
+
+    Promote-ValidatedPayload -StagingRoot $stagingRoot -InstallRoot $InstallRoot -BackupRoot $backupRoot
+    $promoted = $true
+} catch {
+    if (-not $promoted -and (Test-Path -LiteralPath $stagingRoot)) {
+        Remove-DirectoryWithRetry -Path $stagingRoot -MaxAttempts 4
+    }
+    throw
 }
 
 $stagedManifest = Join-Path $InstallRoot 'lifeviz.application'

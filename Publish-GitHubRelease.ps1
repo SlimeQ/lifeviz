@@ -101,6 +101,7 @@ internal static class Program
 
         if (resourceName == null)
         {
+            Environment.ExitCode = 1;
             MessageBox.Show("Installer payload is missing.", "LifeViz Installer", MessageBoxButtons.OK, MessageBoxIcon.Error);
             return;
         }
@@ -113,11 +114,13 @@ internal static class Program
                 payload?.CopyTo(fs);
             }
             ZipFile.ExtractToDirectory(zipPath, tempRoot);
+            try { File.Delete(zipPath); } catch { }
         }
 
         string scriptPath = Path.Combine(tempRoot, "Install-ClickOnce.ps1");
         if (!File.Exists(scriptPath))
         {
+            Environment.ExitCode = 1;
             MessageBox.Show("Installer payload is incomplete (missing Install-ClickOnce.ps1).", "LifeViz Installer", MessageBoxButtons.OK, MessageBoxIcon.Error);
             return;
         }
@@ -138,19 +141,58 @@ internal static class Program
             ? " -WaitForProcessId " + waitForProcessId
             : string.Empty;
 
+        string logPath = Path.Combine(Path.GetTempPath(), "lifeviz-install.log");
         var psi = new ProcessStartInfo("powershell")
         {
-            Arguments = $"-ExecutionPolicy Bypass -File \"{scriptPath}\" -SourcePath \"{tempRoot}\"{waitArgument}",
-            UseShellExecute = true
+            Arguments = $"-NoProfile -ExecutionPolicy Bypass -File \"{scriptPath}\" -SourcePath \"{tempRoot}\"{waitArgument}",
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true
         };
 
         try
         {
-            Process.Start(psi);
+            using Process? installProcess = Process.Start(psi);
+            if (installProcess == null)
+            {
+                throw new InvalidOperationException("PowerShell did not start.");
+            }
+
+            var standardOutput = installProcess.StandardOutput.ReadToEndAsync();
+            var standardError = installProcess.StandardError.ReadToEndAsync();
+            installProcess.WaitForExit();
+            string output = standardOutput.GetAwaiter().GetResult();
+            string error = standardError.GetAwaiter().GetResult();
+            string combinedLog = "[stdout]\r\n" + output + "\r\n[stderr]\r\n" + error;
+            try { File.WriteAllText(logPath, combinedLog); } catch { }
+
+            if (installProcess.ExitCode != 0)
+            {
+                Environment.ExitCode = installProcess.ExitCode;
+                string detail = string.IsNullOrWhiteSpace(error) ? output : error;
+                if (detail.Length > 1600)
+                {
+                    detail = detail[^1600..];
+                }
+                MessageBox.Show(
+                    $"Installation failed with exit code {installProcess.ExitCode}.\r\n\r\n{detail}\r\n\r\nLog: {logPath}",
+                    "LifeViz Installer",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Error);
+                return;
+            }
+
+            try { Directory.Delete(tempRoot, recursive: true); } catch { }
         }
         catch (Exception ex)
         {
-            MessageBox.Show("Failed to launch installer: " + ex.Message, "LifeViz Installer", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            Environment.ExitCode = 1;
+            MessageBox.Show(
+                "Failed to run installer: " + ex.Message + "\r\n\r\nLog: " + logPath,
+                "LifeViz Installer",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Error);
         }
     }
 }
