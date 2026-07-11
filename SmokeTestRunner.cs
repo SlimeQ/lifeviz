@@ -3018,6 +3018,14 @@ internal static class SmokeTestRunner
     private static int RunStartupSmokeTest()
     {
         Logger.Info("Running startup smoke test.");
+        if (AppVersionInfo.FormatDisplayVersion("4.4.0+6b71767e65c7559a", "1.0.0.0") != "v4.4.0" ||
+            AppVersionInfo.FormatDisplayVersion("0.0.0-dev+6b71767e65c7559a", "0.0.0.0") != "dev (6b71767)" ||
+            AppVersionInfo.FormatDisplayVersion("4.5.0-beta.1+6b71767e65c7559a", "4.5.0.0") != "v4.5.0-beta.1" ||
+            AppVersionInfo.FormatDisplayVersion(null, "4.4.1.0") != "v4.4.1")
+        {
+            throw new InvalidOperationException("Version display formatting did not preserve release and development identities.");
+        }
+
         Exception? failure = null;
 
         var app = new App();
@@ -3051,6 +3059,20 @@ internal static class SmokeTestRunner
                 timer.Tick += (_, _) =>
                 {
                     timer.Stop();
+                    var versionState = window.GetVersionIndicatorStateForSmoke();
+                    string expectedTitle = AppVersionInfo.WindowTitle;
+                    string expectedMenuHeader = $"Current version: {AppVersionInfo.DisplayVersion}";
+                    if (string.IsNullOrWhiteSpace(AppVersionInfo.DisplayVersion) ||
+                        !string.Equals(versionState.WindowTitle, expectedTitle, StringComparison.Ordinal) ||
+                        !string.Equals(versionState.ChromeTitle, expectedTitle, StringComparison.Ordinal) ||
+                        !string.Equals(versionState.VersionMenuHeader, expectedMenuHeader, StringComparison.Ordinal) ||
+                        !versionState.VersionMenuDisabled)
+                    {
+                        throw new InvalidOperationException(
+                            $"Version indicator mismatch: window='{versionState.WindowTitle}', chrome='{versionState.ChromeTitle}', " +
+                            $"menu='{versionState.VersionMenuHeader}', disabled={versionState.VersionMenuDisabled}.");
+                    }
+
                     window.Close();
                     app.Shutdown(0);
                 };

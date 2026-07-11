@@ -560,6 +560,10 @@
                     </StackPanel>
                 </MenuItem>
                 <Separator />
+                <MenuItem x:Name="VersionMenuItem"
+                          Header="Current version: dev"
+                          IsEnabled="False"
+                          ToolTipService.ShowOnDisabled="True" />
                 <MenuItem x:Name="UpdateMenuItem"
                           Header="Update to Latest Release..."
                           Click="UpdateToLatestRelease_Click" />
@@ -580,7 +584,8 @@
                     <ColumnDefinition Width="*" />
                     <ColumnDefinition Width="Auto" />
                 </Grid.ColumnDefinitions>
-                <TextBlock Margin="10,0,0,0"
+                <TextBlock x:Name="ChromeTitleText"
+                           Margin="10,0,0,0"
                            VerticalAlignment="Center"
                            Foreground="#FFF0F0F0"
                            FontSize="13"

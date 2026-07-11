@@ -69,6 +69,11 @@ function Build-SingleInstaller {
 
     $workDir = Join-Path ([IO.Path]::GetTempPath()) ("lifeviz_bootstrapper_" + [Guid]::NewGuid().ToString("N"))
     New-Item -ItemType Directory -Force -Path $workDir | Out-Null
+    $installerProductVersion = if ($VersionTag.StartsWith('v', [StringComparison]::OrdinalIgnoreCase)) {
+        $VersionTag.Substring(1)
+    } else {
+        $VersionTag
+    }
 
     $payloadZip = Join-Path $workDir 'payload.zip'
     Compress-Archive -Path (Join-Path $PublishDir '*') -DestinationPath $payloadZip -Force
@@ -85,7 +90,7 @@ using System.Linq;
 internal static class Program
 {
     [STAThread]
-    private static void Main()
+    private static void Main(string[] args)
     {
         string tempRoot = Path.Combine(Path.GetTempPath(), "lifeviz_installer_" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(tempRoot);
@@ -117,9 +122,25 @@ internal static class Program
             return;
         }
 
+        int waitForProcessId = 0;
+        for (int i = 0; i + 1 < args.Length; i++)
+        {
+            if (string.Equals(args[i], "--wait-for-pid", StringComparison.OrdinalIgnoreCase) &&
+                int.TryParse(args[i + 1], out int parsedProcessId) &&
+                parsedProcessId > 0)
+            {
+                waitForProcessId = parsedProcessId;
+                break;
+            }
+        }
+
+        string waitArgument = waitForProcessId > 0
+            ? " -WaitForProcessId " + waitForProcessId
+            : string.Empty;
+
         var psi = new ProcessStartInfo("powershell")
         {
-            Arguments = $"-ExecutionPolicy Bypass -File \"{scriptPath}\" -SourcePath \"{tempRoot}\"",
+            Arguments = $"-ExecutionPolicy Bypass -File \"{scriptPath}\" -SourcePath \"{tempRoot}\"{waitArgument}",
             UseShellExecute = true
         };
 
@@ -142,6 +163,7 @@ internal static class Program
     <TargetFramework>net9.0-windows</TargetFramework>
     <Nullable>enable</Nullable>
     <UseWindowsForms>true</UseWindowsForms>
+    <Version>$installerProductVersion</Version>
     <PublishSingleFile>true</PublishSingleFile>
     <SelfContained>true</SelfContained>
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
@@ -254,7 +276,7 @@ if (-not $gh) {
 }
 
 $normalizedTag = $tagInput
-if ($normalizedTag.StartsWith('v')) {
+if ($normalizedTag.StartsWith('v', [StringComparison]::OrdinalIgnoreCase)) {
     $normalizedTag = $normalizedTag.Substring(1)
 }
 
@@ -277,7 +299,7 @@ Invoke-Step 'Checking GitHub authentication' {
 }
 
 Invoke-Step 'Building project' {
-    dotnet build -c $Configuration
+    dotnet build -c $Configuration -p:Version=$normalizedTag
 }
 
 Invoke-Step 'Publishing ClickOnce installer via MSBuild' {
@@ -285,6 +307,7 @@ Invoke-Step 'Publishing ClickOnce installer via MSBuild' {
         -Configuration $Configuration `
         -PublishProfile $PublishProfile `
         -ApplicationVersion $applicationVersion `
+        -ProductVersion $normalizedTag `
         -ApplicationRevision $ApplicationRevision
 }
 

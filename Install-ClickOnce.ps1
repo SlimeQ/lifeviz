@@ -3,7 +3,8 @@ param(
     [string]$InstallRoot = "$env:LOCALAPPDATA\lifeviz-clickonce",
     [switch]$SkipCacheClear,
     [switch]$RegisterClickOnce,
-    [switch]$NoLaunch
+    [switch]$NoLaunch,
+    [int]$WaitForProcessId = 0
 )
 
 $ErrorActionPreference = 'Stop'
@@ -119,6 +120,57 @@ function Install-DirectShortcuts {
     Write-Host "[install] Desktop shortcut: $desktopShortcut" -ForegroundColor Cyan
 }
 
+function Wait-ForStagedLifeVizProcesses {
+    param(
+        [string]$StagedRoot,
+        [int]$ExplicitProcessId
+    )
+
+    $rootPath = [IO.Path]::GetFullPath($StagedRoot).TrimEnd(
+        [IO.Path]::DirectorySeparatorChar,
+        [IO.Path]::AltDirectorySeparatorChar) + [IO.Path]::DirectorySeparatorChar
+
+    $processIds = @()
+    if ($ExplicitProcessId -gt 0 -and $ExplicitProcessId -ne $PID) {
+        $explicitProcess = Get-Process -Id $ExplicitProcessId -ErrorAction SilentlyContinue
+        if ($explicitProcess) {
+            try {
+                $explicitPath = $explicitProcess.Path
+                if ($explicitProcess.ProcessName -eq 'lifeviz' -and
+                    $explicitPath -and
+                    $explicitPath.StartsWith($rootPath, [StringComparison]::OrdinalIgnoreCase)) {
+                    $processIds += $ExplicitProcessId
+                }
+            } catch {}
+        }
+    }
+
+    Get-Process -Name 'lifeviz' -ErrorAction SilentlyContinue | ForEach-Object {
+        try {
+            $candidatePath = $_.Path
+            if ($candidatePath -and $candidatePath.StartsWith($rootPath, [StringComparison]::OrdinalIgnoreCase)) {
+                $processIds += $_.Id
+            }
+        } catch {}
+    }
+
+    foreach ($processId in ($processIds | Sort-Object -Unique)) {
+        $process = Get-Process -Id $processId -ErrorAction SilentlyContinue
+        if (-not $process) {
+            continue
+        }
+
+        Write-Host "[install] Waiting for running LifeViz process $processId to exit..." -ForegroundColor Cyan
+        if (-not $process.WaitForExit(60000)) {
+            throw "LifeViz process $processId did not exit within 60 seconds. Close LifeViz and run the installer again."
+        }
+    }
+
+    if ($processIds.Count -gt 0) {
+        Start-Sleep -Milliseconds 300
+    }
+}
+
 $payloadRoot = Resolve-Source $SourcePath
 $manifest = Join-Path $payloadRoot 'lifeviz.application'
 if (-not (Test-Path $manifest)) {
@@ -127,6 +179,8 @@ if (-not (Test-Path $manifest)) {
 
 Write-Host "[install] Payload root: $payloadRoot" -ForegroundColor Cyan
 Write-Host "[install] Target location: $InstallRoot" -ForegroundColor Cyan
+
+Wait-ForStagedLifeVizProcesses -StagedRoot $InstallRoot -ExplicitProcessId $WaitForProcessId
 
 if ($RegisterClickOnce -and -not $SkipCacheClear) {
     $mage = Resolve-Mage
@@ -140,7 +194,23 @@ if ($RegisterClickOnce -and -not $SkipCacheClear) {
 
 if (Test-Path $InstallRoot) {
     Write-Host "[install] Removing previous staged payload at $InstallRoot" -ForegroundColor Cyan
-    Remove-Item -Recurse -Force -Path $InstallRoot
+    for ($attempt = 1; $attempt -le 20; $attempt++) {
+        if (-not (Test-Path -LiteralPath $InstallRoot)) {
+            break
+        }
+        try {
+            Remove-Item -Recurse -Force -LiteralPath $InstallRoot
+            break
+        } catch {
+            if (-not (Test-Path -LiteralPath $InstallRoot)) {
+                break
+            }
+            if ($attempt -eq 20) {
+                throw
+            }
+            Start-Sleep -Milliseconds 250
+        }
+    }
 }
 
 New-Item -ItemType Directory -Force -Path $InstallRoot | Out-Null

@@ -191,7 +191,7 @@ The custom neon "LV" mark lives in `Assets/lifeviz.ico` and is referenced via `<
 
 Because `deploy.ps1` embeds a unique version for every publish and restages the payload before refreshing shortcuts, Start Menu launches point at the latest staged build. Use `setup.exe` only when onboarding a clean machine that lacks prerequisites.
 
-For end users, the context menu now includes **Update to Latest Release...**, which downloads the newest GitHub release `lifeviz_installer.exe` and launches it to upgrade in place (LifeViz closes while the installer runs).
+For end users, the custom title and a disabled context-menu row show the running release identity. **Update to Latest Release...** downloads the newest GitHub release `lifeviz_installer.exe`, passes the current process identity into the installer, and closes LifeViz. The installer also detects legacy staged instances itself, waits for their executable handles to close, and only then replaces the payload and shortcuts; this prevents an update from silently losing a race with shutdown.
 
 ## Publish a Windows Release to GitHub
 
@@ -205,11 +205,11 @@ gh auth login # one-time
 What it does:
 
 - Prompts for the release vibe (tiny tweak / glow-up / new era) and auto-bumps the semantic version/tag based on the existing highest `v*` tag. You can still pass `-Tag` to override if needed.
-- Builds in Release, then calls `Publish-Installer.ps1` with `ApplicationVersion` derived from the new tag and optional `-ApplicationRevision`.
+- Builds in Release with the normalized tag stamped into .NET product/file/informational metadata, then calls `Publish-Installer.ps1` with that `ProductVersion`, a matching ClickOnce `ApplicationVersion`, and the optional `-ApplicationRevision`. `Publish-Installer.ps1` clears its prior publish directory first, so historical `Application Files` payloads are not recompressed, copied, or installed again. The same tag is stamped into the single-file installer bootstrapper. Local builds default to a commit-backed `0.0.0-dev` identity instead of the misleading SDK `1.0.0` default.
 - Bundles the publish payload into a single self-extracting `lifeviz_installer.exe` (stored in `artifacts/github-release/`).
 - Creates a GitHub release for the supplied tag (draftable via `-Draft`) and uploads only that exe as the release asset. If the tag does not yet exist, `gh release create` will create it.
 
-Downloaders should grab the single `lifeviz_installer.exe` from the release and run it; it self-extracts the payload and launches `Install-ClickOnce.ps1` from a stable location. The helper rewrites the staged manifest for consistency, removes old `.appref-ms` shortcuts, and creates normal `LifeViz` shortcuts to the staged exe.
+Downloaders should grab the single `lifeviz_installer.exe` from the release and run it; it self-extracts the payload and launches `Install-ClickOnce.ps1` from a stable location. The helper waits for any running staged LifeViz instance, rewrites the staged manifest for consistency, removes old `.appref-ms` shortcuts, and creates normal `LifeViz` shortcuts to the staged exe.
 
 ## Troubleshooting
 
