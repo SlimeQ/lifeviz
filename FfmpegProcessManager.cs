@@ -185,6 +185,19 @@ internal sealed class FfmpegProcessManager : IDisposable
     }
 
     /// <summary>
+    /// Signals an owned FFmpeg tree to exit without waiting or disposing its
+    /// Process wrapper. The normal worker/finalizer path retains ownership and
+    /// performs bounded cleanup after the process exits.
+    /// </summary>
+    internal void RequestTermination(Process? process)
+    {
+        if (process != null)
+        {
+            TryKillProcessTree(process);
+        }
+    }
+
+    /// <summary>
     /// Terminates all currently tracked FFmpeg trees within one shared timeout.
     /// The manager remains usable for later starts.
     /// </summary>

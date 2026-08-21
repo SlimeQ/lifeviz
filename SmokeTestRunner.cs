@@ -2049,6 +2049,18 @@ internal static class SmokeTestRunner
             var fittedWindow = FileCaptureService.AutoClipSession.FitClipWindowToSource(10, 3, 1);
             var oversizedWindow = FileCaptureService.AutoClipSession.FitClipWindowToSource(10, 30, 0.5);
             var loopingWindow = FileCaptureService.AutoClipSession.SelectClipWindow(10, 30, 0.75, loopSelectedFile: true);
+            var handoffWindow = FileCaptureService.AutoClipSession.SelectClipWindow(
+                10,
+                3,
+                1,
+                loopSelectedFile: false,
+                trailingContinuationSeconds: 1.0);
+            var shortHandoffWindow = FileCaptureService.AutoClipSession.SelectClipWindow(
+                0.6,
+                2,
+                1,
+                loopSelectedFile: false,
+                trailingContinuationSeconds: 1.0);
             var nonLoopingDecoderPlan = FileCaptureService.AutoClipSession.GetDecoderPlan(
                 loopSelectedFile: false,
                 clipSeconds: 10,
@@ -2057,17 +2069,33 @@ internal static class SmokeTestRunner
                 loopSelectedFile: true,
                 clipSeconds: 10,
                 elapsedSeconds: 2);
+            var seamlessHandoffDecoderPlan = FileCaptureService.AutoClipSession.GetDecoderPlan(
+                loopSelectedFile: false,
+                clipSeconds: 10,
+                elapsedSeconds: 2,
+                allowSeamlessHandoff: true);
             bool clipWindowsFit = fittedWindow.StartSeconds + fittedWindow.ClipSeconds <= 9.8 + 0.0001 &&
                                   oversizedWindow.StartSeconds + oversizedWindow.ClipSeconds <= 9.8 + 0.0001 &&
                                   oversizedWindow.ClipSeconds < 10 &&
                                   Math.Abs(loopingWindow.StartSeconds) < 0.0001 &&
-                                  Math.Abs(loopingWindow.ClipSeconds - 30) < 0.0001;
+                                  Math.Abs(loopingWindow.ClipSeconds - 30) < 0.0001 &&
+                                  // The continuation tail is additive to the ordinary
+                                  // 2% endpoint guard: 10 - 1.0 - 0.2 = 8.8.
+                                  handoffWindow.StartSeconds + handoffWindow.ClipSeconds <= 8.8 + 0.0001 &&
+                                  // Very short sources cap continuation at 20% while
+                                  // preserving the separate endpoint guard:
+                                  // 0.6 - 0.12 - 0.012 = 0.468.
+                                  shortHandoffWindow.StartSeconds + shortHandoffWindow.ClipSeconds <= 0.468 + 0.0001 &&
+                                  shortHandoffWindow.ClipSeconds >= 0.467;
             bool decoderPlansBounded = !nonLoopingDecoderPlan.LoopPlayback &&
                                        loopingDecoderPlan.LoopPlayback &&
                                        nonLoopingDecoderPlan.MaxDecodeDurationSeconds > 8 &&
                                        nonLoopingDecoderPlan.MaxDecodeDurationSeconds <= 8.11 &&
                                        loopingDecoderPlan.MaxDecodeDurationSeconds > 8 &&
-                                       loopingDecoderPlan.MaxDecodeDurationSeconds <= 8.11;
+                                       loopingDecoderPlan.MaxDecodeDurationSeconds <= 8.11 &&
+                                       !seamlessHandoffDecoderPlan.LoopPlayback &&
+                                       seamlessHandoffDecoderPlan.MaxDecodeDurationSeconds > 18 &&
+                                       seamlessHandoffDecoderPlan.MaxDecodeDurationSeconds <= 18.11;
 
             session.SetOfflineRenderMode(false, 0);
             session.UpdateSettings(new[] { smokeVideoPath }, 1.2, 1.2, 0, 0);
@@ -2220,8 +2248,126 @@ internal static class SmokeTestRunner
                                                performanceRestartPhasePreserved;
             bool zeroFadePreparingContinuous = session.GetVisualOpacity(0) > 0.99;
 
+            // Exercise a real zero-delay boundary. Hold promotion of the selected
+            // successor for 100 ms after the outgoing session is moved into its
+            // one-decoder handoff slot. The old implementation returned the same
+            // retained frame for this entire window; the bounded-overlap contract
+            // requires fresh outgoing publication timestamps until the incoming
+            // decoder produces its first fresh token.
+            session.SetAudioEnabled(false);
+            session.SetPerformanceSettings(
+                lowContentionMode: false,
+                decoderThreadLimit: 2,
+                videoDecodeFpsLimit: 30);
+            session.UpdateSettings(new[] { smokeVideoPath }, 2.0, 2.0, 0, 0);
+            bool preHandoffDisposalDrained = MediaDisposalQueue.Drain(TimeSpan.FromSeconds(5));
+            int[] trackedProcessBaseline = FfmpegProcessManager.Shared.GetTrackedProcessIdsForSmokeTest();
+            int CountNewTrackedProcesses() => FfmpegProcessManager.Shared
+                .GetTrackedProcessIdsForSmokeTest()
+                .Except(trackedProcessBaseline)
+                .Count();
+            session.ForceNextClipRandomUnitForSmoke(1.0);
+            FileCaptureService.FileCaptureFrame? handoffPrimeFrame = null;
+            for (int attempt = 0; attempt < startupPollAttempts && !handoffPrimeFrame.HasValue; attempt++)
+            {
+                handoffPrimeFrame = session.CaptureFrame(160, 90, FitMode.Fill, includeSource: false);
+                if (!handoffPrimeFrame.HasValue)
+                {
+                    Thread.Sleep(25);
+                }
+            }
+
+            int handoffCompletionBaseline = session.GetHandoffCompletionCountForSmoke();
+            session.DelayNextHandoffPromotionForSmoke(100);
+            bool sawBoundedHandoff = false;
+            bool handoffStayedVisible = handoffPrimeFrame.HasValue;
+            int distinctOutgoingPublications = 0;
+            int peakOwnedVideoSessions = session.GetOwnedVideoSessionCountForSmoke();
+            int peakTrackedHandoffProcesses = Math.Max(
+                0,
+                CountNewTrackedProcesses());
+            long lastOutgoingPublishTimestamp = 0;
+            long lastOutgoingPublicationWallTimestamp = 0;
+            double maxOutgoingPublicationStaleSeconds = 0;
+            FileCaptureService.FileCaptureFrame? activatedSuccessorFrame = null;
+            const int requiredConsecutiveHandoffs = 3;
+            for (int attempt = 0; attempt < startupPollAttempts * requiredConsecutiveHandoffs; attempt++)
+            {
+                FileCaptureService.FileCaptureFrame? candidate = session.CaptureFrame(
+                    160,
+                    90,
+                    FitMode.Fill,
+                    includeSource: false);
+                peakOwnedVideoSessions = Math.Max(
+                    peakOwnedVideoSessions,
+                    session.GetOwnedVideoSessionCountForSmoke());
+                peakTrackedHandoffProcesses = Math.Max(
+                    peakTrackedHandoffProcesses,
+                    Math.Max(
+                        0,
+                        CountNewTrackedProcesses()));
+
+                if (session.IsHandoffActiveForSmoke())
+                {
+                    sawBoundedHandoff = true;
+                    handoffStayedVisible &= candidate.HasValue && session.GetVisualOpacity(0) > 0.99;
+                    if (candidate.HasValue &&
+                        candidate.Value.FramePublishTimestamp != 0 &&
+                        candidate.Value.FramePublishTimestamp != lastOutgoingPublishTimestamp)
+                    {
+                        lastOutgoingPublishTimestamp = candidate.Value.FramePublishTimestamp;
+                        lastOutgoingPublicationWallTimestamp = Stopwatch.GetTimestamp();
+                        distinctOutgoingPublications++;
+                    }
+                    else
+                    {
+                        if (lastOutgoingPublicationWallTimestamp == 0)
+                        {
+                            lastOutgoingPublicationWallTimestamp = Stopwatch.GetTimestamp();
+                        }
+                        maxOutgoingPublicationStaleSeconds = Math.Max(
+                            maxOutgoingPublicationStaleSeconds,
+                            Stopwatch.GetElapsedTime(lastOutgoingPublicationWallTimestamp).TotalSeconds);
+                    }
+                }
+                else if (sawBoundedHandoff &&
+                         session.GetHandoffCompletionCountForSmoke() > handoffCompletionBaseline)
+                {
+                    activatedSuccessorFrame ??= candidate;
+                    if (session.GetHandoffCompletionCountForSmoke() >=
+                        handoffCompletionBaseline + requiredConsecutiveHandoffs)
+                    {
+                        break;
+                    }
+                }
+
+                Thread.Sleep(25);
+            }
+
+            bool outgoingProcessRetired = MediaDisposalQueue.Drain(TimeSpan.FromSeconds(5)) &&
+                                          CountNewTrackedProcesses() <= 1;
+            int completedHandoffs = session.GetHandoffCompletionCountForSmoke() -
+                                    handoffCompletionBaseline;
+            bool movingHandoffCompleted = sawBoundedHandoff &&
+                                          handoffStayedVisible &&
+                                          distinctOutgoingPublications >= 3 &&
+                                          maxOutgoingPublicationStaleSeconds <= 0.3 &&
+                                          activatedSuccessorFrame.HasValue &&
+                                          completedHandoffs >= requiredConsecutiveHandoffs &&
+                                          !session.IsHandoffActiveForSmoke() &&
+                                          peakOwnedVideoSessions == 2 &&
+                                          session.GetOwnedVideoSessionCountForSmoke() == 1 &&
+                                          preHandoffDisposalDrained &&
+                                          peakTrackedHandoffProcesses <= 2 &&
+                                          outgoingProcessRetired;
+
             session.UpdateSettings(Array.Empty<string>(), 1, 1, 0, 0);
-            bool emptyIsTransparent = !session.CaptureFrame(160, 90, FitMode.Fill, includeSource: false).HasValue && session.IsEmpty;
+            bool finalHandoffDisposalDrained = MediaDisposalQueue.Drain(TimeSpan.FromSeconds(5));
+            bool emptyIsTransparent = !session.CaptureFrame(160, 90, FitMode.Fill, includeSource: false).HasValue &&
+                                      session.IsEmpty &&
+                                      session.GetOwnedVideoSessionCountForSmoke() == 0 &&
+                                      finalHandoffDisposalDrained &&
+                                      CountNewTrackedProcesses() == 0;
             // AutoClip accepts silent video files, so clip audio is observational in
             // this scheduler smoke. The dedicated video-audio smoke owns the positive
             // audio-decode assertion; this target still verifies delay phases stay silent.
@@ -2231,7 +2377,7 @@ internal static class SmokeTestRunner
                       liveVisiblePhaseArmed && activationClockReleased && activePausedScheduleHeld && resumeClockHeld &&
                       repeatedResumeHeld && repeatedWarmupPreserved && freshResumeActivated &&
                       performanceRestartClockHeld && performanceRestartActivated &&
-                      zeroFadePreparingContinuous && overrideResolutionOk;
+                      zeroFadePreparingContinuous && movingHandoffCompleted && overrideResolutionOk;
             Logger.Info($"AutoClip smoke: sawClipFrame={sawClipFrame}, sawDelay={sawDelay}, " +
                         $"delayTransparent={delayWasTransparent}, clipAudio={clipAudioReceived}, delayAudioSilent={delayAudioSilent}, " +
                         $"fadeStart={sawFadeStart}, fadePeak={sawFadePeak}, fadeOut={sawFadeOut}, " +
@@ -2259,6 +2405,12 @@ internal static class SmokeTestRunner
                         $"phaseRemainingBeforePerformanceRestart={phaseRemainingBeforePerformanceRestart?.ToString("F3") ?? "<null>"}s, " +
                         $"phaseRemainingAfterPerformanceRestart={phaseRemainingAfterPerformanceRestart?.ToString("F3") ?? "<null>"}s, " +
                         $"zeroFadePreparingContinuous={zeroFadePreparingContinuous}, " +
+                        $"movingHandoffCompleted={movingHandoffCompleted}, sawBoundedHandoff={sawBoundedHandoff}, " +
+                        $"handoffStayedVisible={handoffStayedVisible}, outgoingPublications={distinctOutgoingPublications}, " +
+                        $"maxOutgoingStale={maxOutgoingPublicationStaleSeconds:F3}s, " +
+                        $"completedHandoffs={completedHandoffs}, " +
+                        $"peakOwnedVideoSessions={peakOwnedVideoSessions}, peakTrackedHandoffProcesses={peakTrackedHandoffProcesses}, " +
+                        $"outgoingProcessRetired={outgoingProcessRetired}, " +
                         $"ordinaryLiveFilter={ordinaryLiveFilter}, pacedLiveFilter={pacedLiveFilter}, " +
                         $"overrides={overrideResolutionOk}, ok={ok}.");
             return ok ? 0 : 1;

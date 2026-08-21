@@ -2205,7 +2205,7 @@ internal sealed class FileCaptureService : IDisposable
                     _readyDownscaledWidth = targetWidth;
                     _readyDownscaledHeight = targetHeight;
                 }
-                return new FileCaptureFrame(
+            return new FileCaptureFrame(
                     _readyDownscaled,
                     _readyDownscaledWidth,
                     _readyDownscaledHeight,
@@ -2215,6 +2215,25 @@ internal sealed class FileCaptureService : IDisposable
                     readyFrameToken,
                     readyFramePublishTimestamp);
             }
+        }
+
+        internal void PrimeLiveFramePipeline(
+            int targetWidth,
+            int targetHeight,
+            FitMode fitMode,
+            bool includeSource)
+        {
+            if (_offlineRenderEnabled || _hasError || _isDisposed)
+            {
+                return;
+            }
+
+            // AutoClip can open one successor before it becomes visible. Start its
+            // correctly-sized decoder without dequeuing/converting frames that would
+            // only be discarded; the live two-frame queue already retains the newest
+            // paced output for the boundary publication.
+            EnsureProcessDimensionsForRequest(targetWidth, targetHeight, fitMode, includeSource);
+            EnsureVideoWorkerStarted();
         }
 
         private (int width, int height) GetNativeProcessDimensions()
@@ -2415,6 +2434,43 @@ internal sealed class FileCaptureService : IDisposable
             StopAudioPlayback();
         }
 
+        internal void RequestRetirement()
+        {
+            CancellationTokenSource? videoCts;
+            Process? videoProcess;
+            lock (_videoPipelineLock)
+            {
+                videoCts = _cts;
+                videoProcess = _process;
+            }
+
+            CancellationTokenSource? audioCts;
+            Process? audioProcess;
+            WaveOutEvent? audioOutput;
+            lock (_audioLock)
+            {
+                _isDisposed = true;
+                _audioEnabled = false;
+                audioCts = _audioDecodeCts;
+                audioProcess = _audioDecodeProcess;
+                audioOutput = _audioOutput;
+            }
+
+            Process? offlineAudioProcess;
+            lock (_offlineAudioLock)
+            {
+                _offlineAudioGeneration++;
+                offlineAudioProcess = _offlineAudioProcess;
+            }
+
+            try { videoCts?.Cancel(); } catch { }
+            try { audioCts?.Cancel(); } catch { }
+            try { audioOutput?.Stop(); } catch { }
+            FfmpegProcessManager.Shared.RequestTermination(videoProcess);
+            FfmpegProcessManager.Shared.RequestTermination(audioProcess);
+            FfmpegProcessManager.Shared.RequestTermination(offlineAudioProcess);
+        }
+
         public bool MixOfflineAudioFrame(Span<float> destination)
         {
             if (!_offlineRenderEnabled || destination.Length == 0 || _offlineAudioUnavailable)
@@ -2573,7 +2629,9 @@ internal sealed class FileCaptureService : IDisposable
                         isCurrentDecoder = ReferenceEquals(_offlineAudioProcess, process);
                     }
 
-                    if (isCurrentDecoder && !string.IsNullOrWhiteSpace(e.Data))
+                    if (isCurrentDecoder &&
+                        !_isDisposed &&
+                        !string.IsNullOrWhiteSpace(e.Data))
                     {
                         Logger.Warn($"[ffmpeg-offline-audio:{DisplayName}] {e.Data}");
                     }
@@ -2691,7 +2749,12 @@ internal sealed class FileCaptureService : IDisposable
                     preferThroughput: _offlineRenderEnabled);
                 process.ErrorDataReceived += (s, e) =>
                 {
-                    if (!string.IsNullOrWhiteSpace(e.Data)) Logger.Warn($"[ffmpeg] {e.Data}");
+                    if (!token.IsCancellationRequested &&
+                        !_isDisposed &&
+                        !string.IsNullOrWhiteSpace(e.Data))
+                    {
+                        Logger.Warn($"[ffmpeg] {e.Data}");
+                    }
                 };
                 process.BeginErrorReadLine();
 
@@ -2701,7 +2764,10 @@ internal sealed class FileCaptureService : IDisposable
                 
                 int framesRead = 0;
 
-                while (!token.IsCancellationRequested && IsProcessAlive(process))
+                // Drain redirected stdout through definitive EOF even if the
+                // Process exit flag becomes visible first; complete pipe-buffered
+                // frames and the terminal state would otherwise be lost.
+                while (!token.IsCancellationRequested)
                 {
                     int totalRead = 0;
                     while (totalRead < frameSize)
@@ -2714,10 +2780,30 @@ internal sealed class FileCaptureService : IDisposable
                     if (totalRead < frameSize) 
                     {
                         bool exited = !IsProcessAlive(process);
-                        Logger.Warn($"ffmpeg stream ended (read {totalRead}/{frameSize} bytes). Exited: {exited}");
-                        if (!token.IsCancellationRequested && exited && TryGetProcessExitCode(process, out int exitCode) && exitCode == 0)
+                        bool publishesTerminalState = !token.IsCancellationRequested &&
+                                                      IsCurrentVideoPipeline(generation);
+                        if (publishesTerminalState)
                         {
-                            _ended = true;
+                            Logger.Warn($"ffmpeg stream ended (read {totalRead}/{frameSize} bytes). Exited: {exited}");
+                            // EOF on the redirected stdout stream is definitive
+                            // even though Process.HasExited can lag it briefly.
+                            // Publish the terminal state now so AutoClip cannot
+                            // retain a dead decoder until its nominal container
+                            // duration. A known non-zero exit is surfaced as an
+                            // error; otherwise orderly/just-about-to-exit EOF ends
+                            // the live stream normally.
+                            if (exited &&
+                                TryGetProcessExitCode(process, out int exitCode) &&
+                                exitCode != 0)
+                            {
+                                _hasError = true;
+                                _errorMessage = $"FFmpeg exited with code {exitCode}.";
+                            }
+                            else
+                            {
+                                _ended = true;
+                            }
+
                             lock (_lock)
                             {
                                 Monitor.PulseAll(_lock);
@@ -2931,7 +3017,10 @@ internal sealed class FileCaptureService : IDisposable
             }
         }
 
-        internal bool ActivateLivePlaybackFromFirstFrame(double mediaAgeSeconds, long frameToken)
+        internal bool ActivateLivePlaybackFromFirstFrame(
+            double mediaAgeSeconds,
+            long frameToken,
+            bool deferAudioRefresh = false)
         {
             if (!_paceLiveFromFirstFrame || _offlineRenderEnabled)
             {
@@ -2979,7 +3068,7 @@ internal sealed class FileCaptureService : IDisposable
                 }
             }
 
-            if (shouldRefreshAudio)
+            if (shouldRefreshAudio && !deferAudioRefresh)
             {
                 // Decoder/output-device setup must not delay publication of the
                 // video frame that just activated the AutoClip phase.
@@ -2987,6 +3076,11 @@ internal sealed class FileCaptureService : IDisposable
             }
 
             return true;
+        }
+
+        internal void RefreshActivatedAudioAfterHandoff()
+        {
+            _ = Task.Run(RefreshAudioPlayback);
         }
 
         internal double GetFirstDecodedFrameAgeSeconds()
@@ -3498,7 +3592,9 @@ internal sealed class FileCaptureService : IDisposable
 
                 process.ErrorDataReceived += (_, e) =>
                 {
-                    if (!string.IsNullOrWhiteSpace(e.Data))
+                    if (audioCts?.IsCancellationRequested != true &&
+                        !_isDisposed &&
+                        !string.IsNullOrWhiteSpace(e.Data))
                     {
                         Logger.Warn($"[ffmpeg-audio:{DisplayName}] {e.Data}");
                         if (IsFatalAudioError(e.Data))
@@ -4539,6 +4635,8 @@ internal sealed class FileCaptureService : IDisposable
     {
         private const double DecoderLifetimeGraceSeconds = 0.1;
         private const double DecoderStartupTimeoutSeconds = 10.0;
+        private const double HandoffContinuationReserveSeconds = 1.0;
+        private const double HandoffPreopenLeadSeconds = 1.0;
 
         private enum Phase
         {
@@ -4585,6 +4683,8 @@ internal sealed class FileCaptureService : IDisposable
         private readonly int _offlineSeed = Random.Shared.Next();
         private Random _random = new();
         private VideoSession? _current;
+        private VideoSession? _handoffOutgoing;
+        private string? _handoffOutgoingPath;
         private PendingClipRequest? _pendingClip;
         private FileCaptureFrame? _lastFrame;
         private string? _lastFramePath;
@@ -4628,6 +4728,15 @@ internal sealed class FileCaptureService : IDisposable
         private double _savedLiveClipDurationSeconds;
         private bool _settingsInitialized;
         private bool _disposed;
+        private int _smokeNextHandoffPromotionDelayMilliseconds;
+        private long _smokeHandoffPromotionNotBeforeTimestamp;
+        private int _handoffCompletionCount;
+        private bool _handoffPendingCompletion;
+        private double _handoffSwitchNotBeforeSeconds;
+        private double _currentHandoffContinuationSeconds;
+        private double _handoffOutgoingPhaseStartSeconds;
+        private double _handoffOutgoingPhaseEndSeconds;
+        private double? _smokeNextClipRandomUnit;
 
         public AutoClipSession(
             IReadOnlyList<string> paths,
@@ -4652,21 +4761,29 @@ internal sealed class FileCaptureService : IDisposable
         public string DisplayName => _paths.Count == 0 ? "AutoClip" : $"AutoClip ({_paths.Count})";
         public string? CurrentPath => _currentPath;
         public string? CurrentFramePath => _lastFramePath;
-        public bool IsDelaying => _phase == Phase.Delaying;
+        public bool IsDelaying => _phase == Phase.Delaying && !_handoffPendingCompletion;
         public bool IsEmpty => _paths.Count == 0;
         public FileCaptureState State => _offlineProbeBudgetExhausted
             ? FileCaptureState.Error
             : _paths.Count == 0
             ? FileCaptureState.Ready
-            : _current?.State ?? FileCaptureState.Pending;
+            : _current?.State ?? _handoffOutgoing?.State ?? FileCaptureState.Pending;
 
         public double GetVisualOpacity(double fadeSeconds)
         {
+            if (_handoffPendingCompletion && _lastFrame.HasValue)
+            {
+                return CalculatePhaseOpacity(
+                    fadeSeconds,
+                    _handoffOutgoingPhaseStartSeconds,
+                    _handoffOutgoingPhaseEndSeconds);
+            }
+
             if (_phase == Phase.Preparing && _lastFrame.HasValue)
             {
                 // A cached probe is normally promoted on the next capture tick.
-                // Keep a zero-fade handoff visually continuous during that brief
-                // preparing state; a faded-out prior phase remains transparent.
+                // Keep zero-fade retained-frame continuity during that brief
+                // preparing state; a faded-out prior phase stays transparent.
                 return fadeSeconds <= 0.0001 ? 1 : 0;
             }
 
@@ -4684,15 +4801,20 @@ internal sealed class FileCaptureService : IDisposable
                 return _lastFrame.HasValue && fadeSeconds <= 0.0001 ? 1 : 0;
             }
 
-            double duration = Math.Max(0, _phaseEndSeconds - _phaseStartSeconds);
+            return CalculatePhaseOpacity(fadeSeconds, _phaseStartSeconds, _phaseEndSeconds);
+        }
+
+        private double CalculatePhaseOpacity(double fadeSeconds, double phaseStart, double phaseEnd)
+        {
+            double duration = Math.Max(0, phaseEnd - phaseStart);
             double effectiveFade = Math.Min(Math.Clamp(fadeSeconds, 0, 10), duration / 2.0);
             if (effectiveFade <= 0.0001)
             {
                 return 1;
             }
 
-            double elapsed = Math.Max(0, _lastCaptureTimelineSeconds - _phaseStartSeconds);
-            double remaining = Math.Max(0, _phaseEndSeconds - _lastCaptureTimelineSeconds);
+            double elapsed = Math.Max(0, _lastCaptureTimelineSeconds - phaseStart);
+            double remaining = Math.Max(0, phaseEnd - _lastCaptureTimelineSeconds);
             return Math.Clamp(Math.Min(elapsed / effectiveFade, remaining / effectiveFade), 0, 1);
         }
 
@@ -4748,21 +4870,51 @@ internal sealed class FileCaptureService : IDisposable
             if (_phase == Phase.Preparing)
             {
                 // Keep the deterministic offline timeline pinned while media metadata is prepared.
-                return null;
+                return _offlineRenderEnabled
+                    ? null
+                    : CaptureHandoffOutgoingFrame(targetWidth, targetHeight, fitMode, includeSource);
             }
 
             if (_phase == Phase.Delaying || _phase == Phase.Empty || _current == null)
             {
+                FileCaptureFrame? outgoingFrame = _offlineRenderEnabled
+                    ? null
+                    : CaptureHandoffOutgoingFrame(targetWidth, targetHeight, fitMode, includeSource);
                 AdvanceOfflineFrame();
-                return null;
+                return outgoingFrame;
             }
 
-            FileCaptureFrame? frame = _current.CaptureFrame(targetWidth, targetHeight, fitMode, includeSource);
-            if (frame.HasValue)
+            VideoSession current = _current;
+            bool wasAwaitingInitialFrame = _phaseAwaitingFirstFrame;
+            bool holdPreparedSuccessor = wasAwaitingInitialFrame &&
+                                         _handoffPendingCompletion &&
+                                         _handoffOutgoing != null &&
+                                         now < _handoffSwitchNotBeforeSeconds;
+            FileCaptureFrame? frame;
+            if (holdPreparedSuccessor)
+            {
+                current.PrimeLiveFramePipeline(targetWidth, targetHeight, fitMode, includeSource);
+                frame = null;
+            }
+            else
+            {
+                frame = current.CaptureFrame(targetWidth, targetHeight, fitMode, includeSource);
+            }
+            // Offline decoders can reach EOF while their bounded FIFO still holds
+            // deterministic export frames. Let the offline phase clock drain that
+            // queue; early EOF advancement is a live-playback safeguard only.
+            bool decoderEnded = !_offlineRenderEnabled && current.ConsumeEnded();
+            if (holdPreparedSuccessor)
+            {
+                // Do not publish or release the successor clock/audio before the
+                // outgoing phase boundary. PrimeLiveFramePipeline leaves newest-frame
+                // retention to the bounded raw queue without duplicate conversion.
+            }
+            else if (frame.HasValue)
             {
                 bool activated;
                 double frameAge = 0;
-                if (_phaseAwaitingFirstFrame)
+                if (wasAwaitingInitialFrame)
                 {
                     activated = ArmPhaseFromFirstFrame(now, frame.Value.FrameToken);
                 }
@@ -4770,8 +4922,8 @@ internal sealed class FileCaptureService : IDisposable
                 {
                     frameAge = _offlineRenderEnabled
                         ? 0
-                        : _current.GetFirstDecodedFrameAgeSeconds();
-                    activated = _current.ActivateLivePlaybackFromFirstFrame(
+                        : current.GetFirstDecodedFrameAgeSeconds();
+                    activated = current.ActivateLivePlaybackFromFirstFrame(
                         frameAge,
                         frame.Value.FrameToken);
                     if (!activated && !_resumeAwaitingFreshFrame)
@@ -4790,21 +4942,46 @@ internal sealed class FileCaptureService : IDisposable
                     CompleteResumeWarmup(now, frameAge);
                 }
 
-                _lastFrame = frame;
-                _lastFramePath = _currentPath;
+                if (!wasAwaitingInitialFrame || activated)
+                {
+                    _lastFrame = frame;
+                    _lastFramePath = _currentPath;
+                    if (wasAwaitingInitialFrame && activated)
+                    {
+                        CompleteHandoff();
+                    }
+                }
+                else
+                {
+                    // A newly-created session may briefly expose a retained frame
+                    // that does not belong to its activation generation. Continue
+                    // the outgoing clip until a genuinely fresh token arrives.
+                    frame = null;
+                }
             }
-            else if (_current.State == FileCaptureState.Error)
+
+            if (current.State == FileCaptureState.Error)
             {
-                BeginNextPhase(now);
+                BeginNextPhase(now, preserveCurrentForHandoff: false);
+            }
+            else if (decoderEnded)
+            {
+                // Container duration can outlive the mapped video stream. Do not
+                // retain its final frame until the nominal phase deadline (or the
+                // startup timeout); advance as soon as the decoder reports EOF.
+                BeginNextPhase(now, preserveCurrentForHandoff: false);
             }
             else if (_phaseAwaitingFirstFrame && now >= _decoderStartupDeadlineSeconds)
             {
                 Logger.Warn($"AutoClip decoder did not publish its first frame within {DecoderStartupTimeoutSeconds:0.#}s; advancing from {Path.GetFileName(_currentPath)}.");
-                BeginNextPhase(now);
+                BeginNextPhase(now, preserveCurrentForHandoff: false);
             }
 
+            FileCaptureFrame? outgoingFallback = !frame.HasValue && !_offlineRenderEnabled
+                ? CaptureHandoffOutgoingFrame(targetWidth, targetHeight, fitMode, includeSource)
+                : null;
             AdvanceOfflineFrame();
-            return frame ?? _lastFrame;
+            return frame ?? outgoingFallback ?? _lastFrame;
         }
 
         public void Restart()
@@ -4814,27 +4991,43 @@ internal sealed class FileCaptureService : IDisposable
 
         public void SetAudioEnabled(bool enabled)
         {
-            _audioEnabled = enabled;
-            _current?.SetAudioEnabled(enabled);
+            lock (_stateLock)
+            {
+                _audioEnabled = enabled;
+                _current?.SetAudioEnabled(enabled);
+                _handoffOutgoing?.SetAudioEnabled(enabled);
+            }
         }
 
         public void SetAudioVolume(double volume)
         {
-            _audioVolume = Math.Clamp(volume, 0, 1);
-            _current?.SetAudioVolume(_audioVolume);
+            lock (_stateLock)
+            {
+                _audioVolume = Math.Clamp(volume, 0, 1);
+                _current?.SetAudioVolume(_audioVolume);
+                _handoffOutgoing?.SetAudioVolume(_audioVolume);
+            }
         }
 
         public void SetAudioMaster(bool enabled, double volume)
         {
-            _masterAudioEnabled = enabled;
-            _masterAudioVolume = Math.Clamp(volume, 0, 1);
-            _current?.SetMasterAudio(_masterAudioEnabled, _masterAudioVolume);
+            lock (_stateLock)
+            {
+                _masterAudioEnabled = enabled;
+                _masterAudioVolume = Math.Clamp(volume, 0, 1);
+                _current?.SetMasterAudio(_masterAudioEnabled, _masterAudioVolume);
+                _handoffOutgoing?.SetMasterAudio(_masterAudioEnabled, _masterAudioVolume);
+            }
         }
 
         public void SetLiveAudioAnalysisEnabled(bool enabled)
         {
-            _liveAudioAnalysisEnabled = enabled;
-            _current?.SetLiveAudioAnalysisEnabled(enabled);
+            lock (_stateLock)
+            {
+                _liveAudioAnalysisEnabled = enabled;
+                _current?.SetLiveAudioAnalysisEnabled(enabled);
+                _handoffOutgoing?.SetLiveAudioAnalysisEnabled(enabled);
+            }
         }
 
         public void SetPlaybackPaused(bool paused)
@@ -4871,6 +5064,11 @@ internal sealed class FileCaptureService : IDisposable
                     _clock.Start();
                 }
             }
+            // During a pre-open seam the outgoing session is still the visible and
+            // potentially audible owner. Pause/resume it first so synchronous teardown
+            // of the hidden successor cannot let the displayed clip advance against a
+            // stopped AutoClip clock.
+            _handoffOutgoing?.SetPlaybackPaused(paused);
             _current?.SetPlaybackPaused(paused);
         }
 
@@ -4903,6 +5101,10 @@ internal sealed class FileCaptureService : IDisposable
                 _lowContentionMode,
                 _decoderThreadLimit,
                 _videoDecodeFpsLimit) == true;
+            _handoffOutgoing?.SetPerformanceSettings(
+                _lowContentionMode,
+                _decoderThreadLimit,
+                _videoDecodeFpsLimit);
             if (changed && !restarted && !wasAwaitingFreshFrame)
             {
                 ClearResumeWarmup();
@@ -4929,25 +5131,40 @@ internal sealed class FileCaptureService : IDisposable
             {
                 double liveNow = _clock.Elapsed.TotalSeconds;
                 SettleResumeWarmupHold(liveNow);
-                _savedLivePhase = _phase;
-                _savedLivePath = _currentPath;
-                _savedLivePhaseRemainingSeconds = _phaseAwaitingFirstFrame
-                    ? Math.Max(0, _pendingPhaseDurationSeconds - _pendingPhaseElapsedSeconds)
-                    : Math.Max(0, _phaseEndSeconds - liveNow);
-                _savedLivePhaseElapsedSeconds = _phaseAwaitingFirstFrame
-                    ? Math.Max(0, _pendingPhaseElapsedSeconds)
-                    : Math.Max(0, liveNow - _phaseStartSeconds);
-                _savedLiveClipDurationSeconds = _phaseAwaitingFirstFrame
-                    ? Math.Max(0, _pendingPhaseDurationSeconds)
-                    : Math.Max(0, _phaseEndSeconds - _phaseStartSeconds);
+                bool saveVisibleHandoffOwner = _handoffPendingCompletion &&
+                                               _handoffOutgoing != null;
+                VideoSession? savedSession = saveVisibleHandoffOwner
+                    ? _handoffOutgoing
+                    : _current;
+                _savedLivePhase = saveVisibleHandoffOwner ? Phase.Playing : _phase;
+                _savedLivePath = saveVisibleHandoffOwner
+                    ? _handoffOutgoingPath
+                    : _currentPath;
+                _savedLivePhaseRemainingSeconds = saveVisibleHandoffOwner
+                    ? Math.Max(0, _handoffOutgoingPhaseEndSeconds - liveNow)
+                    : _phaseAwaitingFirstFrame
+                        ? Math.Max(0, _pendingPhaseDurationSeconds - _pendingPhaseElapsedSeconds)
+                        : Math.Max(0, _phaseEndSeconds - liveNow);
+                _savedLivePhaseElapsedSeconds = saveVisibleHandoffOwner
+                    ? Math.Max(0, liveNow - _handoffOutgoingPhaseStartSeconds)
+                    : _phaseAwaitingFirstFrame
+                        ? Math.Max(0, _pendingPhaseElapsedSeconds)
+                        : Math.Max(0, liveNow - _phaseStartSeconds);
+                _savedLiveClipDurationSeconds = saveVisibleHandoffOwner
+                    ? Math.Max(0, _handoffOutgoingPhaseEndSeconds - _handoffOutgoingPhaseStartSeconds)
+                    : _phaseAwaitingFirstFrame
+                        ? Math.Max(0, _pendingPhaseDurationSeconds)
+                        : Math.Max(0, _phaseEndSeconds - _phaseStartSeconds);
                 _savedLivePlaybackSeconds = 0;
-                if (_current?.TryGetPlaybackState(out VideoPlaybackState playbackState) == true)
+                if (savedSession?.TryGetPlaybackState(out VideoPlaybackState playbackState) == true)
                 {
                     _savedLivePlaybackSeconds = playbackState.PositionSeconds;
                 }
 
                 ClearPendingClip();
                 DisposeCurrent(background: false);
+                DisposeHandoffOutgoing(background: false);
+                ClearHandoffTimingState();
                 ClearResumeWarmup();
                 _offlineRenderEnabled = true;
                 _offlineRenderFps = fps;
@@ -4970,6 +5187,8 @@ internal sealed class FileCaptureService : IDisposable
 
             ClearPendingClip();
             DisposeCurrent(background: false);
+            DisposeHandoffOutgoing(background: false);
+            ClearHandoffTimingState();
             ClearResumeWarmup();
             _offlineRenderEnabled = false;
             _offlineRenderFps = 0;
@@ -5034,13 +5253,24 @@ internal sealed class FileCaptureService : IDisposable
 
         public int MixLiveAudioSamples(Span<float> destination)
         {
-            if (_offlineRenderEnabled)
+            VideoSession? audioSession;
+            lock (_stateLock)
             {
-                return 0;
+                if (_offlineRenderEnabled)
+                {
+                    return 0;
+                }
+
+                // Audio mixing observes the phase selected by CaptureFrame; it
+                // must never advance the scheduler on the audio thread because
+                // that could move/dispose current and outgoing ownership midway
+                // through a visual capture.
+                audioSession = _phase == Phase.Playing && !_phaseAwaitingFirstFrame
+                    ? _current
+                    : _handoffOutgoing;
             }
 
-            EnsurePhase(GetTimelineSeconds());
-            return _phase == Phase.Playing ? _current?.MixLiveAudioSamples(destination) ?? 0 : 0;
+            return audioSession?.MixLiveAudioSamples(destination) ?? 0;
         }
 
         public void Dispose()
@@ -5053,6 +5283,8 @@ internal sealed class FileCaptureService : IDisposable
             _disposed = true;
             ClearPendingClip();
             DisposeCurrent(background: false);
+            DisposeHandoffOutgoing(background: false);
+            ClearHandoffTimingState();
             lock (_pathsLock)
             {
                 _paths.Clear();
@@ -5137,7 +5369,7 @@ internal sealed class FileCaptureService : IDisposable
                 if (_current == null || _current.State == FileCaptureState.Error)
                 {
                     ClearResumeWarmup();
-                    BeginNextPhase(now);
+                    BeginNextPhase(now, preserveCurrentForHandoff: false);
                 }
                 else if (now >= _resumeStartupDeadlineSeconds)
                 {
@@ -5145,7 +5377,7 @@ internal sealed class FileCaptureService : IDisposable
                         $"AutoClip decoder did not publish a fresh frame within {DecoderStartupTimeoutSeconds:0.#}s after resume; " +
                         $"advancing from {Path.GetFileName(_currentPath)}.");
                     ClearResumeWarmup();
-                    BeginNextPhase(now);
+                    BeginNextPhase(now, preserveCurrentForHandoff: false);
                 }
 
                 return;
@@ -5154,6 +5386,8 @@ internal sealed class FileCaptureService : IDisposable
             if (_paths.Count == 0)
             {
                 DisposeCurrent(background: true);
+                DisposeHandoffOutgoing(background: true);
+                ClearHandoffTimingState();
                 _phase = Phase.Empty;
                 _lastFrame = null;
                 _lastFramePath = null;
@@ -5166,6 +5400,31 @@ internal sealed class FileCaptureService : IDisposable
                 {
                     StartRandomClip(now);
                     return;
+                }
+
+                if (_phase == Phase.Playing &&
+                    !_offlineRenderEnabled &&
+                    !_phaseAwaitingFirstFrame &&
+                    !_resumeAwaitingFreshFrame &&
+                    !_handoffPendingCompletion &&
+                    _current != null &&
+                    _maxDelaySeconds <= 0.0001)
+                {
+                    double phaseDuration = Math.Max(0, _phaseEndSeconds - _phaseStartSeconds);
+                    double preopenLead = Math.Min(
+                        HandoffPreopenLeadSeconds,
+                        phaseDuration / 2.0);
+                    if (preopenLead > 0.0001 && now >= _phaseEndSeconds - preopenLead)
+                    {
+                        // Open/accurately seek exactly one successor before the
+                        // boundary, but continue presenting the outgoing clip and
+                        // keep the successor clock/audio gated until that boundary.
+                        BeginNextPhase(
+                            now,
+                            preserveCurrentForHandoff: true,
+                            handoffSwitchNotBeforeSeconds: _phaseEndSeconds);
+                        return;
+                    }
                 }
 
                 if (now < _phaseEndSeconds)
@@ -5184,23 +5443,45 @@ internal sealed class FileCaptureService : IDisposable
             }
         }
 
-        private void BeginNextPhase(double now)
+        private void BeginNextPhase(
+            double now,
+            bool preserveCurrentForHandoff = true,
+            double handoffSwitchNotBeforeSeconds = 0)
         {
+            bool canContinueOutgoing = preserveCurrentForHandoff &&
+                                       !_offlineRenderEnabled &&
+                                       _maxDelaySeconds <= 0.0001 &&
+                                       _current != null &&
+                                       !_phaseAwaitingFirstFrame;
             ClearResumeWarmup();
             _phaseAwaitingFirstFrame = false;
             _pendingPhaseDurationSeconds = 0;
             _pendingPhaseElapsedSeconds = 0;
             _decoderStartupDeadlineSeconds = 0;
-            DisposeCurrent(background: true);
             double delay = NextRange(_minDelaySeconds, _maxDelaySeconds);
             if (delay > 0.0001)
             {
+                DisposeCurrent(background: true);
+                DisposeHandoffOutgoing(background: true);
+                ClearHandoffTimingState();
                 _lastFrame = null;
                 _lastFramePath = null;
                 _phase = Phase.Delaying;
                 _phaseStartSeconds = now;
                 _phaseEndSeconds = now + delay;
                 return;
+            }
+
+            if (canContinueOutgoing)
+            {
+                MoveCurrentToHandoffOutgoing(
+                    handoffSwitchNotBeforeSeconds > 0
+                        ? handoffSwitchNotBeforeSeconds
+                        : now);
+            }
+            else
+            {
+                DisposeCurrent(background: true);
             }
 
             _phase = Phase.Uninitialized;
@@ -5223,7 +5504,8 @@ internal sealed class FileCaptureService : IDisposable
 
             string path = _paths[index];
             double requestedClipSeconds = NextRange(_minClipSeconds, _maxClipSeconds);
-            double randomUnit = _random.NextDouble();
+            double randomUnit = _smokeNextClipRandomUnit ?? _random.NextDouble();
+            _smokeNextClipRandomUnit = null;
             QueueClipPreparation(
                 new PendingClipRequest(
                     path,
@@ -5237,20 +5519,26 @@ internal sealed class FileCaptureService : IDisposable
             double sourceDurationSeconds,
             double requestedClipSeconds,
             double randomUnit,
-            bool loopSelectedFile)
+            bool loopSelectedFile,
+            double trailingContinuationSeconds = 0)
         {
             double requested = double.IsFinite(requestedClipSeconds)
                 ? Math.Max(0.05, requestedClipSeconds)
                 : 0.05;
             return loopSelectedFile
                 ? (0, requested)
-                : FitClipWindowToSource(sourceDurationSeconds, requested, randomUnit);
+                : FitClipWindowToSource(
+                    sourceDurationSeconds,
+                    requested,
+                    randomUnit,
+                    trailingContinuationSeconds);
         }
 
         internal static (double StartSeconds, double ClipSeconds) FitClipWindowToSource(
             double sourceDurationSeconds,
             double requestedClipSeconds,
-            double randomUnit)
+            double randomUnit,
+            double trailingContinuationSeconds = 0)
         {
             double requested = double.IsFinite(requestedClipSeconds)
                 ? Math.Max(0.05, requestedClipSeconds)
@@ -5264,13 +5552,54 @@ internal sealed class FileCaptureService : IDisposable
             // Probe durations and decoder endpoints are not always sample-exact. Leave
             // up to 250 ms (or 2% for short media) unused at the tail so ffmpeg never
             // has to cross EOF while an AutoClip phase is still supposed to be playing.
-            double endGuard = Math.Min(0.25, sourceDuration * 0.02);
+            double endpointGuard = Math.Min(0.25, sourceDuration * 0.02);
+            double requestedContinuation = double.IsFinite(trailingContinuationSeconds)
+                ? Math.Max(0, trailingContinuationSeconds)
+                : 0;
+            // A non-looping zero-delay live clip reserves real source media after
+            // its visible window so the outgoing decoder can keep advancing while
+            // one successor accurately seeks. Cap the reserve at 20% for very short
+            // sources instead of reducing them to a near-empty visible excerpt.
+            double continuationGuard = Math.Min(
+                requestedContinuation,
+                sourceDuration * 0.2);
+            // The ordinary endpoint guard and the moving-handoff reserve protect
+            // different intervals, so reserve both. Using only the larger value
+            // would make a nominal one-second reserve shorter by the endpoint
+            // safety margin and could still exhaust the outgoing source at a seam.
+            double endGuard = Math.Min(sourceDuration - 0.001, endpointGuard + continuationGuard);
             double usableDuration = Math.Max(0.001, sourceDuration - endGuard);
             double clipSeconds = Math.Min(requested, usableDuration);
             double maxStartSeconds = Math.Max(0, usableDuration - clipSeconds);
             double unit = double.IsFinite(randomUnit) ? Math.Clamp(randomUnit, 0, 1) : 0;
             double startSeconds = maxStartSeconds * unit;
             return (startSeconds, clipSeconds);
+        }
+
+        private static double GetAvailableHandoffContinuationSeconds(
+            double sourceDurationSeconds,
+            double startSeconds,
+            double clipSeconds,
+            bool loopSelectedFile)
+        {
+            if (loopSelectedFile)
+            {
+                return HandoffContinuationReserveSeconds;
+            }
+
+            if (!double.IsFinite(sourceDurationSeconds) || sourceDurationSeconds <= 0.001)
+            {
+                return 0;
+            }
+
+            double sourceDuration = Math.Max(0.001, sourceDurationSeconds);
+            double endpointGuard = Math.Min(0.25, sourceDuration * 0.02);
+            double safeSourceEnd = Math.Max(0, sourceDuration - endpointGuard);
+            double selectedEnd = Math.Max(0, startSeconds) + Math.Max(0, clipSeconds);
+            return Math.Clamp(
+                safeSourceEnd - selectedEnd,
+                0,
+                HandoffContinuationReserveSeconds);
         }
 
         private void QueueSpecificClip(string path, double startSeconds, double clipSeconds, double elapsedSeconds = 0)
@@ -5306,6 +5635,16 @@ internal sealed class FileCaptureService : IDisposable
             {
                 return false;
             }
+
+            long promotionNotBefore = Volatile.Read(ref _smokeHandoffPromotionNotBeforeTimestamp);
+            if (_handoffOutgoing != null &&
+                promotionNotBefore > 0 &&
+                Stopwatch.GetTimestamp() < promotionNotBefore)
+            {
+                return false;
+            }
+
+            Volatile.Write(ref _smokeHandoffPromotionNotBeforeTimestamp, 0);
 
             VideoSession.VideoProbeInfo? probe = null;
             try
@@ -5349,11 +5688,15 @@ internal sealed class FileCaptureService : IDisposable
             }
             else
             {
+                bool reserveLiveHandoffTail = !_offlineRenderEnabled &&
+                                              _maxDelaySeconds <= 0.0001 &&
+                                              !pending.LoopSelectedFile;
                 (startSeconds, clipSeconds) = SelectClipWindow(
                     probe.Value.DurationSeconds,
                     pending.RequestedClipSeconds,
                     pending.RandomUnit,
-                    pending.LoopSelectedFile);
+                    pending.LoopSelectedFile,
+                    reserveLiveHandoffTail ? HandoffContinuationReserveSeconds : 0);
             }
 
             StartPreparedClip(
@@ -5379,7 +5722,12 @@ internal sealed class FileCaptureService : IDisposable
             DisposeCurrent(background: true);
             double duration = Math.Max(0.001, clipSeconds);
             double elapsed = Math.Clamp(elapsedSeconds, 0, duration);
-            var decoderPlan = GetDecoderPlan(loopSelectedFile, duration, elapsed);
+            bool allowSeamlessHandoff = !_offlineRenderEnabled && _maxDelaySeconds <= 0.0001;
+            var decoderPlan = GetDecoderPlan(
+                loopSelectedFile,
+                duration,
+                elapsed,
+                allowSeamlessHandoff);
             var session = new VideoSession(
                 path,
                 loopPlayback: decoderPlan.LoopPlayback,
@@ -5399,6 +5747,11 @@ internal sealed class FileCaptureService : IDisposable
             _offlineProbeDeadlineTimestamp = 0;
             _offlineProbeBudgetExhausted = false;
             _currentPath = path;
+            _currentHandoffContinuationSeconds = GetAvailableHandoffContinuationSeconds(
+                probe.DurationSeconds,
+                startSeconds,
+                duration,
+                loopSelectedFile);
             _phase = Phase.Playing;
             ClearResumeWarmup();
             _phaseAwaitingFirstFrame = true;
@@ -5415,24 +5768,52 @@ internal sealed class FileCaptureService : IDisposable
         {
             double duration = Math.Max(0.05, _pendingPhaseDurationSeconds);
             double elapsed = Math.Clamp(_pendingPhaseElapsedSeconds, 0, duration);
-            // Process launch/seek time before the decoder's first output does not
-            // consume the visible phase. If the UI itself was stalled after output
-            // began, however, FFmpeg's realtime clock has advanced and the live
-            // queue intentionally kept the newest frame. Subtract that queue age so
-            // the scheduler follows the media position instead of extending past
-            // EOF and freezing on the decoder's final retained frame.
-            double firstFrameQueueAge = _offlineRenderEnabled
+            // The media/audio clock follows the newest paced frame. For a successor
+            // that became ready before its switch boundary, its intentional hidden
+            // pre-open age does not shorten the new visible phase; only additional
+            // post-boundary/UI queue age does. The selected window reserves the same
+            // bounded real-media tail so the shifted visible window stays before EOF.
+            double decodedMediaAge = _offlineRenderEnabled
                 ? 0
                 : Math.Clamp(
                     _current?.GetFirstDecodedFrameAgeSeconds() ?? 0,
                     0,
-                    Math.Max(0, duration - elapsed));
-            if (_current?.ActivateLivePlaybackFromFirstFrame(firstFrameQueueAge, frameToken) != true)
+                    Math.Max(0, duration - elapsed + HandoffContinuationReserveSeconds));
+            double preBoundaryMediaAge = 0;
+            if (_handoffPendingCompletion && _handoffSwitchNotBeforeSeconds > 0)
+            {
+                // Derive this from the actual first decoded timestamp at activation
+                // rather than relying on a prior UI tick. If the capture thread is
+                // stalled across the boundary, there may never have been a pre-boundary
+                // poll even though the successor was already decoding.
+                double firstDecodedTimelineSeconds = now - decodedMediaAge;
+                preBoundaryMediaAge = Math.Clamp(
+                    _handoffSwitchNotBeforeSeconds - firstDecodedTimelineSeconds,
+                    0,
+                    decodedMediaAge);
+            }
+
+            // Hidden media may extend the visible phase only as far as this selected
+            // window's real source tail permits. Any predecode beyond that tail is
+            // charged like ordinary queue age, preventing short/non-loop sources from
+            // reaching EOF before their adjusted phase deadline.
+            double freePredecodedMediaAge = Math.Min(
+                preBoundaryMediaAge,
+                _currentHandoffContinuationSeconds);
+            double visibleQueueAge = Math.Clamp(
+                decodedMediaAge - freePredecodedMediaAge,
+                0,
+                Math.Max(0, duration - elapsed));
+            bool deferAudioRefresh = _handoffPendingCompletion;
+            if (_current?.ActivateLivePlaybackFromFirstFrame(
+                    decodedMediaAge,
+                    frameToken,
+                    deferAudioRefresh) != true)
             {
                 return false;
             }
             _phaseStartSeconds = now - elapsed;
-            _phaseEndSeconds = now + Math.Max(0.05, duration - elapsed - firstFrameQueueAge);
+            _phaseEndSeconds = now + Math.Max(0.05, duration - elapsed - visibleQueueAge);
             _phaseAwaitingFirstFrame = false;
             _pendingPhaseDurationSeconds = 0;
             _pendingPhaseElapsedSeconds = 0;
@@ -5443,14 +5824,24 @@ internal sealed class FileCaptureService : IDisposable
         internal static (bool LoopPlayback, double MaxDecodeDurationSeconds) GetDecoderPlan(
             bool loopSelectedFile,
             double clipSeconds,
-            double elapsedSeconds)
+            double elapsedSeconds,
+            bool allowSeamlessHandoff = false)
         {
             double duration = double.IsFinite(clipSeconds) ? Math.Max(0.05, clipSeconds) : 0.05;
             double elapsed = double.IsFinite(elapsedSeconds)
                 ? Math.Clamp(elapsedSeconds, 0, duration)
                 : 0;
             double remaining = Math.Max(0.05, duration - elapsed);
-            return (loopSelectedFile, remaining + DecoderLifetimeGraceSeconds);
+            // A zero-delay live AutoClip keeps exactly one outgoing decoder moving
+            // while one successor opens. Give that process a bounded lifetime tail;
+            // non-looping selection separately reserves real source frames after
+            // the visible window, while looping remains tied strictly to the user's
+            // Loop selected file option. The outgoing process is retired as soon as
+            // the successor's first fresh frame is published.
+            double handoffAllowance = allowSeamlessHandoff ? DecoderStartupTimeoutSeconds : 0;
+            return (
+                loopSelectedFile,
+                remaining + handoffAllowance + DecoderLifetimeGraceSeconds);
         }
 
         internal double GetTimelineSecondsForSmoke() => GetTimelineSeconds();
@@ -5472,10 +5863,32 @@ internal sealed class FileCaptureService : IDisposable
                 : Math.Max(0, _phaseEndSeconds - GetTimelineSeconds());
         }
 
+        internal void DelayNextHandoffPromotionForSmoke(int milliseconds)
+        {
+            _smokeNextHandoffPromotionDelayMilliseconds = Math.Clamp(milliseconds, 0, 5000);
+        }
+
+        internal void ForceNextClipRandomUnitForSmoke(double randomUnit)
+        {
+            _smokeNextClipRandomUnit = double.IsFinite(randomUnit)
+                ? Math.Clamp(randomUnit, 0, 1)
+                : 0;
+        }
+
+        internal bool IsHandoffActiveForSmoke() => _handoffPendingCompletion;
+
+        internal int GetOwnedVideoSessionCountForSmoke()
+        {
+            return (_current != null ? 1 : 0) + (_handoffOutgoing != null ? 1 : 0);
+        }
+
+        internal int GetHandoffCompletionCountForSmoke() => _handoffCompletionCount;
+
         private void ResetSchedule()
         {
             ClearPendingClip();
             DisposeCurrent(background: true);
+            DisposeHandoffOutgoing(background: true);
             ClearResumeWarmup();
             _lastFrame = null;
             _lastFramePath = null;
@@ -5492,6 +5905,9 @@ internal sealed class FileCaptureService : IDisposable
             _probeFailureStreak = 0;
             _offlineProbeDeadlineTimestamp = 0;
             _offlineProbeBudgetExhausted = false;
+            _smokeHandoffPromotionNotBeforeTimestamp = 0;
+            _smokeNextClipRandomUnit = null;
+            ClearHandoffTimingState();
         }
 
         private void WaitForPendingClipForOffline(double now)
@@ -5654,10 +6070,127 @@ internal sealed class FileCaptureService : IDisposable
             ? min
             : min + (_random.NextDouble() * (max - min));
 
+        private FileCaptureFrame? CaptureHandoffOutgoingFrame(
+            int targetWidth,
+            int targetHeight,
+            FitMode fitMode,
+            bool includeSource)
+        {
+            VideoSession? outgoing = _handoffOutgoing;
+            if (outgoing == null)
+            {
+                return _lastFrame;
+            }
+
+            FileCaptureFrame? frame = outgoing.CaptureFrame(
+                targetWidth,
+                targetHeight,
+                fitMode,
+                includeSource);
+            bool ended = outgoing.ConsumeEnded();
+            if (frame.HasValue)
+            {
+                double frameAge = outgoing.GetFirstDecodedFrameAgeSeconds();
+                if (outgoing.ActivateLivePlaybackFromFirstFrame(
+                        frameAge,
+                        frame.Value.FrameToken))
+                {
+                    _lastFrame = frame;
+                    _lastFramePath = _handoffOutgoingPath;
+                }
+                else
+                {
+                    frame = null;
+                }
+            }
+
+            if (outgoing.State == FileCaptureState.Error || ended)
+            {
+                DisposeHandoffOutgoing(background: true);
+            }
+
+            return frame ?? _lastFrame;
+        }
+
+        private void MoveCurrentToHandoffOutgoing(double switchNotBeforeSeconds)
+        {
+            VideoSession? outgoing = _current;
+            if (outgoing == null)
+            {
+                return;
+            }
+
+            DisposeHandoffOutgoing(background: true);
+            _current = null;
+            _handoffOutgoing = outgoing;
+            _handoffOutgoingPath = _currentPath;
+            _handoffPendingCompletion = true;
+            _handoffSwitchNotBeforeSeconds = Math.Max(0, switchNotBeforeSeconds);
+            _handoffOutgoingPhaseStartSeconds = _phaseStartSeconds;
+            _handoffOutgoingPhaseEndSeconds = _phaseEndSeconds;
+            _currentHandoffContinuationSeconds = 0;
+
+            int delayMilliseconds = _smokeNextHandoffPromotionDelayMilliseconds;
+            _smokeNextHandoffPromotionDelayMilliseconds = 0;
+            if (delayMilliseconds > 0)
+            {
+                long delayTicks = (long)Math.Ceiling(
+                    delayMilliseconds * Stopwatch.Frequency / 1000.0);
+                Volatile.Write(
+                    ref _smokeHandoffPromotionNotBeforeTimestamp,
+                    Stopwatch.GetTimestamp() + delayTicks);
+            }
+
+        }
+
+        private void CompleteHandoff()
+        {
+            if (!_handoffPendingCompletion)
+            {
+                return;
+            }
+
+            DisposeHandoffOutgoing(background: true);
+            ClearHandoffTimingState();
+            _handoffCompletionCount++;
+            _current?.RefreshActivatedAudioAfterHandoff();
+        }
+
+        private void ClearHandoffTimingState()
+        {
+            _handoffPendingCompletion = false;
+            _handoffSwitchNotBeforeSeconds = 0;
+            _handoffOutgoingPhaseStartSeconds = 0;
+            _handoffOutgoingPhaseEndSeconds = 0;
+        }
+
+        private void DisposeHandoffOutgoing(bool background)
+        {
+            VideoSession? outgoing = _handoffOutgoing;
+            _handoffOutgoing = null;
+            _handoffOutgoingPath = null;
+            Volatile.Write(ref _smokeHandoffPromotionNotBeforeTimestamp, 0);
+            if (outgoing == null)
+            {
+                return;
+            }
+
+            if (background)
+            {
+                outgoing.RequestRetirement();
+                MediaDisposalQueue.Enqueue(outgoing, "AutoClip outgoing decoder");
+            }
+            else
+            {
+                outgoing.Dispose();
+            }
+        }
+
         private void DisposeCurrent(bool background)
         {
             VideoSession? previous = _current;
             _current = null;
+            _currentHandoffContinuationSeconds = 0;
             if (previous == null)
             {
                 return;
@@ -5665,6 +6198,7 @@ internal sealed class FileCaptureService : IDisposable
 
             if (background)
             {
+                previous.RequestRetirement();
                 MediaDisposalQueue.Enqueue(previous, "AutoClip decoder");
             }
             else
