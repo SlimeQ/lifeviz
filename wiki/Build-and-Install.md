@@ -76,6 +76,7 @@ dotnet bin\Debug\net9.0-windows-sbx\lifeviz.dll --smoke-test dimensions
 dotnet bin\Debug\net9.0-windows-sbx\lifeviz.dll --smoke-test shutdown
 dotnet bin\Debug\net9.0-windows-sbx\lifeviz.dll --smoke-test startup
 dotnet bin\Debug\net9.0-windows-sbx\lifeviz.dll --smoke-test ffmpeg-lifecycle
+dotnet bin\Debug\net9.0-windows-sbx\lifeviz.dll --smoke-test autoclip C:\path\to\video.mp4
 dotnet bin\Debug\net9.0-windows-sbx\lifeviz.dll --smoke-test webm-alpha C:\path\to\transparent.webm
 dotnet bin\Debug\net9.0-windows-sbx\lifeviz.dll --smoke-test all
 ```
@@ -130,6 +131,7 @@ dotnet bin\Debug\net9.0-windows-sbx\lifeviz.dll --smoke-test all
 - `shutdown` opens the real `MainWindow`, opens the Scene Editor, then closes the main window and fails if close-time teardown captures any exception or if the owned editor-close path throws.
 - `startup` launches `MainWindow` in a dedicated smoke-test mode that skips loading the persisted project plus file/video/audio capture pipelines, so WPF/render startup can be validated in isolation and should exit quickly.
 - `ffmpeg-lifecycle` launches a controlled FFmpeg child through an isolated process manager, verifies that the child is tracked and receives the external temporary working directory, closes the manager's Windows Job Object, and fails if the child remains alive. It also exercises direct FFmpeg executable resolution, including Chocolatey shim bypass when applicable.
+- `autoclip <path>` uses one real video to cover deterministic offline clip/delay/audio/fade behavior and the live handoff contract. It verifies retained-frame continuity and bounded sequential decoder plans, the AutoClip-specific output `realtime` plan without input `-re`, ordinary-live/offline filter selection, a playback clock held before publication and advancing afterward, repeated pause/resume generations that remain held until a fresh token, and an active performance-triggered decoder restart that preserves the same phase. The target uses the normal in-memory decode path and creates no warm decoder or persistent frame/transcode cache.
 - `webm-alpha <path>` expects an alpha-tagged VP8 or VP9 WebM. It exercises the existing cached metadata probe plus a real first-frame BGRA decode and fails if the matching `libvpx` decoder is not selected, the frame contains no non-opaque alpha, or the alpha-aware **Fit** plan stops using transparent padding. This target is intentionally scoped to alpha-tagged VP8/VP9; it does not change or characterize ordinary opaque WebM decoding.
 - `all` runs `gpu-sim` plus the combined GPU handoff/passthrough-render/source/render UI smoke suite. That combined UI suite includes `gpu-snapshot-order`, including its forced producer/consumer not-ready and final consumer-query drain checks.
 

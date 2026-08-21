@@ -1896,6 +1896,51 @@ internal static class SmokeTestRunner
         }
 
         Logger.Info("Running AutoClip scheduler smoke test.");
+        const string directScaleFilter = "scale=160:90";
+        const string expectedLiveFilter =
+            "fps='if(gt(source_fps,0),min(source_fps,30),30)',scale=160:90";
+        const string pacedFilterSuffix = "realtime";
+        bool realtimeInputSelectionOk =
+            FileCaptureService.ShouldUseInputRealtimeForVideo(
+                offlineRender: false,
+                paceFromFirstFrame: false) &&
+            !FileCaptureService.ShouldUseInputRealtimeForVideo(
+                offlineRender: false,
+                paceFromFirstFrame: true) &&
+            !FileCaptureService.ShouldUseInputRealtimeForVideo(
+                offlineRender: true,
+                paceFromFirstFrame: false) &&
+            !FileCaptureService.ShouldUseInputRealtimeForVideo(
+                offlineRender: true,
+                paceFromFirstFrame: true);
+        string ordinaryLiveFilter = FileCaptureService.BuildVideoOutputFilterPlan(
+            offlineRender: false,
+            decodeFps: 30,
+            directScaleFilter);
+        string ordinaryOfflineFilter = FileCaptureService.BuildVideoOutputFilterPlan(
+            offlineRender: true,
+            decodeFps: 30,
+            directScaleFilter);
+        string pacedLiveFilter = FileCaptureService.BuildVideoOutputFilterPlan(
+            offlineRender: false,
+            decodeFps: 30,
+            directScaleFilter,
+            paceFromFirstFrame: true);
+        string pacedOfflineFilter = FileCaptureService.BuildVideoOutputFilterPlan(
+            offlineRender: true,
+            decodeFps: 30,
+            directScaleFilter,
+            paceFromFirstFrame: true);
+        bool pacedFilterPlansOk =
+            string.Equals(ordinaryLiveFilter, expectedLiveFilter, StringComparison.Ordinal) &&
+            string.Equals(ordinaryOfflineFilter, $"{directScaleFilter},fps=30", StringComparison.Ordinal) &&
+            string.Equals(pacedOfflineFilter, ordinaryOfflineFilter, StringComparison.Ordinal) &&
+            pacedLiveFilter.EndsWith($",{pacedFilterSuffix}", StringComparison.Ordinal) &&
+            string.Equals(
+                pacedLiveFilter,
+                $"{expectedLiveFilter},{pacedFilterSuffix}",
+                StringComparison.Ordinal);
+
         using var capture = new FileCaptureService();
         if (!capture.TryCreateAutoClip(
                 new[] { smokeVideoPath },
@@ -2025,10 +2070,40 @@ internal static class SmokeTestRunner
                                        loopingDecoderPlan.MaxDecodeDurationSeconds <= 8.11;
 
             session.SetOfflineRenderMode(false, 0);
-            session.UpdateSettings(new[] { smokeVideoPath }, 0.6, 0.6, 0, 0);
+            session.UpdateSettings(new[] { smokeVideoPath }, 1.2, 1.2, 0, 0);
             session.SetPlaybackPaused(false);
+
+            // The first tick queues the already-cached probe and the second promotes
+            // it and starts the worker. Do not consume again during the startup pause:
+            // even if the worker has a raw frame queued, AutoClip has not published
+            // that frame to the UI and its playback clock must remain at the clip base.
+            FileCaptureService.FileCaptureFrame? preparationTickFrame = session.CaptureFrame(
+                160,
+                90,
+                FitMode.Fill,
+                includeSource: false);
+            FileCaptureService.FileCaptureFrame? workerStartTickFrame = session.CaptureFrame(
+                160,
+                90,
+                FitMode.Fill,
+                includeSource: false);
+            double? startupClockAdvanceAtWorkerStart = session.GetCurrentPlaybackClockAdvanceForSmoke();
+            Thread.Sleep(300);
+            double? startupClockAdvanceBeforePublication = session.GetCurrentPlaybackClockAdvanceForSmoke();
+            bool startupClockHeld =
+                !preparationTickFrame.HasValue &&
+                !workerStartTickFrame.HasValue &&
+                startupClockAdvanceAtWorkerStart.HasValue &&
+                startupClockAdvanceBeforePublication.HasValue &&
+                Math.Abs(startupClockAdvanceAtWorkerStart.Value) < 0.1 &&
+                Math.Abs(startupClockAdvanceBeforePublication.Value) < 0.1;
+
+            // Match the production 10-second startup allowance plus polling
+            // overhead; sparse-keyframe alpha VP9 seeks can legitimately exceed
+            // three seconds on a busy machine.
+            const int startupPollAttempts = 440;
             FileCaptureService.FileCaptureFrame? livePhaseFrame = null;
-            for (int attempt = 0; attempt < 120 && !livePhaseFrame.HasValue; attempt++)
+            for (int attempt = 0; attempt < startupPollAttempts && !livePhaseFrame.HasValue; attempt++)
             {
                 livePhaseFrame = session.CaptureFrame(160, 90, FitMode.Fill, includeSource: false);
                 if (!livePhaseFrame.HasValue)
@@ -2037,7 +2112,17 @@ internal static class SmokeTestRunner
                 }
             }
 
+            bool liveVisiblePhaseArmed = livePhaseFrame.HasValue &&
+                                         !session.IsDelaying &&
+                                         session.GetVisualOpacity(0) > 0.99;
+            Thread.Sleep(120);
+            double? activatedClockAdvance = session.GetCurrentPlaybackClockAdvanceForSmoke();
+            bool activationClockReleased = activatedClockAdvance.HasValue &&
+                                           activatedClockAdvance.Value >= 0.07;
+
             string? activePathBeforePause = session.CurrentPath;
+            long frameTokenBeforePause = livePhaseFrame?.FrameToken ?? 0;
+            double? phaseRemainingBeforePause = session.GetCurrentPhaseRemainingForSmoke();
             session.SetPlaybackPaused(true);
             double pausedTimelineBefore = session.GetTimelineSecondsForSmoke();
             Thread.Sleep(750);
@@ -2049,22 +2134,132 @@ internal static class SmokeTestRunner
                                             string.Equals(activePathBeforePause, session.CurrentPath, StringComparison.OrdinalIgnoreCase) &&
                                             Math.Abs(pausedTimelineAfter - pausedTimelineBefore) < 0.01;
             session.SetPlaybackPaused(false);
-            Thread.Sleep(700);
-            session.CaptureFrame(160, 90, FitMode.Fill, includeSource: false);
+            Thread.Sleep(150);
+            double? resumeClockBeforePublication = session.GetCurrentPlaybackClockAdvanceForSmoke();
+            bool resumeClockHeld = resumeClockBeforePublication.HasValue &&
+                                   resumeClockBeforePublication.Value < 0.1;
+            // Interrupt the cold resumed decoder before publishing its first fresh
+            // frame, then resume again. The discarded generation's warm-up must be
+            // accumulated rather than silently shortening the clip/fade window.
+            session.SetPlaybackPaused(true);
+            double repeatedPauseTimelineBefore = session.GetTimelineSecondsForSmoke();
+            Thread.Sleep(150);
+            double repeatedPauseTimelineAfter = session.GetTimelineSecondsForSmoke();
+            session.SetPlaybackPaused(false);
+            Thread.Sleep(150);
+            double? repeatedResumeClockBeforePublication = session.GetCurrentPlaybackClockAdvanceForSmoke();
+            bool repeatedResumeHeld = repeatedResumeClockBeforePublication.HasValue &&
+                                      repeatedResumeClockBeforePublication.Value < 0.1 &&
+                                      Math.Abs(repeatedPauseTimelineAfter - repeatedPauseTimelineBefore) < 0.01;
+            FileCaptureService.FileCaptureFrame? resumedFreshFrame = null;
+            for (int attempt = 0; attempt < startupPollAttempts && !resumedFreshFrame.HasValue; attempt++)
+            {
+                FileCaptureService.FileCaptureFrame? candidate = session.CaptureFrame(
+                    160,
+                    90,
+                    FitMode.Fill,
+                    includeSource: false);
+                if (candidate.HasValue && candidate.Value.FrameToken > frameTokenBeforePause)
+                {
+                    resumedFreshFrame = candidate;
+                    break;
+                }
+
+                Thread.Sleep(25);
+            }
+
+            double? phaseRemainingAfterResume = session.GetCurrentPhaseRemainingForSmoke();
+            bool repeatedWarmupPreserved = phaseRemainingBeforePause.HasValue &&
+                                           phaseRemainingAfterResume.HasValue &&
+                                           phaseRemainingAfterResume.Value >=
+                                               phaseRemainingBeforePause.Value - 0.2;
+            Thread.Sleep(120);
+            double? resumedClockAdvance = session.GetCurrentPlaybackClockAdvanceForSmoke();
+            bool freshResumeActivated = resumedFreshFrame.HasValue &&
+                                        resumedClockAdvance.HasValue &&
+                                        resumedClockAdvance.Value >= 0.07 &&
+                                        !session.IsDelaying &&
+                                        string.Equals(activePathBeforePause, session.CurrentPath, StringComparison.OrdinalIgnoreCase);
+            long frameTokenBeforePerformanceRestart = resumedFreshFrame?.FrameToken ?? frameTokenBeforePause;
+            double? phaseRemainingBeforePerformanceRestart = session.GetCurrentPhaseRemainingForSmoke();
+            session.SetPerformanceSettings(
+                lowContentionMode: true,
+                decoderThreadLimit: 1,
+                videoDecodeFpsLimit: 30);
+            Thread.Sleep(150);
+            double? performanceRestartClockBeforePublication = session.GetCurrentPlaybackClockAdvanceForSmoke();
+            bool performanceRestartClockHeld = performanceRestartClockBeforePublication.HasValue &&
+                                               performanceRestartClockBeforePublication.Value < 0.1;
+            FileCaptureService.FileCaptureFrame? performanceRestartFreshFrame = null;
+            for (int attempt = 0; attempt < startupPollAttempts && !performanceRestartFreshFrame.HasValue; attempt++)
+            {
+                FileCaptureService.FileCaptureFrame? candidate = session.CaptureFrame(
+                    160,
+                    90,
+                    FitMode.Fill,
+                    includeSource: false);
+                if (candidate.HasValue && candidate.Value.FrameToken > frameTokenBeforePerformanceRestart)
+                {
+                    performanceRestartFreshFrame = candidate;
+                    break;
+                }
+
+                Thread.Sleep(25);
+            }
+
+            double? phaseRemainingAfterPerformanceRestart = session.GetCurrentPhaseRemainingForSmoke();
+            bool performanceRestartPhasePreserved = phaseRemainingBeforePerformanceRestart.HasValue &&
+                                                    phaseRemainingAfterPerformanceRestart.HasValue &&
+                                                    phaseRemainingAfterPerformanceRestart.Value >=
+                                                        phaseRemainingBeforePerformanceRestart.Value - 0.2;
+            Thread.Sleep(120);
+            double? performanceRestartClockAdvance = session.GetCurrentPlaybackClockAdvanceForSmoke();
+            bool performanceRestartActivated = performanceRestartFreshFrame.HasValue &&
+                                               performanceRestartClockAdvance.HasValue &&
+                                               performanceRestartClockAdvance.Value >= 0.07 &&
+                                               performanceRestartPhasePreserved;
             bool zeroFadePreparingContinuous = session.GetVisualOpacity(0) > 0.99;
 
             session.UpdateSettings(Array.Empty<string>(), 1, 1, 0, 0);
             bool emptyIsTransparent = !session.CaptureFrame(160, 90, FitMode.Fill, includeSource: false).HasValue && session.IsEmpty;
-            bool ok = sawClipFrame && sawDelay && delayWasTransparent && clipAudioReceived && delayAudioSilent &&
+            // AutoClip accepts silent video files, so clip audio is observational in
+            // this scheduler smoke. The dedicated video-audio smoke owns the positive
+            // audio-decode assertion; this target still verifies delay phases stay silent.
+            bool ok = sawClipFrame && sawDelay && delayWasTransparent && delayAudioSilent &&
                       sawFadeStart && sawFadePeak && sawFadeOut && emptyIsTransparent && persistenceOk && clipWindowsFit &&
-                      decoderPlansBounded && activePausedScheduleHeld && zeroFadePreparingContinuous && overrideResolutionOk;
+                      decoderPlansBounded && realtimeInputSelectionOk && pacedFilterPlansOk && startupClockHeld &&
+                      liveVisiblePhaseArmed && activationClockReleased && activePausedScheduleHeld && resumeClockHeld &&
+                      repeatedResumeHeld && repeatedWarmupPreserved && freshResumeActivated &&
+                      performanceRestartClockHeld && performanceRestartActivated &&
+                      zeroFadePreparingContinuous && overrideResolutionOk;
             Logger.Info($"AutoClip smoke: sawClipFrame={sawClipFrame}, sawDelay={sawDelay}, " +
                         $"delayTransparent={delayWasTransparent}, clipAudio={clipAudioReceived}, delayAudioSilent={delayAudioSilent}, " +
                         $"fadeStart={sawFadeStart}, fadePeak={sawFadePeak}, fadeOut={sawFadeOut}, " +
                         $"emptyTransparent={emptyIsTransparent}, " +
                         $"persistence={persistenceOk}, clipWindowsFit={clipWindowsFit}, " +
-                        $"decoderPlansBounded={decoderPlansBounded}, activePausedScheduleHeld={activePausedScheduleHeld}, " +
+                        $"decoderPlansBounded={decoderPlansBounded}, realtimeInputSelection={realtimeInputSelectionOk}, " +
+                        $"pacedFilterPlans={pacedFilterPlansOk}, startupClockHeld={startupClockHeld}, " +
+                        $"clockAtStart={startupClockAdvanceAtWorkerStart?.ToString("F3") ?? "<null>"}s, " +
+                        $"clockBeforePublication={startupClockAdvanceBeforePublication?.ToString("F3") ?? "<null>"}s, " +
+                        $"liveVisiblePhaseArmed={liveVisiblePhaseArmed}, activationClockReleased={activationClockReleased}, " +
+                        $"activatedClock={activatedClockAdvance?.ToString("F3") ?? "<null>"}s, " +
+                        $"activePausedScheduleHeld={activePausedScheduleHeld}, resumeClockHeld={resumeClockHeld}, " +
+                        $"resumeClockBeforePublication={resumeClockBeforePublication?.ToString("F3") ?? "<null>"}s, " +
+                        $"repeatedResumeHeld={repeatedResumeHeld}, " +
+                        $"repeatedResumeClock={repeatedResumeClockBeforePublication?.ToString("F3") ?? "<null>"}s, " +
+                        $"repeatedWarmupPreserved={repeatedWarmupPreserved}, " +
+                        $"phaseRemainingBeforePause={phaseRemainingBeforePause?.ToString("F3") ?? "<null>"}s, " +
+                        $"phaseRemainingAfterResume={phaseRemainingAfterResume?.ToString("F3") ?? "<null>"}s, " +
+                        $"freshResumeActivated={freshResumeActivated}, resumedClock={resumedClockAdvance?.ToString("F3") ?? "<null>"}s, " +
+                        $"performanceRestartClockHeld={performanceRestartClockHeld}, " +
+                        $"performanceRestartClockBeforePublication={performanceRestartClockBeforePublication?.ToString("F3") ?? "<null>"}s, " +
+                        $"performanceRestartActivated={performanceRestartActivated}, " +
+                        $"performanceRestartClock={performanceRestartClockAdvance?.ToString("F3") ?? "<null>"}s, " +
+                        $"performanceRestartPhasePreserved={performanceRestartPhasePreserved}, " +
+                        $"phaseRemainingBeforePerformanceRestart={phaseRemainingBeforePerformanceRestart?.ToString("F3") ?? "<null>"}s, " +
+                        $"phaseRemainingAfterPerformanceRestart={phaseRemainingAfterPerformanceRestart?.ToString("F3") ?? "<null>"}s, " +
                         $"zeroFadePreparingContinuous={zeroFadePreparingContinuous}, " +
+                        $"ordinaryLiveFilter={ordinaryLiveFilter}, pacedLiveFilter={pacedLiveFilter}, " +
                         $"overrides={overrideResolutionOk}, ok={ok}.");
             return ok ? 0 : 1;
         }
