@@ -1823,6 +1823,10 @@ internal static class SmokeTestRunner
 
         Logger.Info("Running silent live video-stack audio reactivity smoke test.");
         using var capture = new FileCaptureService();
+        capture.SetPerformanceSettings(
+            lowContentionMode: false,
+            decoderThreadLimit: 2,
+            videoDecodeFpsLimit: 30);
         using var detector = new AudioBeatDetector();
         var setupStopwatch = Stopwatch.StartNew();
         if (!capture.TryGetOrAdd(smokeVideoPath, out _, out string? error))
@@ -1841,6 +1845,76 @@ internal static class SmokeTestRunner
         bool mutedIgnored = capture.MixLiveVideoAudioSamples(smokeVideoPath, samples) == 0 &&
                             samples.All(sample => Math.Abs(sample) < 0.000001f);
 
+        FileCaptureService.FileCaptureFrame? initialFrame = null;
+        for (int attempt = 0; attempt < 400 && !initialFrame.HasValue; attempt++)
+        {
+            initialFrame = capture.CaptureFrame(smokeVideoPath, 160, 90, FitMode.Fill);
+            if (!initialFrame.HasValue)
+            {
+                Thread.Sleep(25);
+            }
+        }
+
+        bool initialPlaybackActivated = initialFrame.HasValue &&
+                                        capture.TryGetVideoPlaybackState(
+                                            smokeVideoPath,
+                                            out FileCaptureService.VideoPlaybackState initialPlaybackState) &&
+                                        !initialPlaybackState.IsPaused;
+        long initialFrameToken = initialFrame?.FrameToken ?? 0;
+        FileCaptureService.VideoPlaybackState pausedState = default;
+        bool pauseApplied = capture.SetVideoPaused(smokeVideoPath, paused: true) &&
+                            capture.TryGetVideoPlaybackState(
+                                smokeVideoPath,
+                                out pausedState) &&
+                            pausedState.IsPaused;
+        Thread.Sleep(300);
+        bool pausedClockHeld = capture.TryGetVideoPlaybackState(
+                                   smokeVideoPath,
+                                   out FileCaptureService.VideoPlaybackState pausedStateAfterWait) &&
+                               Math.Abs(pausedStateAfterWait.PositionSeconds - pausedState.PositionSeconds) < 0.05;
+
+        bool resumeApplied = capture.SetVideoPaused(smokeVideoPath, paused: false);
+        Thread.Sleep(300);
+        bool resumeClockHeldBeforePublication = capture.TryGetVideoPlaybackState(
+                                                    smokeVideoPath,
+                                                    out FileCaptureService.VideoPlaybackState resumeStateBeforePublication) &&
+                                                !resumeStateBeforePublication.IsPaused &&
+                                                Math.Abs(
+                                                    resumeStateBeforePublication.PositionSeconds -
+                                                    pausedState.PositionSeconds) < 0.08;
+        FileCaptureService.FileCaptureFrame? resumedFreshFrame = null;
+        for (int attempt = 0; attempt < 400 && !resumedFreshFrame.HasValue; attempt++)
+        {
+            FileCaptureService.FileCaptureFrame? candidate = capture.CaptureFrame(
+                smokeVideoPath,
+                160,
+                90,
+                FitMode.Fill);
+            if (candidate.HasValue && candidate.Value.FrameToken > initialFrameToken)
+            {
+                resumedFreshFrame = candidate;
+                break;
+            }
+
+            Thread.Sleep(25);
+        }
+
+        bool resumedStateCaptured = capture.TryGetVideoPlaybackState(
+            smokeVideoPath,
+            out FileCaptureService.VideoPlaybackState resumedStateAtActivation);
+        Thread.Sleep(150);
+        bool resumedClockReleased = capture.TryGetVideoPlaybackState(
+                                        smokeVideoPath,
+                                        out FileCaptureService.VideoPlaybackState resumedStateAfterActivation) &&
+                                    resumedStateCaptured &&
+                                    resumedStateAfterActivation.PositionSeconds >=
+                                        resumedStateAtActivation.PositionSeconds + 0.08 &&
+                                    resumedStateAfterActivation.PositionSeconds <=
+                                        resumedStateAtActivation.PositionSeconds + 0.5;
+
+        var pacingStall = RunRealtimeDebtRebaseSmoke();
+        bool postStallBurstBounded = pacingStall.ok;
+
         detector.BeginExternalInput();
         detector.SetAnalysisRequirements(enableSpectrumAnalysis: true, enableDebugHistory: false);
         capture.SetVideoAudioEnabled(smokeVideoPath, true);
@@ -1853,6 +1927,7 @@ internal static class SmokeTestRunner
             for (int attempt = 0; attempt < 100; attempt++)
             {
                 Thread.Sleep(40);
+                capture.CaptureFrame(smokeVideoPath, 160, 90, FitMode.Fill);
                 Array.Clear(samples);
                 int sampleCount = capture.MixLiveVideoAudioSamples(smokeVideoPath, samples);
                 if (sampleCount <= 0)
@@ -1881,11 +1956,120 @@ internal static class SmokeTestRunner
             detector.EndExternalInput();
         }
 
-        bool ok = setupWasNonblocking && mutedIgnored && receivedAudio && peakRms > 0.0001 && peakLevel > 0.01 && peakBand > 0.001;
+        bool resumeGenerationOk = initialPlaybackActivated && pauseApplied && pausedClockHeld &&
+                                  resumeApplied && resumeClockHeldBeforePublication &&
+                                  resumedFreshFrame.HasValue && resumedClockReleased &&
+                                  postStallBurstBounded;
+        bool ok = setupWasNonblocking && mutedIgnored && resumeGenerationOk &&
+                  receivedAudio && peakRms > 0.0001 && peakLevel > 0.01 && peakBand > 0.001;
         Logger.Info($"Live video-audio smoke: mutedIgnored={mutedIgnored}, received={receivedAudio}, peakRms={peakRms:F6}, " +
                     $"peakLevel={peakLevel:F3}, peakBand={peakBand:F3}, setupMs={setupStopwatch.Elapsed.TotalMilliseconds:F1}, " +
-                    $"setupNonblocking={setupWasNonblocking}, ok={ok}.");
+                    $"setupNonblocking={setupWasNonblocking}, resumeGeneration={resumeGenerationOk}, " +
+                    $"initialActivated={initialPlaybackActivated}, pauseApplied={pauseApplied}, pausedClockHeld={pausedClockHeld}, " +
+                    $"resumeApplied={resumeApplied}, resumeClockHeld={resumeClockHeldBeforePublication}, " +
+                    $"freshResumeFrame={resumedFreshFrame.HasValue}, resumedClockReleased={resumedClockReleased}, " +
+                    $"debtRebaseFrames={pacingStall.framesRead}, debtRebaseSpan={pacingStall.spanSeconds:F3}s, " +
+                    $"debtRebaseWarning={pacingStall.sawResetWarning}, postStallBurstBounded={postStallBurstBounded}, ok={ok}.");
         return ok ? 0 : 1;
+    }
+
+    private static (bool ok, int framesRead, double spanSeconds, bool sawResetWarning) RunRealtimeDebtRebaseSmoke()
+    {
+        const int width = 64;
+        const int height = 64;
+        const int warmupFrames = 4;
+        const int measuredFrames = 12;
+        Process? process = null;
+        int sawResetWarning = 0;
+        using var manager = FfmpegProcessManager.CreateIsolatedForSmokeTest();
+        try
+        {
+            var psi = new ProcessStartInfo
+            {
+                FileName = "ffmpeg",
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true
+            };
+            psi.ArgumentList.Add("-hide_banner");
+            psi.ArgumentList.Add("-loglevel");
+            psi.ArgumentList.Add("warning");
+            psi.ArgumentList.Add("-f");
+            psi.ArgumentList.Add("lavfi");
+            psi.ArgumentList.Add("-i");
+            psi.ArgumentList.Add("testsrc2=size=64x64:rate=30");
+            psi.ArgumentList.Add("-vf");
+            // Shift PTS backward after four normally paced frames. That creates
+            // the exact negative realtime deadline debt caused by a suspended or
+            // starved live decoder, without depending on OS pipe-buffer capacity.
+            psi.ArgumentList.Add("setpts=if(gte(N\\,4)\\,PTS-0.6/TB\\,PTS),realtime=limit=0.1");
+            psi.ArgumentList.Add("-filter_threads");
+            psi.ArgumentList.Add("1");
+            psi.ArgumentList.Add("-frames:v");
+            psi.ArgumentList.Add("90");
+            psi.ArgumentList.Add("-f");
+            psi.ArgumentList.Add("rawvideo");
+            psi.ArgumentList.Add("-pix_fmt");
+            psi.ArgumentList.Add("bgra");
+            psi.ArgumentList.Add("-");
+
+            process = manager.Start(psi);
+            process.ErrorDataReceived += (_, e) =>
+            {
+                if (FileCaptureService.IsExpectedRealtimeResetWarning(e.Data))
+                {
+                    Interlocked.Exchange(ref sawResetWarning, 1);
+                }
+            };
+            process.BeginErrorReadLine();
+
+            Stream stdout = process.StandardOutput.BaseStream;
+            var readTask = Task.Run(() =>
+            {
+                byte[] frame = new byte[width * height * 4];
+                for (int i = 0; i < warmupFrames; i++)
+                {
+                    stdout.ReadExactly(frame);
+                }
+
+                long started = Stopwatch.GetTimestamp();
+                int framesRead = 0;
+                for (; framesRead < measuredFrames; framesRead++)
+                {
+                    stdout.ReadExactly(frame);
+                }
+
+                return (framesRead, Stopwatch.GetElapsedTime(started).TotalSeconds);
+            });
+
+            if (!readTask.Wait(TimeSpan.FromSeconds(5)))
+            {
+                return (false, 0, 5, Volatile.Read(ref sawResetWarning) != 0);
+            }
+
+            var result = readTask.GetAwaiter().GetResult();
+            bool resetObserved = SpinWait.SpinUntil(
+                () => Volatile.Read(ref sawResetWarning) != 0,
+                millisecondsTimeout: 500);
+            // With the old two-second discontinuity window these twelve frames are
+            // dumped almost immediately. A three-frame (100 ms at 30 fps) limit
+            // rebases after the injected deadline discontinuity and makes this sample span
+            // normal frame intervals.
+            bool ok = result.framesRead == measuredFrames &&
+                      result.TotalSeconds is >= 0.18 and <= 1.5 &&
+                      resetObserved;
+            return (ok, result.framesRead, result.TotalSeconds, resetObserved);
+        }
+        catch (Exception ex)
+        {
+            Logger.Warn($"Realtime debt-rebase smoke failed: {ex.Message}");
+            return (false, 0, 0, Volatile.Read(ref sawResetWarning) != 0);
+        }
+        finally
+        {
+            manager.TerminateAndDispose(process, TimeSpan.FromSeconds(2));
+        }
     }
 
     private static int RunAutoClipSmokeTest(string? smokeVideoPath)
@@ -1899,47 +2083,66 @@ internal static class SmokeTestRunner
         const string directScaleFilter = "scale=160:90";
         const string expectedLiveFilter =
             "fps='if(gt(source_fps,0),min(source_fps,30),30)',scale=160:90";
-        const string pacedFilterSuffix = "realtime";
+        const string pacedFilterSuffix = "realtime=limit=0.1";
         bool realtimeInputSelectionOk =
+            !FileCaptureService.ShouldUseInputRealtimeForVideo(
+                offlineRender: false,
+                paceLiveOutput: true) &&
             FileCaptureService.ShouldUseInputRealtimeForVideo(
                 offlineRender: false,
-                paceFromFirstFrame: false) &&
-            !FileCaptureService.ShouldUseInputRealtimeForVideo(
-                offlineRender: false,
-                paceFromFirstFrame: true) &&
+                paceLiveOutput: false) &&
             !FileCaptureService.ShouldUseInputRealtimeForVideo(
                 offlineRender: true,
-                paceFromFirstFrame: false) &&
+                paceLiveOutput: false) &&
             !FileCaptureService.ShouldUseInputRealtimeForVideo(
                 offlineRender: true,
-                paceFromFirstFrame: true);
+                paceLiveOutput: true);
         string ordinaryLiveFilter = FileCaptureService.BuildVideoOutputFilterPlan(
             offlineRender: false,
             decodeFps: 30,
-            directScaleFilter);
+            directScaleFilter,
+            paceLiveOutput: true,
+            sourceFrameRate: 30);
         string ordinaryOfflineFilter = FileCaptureService.BuildVideoOutputFilterPlan(
             offlineRender: true,
             decodeFps: 30,
             directScaleFilter);
-        string pacedLiveFilter = FileCaptureService.BuildVideoOutputFilterPlan(
+        string unpacedLiveFilter = FileCaptureService.BuildVideoOutputFilterPlan(
             offlineRender: false,
             decodeFps: 30,
             directScaleFilter,
-            paceFromFirstFrame: true);
+            paceLiveOutput: false,
+            sourceFrameRate: 30);
         string pacedOfflineFilter = FileCaptureService.BuildVideoOutputFilterPlan(
             offlineRender: true,
             decodeFps: 30,
             directScaleFilter,
-            paceFromFirstFrame: true);
+            paceLiveOutput: true,
+            sourceFrameRate: 30);
+        string lowFpsLiveFilter = FileCaptureService.BuildVideoOutputFilterPlan(
+            offlineRender: false,
+            decodeFps: 30,
+            directScaleFilter,
+            paceLiveOutput: true,
+            sourceFrameRate: 2);
+        const string representativeProbe =
+            "  Stream #0:0: Video: vp9 (Profile 0), yuv420p(tv), 426x240, 30 fps\r\n";
         bool pacedFilterPlansOk =
-            string.Equals(ordinaryLiveFilter, expectedLiveFilter, StringComparison.Ordinal) &&
+            string.Equals(ordinaryLiveFilter, $"{expectedLiveFilter},{pacedFilterSuffix}", StringComparison.Ordinal) &&
             string.Equals(ordinaryOfflineFilter, $"{directScaleFilter},fps=30", StringComparison.Ordinal) &&
             string.Equals(pacedOfflineFilter, ordinaryOfflineFilter, StringComparison.Ordinal) &&
-            pacedLiveFilter.EndsWith($",{pacedFilterSuffix}", StringComparison.Ordinal) &&
+            string.Equals(unpacedLiveFilter, expectedLiveFilter, StringComparison.Ordinal) &&
+            lowFpsLiveFilter.EndsWith(",realtime=limit=1.5", StringComparison.Ordinal) &&
             string.Equals(
-                pacedLiveFilter,
-                $"{expectedLiveFilter},{pacedFilterSuffix}",
-                StringComparison.Ordinal);
+                FileCaptureService.BuildLiveAudioPacingFilter(),
+                "aresample=48000,asetnsamples=n=1024:p=1,arealtime=limit=0.1",
+                StringComparison.Ordinal) &&
+            Math.Abs(FileCaptureService.ParseVideoFrameRateForSmoke(representativeProbe) - 30) < 0.001 &&
+            FileCaptureService.IsExpectedRealtimeResetWarning(
+                "[Parsed_realtime_3 @ 000001] time discontinuity detected: -150000 us, resetting") &&
+            FileCaptureService.IsExpectedRealtimeResetWarning(
+                "[Parsed_arealtime_0 @ 000001] time discontinuity detected: -150000 us, resetting") &&
+            !FileCaptureService.IsExpectedRealtimeResetWarning("Invalid data found when processing input");
 
         using var capture = new FileCaptureService();
         if (!capture.TryCreateAutoClip(
@@ -2411,7 +2614,7 @@ internal static class SmokeTestRunner
                         $"completedHandoffs={completedHandoffs}, " +
                         $"peakOwnedVideoSessions={peakOwnedVideoSessions}, peakTrackedHandoffProcesses={peakTrackedHandoffProcesses}, " +
                         $"outgoingProcessRetired={outgoingProcessRetired}, " +
-                        $"ordinaryLiveFilter={ordinaryLiveFilter}, pacedLiveFilter={pacedLiveFilter}, " +
+                        $"ordinaryLiveFilter={ordinaryLiveFilter}, unpacedLiveFilter={unpacedLiveFilter}, " +
                         $"overrides={overrideResolutionOk}, ok={ok}.");
             return ok ? 0 : 1;
         }

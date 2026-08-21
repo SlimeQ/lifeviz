@@ -170,8 +170,16 @@ internal sealed class FileCaptureService : IDisposable
 
     internal static (string codecName, bool hasAlpha, string? preferredDecoder) ParseVideoAlphaProbeForSmoke(string output)
     {
-        (string codecName, bool hasAlpha) = VideoSession.ParsePrimaryVideoStreamMetadata(output);
-        return (codecName, hasAlpha, VideoSession.ResolvePreferredVideoDecoder(codecName, hasAlpha));
+        var metadata = VideoSession.ParsePrimaryVideoStreamMetadata(output);
+        return (
+            metadata.codecName,
+            metadata.hasAlpha,
+            VideoSession.ResolvePreferredVideoDecoder(metadata.codecName, metadata.hasAlpha));
+    }
+
+    internal static double ParseVideoFrameRateForSmoke(string output)
+    {
+        return VideoSession.ParsePrimaryVideoStreamMetadata(output).frameRate;
     }
 
     internal static string BuildDirectVideoFilterForSmoke(
@@ -431,16 +439,17 @@ internal sealed class FileCaptureService : IDisposable
 
     internal int GetVideoDecodeFpsLimitForSmoke() => _videoDecodeFpsLimit;
 
-    internal static bool ShouldUseInputRealtimeForVideo(bool offlineRender, bool paceFromFirstFrame)
+    internal static bool ShouldUseInputRealtimeForVideo(bool offlineRender, bool paceLiveOutput)
     {
-        return !offlineRender && !paceFromFirstFrame;
+        return !offlineRender && !paceLiveOutput;
     }
 
     internal static string BuildVideoOutputFilterPlan(
         bool offlineRender,
         int decodeFps,
         string? directFilter,
-        bool paceFromFirstFrame = false)
+        bool paceLiveOutput = true,
+        double sourceFrameRate = 0)
     {
         string? fpsFilter = decodeFps > 0
             ? (offlineRender
@@ -473,23 +482,51 @@ internal sealed class FileCaptureService : IDisposable
             outputFilter = $"{fpsFilter},{directFilter}";
         }
 
-        if (offlineRender || !paceFromFirstFrame)
+        if (offlineRender || !paceLiveOutput)
         {
             return outputFilter;
         }
 
-        // AutoClip opens and accurately seeks a decoder only after selecting the
-        // next clip. Input-side -re starts its wall clock before that expensive
-        // seek, so FFmpeg tries to catch up by bursting frames once output begins.
-        // Pace at the end of the output graph instead: realtime anchors its wall
-        // clock to the first incoming frame. Do not prepend setpts here; it clears
-        // FFmpeg's link frame-rate metadata and makes rawvideo output fall back to
-        // 25 fps. Keep the filter's default discontinuity limit too: a fixed
-        // sub-frame limit would continuously reset for legitimately low-FPS media.
-        const string firstFramePacingFilter = "realtime";
+        // Input-side -re starts its wall clock before process launch, accurate seek,
+        // and decoder warm-up. It also accumulates read-rate debt while a redirected
+        // stdout pipe is blocked, then emits frames as fast as possible to catch up.
+        // Pace at the end of the output graph instead so each process anchors on its
+        // first decoded frame. A cadence-relative discontinuity limit bounds later
+        // stalls to roughly three output frames without breaking low-FPS media.
+        // When the live fps filter is active, unknown source rates are normalized to
+        // decodeFps; with no known cadence, retain FFmpeg's conservative default.
+        double effectiveFrameRate = decodeFps > 0
+            ? sourceFrameRate > 0
+                ? Math.Min(sourceFrameRate, decodeFps)
+                : decodeFps
+            : 0;
+        string firstFramePacingFilter = effectiveFrameRate > 0 && double.IsFinite(effectiveFrameRate)
+            ? $"realtime=limit={(3.0 / effectiveFrameRate).ToString("0.######", CultureInfo.InvariantCulture)}"
+            : "realtime";
         return string.IsNullOrWhiteSpace(outputFilter)
             ? firstFramePacingFilter
             : $"{outputFilter},{firstFramePacingFilter}";
+    }
+
+    internal static bool IsExpectedRealtimeResetWarning(string? line)
+    {
+        if (string.IsNullOrWhiteSpace(line) ||
+            line.IndexOf("time discontinuity detected:", StringComparison.OrdinalIgnoreCase) < 0)
+        {
+            return false;
+        }
+
+        return line.IndexOf("Parsed_realtime", StringComparison.OrdinalIgnoreCase) >= 0 ||
+               line.IndexOf("Parsed_arealtime", StringComparison.OrdinalIgnoreCase) >= 0;
+    }
+
+    internal static string BuildLiveAudioPacingFilter()
+    {
+        // Decoder audio packets can legitimately span more than 100 ms at low
+        // sample rates. Normalize them to 1024-sample, 48 kHz frames before the
+        // discontinuity guard so normal packet cadence is never mistaken for a
+        // stall while actual resume debt still rebases promptly.
+        return "aresample=48000,asetnsamples=n=1024:p=1,arealtime=limit=0.1";
     }
 
     public void BeginOfflineRender(int fps, double startTimeSeconds)
@@ -1562,13 +1599,15 @@ internal sealed class FileCaptureService : IDisposable
                 int height,
                 double durationSeconds,
                 string? codecName = null,
-                bool hasAlpha = false)
+                bool hasAlpha = false,
+                double frameRate = 0)
             {
                 Width = width;
                 Height = height;
                 DurationSeconds = durationSeconds;
                 CodecName = codecName ?? string.Empty;
                 HasAlpha = hasAlpha;
+                FrameRate = double.IsFinite(frameRate) && frameRate > 0 ? frameRate : 0;
             }
 
             public int Width { get; }
@@ -1576,6 +1615,7 @@ internal sealed class FileCaptureService : IDisposable
             public double DurationSeconds { get; }
             public string CodecName { get; }
             public bool HasAlpha { get; }
+            public double FrameRate { get; }
         }
 
         public readonly struct ResolvedPlayback
@@ -1592,7 +1632,7 @@ internal sealed class FileCaptureService : IDisposable
 
         private readonly bool _loopPlayback;
         private readonly double? _maxDecodeDurationSeconds;
-        private readonly bool _paceLiveFromFirstFrame;
+        private readonly bool _ownerControlsLivePlaybackActivation;
         private readonly Func<Task<ResolvedPlayback>>? _urlResolver;
         private readonly object _audioLock = new();
         private readonly object _videoPipelineLock = new();
@@ -1616,7 +1656,7 @@ internal sealed class FileCaptureService : IDisposable
         private readonly Stopwatch _playbackClock = new();
         private double _playbackBaseOffsetSeconds;
         private double _pausedOffsetSeconds;
-        private bool _playbackPaused;
+        private volatile bool _playbackPaused;
         private bool _livePlaybackActivationPending;
         private long _livePlaybackActivationBaselineFrameToken;
         private bool _audioEnabled;
@@ -1661,6 +1701,7 @@ internal sealed class FileCaptureService : IDisposable
 
         private int _nativeWidth;
         private int _nativeHeight;
+        private double _sourceFrameRate;
         private string? _preferredVideoDecoder;
         private bool _sourceHasAlpha;
         private int _processWidth;
@@ -1682,7 +1723,7 @@ internal sealed class FileCaptureService : IDisposable
             Func<Task<ResolvedPlayback>>? urlResolver = null,
             VideoProbeInfo? cachedProbe = null,
             double? maxDecodeDurationSeconds = null,
-            bool paceLiveFromFirstFrame = false)
+            bool ownerControlsLivePlaybackActivation = false)
             : base(path, displayName, 0, 0)
         {
             _loopPlayback = loopPlayback;
@@ -1690,8 +1731,8 @@ internal sealed class FileCaptureService : IDisposable
                                         double.IsFinite(maxDecodeDurationSeconds.Value)
                 ? Math.Max(0.05, maxDecodeDurationSeconds.Value)
                 : null;
-            _paceLiveFromFirstFrame = paceLiveFromFirstFrame;
-            _livePlaybackActivationPending = paceLiveFromFirstFrame;
+            _ownerControlsLivePlaybackActivation = ownerControlsLivePlaybackActivation;
+            _livePlaybackActivationPending = true;
             _urlResolver = urlResolver;
 
             if (_urlResolver == null)
@@ -1722,7 +1763,7 @@ internal sealed class FileCaptureService : IDisposable
             bool loopPlayback,
             VideoProbeInfo? cachedProbe = null,
             double? maxDecodeDurationSeconds = null,
-            bool paceLiveFromFirstFrame = false)
+            bool ownerControlsLivePlaybackActivation = false)
             : this(
                 path,
                 System.IO.Path.GetFileName(path),
@@ -1730,7 +1771,7 @@ internal sealed class FileCaptureService : IDisposable
                 null,
                 cachedProbe,
                 maxDecodeDurationSeconds,
-                paceLiveFromFirstFrame)
+                ownerControlsLivePlaybackActivation)
         {
         }
 
@@ -1918,6 +1959,7 @@ internal sealed class FileCaptureService : IDisposable
         {
             _nativeWidth = probe.Width;
             _nativeHeight = probe.Height;
+            _sourceFrameRate = probe.FrameRate;
             _sourceHasAlpha = probe.HasAlpha;
             _preferredVideoDecoder = ResolvePreferredVideoDecoder(probe.CodecName, probe.HasAlpha);
 
@@ -2173,6 +2215,7 @@ internal sealed class FileCaptureService : IDisposable
                 }
             }
 
+            FileCaptureFrame result;
             lock (_lock)
             {
                 if (_readyDownscaled == null) return null;
@@ -2205,7 +2248,7 @@ internal sealed class FileCaptureService : IDisposable
                     _readyDownscaledWidth = targetWidth;
                     _readyDownscaledHeight = targetHeight;
                 }
-            return new FileCaptureFrame(
+                result = new FileCaptureFrame(
                     _readyDownscaled,
                     _readyDownscaledWidth,
                     _readyDownscaledHeight,
@@ -2215,6 +2258,19 @@ internal sealed class FileCaptureService : IDisposable
                     readyFrameToken,
                     readyFramePublishTimestamp);
             }
+
+            if (!_ownerControlsLivePlaybackActivation && !_offlineRenderEnabled)
+            {
+                // Direct files, remote videos, and sequence entries own no outer
+                // phase clock, so they can release playback/audio as soon as this
+                // generation publishes a token newer than the retained baseline.
+                // AutoClip performs the same activation itself at its handoff bound.
+                ActivateLivePlaybackFromFirstFrame(
+                    GetFirstDecodedFrameAgeSeconds(),
+                    result.FrameToken);
+            }
+
+            return result;
         }
 
         internal void PrimeLiveFramePipeline(
@@ -2364,7 +2420,8 @@ internal sealed class FileCaptureService : IDisposable
                 _offlineRenderEnabled,
                 decodeFps,
                 directFilter,
-                _paceLiveFromFirstFrame);
+                paceLiveOutput: true,
+                sourceFrameRate: _sourceFrameRate);
         }
 
         private void EnsureProcessDimensionsForRequest(int targetWidth, int targetHeight, FitMode fitMode, bool includeSource)
@@ -2692,7 +2749,7 @@ internal sealed class FileCaptureService : IDisposable
                     args += $" -ss {startOffsetSeconds.ToString("0.###", CultureInfo.InvariantCulture)}";
                 }
                 if (_loopPlayback) args += " -stream_loop -1";
-                if (ShouldUseInputRealtimeForVideo(_offlineRenderEnabled, _paceLiveFromFirstFrame))
+                if (ShouldUseInputRealtimeForVideo(_offlineRenderEnabled, paceLiveOutput: true))
                 {
                     args += " -re"; // Realtime reading for interactive playback.
                 }
@@ -2730,7 +2787,8 @@ internal sealed class FileCaptureService : IDisposable
                 {
                     ownsCurrentPipeline = generation == _videoPipelineGeneration &&
                                           !token.IsCancellationRequested &&
-                                          !_isDisposed;
+                                          !_isDisposed &&
+                                          !_playbackPaused;
                     if (ownsCurrentPipeline)
                     {
                         _process = process;
@@ -2751,7 +2809,8 @@ internal sealed class FileCaptureService : IDisposable
                 {
                     if (!token.IsCancellationRequested &&
                         !_isDisposed &&
-                        !string.IsNullOrWhiteSpace(e.Data))
+                        !string.IsNullOrWhiteSpace(e.Data) &&
+                        !IsExpectedRealtimeResetWarning(e.Data))
                     {
                         Logger.Warn($"[ffmpeg] {e.Data}");
                     }
@@ -3022,7 +3081,7 @@ internal sealed class FileCaptureService : IDisposable
             long frameToken,
             bool deferAudioRefresh = false)
         {
-            if (!_paceLiveFromFirstFrame || _offlineRenderEnabled)
+            if (_offlineRenderEnabled)
             {
                 return true;
             }
@@ -3101,7 +3160,7 @@ internal sealed class FileCaptureService : IDisposable
 
         private void ResetOrStartPlaybackClockNoLock(bool paused, bool offlineRender)
         {
-            if (paused || (_paceLiveFromFirstFrame && _livePlaybackActivationPending && !offlineRender))
+            if (paused || (_livePlaybackActivationPending && !offlineRender))
             {
                 _playbackClock.Reset();
             }
@@ -3140,10 +3199,14 @@ internal sealed class FileCaptureService : IDisposable
             lock (_audioLock)
             {
                 double normalized = NormalizeOffsetNoLock(startOffsetSeconds);
-                if (_paceLiveFromFirstFrame && !_offlineRenderEnabled && !shouldPause)
+                if (!_offlineRenderEnabled && !shouldPause)
                 {
                     _livePlaybackActivationPending = true;
                     _livePlaybackActivationBaselineFrameToken = Volatile.Read(ref _readyFrameToken);
+                }
+                else
+                {
+                    _livePlaybackActivationPending = false;
                 }
                 _pausedOffsetSeconds = normalized;
                 _playbackBaseOffsetSeconds = normalized;
@@ -3172,7 +3235,7 @@ internal sealed class FileCaptureService : IDisposable
             string? playbackUrl;
             lock (_videoPipelineLock)
             {
-                if (_isDisposed || _workerTask != null)
+                if (_isDisposed || _playbackPaused || _workerTask != null)
                 {
                     return;
                 }
@@ -3206,7 +3269,7 @@ internal sealed class FileCaptureService : IDisposable
             CancellationToken token = cts.Token;
             lock (_videoPipelineLock)
             {
-                if (_isDisposed || _workerTask != null)
+                if (_isDisposed || _playbackPaused || _workerTask != null)
                 {
                     cts.Dispose();
                     return;
@@ -3237,7 +3300,7 @@ internal sealed class FileCaptureService : IDisposable
             CancellationToken token = cts.Token;
             lock (_videoPipelineLock)
             {
-                if (_isDisposed || _workerTask != null)
+                if (_isDisposed || _playbackPaused || _workerTask != null)
                 {
                     cts.Dispose();
                     return;
@@ -3265,7 +3328,7 @@ internal sealed class FileCaptureService : IDisposable
         private void ReinitializeAndDecode(CancellationToken token, double startOffsetSeconds, long generation)
         {
             InitializeAsync(token, generation).GetAwaiter().GetResult();
-            if (token.IsCancellationRequested || !IsCurrentVideoPipeline(generation))
+            if (token.IsCancellationRequested || _playbackPaused || !IsCurrentVideoPipeline(generation))
             {
                 return;
             }
@@ -3548,24 +3611,17 @@ internal sealed class FileCaptureService : IDisposable
                 args += $" -ss {seekSeconds.ToString("0.###", CultureInfo.InvariantCulture)}";
             }
             args += BuildDecoderThreadArgs();
-            if (!_paceLiveFromFirstFrame)
-            {
-                args += " -re";
-            }
             if (_loopPlayback)
             {
                 args += " -stream_loop -1";
             }
             args += $" -i \"{playbackUrl}\"{BuildDecodeDurationOutputArg()}";
             args += " -map 0:a:0 -vn";
-            if (_paceLiveFromFirstFrame)
-            {
-                // Audible AutoClips start only after the first video frame is
-                // published. Pace their independently-seeking audio decoder from
-                // its first output too, so it cannot fill/discard the live buffer
-                // in a catch-up burst.
-                args += " -af \"arealtime\"";
-            }
+            // Audio starts only after the resumed video generation publishes its
+            // first fresh frame. Pace the independently-seeking decoder from its
+            // first output and rebase after a short device/pipe stall instead of
+            // filling or discarding a catch-up burst.
+            args += $" -af \"{BuildLiveAudioPacingFilter()}\"";
             args += " -ac 2 -ar 48000 -acodec pcm_s16le -f s16le -";
 
             Process? process = null;
@@ -3594,7 +3650,8 @@ internal sealed class FileCaptureService : IDisposable
                 {
                     if (audioCts?.IsCancellationRequested != true &&
                         !_isDisposed &&
-                        !string.IsNullOrWhiteSpace(e.Data))
+                        !string.IsNullOrWhiteSpace(e.Data) &&
+                        !IsExpectedRealtimeResetWarning(e.Data))
                     {
                         Logger.Warn($"[ffmpeg-audio:{DisplayName}] {e.Data}");
                         if (IsFatalAudioError(e.Data))
@@ -3623,7 +3680,6 @@ internal sealed class FileCaptureService : IDisposable
                     {
                         output.Volume = (float)GetEffectiveVolumeNoLock();
                     }
-                    output.Play();
                 }
 
                 audioCts = new CancellationTokenSource();
@@ -3633,6 +3689,7 @@ internal sealed class FileCaptureService : IDisposable
                 lock (_audioLock)
                 {
                     shouldAbort = _isDisposed ||
+                                  _offlineRenderEnabled ||
                                   !_audioEnabled ||
                                   _livePlaybackActivationPending ||
                                   _playbackPaused ||
@@ -3646,6 +3703,7 @@ internal sealed class FileCaptureService : IDisposable
                         _audioBuffer = bufferProvider;
                         _audioOutput = output;
                         published = true;
+                        output?.Play();
                         _audioDecodeTask = RunBackgroundLongRunning(
                             () => AudioDecodeWorker(process, audioToken, () => Volatile.Read(ref fatalAudioError) != 0),
                             "LifeViz.AudioDecode");
@@ -4059,11 +4117,11 @@ internal sealed class FileCaptureService : IDisposable
             };
         }
 
-        internal static (string codecName, bool hasAlpha) ParsePrimaryVideoStreamMetadata(string output)
+        internal static (string codecName, bool hasAlpha, double frameRate) ParsePrimaryVideoStreamMetadata(string output)
         {
             if (string.IsNullOrWhiteSpace(output))
             {
-                return (string.Empty, false);
+                return (string.Empty, false, 0);
             }
 
             Match videoStream = Regex.Match(
@@ -4071,7 +4129,7 @@ internal sealed class FileCaptureService : IDisposable
                 @"(?m)^[ \t]*Stream #0:[^\r\n]*?\bVideo:\s*(?<codec>[A-Za-z0-9_]+)\b[^\r\n]*");
             if (!videoStream.Success)
             {
-                return (string.Empty, false);
+                return (string.Empty, false, 0);
             }
 
             string codecName = videoStream.Groups["codec"].Value.ToLowerInvariant();
@@ -4089,7 +4147,23 @@ internal sealed class FileCaptureService : IDisposable
             bool alphaPixelFormat = Regex.IsMatch(
                 videoStream.Value,
                 @"(?i)\b(?:yuva[0-9a-z]*|gbrap[0-9a-z]*|rgba|bgra|argb|abgr)\b");
-            return (codecName, alphaMetadata || alphaPixelFormat);
+            double frameRate = 0;
+            Match frameRateMatch = Regex.Match(
+                videoStream.Value,
+                @"(?i)(?<fps>\d+(?:\.\d+)?)\s*fps\b");
+            if (frameRateMatch.Success &&
+                double.TryParse(
+                    frameRateMatch.Groups["fps"].Value,
+                    NumberStyles.Float,
+                    CultureInfo.InvariantCulture,
+                    out double parsedFrameRate) &&
+                double.IsFinite(parsedFrameRate) &&
+                parsedFrameRate > 0)
+            {
+                frameRate = parsedFrameRate;
+            }
+
+            return (codecName, alphaMetadata || alphaPixelFormat, frameRate);
         }
 
         internal static VideoProbeInfo? ProbeVideoUncached(string path, int timeoutMilliseconds = VideoProbeTimeoutMilliseconds)
@@ -4153,8 +4227,8 @@ internal sealed class FileCaptureService : IDisposable
                     width > 0 &&
                     height > 0)
                 {
-                    (string codecName, bool hasAlpha) = ParsePrimaryVideoStreamMetadata(output);
-                    return new VideoProbeInfo(width, height, durationSeconds, codecName, hasAlpha);
+                    (string codecName, bool hasAlpha, double frameRate) = ParsePrimaryVideoStreamMetadata(output);
+                    return new VideoProbeInfo(width, height, durationSeconds, codecName, hasAlpha, frameRate);
                 }
             }
             catch (Exception ex)
@@ -4333,13 +4407,19 @@ internal sealed class FileCaptureService : IDisposable
 
         public void SetPlaybackPaused(bool paused)
         {
-            if (_playbackPaused == paused)
+            VideoSession? current;
+            lock (_lock)
             {
-                return;
+                if (_playbackPaused == paused)
+                {
+                    return;
+                }
+
+                _playbackPaused = paused;
+                current = _current;
             }
 
-            _playbackPaused = paused;
-            _current?.SetPlaybackPaused(paused);
+            current?.SetPlaybackPaused(paused);
         }
 
         public void SetPerformanceSettings(bool lowContentionMode, int decoderThreadLimit, int videoDecodeFpsLimit)
@@ -4493,9 +4573,12 @@ internal sealed class FileCaptureService : IDisposable
 
                 if (probe.HasValue)
                 {
-                    var nextSession = CreateSequenceVideoSession(_paths[pendingIndex], probe.Value);
                     lock (_lock)
                     {
+                        var nextSession = CreateSequenceVideoSession(
+                            _paths[pendingIndex],
+                            probe.Value,
+                            _playbackPaused);
                         _current = nextSession;
                         _index = pendingIndex;
                     }
@@ -4601,14 +4684,17 @@ internal sealed class FileCaptureService : IDisposable
             }
         }
 
-        private VideoSession CreateSequenceVideoSession(string path, VideoSession.VideoProbeInfo probe)
+        private VideoSession CreateSequenceVideoSession(
+            string path,
+            VideoSession.VideoProbeInfo probe,
+            bool playbackPaused)
         {
             var session = new VideoSession(path, loopPlayback: false, probe);
             session.SetMasterAudio(_masterAudioEnabled, _masterAudioVolume);
             session.SetLiveAudioAnalysisEnabled(_liveAudioAnalysisEnabled);
             session.SetAudioVolume(_audioVolume);
             session.SetAudioEnabled(_audioEnabled);
-            session.SetPlaybackPaused(_playbackPaused);
+            session.SetPlaybackPaused(playbackPaused);
             session.SetPerformanceSettings(_lowContentionMode, _decoderThreadLimit, _videoDecodeFpsLimit);
             session.SetOfflineRenderMode(_offlineRenderEnabled, _offlineRenderFps);
             return session;
@@ -5733,7 +5819,7 @@ internal sealed class FileCaptureService : IDisposable
                 loopPlayback: decoderPlan.LoopPlayback,
                 cachedProbe: probe,
                 maxDecodeDurationSeconds: decoderPlan.MaxDecodeDurationSeconds,
-                paceLiveFromFirstFrame: true);
+                ownerControlsLivePlaybackActivation: true);
             session.SetInitialPlaybackOffsetSeconds(startSeconds);
             session.SetMasterAudio(_masterAudioEnabled, _masterAudioVolume);
             session.SetLiveAudioAnalysisEnabled(_liveAudioAnalysisEnabled);

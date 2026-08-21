@@ -96,6 +96,11 @@ public partial class MainWindow : Window
     private const double UiInteractionThrottleFps = 20.0;
     private const int WmEnterSizeMove = 0x0231;
     private const int WmExitSizeMove = 0x0232;
+    private const int WmPowerBroadcast = 0x0218;
+    private const int PbtApmSuspend = 0x0004;
+    private const int PbtApmResumeCritical = 0x0006;
+    private const int PbtApmResumeSuspend = 0x0007;
+    private const int PbtApmResumeAutomatic = 0x0012;
     private const int WmMouseMove = 0x0200;
     private const string GitHubRepoOwner = "SlimeQ";
     private const string GitHubRepoName = "lifeviz";
@@ -179,6 +184,8 @@ public partial class MainWindow : Window
     private bool _renderLoopAttached;
     private int _uiInteractionSuspendCount;
     private bool _isPaused;
+    private bool _mediaPlaybackSuspendedForMinimize;
+    private bool _mediaPlaybackSuspendedForPower;
     private double _currentAspectRatio = DefaultAspectRatio;
     private bool _aspectRatioLocked;
     private double _lockedAspectRatio = DefaultAspectRatio;
@@ -325,6 +332,7 @@ public partial class MainWindow : Window
         };
         _configSaveTimer.Tick += ConfigSaveTimer_Tick;
         InitializeComponent();
+        StateChanged += MainWindow_StateChanged;
         ApplyVersionIdentity();
         _renderBackend = CreateRenderBackend(this, RenderSurfaceHost, GameImage);
         bool allowFullSmokeStartup = App.IsSmokeTestMode && App.LoadUserConfigInSmokeTest;
@@ -726,6 +734,44 @@ public partial class MainWindow : Window
     private void ChromeMinimizeButton_OnClick(object sender, RoutedEventArgs e)
     {
         WindowState = WindowState.Minimized;
+    }
+
+    private void MainWindow_StateChanged(object? sender, EventArgs e)
+    {
+        RefreshMinimizedMediaSuspension();
+    }
+
+    private void ApplyPowerMediaSuspension(bool suspend)
+    {
+        bool shouldSuspend = suspend && !_isOfflineRendering;
+        if (_mediaPlaybackSuspendedForPower == shouldSuspend || _isShuttingDown)
+        {
+            return;
+        }
+
+        _mediaPlaybackSuspendedForPower = shouldSuspend;
+        ApplySourceDecodeActivation();
+        if (!shouldSuspend)
+        {
+            ResetFramePumpCadence(scheduleImmediate: true);
+        }
+    }
+
+    private void RefreshMinimizedMediaSuspension(bool forceSuspendWhileOffline = false)
+    {
+        bool shouldSuspend = WindowState == WindowState.Minimized &&
+                             (!_isOfflineRendering || forceSuspendWhileOffline);
+        if (_mediaPlaybackSuspendedForMinimize == shouldSuspend || _isShuttingDown)
+        {
+            return;
+        }
+
+        _mediaPlaybackSuspendedForMinimize = shouldSuspend;
+        ApplySourceDecodeActivation();
+        if (!shouldSuspend)
+        {
+            ResetFramePumpCadence(scheduleImmediate: true);
+        }
     }
 
     private void ChromeCloseButton_OnClick(object sender, RoutedEventArgs e)
@@ -3187,6 +3233,22 @@ public partial class MainWindow : Window
             case WmExitSizeMove:
                 ResumeRenderLoopAfterUiInteraction();
                 break;
+            case WmPowerBroadcast:
+                int powerEvent = wParam.ToInt32();
+                if (powerEvent == PbtApmSuspend)
+                {
+                    // WM_POWERBROADCAST runs synchronously on the window thread.
+                    // Freeze media clocks before Windows enters standby so the
+                    // sleep interval can never be charged as decoded-media age.
+                    ApplyPowerMediaSuspension(suspend: true);
+                }
+                else if (powerEvent is PbtApmResumeCritical or
+                         PbtApmResumeSuspend or
+                         PbtApmResumeAutomatic)
+                {
+                    ApplyPowerMediaSuspension(suspend: false);
+                }
+                break;
         }
 
         return IntPtr.Zero;
@@ -4806,6 +4868,10 @@ public partial class MainWindow : Window
             long totalFrames = Math.Max(1, (long)Math.Round(duration.TotalSeconds * _recordingFps));
             _fileCapture.BeginOfflineRender(_recordingFps, _offlineAnimationTimeSeconds);
             SetVideoSequenceOfflineRenderMode(_sources, enabled: true, _recordingFps);
+            // A minimized preview is normally suspended. Switch its sessions to
+            // offline mode first, then resume them, so export startup does not
+            // briefly launch live decoders only to replace them immediately.
+            RefreshMinimizedMediaSuspension();
             _offlineVideoAudioActive = HasEnabledOfflineVideoAudio(_sources);
             _audioBeatDetector.BeginOfflineInput();
             offlineAudioInputStarted = true;
@@ -4876,6 +4942,10 @@ public partial class MainWindow : Window
         }
         finally
         {
+            // Reapply a minimized preview's pause while sessions are still in
+            // offline mode. They can then return to live mode without launching a
+            // decoder that would be killed again a moment later.
+            RefreshMinimizedMediaSuspension(forceSuspendWhileOffline: true);
             SetVideoSequenceOfflineRenderMode(_sources, enabled: false, fps: 0);
             _fileCapture.EndOfflineRender();
             if (offlineAudioInputStarted)
@@ -4892,6 +4962,7 @@ public partial class MainWindow : Window
             }
 
             _isOfflineRendering = false;
+            RefreshMinimizedMediaSuspension();
             _offlineFrameDeltaSeconds = 0;
             _offlineRenderCancellation?.Dispose();
             _offlineRenderCancellation = null;
@@ -7937,7 +8008,10 @@ public partial class MainWindow : Window
         }
 
         source.VideoPlaybackPaused = paused;
-        bool decoderPaused = paused || !IsSourceEffectivelyEnabled(source.Id);
+        bool decoderPaused = paused ||
+                             !IsSourceEffectivelyEnabled(source.Id) ||
+                             _mediaPlaybackSuspendedForMinimize ||
+                             _mediaPlaybackSuspendedForPower;
         bool applied;
         if (source.Type == CaptureSource.SourceType.VideoSequence)
         {
@@ -8040,7 +8114,10 @@ public partial class MainWindow : Window
             return;
         }
 
-        bool paused = !effectivelyEnabled || source.VideoPlaybackPaused;
+        bool paused = !effectivelyEnabled ||
+                      source.VideoPlaybackPaused ||
+                      _mediaPlaybackSuspendedForMinimize ||
+                      _mediaPlaybackSuspendedForPower;
         if (source.Type == CaptureSource.SourceType.VideoSequence)
         {
             source.VideoSequence?.SetPlaybackPaused(paused);
