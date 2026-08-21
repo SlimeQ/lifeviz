@@ -4549,6 +4549,7 @@ public partial class MainWindow : Window
             {
                 FileName = installerPath,
                 Arguments = $"--wait-for-pid {Environment.ProcessId}",
+                WorkingDirectory = tempRoot,
                 UseShellExecute = true
             });
 

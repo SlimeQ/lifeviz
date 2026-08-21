@@ -95,6 +95,11 @@ internal static class Program
         string tempRoot = Path.Combine(Path.GetTempPath(), "lifeviz_installer_" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(tempRoot);
 
+        // The updater can launch us while LifeViz's current directory is inside
+        // the install being replaced. Release that inherited directory handle
+        // before the transactional rename begins.
+        Directory.SetCurrentDirectory(Path.GetTempPath());
+
         var assembly = Assembly.GetExecutingAssembly();
         string? resourceName = assembly.GetManifestResourceNames()
             .FirstOrDefault(n => n.EndsWith("payload.zip", StringComparison.OrdinalIgnoreCase));
@@ -145,6 +150,7 @@ internal static class Program
         var psi = new ProcessStartInfo("powershell")
         {
             Arguments = $"-NoProfile -ExecutionPolicy Bypass -File \"{scriptPath}\" -SourcePath \"{tempRoot}\"{waitArgument}",
+            WorkingDirectory = tempRoot,
             UseShellExecute = false,
             CreateNoWindow = true,
             RedirectStandardOutput = true,
@@ -340,6 +346,15 @@ Invoke-Step 'Checking GitHub authentication' {
     gh auth status --hostname github.com | Out-Null
 }
 
+$releaseChanges = @(git status --porcelain --untracked-files=normal)
+if ($releaseChanges.Count -gt 0) {
+    throw 'Release builds must come from a clean, committed worktree so the installer payload and GitHub tag cannot diverge.'
+}
+$releaseTarget = (git rev-parse HEAD).Trim()
+if (-not $releaseTarget) {
+    throw 'Could not resolve the release source commit.'
+}
+
 Invoke-Step 'Building project' {
     dotnet build -c $Configuration -p:Version=$normalizedTag
 }
@@ -392,7 +407,10 @@ Invoke-Step "Bundling single-file installer to $installerExe" {
 $assets = @($installerExe)
 
 Invoke-Step "Creating GitHub release $tagInput" {
-    $ghArgs = @('release', 'create', $tagInput) + $assets + @('--title', $ReleaseName)
+    $ghArgs = @('release', 'create', $tagInput) + $assets + @(
+        '--title', $ReleaseName,
+        '--target', $releaseTarget
+    )
 
     if ($Draft) {
         $ghArgs += '--draft'

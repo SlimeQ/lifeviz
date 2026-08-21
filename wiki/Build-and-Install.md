@@ -126,7 +126,7 @@ dotnet bin\Debug\net9.0-windows-sbx\lifeviz.dll --smoke-test all
 - `dimensions` applies a live height/depth change through `MainWindow`, forces the reference simulation layer into `RGB Channel Bins`, then drives the real Scene Editor height dropdown in both Live Mode and deferred Apply mode, and verifies that every simulation layer plus the presentation surface resize together.
 - `shutdown` opens the real `MainWindow`, opens the Scene Editor, then closes the main window and fails if close-time teardown captures any exception or if the owned editor-close path throws.
 - `startup` launches `MainWindow` in a dedicated smoke-test mode that skips loading the persisted project plus file/video/audio capture pipelines, so WPF/render startup can be validated in isolation and should exit quickly.
-- `ffmpeg-lifecycle` launches a controlled FFmpeg child through an isolated process manager, verifies that the child is tracked, closes the manager's Windows Job Object, and fails if the child remains alive. It also exercises direct FFmpeg executable resolution, including Chocolatey shim bypass when applicable.
+- `ffmpeg-lifecycle` launches a controlled FFmpeg child through an isolated process manager, verifies that the child is tracked and receives the external temporary working directory, closes the manager's Windows Job Object, and fails if the child remains alive. It also exercises direct FFmpeg executable resolution, including Chocolatey shim bypass when applicable.
 - `all` runs `gpu-sim` plus the combined GPU handoff/passthrough-render/source/render UI smoke suite. That combined UI suite includes `gpu-snapshot-order`, including its forced producer/consumer not-ready and final consumer-query drain checks.
 
 ## Normal-Startup Diagnostics
@@ -155,7 +155,7 @@ dotnet bin\Debug\net9.0-windows-sbx\lifeviz.dll --diagnostic-test profile-curren
 .\install.ps1
 ```
 
-By default, `install.ps1` now publishes and then runs `Install-ClickOnce.ps1` directly against the fresh publish output. The helper stages the payload under `%LOCALAPPDATA%\lifeviz-clickonce`, removes stale `LifeViz` `.appref-ms` ClickOnce shortcuts, and creates normal `LifeViz` Start Menu/Desktop shortcuts that launch the staged `lifeviz.exe` directly. This keeps Start Menu launches on the freshly staged build without showing the ClickOnce update/install UI. If you specifically need the single-file wrapper installer, pass `-BundleInstaller`.
+By default, `install.ps1` now publishes and then runs `Install-ClickOnce.ps1` directly against the fresh publish output. The helper stages the payload under `%LOCALAPPDATA%\lifeviz-clickonce`, removes stale `LifeViz` `.appref-ms` ClickOnce shortcuts, and creates normal `LifeViz` Start Menu/Desktop shortcuts that launch the staged `lifeviz.exe` directly. Installer launchers and helpers explicitly work from the artifact/extracted-temp directory rather than inheriting a current directory below the staged install, so the installer cannot hold its own transaction target open. This keeps Start Menu launches on the freshly staged build without showing the ClickOnce update/install UI. If you specifically need the single-file wrapper installer, pass `-BundleInstaller`.
 
 Optional parameters:
 
@@ -163,6 +163,14 @@ Optional parameters:
 .\install.ps1 -Configuration Release -NoRun
 .\install.ps1 -BundleInstaller
 ```
+
+Run the Windows-only transaction regression against an isolated temporary install tree:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-InstallerTransaction.ps1
+```
+
+`tests/Test-InstallerTransaction.ps1` does not replace the user's installation or rewrite real shortcuts. It verifies that an inherited current directory below the old install blocks its atomic parent rename and that the rename succeeds after the holder exits. Its control case runs an executable copied inside the old tree with an external current directory and confirms that the mapped image alone does not block the rename. The suite also statically checks safe working-directory handoffs in the updater plus release/local bootstrappers, runs a disposable copy of `Install-ClickOnce.ps1` from a deliberately locked old-version directory, proves that the scoped legacy `ffmpeg.exe` holder is retired without stopping an unrelated FFmpeg process, verifies promotion of the validated payload, and fails if transaction debris remains. Use `-KeepArtifacts` to retain the `%TEMP%\lifeviz-installer-regression-*` audit tree or `-TimeoutSeconds <5-120>` to adjust its process timeout.
 
 ## Branded Icon
 
@@ -198,7 +206,9 @@ The custom neon "LV" mark lives in `Assets/lifeviz.ico` and is referenced via `<
 
 Because `deploy.ps1` embeds a unique version for every publish and restages the payload before refreshing shortcuts, Start Menu launches point at the latest staged build. Use `setup.exe` only when onboarding a clean machine that lacks prerequisites.
 
-For end users, the custom title and a disabled context-menu row show the running release identity. **Update to Latest Release...** downloads the newest GitHub release `lifeviz_installer.exe`, passes the current process identity into the installer, and closes LifeViz. The installer copies and validates the new release in a sibling transaction directory first, retries transient `robocopy` failures, detects legacy staged instances itself, waits for their executable handles to close, and only then swaps the validated payload into place. A pre-swap copy failure leaves the previous install intact. The bootstrapper waits for completion, writes `%TEMP%\lifeviz-install.log`, and presents failures instead of silently disappearing.
+For end users, the custom title and a disabled context-menu row show the running release identity. **Update to Latest Release...** downloads the newest GitHub release `lifeviz_installer.exe`, passes the current process identity into the installer, gives the installer a temporary working directory outside `%LOCALAPPDATA%\lifeviz-clickonce`, and closes LifeViz. The self-extracting bootstrapper also releases any inherited staged-install current directory and launches its PowerShell helper from the extracted temp directory. The installer copies and validates the new release in a sibling transaction directory first, retries transient `robocopy` failures, detects legacy staged instances itself, waits for the staged process to exit and inherited current-directory handles inside the old tree to release, and only then swaps the validated payload into place. A mapped executable image alone does not block the atomic parent-directory rename when that process's current directory is outside the tree. The helper narrowly terminates legacy processes named `ffmpeg.exe` only when their current directory is proven to be inside the old install root. Unrelated FFmpeg work is not touched, and non-FFmpeg current-directory holders are reported without being terminated. A pre-swap failure leaves the previous install intact. The bootstrapper waits for completion, writes `%TEMP%\lifeviz-install.log`, and presents failures instead of silently disappearing.
+
+LifeViz's managed FFmpeg launch path follows the same rule: decoders, probes, audio workers, and recorders receive an external temporary working directory when the caller has not supplied one. This prevents a long-running or legacy-orphaned child from blocking an install solely because it inherited LifeViz's versioned application directory as its current directory.
 
 ## Publish a Windows Release to GitHub
 
@@ -214,9 +224,9 @@ What it does:
 - Prompts for the release vibe (tiny tweak / glow-up / new era) and auto-bumps the semantic version/tag based on the existing highest `v*` tag. You can still pass `-Tag` to override if needed.
 - Builds in Release with the normalized tag stamped into .NET product/file/informational metadata, then calls `Publish-Installer.ps1` with that `ProductVersion`, a matching ClickOnce `ApplicationVersion`, and the optional `-ApplicationRevision`. `Publish-Installer.ps1` clears its prior publish directory first, so historical `Application Files` payloads are not recompressed, copied, or installed again. The same tag is stamped into the single-file installer bootstrapper. Local builds default to a commit-backed `0.0.0-dev` identity instead of the misleading SDK `1.0.0` default.
 - Bundles the publish payload into a single self-extracting `lifeviz_installer.exe` (stored in `artifacts/github-release/`).
-- Creates a GitHub release for the supplied tag (draftable via `-Draft`) and uploads only that exe as the release asset. If the tag does not yet exist, `gh release create` will create it.
+- Refuses to release from a dirty/uncommitted worktree, then creates a GitHub release for the supplied tag (draftable via `-Draft`) and uploads only that exe as the release asset. If the tag does not yet exist, the script passes the exact built `HEAD` commit to `gh release create --target`; the resulting GitHub tag therefore identifies the committed source that produced the stamped installer rather than implicitly using whatever commit the default branch currently references.
 
-Downloaders should grab the single `lifeviz_installer.exe` from the release and run it; it self-extracts the payload and launches `Install-ClickOnce.ps1` from a stable location. The helper transactionally stages and validates the new payload, waits for any running staged LifeViz instance, swaps the validated directory into place, rewrites the manifest for consistency, removes old `.appref-ms` shortcuts, and creates normal `LifeViz` shortcuts to the staged exe. The bootstrapper removes its extracted temp payload after success and retains an install log/error message on failure.
+Downloaders should grab the single `lifeviz_installer.exe` from the release and run it; it self-extracts the payload, changes away from any inherited staged-install working directory, and launches `Install-ClickOnce.ps1` with the extracted temp directory as the helper's working directory. The helper transactionally stages and validates the new payload, waits for any running staged LifeViz instance, narrowly retires only legacy `ffmpeg.exe` processes proven to have a current directory below that install root, swaps the validated directory into place, rewrites the manifest for consistency, removes old `.appref-ms` shortcuts, and creates normal `LifeViz` shortcuts to the staged exe. The bootstrapper removes its extracted temp payload after success and retains an install log/error message on failure.
 
 ## Troubleshooting
 
@@ -224,5 +234,6 @@ Downloaders should grab the single `lifeviz_installer.exe` from the release and 
 - If Rider/VS doesn't see the run configs, ensure the `.run/` folder and `.idea` contents are checked out.
 - Window capture requires desktop composition (Aero); minimized or hidden windows cannot be sampled.
 - ClickOnce `.appref-ms` entries or "already installed from a different location" errors: rerun `Install-ClickOnce.ps1` without `-RegisterClickOnce`. The default flow stages to `%LOCALAPPDATA%\lifeviz-clickonce`, removes stale appref shortcuts, and replaces them with a direct `LifeViz.lnk`.
+- Installer popup or nonzero exit: read `%TEMP%\lifeviz-install.log`, which contains the complete captured helper output even when the popup is closed. Pre-swap failures leave the old install intact. Close LifeViz and retry the downloaded installer; if the log still says `%LOCALAPPDATA%\lifeviz-clickonce` is in use, attach that log to the report. The helper may terminate a legacy process named `ffmpeg.exe` whose current directory is proven to be inside that install root, but it deliberately does not stop unrelated FFmpeg jobs or any non-FFmpeg holder elsewhere on the machine.
 
 

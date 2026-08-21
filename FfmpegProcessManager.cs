@@ -84,6 +84,13 @@ internal sealed class FfmpegProcessManager : IDisposable
 
             startInfo.FileName = ResolveFfmpegExecutable(startInfo.FileName);
             startInfo.UseShellExecute = false;
+            if (string.IsNullOrWhiteSpace(startInfo.WorkingDirectory))
+            {
+                // Direct shortcuts intentionally run LifeViz from its versioned
+                // install directory. Do not let FFmpeg inherit a directory handle
+                // that could block a later transactional installer swap.
+                startInfo.WorkingDirectory = Path.GetTempPath();
+            }
 
             var process = new Process
             {

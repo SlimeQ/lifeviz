@@ -33,7 +33,7 @@ LifeViz intentionally does not introduce a warm decoder pool or persistent trans
 
 The `config-save-coalescing` smoke test exercises burst, duplicate, changed, and shutdown persistence behavior. `gpu-source` covers the D3D source compositor, while the current-scene profiling targets measure the complete saved stack.
 
-The `ffmpeg-lifecycle` smoke starts a controlled FFmpeg child through an isolated manager, verifies that it is tracked, closes the manager/Job Object, and fails if the child remains alive. It is the focused regression test for orphan-process containment and direct executable resolution.
+The `ffmpeg-lifecycle` smoke starts a controlled FFmpeg child through an isolated manager, verifies that it is tracked and receives the external temporary working directory, closes the manager/Job Object, and fails if the child remains alive. It is the focused regression test for orphan-process containment, update-safe process startup, and direct executable resolution.
 
 The application's core logic has been significantly optimized to improve performance, especially on multi-core systems. Several key parts of the application that perform heavy computations over large collections of data now run in parallel. This allows for larger grid sizes, more complex scenes with multiple sources, and higher frame rates.
 

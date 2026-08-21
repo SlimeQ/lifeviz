@@ -1863,10 +1863,11 @@ internal static class SmokeTestRunner
         bool explicitTerminationReturned;
         bool explicitProcessExited;
         bool explicitUntracked;
+        bool explicitSafeWorkingDirectory;
         using (var manager = FfmpegProcessManager.CreateIsolatedForSmokeTest())
         {
             explicitJobAvailable = manager.UsesKillOnCloseJob;
-            Process process = StartLongRunningFfmpegForLifecycleSmoke(manager);
+            Process process = StartLongRunningFfmpegForLifecycleSmoke(manager, out explicitSafeWorkingDirectory);
             int processId = process.Id;
             explicitTracked = manager.GetTrackedProcessIdsForSmokeTest().Contains(processId);
             explicitTerminationReturned = manager.TerminateAndDispose(process, TimeSpan.FromSeconds(3));
@@ -1878,11 +1879,12 @@ internal static class SmokeTestRunner
         bool disposalTracked;
         bool disposalProcessExited;
         bool disposalUntracked;
+        bool disposalSafeWorkingDirectory;
         var disposalManager = FfmpegProcessManager.CreateIsolatedForSmokeTest();
         try
         {
             disposalJobAvailable = disposalManager.UsesKillOnCloseJob;
-            Process process = StartLongRunningFfmpegForLifecycleSmoke(disposalManager);
+            Process process = StartLongRunningFfmpegForLifecycleSmoke(disposalManager, out disposalSafeWorkingDirectory);
             int processId = process.Id;
             disposalTracked = disposalManager.GetTrackedProcessIdsForSmokeTest().Contains(processId);
 
@@ -1908,9 +1910,11 @@ internal static class SmokeTestRunner
                   explicitTerminationReturned &&
                   explicitProcessExited &&
                   explicitUntracked &&
+                  explicitSafeWorkingDirectory &&
                   disposalTracked &&
                   disposalProcessExited &&
                   disposalUntracked &&
+                  disposalSafeWorkingDirectory &&
                   recordingAbort.FrameQueued &&
                   recordingAbort.ProcessTracked &&
                   recordingAbort.ProcessAliveBeforeAbort &&
@@ -1921,7 +1925,8 @@ internal static class SmokeTestRunner
         Logger.Info(
             $"FFmpeg lifecycle smoke: job={jobContainmentAvailable}, explicitTracked={explicitTracked}, " +
             $"explicitTerminated={explicitTerminationReturned && explicitProcessExited}, " +
-            $"explicitUntracked={explicitUntracked}, disposalTracked={disposalTracked}, " +
+            $"explicitUntracked={explicitUntracked}, safeWorkingDirectory={explicitSafeWorkingDirectory && disposalSafeWorkingDirectory}, " +
+            $"disposalTracked={disposalTracked}, " +
             $"disposalTerminated={disposalProcessExited}, disposalUntracked={disposalUntracked}, " +
             $"recordingFrameQueued={recordingAbort.FrameQueued}, recordingTracked={recordingAbort.ProcessTracked}, " +
             $"recordingAlive={recordingAbort.ProcessAliveBeforeAbort}, " +
@@ -2072,7 +2077,9 @@ internal static class SmokeTestRunner
         }
     }
 
-    private static Process StartLongRunningFfmpegForLifecycleSmoke(FfmpegProcessManager manager)
+    private static Process StartLongRunningFfmpegForLifecycleSmoke(
+        FfmpegProcessManager manager,
+        out bool safeWorkingDirectory)
     {
         var startInfo = new ProcessStartInfo
         {
@@ -2097,6 +2104,7 @@ internal static class SmokeTestRunner
         }
 
         Process process = manager.Start(startInfo);
+        safeWorkingDirectory = PathsEqual(startInfo.WorkingDirectory, Path.GetTempPath());
         Thread.Sleep(250);
         if (!process.HasExited)
         {
@@ -2116,6 +2124,21 @@ internal static class SmokeTestRunner
         manager.TerminateAndDispose(process, TimeSpan.Zero);
         throw new InvalidOperationException(
             $"The FFmpeg lifecycle fixture exited before it could be tested. {error}");
+    }
+
+    private static bool PathsEqual(string left, string right)
+    {
+        try
+        {
+            return string.Equals(
+                Path.TrimEndingDirectorySeparator(Path.GetFullPath(left)),
+                Path.TrimEndingDirectorySeparator(Path.GetFullPath(right)),
+                OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal);
+        }
+        catch
+        {
+            return false;
+        }
     }
 
     private static bool WaitForProcessExit(int processId, TimeSpan timeout)

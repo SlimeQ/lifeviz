@@ -39,6 +39,10 @@ internal static class Program
         string tempRoot = Path.Combine(Path.GetTempPath(), "lifeviz_installer_" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(tempRoot);
 
+        // Do not retain an inherited current-directory handle inside an older
+        // staged install while the helper replaces that install directory.
+        Directory.SetCurrentDirectory(Path.GetTempPath());
+
         var assembly = Assembly.GetExecutingAssembly();
         string? resourceName = assembly.GetManifestResourceNames()
             .FirstOrDefault(n => n.EndsWith("payload.zip", StringComparison.OrdinalIgnoreCase));
@@ -69,6 +73,7 @@ internal static class Program
         var psi = new ProcessStartInfo("powershell")
         {
             Arguments = $"-ExecutionPolicy Bypass -File \"{scriptPath}\" -SourcePath \"{tempRoot}\"",
+            WorkingDirectory = tempRoot,
             UseShellExecute = true
         };
 
@@ -166,7 +171,7 @@ if ($BundleInstaller) {
 
     if (-not $NoRun) {
         Write-Host "Launching bundled installer..." -ForegroundColor Cyan
-        Start-Process $installerExe
+        Start-Process $installerExe -WorkingDirectory $artifactsDir
     }
 }
 elseif (-not $NoRun) {

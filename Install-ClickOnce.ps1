@@ -19,6 +19,418 @@ function Resolve-Source {
     return (Split-Path -Parent $MyInvocation.MyCommand.Path)
 }
 
+function Test-PathWithinRoot {
+    param(
+        [string]$CandidatePath,
+        [string]$RootPath
+    )
+
+    if ([string]::IsNullOrWhiteSpace($CandidatePath) -or [string]::IsNullOrWhiteSpace($RootPath)) {
+        return $false
+    }
+
+    try {
+        $candidate = [IO.Path]::GetFullPath($CandidatePath).TrimEnd(
+            [IO.Path]::DirectorySeparatorChar,
+            [IO.Path]::AltDirectorySeparatorChar)
+        $root = [IO.Path]::GetFullPath($RootPath).TrimEnd(
+            [IO.Path]::DirectorySeparatorChar,
+            [IO.Path]::AltDirectorySeparatorChar)
+        return $candidate.Equals($root, [StringComparison]::OrdinalIgnoreCase) -or
+            $candidate.StartsWith(
+                $root + [IO.Path]::DirectorySeparatorChar,
+                [StringComparison]::OrdinalIgnoreCase)
+    } catch {
+        return $false
+    }
+}
+
+function Set-InstallerWorkingDirectoryOutsideRoot {
+    param(
+        [string]$RootPath,
+        [string]$PreferredPath
+    )
+
+    $candidates = @(
+        $PreferredPath,
+        [IO.Path]::GetTempPath(),
+        $env:SystemRoot
+    ) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+
+    foreach ($candidatePath in $candidates) {
+        try {
+            $resolved = (Resolve-Path -LiteralPath $candidatePath -ErrorAction Stop).Path
+            if (Test-PathWithinRoot -CandidatePath $resolved -RootPath $RootPath) {
+                continue
+            }
+
+            # PowerShell's provider location and the process-wide .NET current
+            # directory are independent. Relocate both so neither retains a
+            # directory handle below the install root during its atomic rename.
+            Set-Location -LiteralPath $resolved
+            [Environment]::CurrentDirectory = $resolved
+
+            $providerPath = (Get-Location).ProviderPath
+            $processPath = [Environment]::CurrentDirectory
+            if ((Test-PathWithinRoot -CandidatePath $providerPath -RootPath $RootPath) -or
+                (Test-PathWithinRoot -CandidatePath $processPath -RootPath $RootPath)) {
+                throw "Working-directory relocation remained inside '$RootPath'."
+            }
+
+            Write-Host "[install] Installer working directory: $processPath" -ForegroundColor Cyan
+            return
+        } catch {
+            $lastError = $_
+        }
+    }
+
+    throw "Could not relocate the installer working directory outside '$RootPath': $lastError"
+}
+
+function Initialize-ProcessCurrentDirectoryReader {
+    if ('LifeVizInstaller.ProcessCurrentDirectoryReader' -as [type]) {
+        return
+    }
+
+    # Win32_Process does not expose a process's current directory. Read the
+    # native PEB/process-parameter layout so cleanup is restricted to exact
+    # ffmpeg.exe processes that demonstrably inherited the LifeViz install path.
+    Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+using System.Text;
+
+namespace LifeVizInstaller
+{
+    public static class ProcessCurrentDirectoryReader
+    {
+        private const uint ProcessVmRead = 0x0010;
+        private const uint ProcessQueryInformation = 0x0400;
+        private const int ProcessBasicInformationClass = 0;
+        private const int ProcessWow64InformationClass = 26;
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct ProcessBasicInformation
+        {
+            public IntPtr Reserved1;
+            public IntPtr PebBaseAddress;
+            public IntPtr Reserved2_0;
+            public IntPtr Reserved2_1;
+            public IntPtr UniqueProcessId;
+            public IntPtr InheritedFromUniqueProcessId;
+        }
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern IntPtr OpenProcess(uint desiredAccess, bool inheritHandle, int processId);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool ReadProcessMemory(
+            IntPtr process,
+            IntPtr baseAddress,
+            [Out] byte[] buffer,
+            int size,
+            out IntPtr bytesRead);
+
+        [DllImport("kernel32.dll")]
+        private static extern bool CloseHandle(IntPtr handle);
+
+        [DllImport("ntdll.dll", EntryPoint = "NtQueryInformationProcess")]
+        private static extern int QueryBasicInformation(
+            IntPtr process,
+            int informationClass,
+            out ProcessBasicInformation information,
+            int informationLength,
+            out int returnLength);
+
+        [DllImport("ntdll.dll", EntryPoint = "NtQueryInformationProcess")]
+        private static extern int QueryWow64Information(
+            IntPtr process,
+            int informationClass,
+            out IntPtr information,
+            int informationLength,
+            out int returnLength);
+
+        public static bool TryGet(int processId, out string directory)
+        {
+            directory = null;
+            IntPtr process = OpenProcess(ProcessQueryInformation | ProcessVmRead, false, processId);
+            if (process == IntPtr.Zero)
+            {
+                return false;
+            }
+
+            try
+            {
+                ProcessBasicInformation basic;
+                int returned;
+                if (QueryBasicInformation(
+                        process,
+                        ProcessBasicInformationClass,
+                        out basic,
+                        Marshal.SizeOf(typeof(ProcessBasicInformation)),
+                        out returned) != 0)
+                {
+                    return false;
+                }
+
+                bool target32Bit = !Environment.Is64BitProcess;
+                IntPtr peb = basic.PebBaseAddress;
+                if (Environment.Is64BitProcess)
+                {
+                    IntPtr wow64Peb;
+                    if (QueryWow64Information(
+                            process,
+                            ProcessWow64InformationClass,
+                            out wow64Peb,
+                            IntPtr.Size,
+                            out returned) == 0 &&
+                        wow64Peb != IntPtr.Zero)
+                    {
+                        target32Bit = true;
+                        peb = wow64Peb;
+                    }
+                    else
+                    {
+                        target32Bit = false;
+                    }
+                }
+
+                int pointerSize = target32Bit ? 4 : 8;
+                int processParametersOffset = target32Bit ? 0x10 : 0x20;
+                int currentDirectoryOffset = target32Bit ? 0x24 : 0x38;
+                int unicodeBufferOffset = target32Bit ? 4 : 8;
+
+                IntPtr processParameters;
+                if (!TryReadPointer(
+                        process,
+                        IntPtr.Add(peb, processParametersOffset),
+                        pointerSize,
+                        out processParameters) ||
+                    processParameters == IntPtr.Zero)
+                {
+                    return false;
+                }
+
+                byte[] header = new byte[unicodeBufferOffset + pointerSize];
+                IntPtr bytesRead;
+                if (!ReadProcessMemory(
+                        process,
+                        IntPtr.Add(processParameters, currentDirectoryOffset),
+                        header,
+                        header.Length,
+                        out bytesRead) ||
+                    bytesRead.ToInt64() != header.Length)
+                {
+                    return false;
+                }
+
+                int byteLength = BitConverter.ToUInt16(header, 0);
+                if (byteLength <= 0 || byteLength > 32768 || (byteLength & 1) != 0)
+                {
+                    return false;
+                }
+
+                long bufferValue = pointerSize == 8
+                    ? BitConverter.ToInt64(header, unicodeBufferOffset)
+                    : BitConverter.ToUInt32(header, unicodeBufferOffset);
+                if (bufferValue == 0)
+                {
+                    return false;
+                }
+
+                byte[] pathBytes = new byte[byteLength];
+                if (!ReadProcessMemory(
+                        process,
+                        new IntPtr(bufferValue),
+                        pathBytes,
+                        pathBytes.Length,
+                        out bytesRead) ||
+                    bytesRead.ToInt64() != pathBytes.Length)
+                {
+                    return false;
+                }
+
+                directory = Encoding.Unicode.GetString(pathBytes);
+                return !String.IsNullOrWhiteSpace(directory);
+            }
+            catch
+            {
+                directory = null;
+                return false;
+            }
+            finally
+            {
+                CloseHandle(process);
+            }
+        }
+
+        private static bool TryReadPointer(
+            IntPtr process,
+            IntPtr address,
+            int pointerSize,
+            out IntPtr value)
+        {
+            value = IntPtr.Zero;
+            byte[] bytes = new byte[pointerSize];
+            IntPtr bytesRead;
+            if (!ReadProcessMemory(process, address, bytes, bytes.Length, out bytesRead) ||
+                bytesRead.ToInt64() != bytes.Length)
+            {
+                return false;
+            }
+
+            long raw = pointerSize == 8
+                ? BitConverter.ToInt64(bytes, 0)
+                : BitConverter.ToUInt32(bytes, 0);
+            value = new IntPtr(raw);
+            return true;
+        }
+    }
+}
+'@
+}
+
+function Get-ProcessCurrentDirectory {
+    param([int]$ProcessId)
+
+    $directory = $null
+    if ([LifeVizInstaller.ProcessCurrentDirectoryReader]::TryGet($ProcessId, [ref]$directory)) {
+        return $directory
+    }
+    return $null
+}
+
+function Get-InstallRootCurrentDirectoryHolders {
+    param([string]$RootPath)
+
+    $holders = @()
+    Get-Process -ErrorAction SilentlyContinue | ForEach-Object {
+        $process = $_
+        $currentDirectory = Get-ProcessCurrentDirectory -ProcessId $process.Id
+        if ($currentDirectory -and (Test-PathWithinRoot -CandidatePath $currentDirectory -RootPath $RootPath)) {
+            $processPath = $null
+            try { $processPath = $process.Path } catch {}
+            $startTimeUtcTicks = $null
+            try { $startTimeUtcTicks = $process.StartTime.ToUniversalTime().Ticks } catch {}
+            $holders += [pscustomobject]@{
+                Id = $process.Id
+                Name = $process.ProcessName
+                Path = $processPath
+                CurrentDirectory = $currentDirectory
+                StartTimeUtcTicks = $startTimeUtcTicks
+                Process = $process
+            }
+        } else {
+            $process.Dispose()
+        }
+    }
+    return @($holders)
+}
+
+function Stop-LegacyFfmpegInstallRootHolders {
+    param(
+        [string]$RootPath,
+        [int]$WaitMilliseconds = 10000
+    )
+
+    $holders = @(Get-InstallRootCurrentDirectoryHolders -RootPath $RootPath)
+    $ffmpegHolders = @($holders | Where-Object {
+        $_.Name -and ($_.Name + '.exe').Equals('ffmpeg.exe', [StringComparison]::OrdinalIgnoreCase)
+    })
+
+    foreach ($holder in $ffmpegHolders) {
+        try {
+            if ($holder.Process.HasExited) {
+                continue
+            }
+        } catch {
+            continue
+        }
+
+        $currentProcess = Get-Process -Id $holder.Id -ErrorAction SilentlyContinue
+        if (-not $currentProcess) {
+            continue
+        }
+        try {
+            $currentStartTimeUtcTicks = $null
+            try { $currentStartTimeUtcTicks = $currentProcess.StartTime.ToUniversalTime().Ticks } catch {}
+            $currentDirectory = Get-ProcessCurrentDirectory -ProcessId $currentProcess.Id
+            if (-not $holder.StartTimeUtcTicks -or
+                -not $currentStartTimeUtcTicks -or
+                $holder.StartTimeUtcTicks -ne $currentStartTimeUtcTicks -or
+                -not $currentProcess.ProcessName.Equals('ffmpeg', [StringComparison]::OrdinalIgnoreCase) -or
+                -not $currentDirectory -or
+                -not (Test-PathWithinRoot -CandidatePath $currentDirectory -RootPath $RootPath)) {
+                Write-Warning "[install] FFmpeg process $($holder.Id) changed identity or working directory before cleanup; it will not be terminated."
+                continue
+            }
+
+            Write-Warning (
+                "[install] Stopping legacy FFmpeg process {0} whose current directory is inside the old install: {1}" -f
+                $holder.Id,
+                $currentDirectory)
+            try {
+                & "$env:SystemRoot\System32\taskkill.exe" /PID $holder.Id /T /F | Out-Host
+                if ($LASTEXITCODE -ne 0) {
+                    Write-Warning "[install] taskkill returned exit code $LASTEXITCODE for FFmpeg process $($holder.Id)."
+                }
+            } catch {
+                Write-Warning "[install] Failed to request termination of FFmpeg process $($holder.Id): $_"
+            }
+        } finally {
+            $currentProcess.Dispose()
+        }
+    }
+
+    $deadlineUtc = [DateTime]::UtcNow.AddMilliseconds([Math]::Max(0, $WaitMilliseconds))
+    foreach ($holder in $ffmpegHolders) {
+        try {
+            $remaining = [Math]::Max(0, [int]($deadlineUtc - [DateTime]::UtcNow).TotalMilliseconds)
+            if ($remaining -gt 0) {
+                $null = $holder.Process.WaitForExit($remaining)
+            }
+        } catch {
+            # The process may already have exited between enumeration and waiting.
+        } finally {
+            $holder.Process.Dispose()
+        }
+    }
+
+    foreach ($holder in @($holders | Where-Object {
+        -not ($_.Name -and ($_.Name + '.exe').Equals('ffmpeg.exe', [StringComparison]::OrdinalIgnoreCase))
+    })) {
+        $holder.Process.Dispose()
+    }
+
+    $remainingHolders = @(Get-InstallRootCurrentDirectoryHolders -RootPath $RootPath)
+    try {
+        $remainingFfmpeg = @($remainingHolders | Where-Object {
+            $_.Name -and ($_.Name + '.exe').Equals('ffmpeg.exe', [StringComparison]::OrdinalIgnoreCase)
+        })
+        if ($remainingFfmpeg.Count -gt 0) {
+            $details = ($remainingFfmpeg | ForEach-Object {
+                "PID $($_.Id) ($($_.Name).exe), cwd=$($_.CurrentDirectory)"
+            }) -join '; '
+            throw "Legacy FFmpeg process(es) still hold the install directory after cleanup: $details"
+        }
+
+        $otherHolders = @($remainingHolders | Where-Object {
+            -not ($_.Name -and ($_.Name + '.exe').Equals('ffmpeg.exe', [StringComparison]::OrdinalIgnoreCase))
+        })
+        if ($otherHolders.Count -gt 0) {
+            $details = ($otherHolders | ForEach-Object {
+                $name = if ($_.Name) { "$($_.Name).exe" } else { 'unknown' }
+                "PID $($_.Id) ($name), cwd=$($_.CurrentDirectory)"
+            }) -join '; '
+            Write-Warning "[install] Non-FFmpeg process(es) still have a current directory inside the install root; they will not be terminated: $details"
+        }
+    } finally {
+        foreach ($holder in $remainingHolders) {
+            $holder.Process.Dispose()
+        }
+    }
+}
+
 function Resolve-Mage {
     $candidates = @(
         "$env:WINDIR\Microsoft.NET\Framework64\v4.0.30319\mage.exe",
@@ -134,14 +546,11 @@ function Wait-ForStagedLifeVizProcesses {
     if ($ExplicitProcessId -gt 0 -and $ExplicitProcessId -ne $PID) {
         $explicitProcess = Get-Process -Id $ExplicitProcessId -ErrorAction SilentlyContinue
         if ($explicitProcess) {
-            try {
-                $explicitPath = $explicitProcess.Path
-                if ($explicitProcess.ProcessName -eq 'lifeviz' -and
-                    $explicitPath -and
-                    $explicitPath.StartsWith($rootPath, [StringComparison]::OrdinalIgnoreCase)) {
-                    $processIds += $ExplicitProcessId
-                }
-            } catch {}
+            # The updater supplied this PID specifically so the installer cannot
+            # race application shutdown. Do not discard the wait because Path is
+            # temporarily unreadable or the process is already partway through exit.
+            $processIds += $ExplicitProcessId
+            $explicitProcess.Dispose()
         }
     }
 
@@ -161,8 +570,12 @@ function Wait-ForStagedLifeVizProcesses {
         }
 
         Write-Host "[install] Waiting for running LifeViz process $processId to exit..." -ForegroundColor Cyan
-        if (-not $process.WaitForExit(60000)) {
-            throw "LifeViz process $processId did not exit within 60 seconds. Close LifeViz and run the installer again."
+        try {
+            if (-not $process.WaitForExit(60000)) {
+                throw "LifeViz process $processId did not exit within 60 seconds. Close LifeViz and run the installer again."
+            }
+        } finally {
+            $process.Dispose()
         }
     }
 
@@ -201,16 +614,82 @@ function Move-DirectoryWithRetry {
     param(
         [string]$Source,
         [string]$Destination,
-        [int]$MaxAttempts = 10
+        [int]$MaxAttempts = 60
     )
 
+    $sourcePath = [IO.Path]::GetFullPath($Source).TrimEnd(
+        [IO.Path]::DirectorySeparatorChar,
+        [IO.Path]::AltDirectorySeparatorChar)
+    $destinationPath = [IO.Path]::GetFullPath($Destination).TrimEnd(
+        [IO.Path]::DirectorySeparatorChar,
+        [IO.Path]::AltDirectorySeparatorChar)
+    $sourceVolume = [IO.Path]::GetPathRoot($sourcePath)
+    $destinationVolume = [IO.Path]::GetPathRoot($destinationPath)
+    if (-not $sourceVolume.Equals($destinationVolume, [StringComparison]::OrdinalIgnoreCase)) {
+        throw "Refusing non-transactional cross-volume directory move from '$sourcePath' to '$destinationPath'."
+    }
+
+    if (-not [IO.Directory]::Exists($sourcePath)) {
+        throw "Directory move source does not exist: '$sourcePath'."
+    }
+    if ([IO.Directory]::Exists($destinationPath)) {
+        throw "Refusing to move '$sourcePath' because destination '$destinationPath' already exists."
+    }
+
     for ($attempt = 1; $attempt -le $MaxAttempts; $attempt++) {
+        $sourceExists = [IO.Directory]::Exists($sourcePath)
+        $destinationExists = [IO.Directory]::Exists($destinationPath)
+        if (-not $sourceExists -and $destinationExists) {
+            return
+        }
+        if (-not $sourceExists -and -not $destinationExists) {
+            throw "Directory move lost both source and destination: '$sourcePath' -> '$destinationPath'."
+        }
+        if ($sourceExists -and $destinationExists) {
+            throw "Refusing to move '$sourcePath' because destination '$destinationPath' already exists."
+        }
+
         try {
-            Move-Item -LiteralPath $Source -Destination $Destination
+            # Directory.Move is an atomic same-volume rename. Unlike Move-Item,
+            # it cannot fall back to recursively populating/nesting a destination
+            # when one locked descendant prevents the rename.
+            [IO.Directory]::Move($sourcePath, $destinationPath)
+            if ([IO.Directory]::Exists($sourcePath) -or -not [IO.Directory]::Exists($destinationPath)) {
+                throw "Directory move returned with an invalid state: '$sourcePath' -> '$destinationPath'."
+            }
             return
         } catch {
+            $moveError = $_
+            $sourceExists = [IO.Directory]::Exists($sourcePath)
+            $destinationExists = [IO.Directory]::Exists($destinationPath)
+            if (-not $sourceExists -and $destinationExists) {
+                return
+            }
+            if (-not $sourceExists -or $destinationExists) {
+                throw "Directory move entered an inconsistent state (sourceExists=$sourceExists, destinationExists=$destinationExists): '$sourcePath' -> '$destinationPath'. $moveError"
+            }
             if ($attempt -eq $MaxAttempts) {
-                throw "Failed to move '$Source' to '$Destination' after $MaxAttempts attempts: $_"
+                $holderSuffix = ''
+                $moveHolders = @()
+                try {
+                    if ('LifeVizInstaller.ProcessCurrentDirectoryReader' -as [type]) {
+                        $moveHolders = @(Get-InstallRootCurrentDirectoryHolders -RootPath $sourcePath)
+                        if ($moveHolders.Count -gt 0) {
+                            $holderDetails = ($moveHolders | ForEach-Object {
+                                $name = if ($_.Name) { "$($_.Name).exe" } else { 'unknown' }
+                                "PID $($_.Id) ($name), cwd=$($_.CurrentDirectory)"
+                            }) -join '; '
+                            $holderSuffix = " Current-directory holder(s): $holderDetails"
+                        }
+                    }
+                } catch {
+                    # The atomic move error remains authoritative if diagnostics fail.
+                } finally {
+                    foreach ($holder in $moveHolders) {
+                        $holder.Process.Dispose()
+                    }
+                }
+                throw "Failed to move '$sourcePath' to '$destinationPath' after $MaxAttempts attempts: $moveError$holderSuffix"
             }
             Start-Sleep -Milliseconds 250
         }
@@ -323,6 +802,8 @@ Write-Host "[install] Target location: $InstallRoot" -ForegroundColor Cyan
 $InstallRoot = [IO.Path]::GetFullPath($InstallRoot).TrimEnd(
     [IO.Path]::DirectorySeparatorChar,
     [IO.Path]::AltDirectorySeparatorChar)
+Set-InstallerWorkingDirectoryOutsideRoot -RootPath $InstallRoot -PreferredPath $payloadRoot
+
 $stagingPrefix = "$InstallRoot.installing-"
 $stagingRoot = $stagingPrefix + [Guid]::NewGuid().ToString('N')
 $backupPrefix = "$InstallRoot.backup-"
@@ -347,6 +828,8 @@ try {
     $null = Resolve-StagedApplicationExe -ManifestPath $candidateManifest
 
     Wait-ForStagedLifeVizProcesses -StagedRoot $InstallRoot -ExplicitProcessId $WaitForProcessId
+    Initialize-ProcessCurrentDirectoryReader
+    Stop-LegacyFfmpegInstallRootHolders -RootPath $InstallRoot
 
     if ($RegisterClickOnce -and -not $SkipCacheClear) {
         $mage = Resolve-Mage
