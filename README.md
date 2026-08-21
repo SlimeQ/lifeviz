@@ -24,6 +24,8 @@ Performance-heavy scenes now avoid several sources of background contention and 
 
 FFmpeg child-process ownership is now centralized across video/audio decode, metadata probes, recording, and muxing. On Windows, managed children join a kill-on-close Job Object when available, with tracked process-tree termination as the orderly-shutdown fallback, so the normal and crash teardown paths both have explicit orphan containment. AutoClip still starts a decoder for each randomly selected file/offset—those command-line inputs cannot be changed inside a running process—but the starts are sequential clip handoffs, not a pool of every clip in the library. Each decoder is bounded to the remaining clip duration, source looping is enabled only when requested, unchanged AutoClip settings and compositor-only fit changes no longer restart it, and retired sessions drain through one shared media-disposal worker. Recording submission no longer waits indefinitely on a full encoder queue, and encoder flush/abort paths are bounded so shutdown can always reach the final process sweep. LifeViz deliberately does not keep a warm decoder pool or persistent transcode cache: either would trade process starts for sustained CPU/RAM use or extra disk writes.
 
+Transparent WebM decode is handled as a narrow exception to FFmpeg's normal decoder choice. The existing process-wide cached input probe records the codec and alpha tag; an alpha-tagged VP9 stream uses `libvpx-vp9`, and an alpha-tagged VP8 stream uses `libvpx`, so raw BGRA output retains the transparency needed by Normal compositing. Ordinary WebM files and all other native-codec cases keep FFmpeg's default decoder path. **Fit** padding for alpha-tagged video is transparent black instead of an opaque black matte. This reuses the existing probe and in-memory raw-frame pipe: it does not add a second probe, a persistent frame/transcode cache, or ongoing disk writes.
+
 ## Development
 
 ```powershell
@@ -99,6 +101,7 @@ dotnet bin\Debug\net9.0-windows-sbx\lifeviz.dll --smoke-test shutdown
 dotnet bin\Debug\net9.0-windows-sbx\lifeviz.dll --smoke-test startup
 dotnet bin\Debug\net9.0-windows-sbx\lifeviz.dll --smoke-test config-save-coalescing
 dotnet bin\Debug\net9.0-windows-sbx\lifeviz.dll --smoke-test ffmpeg-lifecycle
+dotnet bin\Debug\net9.0-windows-sbx\lifeviz.dll --smoke-test webm-alpha C:\path\to\transparent.webm
 dotnet bin\Debug\net9.0-windows-sbx\lifeviz.dll --smoke-test all
 ```
 
@@ -107,6 +110,8 @@ The live renderer now keeps source-layer sampling pixel-sharp by default on the 
 Inline `Sim Group` scenes still use the shared-GPU presentation path, but the dedicated three-slot snapshot ring now has a two-sided lease. The producer publishes a slot only after its event query reports that the snapshot copy finished. The WPF presentation device opens each ring handle once per resource generation, copies the published snapshot into its own private underlay texture, and keeps the producer slot leased until a consumer event query confirms that private copy finished; up to three consumer reads can be awaiting retirement. A leased slot is never selected for a new producer copy. If pending work saturates either side, presentation keeps the last private frame and drops/defers newer work rather than falling back to a mutable live surface. This synchronization applies specifically to the inline `Sim Group` snapshot-underlay handoff; it does **not** claim to synchronize every legacy non-inline shared-GPU handle.
 
 `gpu-snapshot-order` encodes monotonically increasing frame IDs into the inline scene, adds redraw/draw pressure, and forcibly exercises both producer- and consumer-query not-ready paths. It fails on backwards or future IDs, torn pixels, insufficient presentation progress, excessive lag, incorrect lease retirement/saturation/drain behavior, repeated paced redraw amplification, or shared-resource opens that exceed the bounded per-handle cache allowance. The combined GPU UI suite runs this gate, so `--smoke-test all` includes it.
+
+`webm-alpha <path>` is the focused transparent-video regression. Pass an alpha-tagged VP8 or VP9 WebM; the smoke exercises the cached metadata probe and real first-frame BGRA decode, then fails if the expected `libvpx` decoder is not selected or the decoded frame has no non-opaque alpha. It also guards the transparent **Fit** padding plan. Ordinary opaque WebM behavior is outside this targeted decoder override and remains unchanged.
 
 For visible normal-startup diagnostics against your real saved scene instead of smoke-mode startup:
 

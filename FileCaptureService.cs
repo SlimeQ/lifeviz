@@ -125,6 +125,62 @@ internal sealed class FileCaptureService : IDisposable
         }
     }
 
+    private static bool TryWaitForVideoProbe(string path, out VideoSession.VideoProbeInfo probe)
+    {
+        probe = default;
+        Task<VideoSession.VideoProbeInfo?> probeTask = GetVideoProbeAsync(path);
+        VideoSession.VideoProbeInfo? result;
+        try
+        {
+            if (!probeTask.Wait(VideoProbeTimeoutMilliseconds + VideoProbeWaitGraceMilliseconds))
+            {
+                Logger.Warn($"Timed out waiting for video probe result: {Path.GetFileName(path)}");
+                return false;
+            }
+
+            result = probeTask.GetAwaiter().GetResult();
+        }
+        catch (Exception ex)
+        {
+            Logger.Warn($"Failed while waiting for video probe: {Path.GetFileName(path)}. {ex.Message}");
+            return false;
+        }
+
+        if (!result.HasValue)
+        {
+            return false;
+        }
+
+        probe = result.Value;
+        return probe.Width > 0 && probe.Height > 0;
+    }
+
+    internal static (string codecName, bool hasAlpha, string? preferredDecoder)? ProbeVideoAlphaForSmoke(string path)
+    {
+        if (!TryWaitForVideoProbe(path, out VideoSession.VideoProbeInfo probe))
+        {
+            return null;
+        }
+
+        return (
+            probe.CodecName,
+            probe.HasAlpha,
+            VideoSession.ResolvePreferredVideoDecoder(probe.CodecName, probe.HasAlpha));
+    }
+
+    internal static (string codecName, bool hasAlpha, string? preferredDecoder) ParseVideoAlphaProbeForSmoke(string output)
+    {
+        (string codecName, bool hasAlpha) = VideoSession.ParsePrimaryVideoStreamMetadata(output);
+        return (codecName, hasAlpha, VideoSession.ResolvePreferredVideoDecoder(codecName, hasAlpha));
+    }
+
+    internal static string BuildDirectVideoFilterForSmoke(
+        FitMode fitMode,
+        int targetWidth,
+        int targetHeight,
+        bool preserveAlpha)
+        => VideoSession.BuildDirectOutputVideoFilter(fitMode, targetWidth, targetHeight, preserveAlpha);
+
     private static string BuildVideoProbeCacheKey(string path)
     {
         try
@@ -1473,16 +1529,25 @@ internal sealed class FileCaptureService : IDisposable
     {
         internal readonly struct VideoProbeInfo
         {
-            public VideoProbeInfo(int width, int height, double durationSeconds)
+            public VideoProbeInfo(
+                int width,
+                int height,
+                double durationSeconds,
+                string? codecName = null,
+                bool hasAlpha = false)
             {
                 Width = width;
                 Height = height;
                 DurationSeconds = durationSeconds;
+                CodecName = codecName ?? string.Empty;
+                HasAlpha = hasAlpha;
             }
 
             public int Width { get; }
             public int Height { get; }
             public double DurationSeconds { get; }
+            public string CodecName { get; }
+            public bool HasAlpha { get; }
         }
 
         public readonly struct ResolvedPlayback
@@ -1565,6 +1630,8 @@ internal sealed class FileCaptureService : IDisposable
 
         private int _nativeWidth;
         private int _nativeHeight;
+        private string? _preferredVideoDecoder;
+        private bool _sourceHasAlpha;
         private int _processWidth;
         private int _processHeight;
         private bool _processProducesExactTargetFrames;
@@ -1675,20 +1742,20 @@ internal sealed class FileCaptureService : IDisposable
 
                 Logger.Info($"Initializing local video: {path}");
 
-                double durationSeconds;
+                VideoProbeInfo probe;
                 if (cachedProbe.HasValue)
                 {
-                    _nativeWidth = cachedProbe.Value.Width;
-                    _nativeHeight = cachedProbe.Value.Height;
-                    durationSeconds = cachedProbe.Value.DurationSeconds;
+                    probe = cachedProbe.Value;
                 }
-                else if (!ProbeVideo(path, out _nativeWidth, out _nativeHeight, out durationSeconds))
+                else if (!TryWaitForVideoProbe(path, out probe))
                 {
                     _hasError = true;
                     _errorMessage = "Failed to probe video dimensions.";
                     Logger.Error(_errorMessage);
                     return;
                 }
+
+                ApplyVideoProbe(probe);
                 
                 ConfigureDimensions();
                 _videoPlaybackUrl = path;
@@ -1697,7 +1764,7 @@ internal sealed class FileCaptureService : IDisposable
                 bool startPaused;
                 lock (_audioLock)
                 {
-                    _estimatedDurationSeconds = durationSeconds;
+                    _estimatedDurationSeconds = probe.DurationSeconds;
                     startOffsetSeconds = NormalizeOffsetNoLock(_pausedOffsetSeconds);
                     _pausedOffsetSeconds = startOffsetSeconds;
                     _playbackBaseOffsetSeconds = startOffsetSeconds;
@@ -1763,7 +1830,7 @@ internal sealed class FileCaptureService : IDisposable
                 }
 
                 Logger.Info($"Probing video: {targetVideoUrl}");
-                if (!ProbeVideo(targetVideoUrl, out int probedWidth, out int probedHeight, out var durationSeconds))
+                if (!TryWaitForVideoProbe(targetVideoUrl, out VideoProbeInfo probe))
                 {
                     if (_isDisposed ||
                         (pipelineGeneration.HasValue && !IsCurrentVideoPipeline(pipelineGeneration.Value)))
@@ -1783,8 +1850,7 @@ internal sealed class FileCaptureService : IDisposable
                     return;
                 }
 
-                _nativeWidth = probedWidth;
-                _nativeHeight = probedHeight;
+                ApplyVideoProbe(probe);
                 Logger.Info($"Probe success: {_nativeWidth}x{_nativeHeight}");
 
                 ConfigureDimensions();
@@ -1794,7 +1860,7 @@ internal sealed class FileCaptureService : IDisposable
                 bool startPaused;
                 lock (_audioLock)
                 {
-                    _estimatedDurationSeconds = durationSeconds;
+                    _estimatedDurationSeconds = probe.DurationSeconds;
                     startOffsetSeconds = NormalizeOffsetNoLock(_pausedOffsetSeconds);
                     _pausedOffsetSeconds = startOffsetSeconds;
                     _playbackBaseOffsetSeconds = startOffsetSeconds;
@@ -1823,6 +1889,20 @@ internal sealed class FileCaptureService : IDisposable
                 _hasError = true;
                 _errorMessage = ex.Message;
                 Logger.Error($"Failed to initialize video session: {ex.Message}", ex);
+            }
+        }
+
+        private void ApplyVideoProbe(VideoProbeInfo probe)
+        {
+            _nativeWidth = probe.Width;
+            _nativeHeight = probe.Height;
+            _sourceHasAlpha = probe.HasAlpha;
+            _preferredVideoDecoder = ResolvePreferredVideoDecoder(probe.CodecName, probe.HasAlpha);
+
+            if (!string.IsNullOrEmpty(_preferredVideoDecoder))
+            {
+                Logger.Info(
+                    $"Alpha video detected for {DisplayName}; using FFmpeg decoder {_preferredVideoDecoder} to preserve transparency.");
             }
         }
 
@@ -2178,7 +2258,11 @@ internal sealed class FileCaptureService : IDisposable
                    normalized == FitMode.Stretch;
         }
 
-        private static string BuildDirectOutputVideoFilter(FitMode fitMode, int targetWidth, int targetHeight)
+        internal static string BuildDirectOutputVideoFilter(
+            FitMode fitMode,
+            int targetWidth,
+            int targetHeight,
+            bool preserveAlpha)
         {
             FitMode normalized = ImageFit.Normalize(fitMode);
             return normalized switch
@@ -2186,7 +2270,7 @@ internal sealed class FileCaptureService : IDisposable
                 FitMode.Fill =>
                     $"scale={targetWidth}:{targetHeight}:force_original_aspect_ratio=increase,crop={targetWidth}:{targetHeight}",
                 FitMode.Fit =>
-                    $"scale={targetWidth}:{targetHeight}:force_original_aspect_ratio=decrease,pad={targetWidth}:{targetHeight}:(ow-iw)/2:(oh-ih)/2:black",
+                    $"scale={targetWidth}:{targetHeight}:force_original_aspect_ratio=decrease,pad={targetWidth}:{targetHeight}:(ow-iw)/2:(oh-ih)/2:{(preserveAlpha ? "black@0" : "black")}",
                 FitMode.Stretch =>
                     $"scale={targetWidth}:{targetHeight}",
                 _ => throw new InvalidOperationException($"Fit mode {fitMode} does not support direct ffmpeg output.")
@@ -2230,7 +2314,7 @@ internal sealed class FileCaptureService : IDisposable
         private string BuildVideoOutputFilter(bool produceExactTargetFrames, FitMode processOutputFitMode, int processWidth, int processHeight)
         {
             string? directFilter = produceExactTargetFrames
-                ? BuildDirectOutputVideoFilter(processOutputFitMode, processWidth, processHeight)
+                ? BuildDirectOutputVideoFilter(processOutputFitMode, processWidth, processHeight, _sourceHasAlpha)
                 : null;
 
             int decodeFps = _offlineRenderEnabled ? _offlineRenderFps : _videoDecodeFpsLimit;
@@ -2527,6 +2611,7 @@ internal sealed class FileCaptureService : IDisposable
                 {
                     args += " -re"; // Realtime reading for interactive playback.
                 }
+                args += BuildPreferredVideoDecoderInputArg(_preferredVideoDecoder);
                 args += $" -i \"{url}\"{BuildDecodeDurationOutputArg()} -map 0:v:0 -an -sn -dn";
                 string videoFilter = BuildVideoOutputFilter(produceExactTargetFrames, processOutputFitMode, processWidth, processHeight);
                 if (!string.IsNullOrWhiteSpace(videoFilter))
@@ -3731,33 +3816,78 @@ internal sealed class FileCaptureService : IDisposable
             height = 0;
             durationSeconds = 0;
 
-            Task<VideoProbeInfo?> probeTask = GetVideoProbeAsync(path);
-            VideoProbeInfo? probe;
-            try
-            {
-                if (!probeTask.Wait(VideoProbeTimeoutMilliseconds + VideoProbeWaitGraceMilliseconds))
-                {
-                    Logger.Warn($"Timed out waiting for video probe result: {System.IO.Path.GetFileName(path)}");
-                    return false;
-                }
-
-                probe = probeTask.GetAwaiter().GetResult();
-            }
-            catch (Exception ex)
-            {
-                Logger.Warn($"Failed while waiting for video probe: {System.IO.Path.GetFileName(path)}. {ex.Message}");
-                return false;
-            }
-
-            if (!probe.HasValue)
+            if (!TryWaitForVideoProbe(path, out VideoProbeInfo probe))
             {
                 return false;
             }
 
-            width = probe.Value.Width;
-            height = probe.Value.Height;
-            durationSeconds = probe.Value.DurationSeconds;
+            width = probe.Width;
+            height = probe.Height;
+            durationSeconds = probe.DurationSeconds;
             return width > 0 && height > 0;
+        }
+
+        internal static string? ResolvePreferredVideoDecoder(string? codecName, bool hasAlpha)
+        {
+            if (!hasAlpha)
+            {
+                return null;
+            }
+
+            return codecName?.Trim().ToLowerInvariant() switch
+            {
+                "vp9" => "libvpx-vp9",
+                "vp8" => "libvpx",
+                _ => null
+            };
+        }
+
+        private static string BuildPreferredVideoDecoderInputArg(string? preferredDecoder)
+        {
+            // Probe text is external input, so decoder arguments stay on an
+            // explicit allowlist instead of interpolating the reported codec.
+            return preferredDecoder switch
+            {
+                // Match the same first video stream consumed by -map 0:v:0. An
+                // unqualified input decoder would also be forced onto unrelated
+                // secondary video streams in a multi-stream container.
+                "libvpx-vp9" => " -c:v:0 libvpx-vp9",
+                "libvpx" => " -c:v:0 libvpx",
+                _ => string.Empty
+            };
+        }
+
+        internal static (string codecName, bool hasAlpha) ParsePrimaryVideoStreamMetadata(string output)
+        {
+            if (string.IsNullOrWhiteSpace(output))
+            {
+                return (string.Empty, false);
+            }
+
+            Match videoStream = Regex.Match(
+                output,
+                @"(?m)^[ \t]*Stream #0:[^\r\n]*?\bVideo:\s*(?<codec>[A-Za-z0-9_]+)\b[^\r\n]*");
+            if (!videoStream.Success)
+            {
+                return (string.Empty, false);
+            }
+
+            string codecName = videoStream.Groups["codec"].Value.ToLowerInvariant();
+            int blockStart = videoStream.Index;
+            int searchStart = videoStream.Index + videoStream.Length;
+            Match nextStream = Regex.Match(
+                output.Substring(searchStart),
+                @"(?m)^[ \t]*Stream #0:");
+            int blockEnd = nextStream.Success ? searchStart + nextStream.Index : output.Length;
+            string streamBlock = output.Substring(blockStart, blockEnd - blockStart);
+
+            bool alphaMetadata = Regex.IsMatch(
+                streamBlock,
+                @"(?im)^[ \t]*alpha_mode[ \t]*:[ \t]*1[ \t]*\r?$");
+            bool alphaPixelFormat = Regex.IsMatch(
+                videoStream.Value,
+                @"(?i)\b(?:yuva[0-9a-z]*|gbrap[0-9a-z]*|rgba|bgra|argb|abgr)\b");
+            return (codecName, alphaMetadata || alphaPixelFormat);
         }
 
         internal static VideoProbeInfo? ProbeVideoUncached(string path, int timeoutMilliseconds = VideoProbeTimeoutMilliseconds)
@@ -3804,15 +3934,25 @@ internal sealed class FileCaptureService : IDisposable
                     durationSeconds = (hours * 3600) + (minutes * 60) + seconds;
                 }
                 
-                // Regex for "Video: ..., 1920x1080"
-                var match = Regex.Match(output, @"Video:.*?, (\d+)x(\d+)");
-                if (match.Success &&
-                    int.TryParse(match.Groups[1].Value, NumberStyles.Integer, CultureInfo.InvariantCulture, out int width) &&
-                    int.TryParse(match.Groups[2].Value, NumberStyles.Integer, CultureInfo.InvariantCulture, out int height) &&
+                Match videoStream = Regex.Match(
+                    output,
+                    @"(?m)^[ \t]*Stream #0:[^\r\n]*?\bVideo:\s*(?<codec>[A-Za-z0-9_]+)\b[^\r\n]*");
+                int videoDescriptionIndex = videoStream.Success
+                    ? videoStream.Value.IndexOf("Video:", StringComparison.Ordinal)
+                    : -1;
+                Match dimensions = videoDescriptionIndex >= 0
+                    ? Regex.Match(
+                        videoStream.Value.Substring(videoDescriptionIndex),
+                        @",\s*(?<width>\d{1,6})x(?<height>\d{1,6})(?:[,\s]|$)")
+                    : Match.Empty;
+                if (dimensions.Success &&
+                    int.TryParse(dimensions.Groups["width"].Value, NumberStyles.Integer, CultureInfo.InvariantCulture, out int width) &&
+                    int.TryParse(dimensions.Groups["height"].Value, NumberStyles.Integer, CultureInfo.InvariantCulture, out int height) &&
                     width > 0 &&
                     height > 0)
                 {
-                    return new VideoProbeInfo(width, height, durationSeconds);
+                    (string codecName, bool hasAlpha) = ParsePrimaryVideoStreamMetadata(output);
+                    return new VideoProbeInfo(width, height, durationSeconds, codecName, hasAlpha);
                 }
             }
             catch (Exception ex)

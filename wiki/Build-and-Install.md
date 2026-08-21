@@ -9,6 +9,8 @@
 
 LifeViz resolves `ffmpeg.exe` once and launches it through a centralized child-process manager. Standard direct installs continue to use the executable discovered beside the app or on `PATH`. If that executable is a Chocolatey shim under `C:\ProgramData\chocolatey\bin`, LifeViz safely resolves the real package binary under Chocolatey's `lib` directory and launches it directly, avoiding an extra shim process for every decode/probe/mux operation. No transcode or frame cache is written by this resolution step.
 
+For transparent WebM input, use an FFmpeg build that exposes the `libvpx` VP8 decoder and `libvpx-vp9` decoder. LifeViz selects them only when the existing cached input probe reports the matching VP8/VP9 codec plus an alpha tag; ordinary WebM and other inputs keep FFmpeg's default/native decoder path. Alpha-tagged **Fit** output uses transparent-black padding. The metadata extension and decoder choice do not add another probe, a persistent media cache, or ongoing disk writes.
+
 ## Local Development
 
 ```powershell
@@ -74,6 +76,7 @@ dotnet bin\Debug\net9.0-windows-sbx\lifeviz.dll --smoke-test dimensions
 dotnet bin\Debug\net9.0-windows-sbx\lifeviz.dll --smoke-test shutdown
 dotnet bin\Debug\net9.0-windows-sbx\lifeviz.dll --smoke-test startup
 dotnet bin\Debug\net9.0-windows-sbx\lifeviz.dll --smoke-test ffmpeg-lifecycle
+dotnet bin\Debug\net9.0-windows-sbx\lifeviz.dll --smoke-test webm-alpha C:\path\to\transparent.webm
 dotnet bin\Debug\net9.0-windows-sbx\lifeviz.dll --smoke-test all
 ```
 
@@ -127,6 +130,7 @@ dotnet bin\Debug\net9.0-windows-sbx\lifeviz.dll --smoke-test all
 - `shutdown` opens the real `MainWindow`, opens the Scene Editor, then closes the main window and fails if close-time teardown captures any exception or if the owned editor-close path throws.
 - `startup` launches `MainWindow` in a dedicated smoke-test mode that skips loading the persisted project plus file/video/audio capture pipelines, so WPF/render startup can be validated in isolation and should exit quickly.
 - `ffmpeg-lifecycle` launches a controlled FFmpeg child through an isolated process manager, verifies that the child is tracked and receives the external temporary working directory, closes the manager's Windows Job Object, and fails if the child remains alive. It also exercises direct FFmpeg executable resolution, including Chocolatey shim bypass when applicable.
+- `webm-alpha <path>` expects an alpha-tagged VP8 or VP9 WebM. It exercises the existing cached metadata probe plus a real first-frame BGRA decode and fails if the matching `libvpx` decoder is not selected, the frame contains no non-opaque alpha, or the alpha-aware **Fit** plan stops using transparent padding. This target is intentionally scoped to alpha-tagged VP8/VP9; it does not change or characterize ordinary opaque WebM decoding.
 - `all` runs `gpu-sim` plus the combined GPU handoff/passthrough-render/source/render UI smoke suite. That combined UI suite includes `gpu-snapshot-order`, including its forced producer/consumer not-ready and final consumer-query drain checks.
 
 ## Normal-Startup Diagnostics

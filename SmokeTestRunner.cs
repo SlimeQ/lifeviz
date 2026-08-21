@@ -106,6 +106,7 @@ internal static class SmokeTestRunner
                 "sim-group-pixel-sort-color" => RunSimGroupPixelSortColorSmokeTest(),
                 "gpu-injection-mode" => RunGpuInjectionModeSmokeTest(),
                 "gpu-file-injection-mode" => RunGpuFileInjectionModeSmokeTest(smokeVideoPath),
+                "webm-alpha" => RunWebmAlphaSmokeTest(smokeVideoPath),
                 "offline-video-audio" => RunOfflineVideoAudioSmokeTest(smokeVideoPath),
                 "live-video-audio" => RunLiveVideoAudioSmokeTest(smokeVideoPath),
                 "autoclip" => RunAutoClipSmokeTest(smokeVideoPath),
@@ -124,7 +125,7 @@ internal static class SmokeTestRunner
                 "startup-recovery" => RunStartupRecoverySmokeTest(),
                 "config-save-coalescing" => RunConfigSaveCoalescingSmokeTest(),
                 "all" => RunAllSmokeTests(),
-                _ => throw new ArgumentException($"Unknown smoke test target '{target}'. Expected profile-240, profile-480, profile-rgb-240, profile-rgb-480, profile-file-240, profile-file-480, profile-file-rgb-240, profile-file-rgb-480, profile-current-scene, profile-current-scene-visible, profile-current-scene-fullscreen, profile-current-scene-bisect, profile-current-scene-presets, profile-current-scene-visible-presets, profile-current-scene-fullscreen-presets, profile-current-scene-<144|240|480|720|1080|1440|2160>, profile-current-scene-visible-<144|240|480|720|1080|1440|2160>, profile-current-scene-fullscreen-<144|240|480|720|1080|1440|2160>, profile-current-scene-interaction, current-scene-hover-presentation, pacing-current-scene-visible-presets, pacing-current-scene-fullscreen-presets, pacing-current-scene-interaction, pacing-current-scene-overlay-fullscreen-144, pacing-current-scene-suite, frame-pump-thread-safety, gpu-benchmark, gpu-handoff, gpu-rgb-threshold, gpu-passthrough-signed-model, passthrough-underlay-only, gpu-frequency-hue, simulation-reactive-mappings, pixel-sort-reactive-cell-size, simulation-reactive-persistence, simulation-reactive-legacy-migration, simulation-reactive-removal, simulation-reactive-editor-isolation, sim-group-legacy-migration, no-sim-group-renders-composite, sim-group-removal-clears-runtime, disabled-sim-group-renders-composite, sim-group-stack-order, sim-group-inline-hue, sim-group-inline-presentation, gpu-snapshot-order, sim-group-enabled-toggle, sim-group-remove-source, sim-group-live-edit-selection, pixel-sort-editor-roundtrip, gpu-bitwise, gpu-pixel-sort, sim-group-pixel-sort-color, gpu-injection-mode, gpu-file-injection-mode, offline-video-audio, live-video-audio, autoclip, ffmpeg-lifecycle, layer-transform-controls, chroma-key, gpu-sim, gpu-source, source-reset, gpu-render, profile-mainloop, profile-mainloop-sim-group, dimensions, shutdown, startup, startup-recovery, config-save-coalescing, or all.")
+                _ => throw new ArgumentException($"Unknown smoke test target '{target}'. Expected profile-240, profile-480, profile-rgb-240, profile-rgb-480, profile-file-240, profile-file-480, profile-file-rgb-240, profile-file-rgb-480, profile-current-scene, profile-current-scene-visible, profile-current-scene-fullscreen, profile-current-scene-bisect, profile-current-scene-presets, profile-current-scene-visible-presets, profile-current-scene-fullscreen-presets, profile-current-scene-<144|240|480|720|1080|1440|2160>, profile-current-scene-visible-<144|240|480|720|1080|1440|2160>, profile-current-scene-fullscreen-<144|240|480|720|1080|1440|2160>, profile-current-scene-interaction, current-scene-hover-presentation, pacing-current-scene-visible-presets, pacing-current-scene-fullscreen-presets, pacing-current-scene-interaction, pacing-current-scene-overlay-fullscreen-144, pacing-current-scene-suite, frame-pump-thread-safety, gpu-benchmark, gpu-handoff, gpu-rgb-threshold, gpu-passthrough-signed-model, passthrough-underlay-only, gpu-frequency-hue, simulation-reactive-mappings, pixel-sort-reactive-cell-size, simulation-reactive-persistence, simulation-reactive-legacy-migration, simulation-reactive-removal, simulation-reactive-editor-isolation, sim-group-legacy-migration, no-sim-group-renders-composite, sim-group-removal-clears-runtime, disabled-sim-group-renders-composite, sim-group-stack-order, sim-group-inline-hue, sim-group-inline-presentation, gpu-snapshot-order, sim-group-enabled-toggle, sim-group-remove-source, sim-group-live-edit-selection, pixel-sort-editor-roundtrip, gpu-bitwise, gpu-pixel-sort, sim-group-pixel-sort-color, gpu-injection-mode, gpu-file-injection-mode, webm-alpha, offline-video-audio, live-video-audio, autoclip, ffmpeg-lifecycle, layer-transform-controls, chroma-key, gpu-sim, gpu-source, source-reset, gpu-render, profile-mainloop, profile-mainloop-sim-group, dimensions, shutdown, startup, startup-recovery, config-save-coalescing, or all.")
             };
         }
         catch (Exception ex)
@@ -1525,6 +1526,222 @@ internal static class SmokeTestRunner
 
         Logger.Info("GPU file injection-mode smoke test passed.");
         return exitCode;
+    }
+
+    private static int RunWebmAlphaSmokeTest(string? smokeVideoPath)
+    {
+        if (string.IsNullOrWhiteSpace(smokeVideoPath))
+        {
+            throw new ArgumentException("webm-alpha requires a video path as the third argument or LIFEVIZ_SMOKE_VIDEO.");
+        }
+
+        string fullPath = Path.GetFullPath(smokeVideoPath);
+        if (!File.Exists(fullPath))
+        {
+            throw new FileNotFoundException("WebM alpha smoke-test video was not found.", fullPath);
+        }
+
+        Logger.Info($"Running WebM alpha smoke test with {fullPath}.");
+
+        const string vp9AlphaProbe =
+            "  Stream #0:0: Video: vp9 (Profile 0), yuv420p(tv), 426x240, 30 fps\r\n" +
+            "    Metadata:\r\n" +
+            "      alpha_mode      : 1\r\n";
+        const string vp8AlphaProbe =
+            "  Stream #0:0: Video: vp8, yuv420p(tv), 426x240, 30 fps\r\n" +
+            "    Metadata:\r\n" +
+            "      alpha_mode      : 1\r\n";
+        const string opaqueVp9Probe =
+            "  Stream #0:0: Video: vp9 (Profile 0), yuv420p(tv), 426x240, 30 fps\r\n";
+        const string laterAlphaStreamProbe =
+            "  Stream #0:0: Video: vp9 (Profile 0), yuv420p(tv), 426x240, 30 fps\r\n" +
+            "  Stream #0:1: Video: vp8, yuva420p(tv), 426x240, 30 fps\r\n" +
+            "    Metadata:\r\n" +
+            "      alpha_mode      : 1\r\n";
+
+        static void AssertProbe(
+            string caseName,
+            (string codecName, bool hasAlpha, string? preferredDecoder) actual,
+            string expectedCodec,
+            bool expectedAlpha,
+            string? expectedDecoder)
+        {
+            bool matches = string.Equals(actual.codecName, expectedCodec, StringComparison.OrdinalIgnoreCase) &&
+                           actual.hasAlpha == expectedAlpha &&
+                           string.Equals(actual.preferredDecoder, expectedDecoder, StringComparison.OrdinalIgnoreCase);
+            if (!matches)
+            {
+                throw new InvalidOperationException(
+                    $"{caseName} probe mismatch: expected codec={expectedCodec}, alpha={expectedAlpha}, " +
+                    $"decoder={expectedDecoder ?? "<native>"}; actual codec={actual.codecName}, alpha={actual.hasAlpha}, " +
+                    $"decoder={actual.preferredDecoder ?? "<native>"}.");
+            }
+        }
+
+        AssertProbe(
+            "First VP9 alpha stream",
+            FileCaptureService.ParseVideoAlphaProbeForSmoke(vp9AlphaProbe),
+            "vp9",
+            expectedAlpha: true,
+            "libvpx-vp9");
+        AssertProbe(
+            "First VP8 alpha stream",
+            FileCaptureService.ParseVideoAlphaProbeForSmoke(vp8AlphaProbe),
+            "vp8",
+            expectedAlpha: true,
+            "libvpx");
+        AssertProbe(
+            "Opaque VP9 stream",
+            FileCaptureService.ParseVideoAlphaProbeForSmoke(opaqueVp9Probe),
+            "vp9",
+            expectedAlpha: false,
+            expectedDecoder: null);
+        AssertProbe(
+            "Later alpha stream isolation",
+            FileCaptureService.ParseVideoAlphaProbeForSmoke(laterAlphaStreamProbe),
+            "vp9",
+            expectedAlpha: false,
+            expectedDecoder: null);
+
+        string alphaFitFilter = FileCaptureService.BuildDirectVideoFilterForSmoke(
+            FitMode.Fit,
+            targetWidth: 320,
+            targetHeight: 240,
+            preserveAlpha: true);
+        bool usesTransparentPadding =
+            alphaFitFilter.Contains("pad=320:240", StringComparison.OrdinalIgnoreCase) &&
+            alphaFitFilter.Contains("black@0", StringComparison.OrdinalIgnoreCase);
+        if (!usesTransparentPadding)
+        {
+            throw new InvalidOperationException(
+                $"Alpha Fit filter does not request transparent padding: {alphaFitFilter}");
+        }
+
+        string opaqueFitFilter = FileCaptureService.BuildDirectVideoFilterForSmoke(
+            FitMode.Fit,
+            targetWidth: 320,
+            targetHeight: 240,
+            preserveAlpha: false);
+        if (!opaqueFitFilter.EndsWith(":black", StringComparison.OrdinalIgnoreCase) ||
+            opaqueFitFilter.Contains("black@0", StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidOperationException(
+                $"Opaque Fit filter no longer requests its original opaque padding: {opaqueFitFilter}");
+        }
+
+        var actualProbe = FileCaptureService.ProbeVideoAlphaForSmoke(fullPath);
+        if (!actualProbe.HasValue)
+        {
+            throw new InvalidOperationException("The real WebM could not be probed.");
+        }
+
+        var realProbe = actualProbe.Value;
+        string? realExpectedDecoder = realProbe.codecName.ToLowerInvariant() switch
+        {
+            "vp9" => "libvpx-vp9",
+            "vp8" => "libvpx",
+            _ => null
+        };
+        if (realExpectedDecoder == null)
+        {
+            throw new InvalidOperationException(
+                $"The real WebM uses unsupported alpha codec '{realProbe.codecName}'. Expected VP8 or VP9.");
+        }
+
+        AssertProbe(
+            "Real WebM",
+            realProbe,
+            realProbe.codecName,
+            expectedAlpha: true,
+            realExpectedDecoder);
+
+        const int outputWidth = 160;
+        const int outputHeight = 90;
+        const int maxFrames = 3;
+        int decodedFrames = 0;
+        byte minAlpha = byte.MaxValue;
+        byte maxAlpha = byte.MinValue;
+        long nonOpaquePixels = 0;
+        long opaquePixels = 0;
+
+        using (var capture = new FileCaptureService())
+        {
+            capture.BeginOfflineRender(fps: 30, startTimeSeconds: 0);
+            try
+            {
+                if (!capture.TryGetOrAdd(fullPath, out _, out string? error))
+                {
+                    throw new InvalidOperationException(error ?? "WebM source could not be opened.");
+                }
+
+                for (int frameIndex = 0; frameIndex < maxFrames; frameIndex++)
+                {
+                    FileCaptureService.FileCaptureFrame? frame = capture.CaptureFrame(
+                        fullPath,
+                        outputWidth,
+                        outputHeight,
+                        FitMode.Stretch,
+                        includeSource: false);
+                    if (!frame.HasValue)
+                    {
+                        continue;
+                    }
+
+                    byte[] bgra = frame.Value.OverlayDownscaled;
+                    int expectedLength = checked(frame.Value.DownscaledWidth * frame.Value.DownscaledHeight * 4);
+                    if (bgra.Length != expectedLength)
+                    {
+                        throw new InvalidOperationException(
+                            $"Decoded BGRA buffer length mismatch: dimensions={frame.Value.DownscaledWidth}x" +
+                            $"{frame.Value.DownscaledHeight}, expected={expectedLength}, actual={bgra.Length}.");
+                    }
+
+                    decodedFrames++;
+                    for (int offset = 3; offset < bgra.Length; offset += 4)
+                    {
+                        byte alpha = bgra[offset];
+                        minAlpha = Math.Min(minAlpha, alpha);
+                        maxAlpha = Math.Max(maxAlpha, alpha);
+                        if (alpha == byte.MaxValue)
+                        {
+                            opaquePixels++;
+                        }
+                        else
+                        {
+                            nonOpaquePixels++;
+                        }
+                    }
+
+                    if (minAlpha <= 8 && maxAlpha >= 247 && nonOpaquePixels > 0 && opaquePixels > 0)
+                    {
+                        break;
+                    }
+                }
+            }
+            finally
+            {
+                capture.Remove(fullPath);
+                capture.EndOfflineRender();
+            }
+        }
+
+        bool decodedAlphaRange = decodedFrames > 0 &&
+                                 minAlpha <= 8 &&
+                                 maxAlpha >= 247 &&
+                                 nonOpaquePixels > 0 &&
+                                 opaquePixels > 0;
+        Logger.Info(
+            $"WebM alpha smoke: frames={decodedFrames}, alphaMin={minAlpha}, alphaMax={maxAlpha}, " +
+            $"nonOpaquePixels={nonOpaquePixels}, opaquePixels={opaquePixels}, filter={alphaFitFilter}, " +
+            $"ok={decodedAlphaRange}.");
+        if (!decodedAlphaRange)
+        {
+            throw new InvalidOperationException(
+                $"Decoded BGRA alpha was not preserved: frames={decodedFrames}, alphaMin={minAlpha}, " +
+                $"alphaMax={maxAlpha}, nonOpaquePixels={nonOpaquePixels}, opaquePixels={opaquePixels}.");
+        }
+
+        return 0;
     }
 
     private static int RunOfflineVideoAudioSmokeTest(string? smokeVideoPath)
