@@ -376,18 +376,19 @@ public partial class MainWindow : Window
             DetachRenderLoop();
             _uiThreadLatencyProbe.Stop();
 
-            if (_layerEditorWindow != null)
+            RunShutdownStep("layer editor", () =>
             {
-                _layerEditorWindow.PrepareForOwnerShutdown();
-                _layerEditorWindow.Close();
-                _layerEditorWindow = null;
-            }
+                if (_layerEditorWindow != null)
+                {
+                    _layerEditorWindow.PrepareForOwnerShutdown();
+                    _layerEditorWindow.Close();
+                    _layerEditorWindow = null;
+                }
+            });
 
-            FlushPendingConfigSave();
-
-            try
+            RunShutdownStep("recording", () => StopRecording(showMessage: false, abortEncoder: true));
+            RunShutdownStep("render backends", () =>
             {
-                StopRecording(showMessage: false);
                 var renderBackend = _renderBackend;
                 _renderBackend = new NullRenderBackend();
                 _pixelBuffer = null;
@@ -404,26 +405,60 @@ public partial class MainWindow : Window
                     backend.Dispose();
                 }
                 _retiredSimulationBackends.Clear();
-                _webcamCapture.Reset();
-                _fileCapture.Dispose();
-                _audioBeatDetector.Dispose();
-            }
-            catch (Exception ex)
+            });
+            RunShutdownStep("source sessions", DisposeSourceSessionsForShutdown);
+            RunShutdownStep("webcam capture", () => _webcamCapture.Reset());
+            RunShutdownStep("file capture", _fileCapture.Dispose);
+            RunShutdownStep("queued media disposal", () =>
             {
-                _shutdownException = ex;
-                Logger.Error("Main window shutdown failed.", ex);
-            }
-            finally
+                if (!MediaDisposalQueue.Drain(TimeSpan.FromSeconds(3)))
+                {
+                    Logger.Warn($"Timed out waiting for {MediaDisposalQueue.PendingCount} queued media disposal(s) during shutdown.");
+                }
+            });
+            RunShutdownStep("FFmpeg process owner", () =>
+            {
+                if (!FfmpegProcessManager.Shared.Shutdown(TimeSpan.FromSeconds(3)))
+                {
+                    Logger.Warn("Timed out waiting for all remaining FFmpeg processes during shutdown.");
+                }
+            });
+            RunShutdownStep("audio analysis", _audioBeatDetector.Dispose);
+            RunShutdownStep("timer cleanup", () =>
             {
                 MarkStartupComplete();
                 DisableHighResolutionTimer();
-            }
+            });
+            RunShutdownStep("configuration flush", FlushPendingConfigSave);
 
             Logger.Shutdown();
         };
     }
 
     internal string? GetShutdownErrorMessage() => _shutdownException?.ToString();
+
+    private void RunShutdownStep(string label, Action action)
+    {
+        try
+        {
+            action();
+        }
+        catch (Exception ex)
+        {
+            _shutdownException ??= ex;
+            Logger.Error($"Main window shutdown step failed ({label}).", ex);
+        }
+    }
+
+    private void DisposeSourceSessionsForShutdown()
+    {
+        foreach (CaptureSource source in _sources.ToList())
+        {
+            RunShutdownStep($"source {source.DisplayName}", () => CleanupSource(source));
+        }
+
+        _sources.Clear();
+    }
 
     internal (bool ok, string detail) RunConfigSaveCoalescingSmoke()
     {
@@ -902,11 +937,13 @@ public partial class MainWindow : Window
 
         try
         {
-            _fileCapture.SetPerformanceSettings(_lowContentionMode, _decoderThreadLimit, _videoDecodeFpsLimit);
+            int scenePresentationFps = Math.Clamp((int)Math.Ceiling(_currentFpsFromConfig), 1, 144);
+            int effectiveVideoDecodeFps = ResolveEffectiveVideoDecodeFps(_videoDecodeFpsLimit, scenePresentationFps);
+            _fileCapture.SetPerformanceSettings(_lowContentionMode, _decoderThreadLimit, effectiveVideoDecodeFps);
             foreach (var source in EnumerateSources(_sources))
             {
-                source.VideoSequence?.SetPerformanceSettings(_lowContentionMode, _decoderThreadLimit, _videoDecodeFpsLimit);
-                source.AutoClip?.SetPerformanceSettings(_lowContentionMode, _decoderThreadLimit, _videoDecodeFpsLimit);
+                source.VideoSequence?.SetPerformanceSettings(_lowContentionMode, _decoderThreadLimit, effectiveVideoDecodeFps);
+                source.AutoClip?.SetPerformanceSettings(_lowContentionMode, _decoderThreadLimit, effectiveVideoDecodeFps);
             }
         }
         catch (Exception ex)
@@ -925,6 +962,15 @@ public partial class MainWindow : Window
         {
             Logger.Warn($"Failed to apply frame pump priority preference: {ex.Message}");
         }
+    }
+
+    internal static int ResolveEffectiveVideoDecodeFps(int configuredLimit, double sceneFps)
+    {
+        int presentationFps = Math.Clamp((int)Math.Ceiling(sceneFps), 1, 144);
+        int normalizedLimit = configuredLimit is 15 or 30 ? configuredLimit : 0;
+        return normalizedLimit > 0
+            ? Math.Min(normalizedLimit, presentationFps)
+            : presentationFps;
     }
 
     private void UpdatePerformanceMenuState()
@@ -1004,6 +1050,14 @@ public partial class MainWindow : Window
         bool allLayerRowsMatch = leaves.All(layer => layer.Engine?.Rows == engine.Rows);
         bool allLayerColumnsMatch = leaves.All(layer => layer.Engine?.Columns == engine.Columns);
         return (_configuredRows, engine.Rows, engine.Columns, _renderBackend.PixelWidth, _renderBackend.PixelHeight, leaves.Length, allLayerRowsMatch, allLayerColumnsMatch);
+    }
+
+    internal (double configuredFps, int effectiveVideoDecodeFps) RunProjectFramerateChangeSmoke(double fps)
+    {
+        var settings = GetProjectSettingsForEditor();
+        settings.Framerate = fps;
+        ApplyProjectSettingsFromEditor(settings);
+        return (_currentFpsFromConfig, _fileCapture.GetVideoDecodeFpsLimitForSmoke());
     }
 
     internal (int configuredRows, int engineRows, int engineColumns, int surfaceWidth, int surfaceHeight, int layerCount, bool allLayerRowsMatch, bool allLayerColumnsMatch) RunSceneEditorDimensionSmoke(int rows, bool liveMode)
@@ -1506,12 +1560,299 @@ public partial class MainWindow : Window
         _inlineGpuPresentationFallbackCount = 0;
         _lastInlinePresentationFallbackLogUtc = DateTime.MinValue;
         GpuPresentationSurfaceSnapshotter.ResetSmokeCounters();
+        GpuPresentationBackend.ResetSharedUnderlaySynchronizationSmokeCounters();
     }
 
     private int GetInlinePresentationFallbackCountForSmoke() => _inlineGpuPresentationFallbackCount;
 
     private (int snapshotCount, int distinctHandleCount) GetInlinePresentationSnapshotStatsForSmoke()
         => GpuPresentationSurfaceSnapshotter.GetSmokeStats();
+
+    private (int completedSnapshots, int heldSnapshots, int notReadyChecks) GetInlinePresentationSynchronizationStatsForSmoke()
+        => GpuPresentationSurfaceSnapshotter.GetSynchronizationSmokeStats();
+
+    internal bool RunGpuPresentationSnapshotOrderingSmoke()
+    {
+        if (_renderLoopAttached)
+        {
+            DetachRenderLoop();
+        }
+
+        if (_renderBackend is NullRenderBackend)
+        {
+            InitializeVisualizer();
+        }
+
+        SetupInlinePixelSortPresentationSceneForSmoke(
+            out int width,
+            out int height,
+            out _,
+            out var simulationGroup,
+            out var overlay,
+            overlayOpacity: 1.0);
+        overlay.BlendMode = BlendMode.Normal;
+        overlay.Opacity = 1.0;
+        overlay.KeyEnabled = false;
+        overlay.Animations.Clear();
+
+        ResetInlinePresentationDiagnosticsForSmoke();
+        var idFrame = new byte[width * height * 4];
+        int lastPresentedId = 0;
+        int presentedSamples = 0;
+        int drawAdvances = 0;
+        int backwardFrames = 0;
+        int futureFrames = 0;
+        int tornFrames = 0;
+        int maxLag = 0;
+        int presentationDrawsBefore = _renderBackend.PresentationDrawCount;
+
+        void ObservePresentedFrame(int submittedId)
+        {
+            byte[]? presented = _renderBackend.GetPresentedFrameCopyForSmoke();
+            if (presented == null || presented.Length < 4)
+            {
+                return;
+            }
+
+            int presentedId = presented[0] | (presented[1] << 8) | (presented[2] << 16);
+            if (presentedId <= 0)
+            {
+                return;
+            }
+
+            presentedSamples++;
+            if (presentedId < lastPresentedId)
+            {
+                backwardFrames++;
+            }
+
+            if (presentedId > submittedId)
+            {
+                futureFrames++;
+            }
+
+            for (int pixel = 4; pixel + 2 < presented.Length; pixel += 4)
+            {
+                int pixelId = presented[pixel] |
+                              (presented[pixel + 1] << 8) |
+                              (presented[pixel + 2] << 16);
+                if (pixelId != presentedId)
+                {
+                    tornFrames++;
+                    break;
+                }
+            }
+
+            maxLag = Math.Max(maxLag, Math.Max(0, submittedId - presentedId));
+            lastPresentedId = Math.Max(lastPresentedId, presentedId);
+        }
+
+        const int iterations = 120;
+        for (int submittedId = 1; submittedId <= iterations; submittedId++)
+        {
+            byte b = (byte)(submittedId & 0xFF);
+            byte g = (byte)((submittedId >> 8) & 0xFF);
+            byte r = (byte)((submittedId >> 16) & 0xFF);
+            for (int pixel = 0; pixel < idFrame.Length; pixel += 4)
+            {
+                idFrame[pixel] = b;
+                idFrame[pixel + 1] = g;
+                idFrame[pixel + 2] = r;
+                idFrame[pixel + 3] = 0xFF;
+            }
+
+            overlay.LastFrame = new SourceFrame(idFrame, width, height, null, width, height);
+            PrimeInlineSmokeLayerStepping(simulationGroup);
+            _pendingInlineSimulationStepsThisFrame = 1;
+            InjectCaptureFrames(injectLayers: true);
+            _pendingInlineSimulationStepsThisFrame = 0;
+
+            if (submittedId == 40)
+            {
+                // Exercise the overload path deterministically: the snapshotter
+                // must hold its last completed surface and must not publish the
+                // live in-flight composite while completion is unavailable.
+                GpuPresentationSurfaceSnapshotter.ForceNotReadyChecksForSmoke(4);
+            }
+
+            if (submittedId == 70)
+            {
+                // Keep consumer-completion queries logically pending long enough
+                // to fill the three-slot lease ring. The producer must hold/drop
+                // submissions until WPF retires a slot; it may never recycle one.
+                GpuPresentationBackend.ForceSharedUnderlayConsumerNotReadyChecksForSmoke(12);
+            }
+
+            int priorDrawCount = _renderBackend.PresentationDrawCount;
+            RenderFrame();
+            if (WaitForPresentationDrawForSmoke(priorDrawCount, maxIdlePasses: 24))
+            {
+                drawAdvances++;
+                ObservePresentedFrame(submittedId);
+            }
+
+            if (submittedId % 6 == 0)
+            {
+                for (int redraw = 0; redraw < 2; redraw++)
+                {
+                    ApplyChromeHoverStressForSmoke((submittedId * 2) + redraw);
+                    priorDrawCount = _renderBackend.PresentationDrawCount;
+                    _renderBackend.RequestPresentationRedrawForSmoke();
+                    if (WaitForPresentationDrawForSmoke(priorDrawCount, maxIdlePasses: 24))
+                    {
+                        ObservePresentedFrame(submittedId);
+                    }
+                }
+            }
+        }
+
+        // Drain consumer event queries explicitly. WPF may coalesce the normal
+        // invalidations above, so a fixed retirement count is not deterministic;
+        // reaching zero active queries is the ownership invariant that matters.
+        int consumerDrainDraws = 0;
+        int activeConsumerQueries = -1;
+        if (_renderBackend is GpuRenderBackend gpuRenderBackend)
+        {
+            for (int attempt = 0; attempt < 32; attempt++)
+            {
+                activeConsumerQueries = gpuRenderBackend.GetActiveSharedUnderlayCopyQueryCountForSmoke();
+                if (activeConsumerQueries == 0)
+                {
+                    break;
+                }
+
+                int priorDrawCount = _renderBackend.PresentationDrawCount;
+                _renderBackend.RequestPresentationRedrawForSmoke();
+                if (WaitForPresentationDrawForSmoke(priorDrawCount, maxIdlePasses: 24))
+                {
+                    consumerDrainDraws++;
+                    ObservePresentedFrame(iterations);
+                }
+            }
+
+            activeConsumerQueries = gpuRenderBackend.GetActiveSharedUnderlayCopyQueryCountForSmoke();
+        }
+
+        int stressPresentationDraws = _renderBackend.PresentationDrawCount - presentationDrawsBefore;
+
+        // The stress loop above is intentionally fast, so WPF may coalesce an
+        // unnecessary self-invalidation into the next logical frame. A separate
+        // paced phase catches that performance regression: after each successful
+        // submission, pump the dispatcher without requesting another redraw. The
+        // old "invalidate while any query is active" behavior produces one extra
+        // Draw here; the saturation-only policy produces none.
+        const int pacedSubmissionTarget = 12;
+        int pacedSubmissions = 0;
+        int pacedExtraDraws = 0;
+        for (int pacedIndex = 0;
+             pacedIndex < pacedSubmissionTarget * 4 && pacedSubmissions < pacedSubmissionTarget;
+             pacedIndex++)
+        {
+            int submittedId = iterations + pacedIndex + 1;
+            byte b = (byte)(submittedId & 0xFF);
+            byte g = (byte)((submittedId >> 8) & 0xFF);
+            byte r = (byte)((submittedId >> 16) & 0xFF);
+            for (int pixel = 0; pixel < idFrame.Length; pixel += 4)
+            {
+                idFrame[pixel] = b;
+                idFrame[pixel + 1] = g;
+                idFrame[pixel + 2] = r;
+                idFrame[pixel + 3] = 0xFF;
+            }
+
+            overlay.LastFrame = new SourceFrame(idFrame, width, height, null, width, height);
+            PrimeInlineSmokeLayerStepping(simulationGroup);
+            _pendingInlineSimulationStepsThisFrame = 1;
+            InjectCaptureFrames(injectLayers: true);
+            _pendingInlineSimulationStepsThisFrame = 0;
+
+            bool drew = false;
+            for (int attempt = 0; attempt < 4 && !drew; attempt++)
+            {
+                int beforeDraw = _renderBackend.PresentationDrawCount;
+                RenderFrame();
+                if (!WaitForPresentationDrawForSmoke(beforeDraw, maxIdlePasses: 24))
+                {
+                    continue;
+                }
+
+                drew = true;
+                pacedSubmissions++;
+                ObservePresentedFrame(submittedId);
+                int firstDraw = _renderBackend.PresentationDrawCount;
+                if (WaitForPresentationDrawForSmoke(firstDraw, maxIdlePasses: 2))
+                {
+                    pacedExtraDraws += _renderBackend.PresentationDrawCount - firstDraw;
+                    ObservePresentedFrame(submittedId);
+                }
+            }
+        }
+
+        if (_renderBackend is GpuRenderBackend pacedGpuRenderBackend)
+        {
+            for (int attempt = 0; attempt < 32; attempt++)
+            {
+                activeConsumerQueries = pacedGpuRenderBackend.GetActiveSharedUnderlayCopyQueryCountForSmoke();
+                if (activeConsumerQueries == 0)
+                {
+                    break;
+                }
+
+                int priorDrawCount = _renderBackend.PresentationDrawCount;
+                _renderBackend.RequestPresentationRedrawForSmoke();
+                WaitForPresentationDrawForSmoke(priorDrawCount, maxIdlePasses: 24);
+            }
+
+            activeConsumerQueries = pacedGpuRenderBackend.GetActiveSharedUnderlayCopyQueryCountForSmoke();
+        }
+
+        var (snapshotCount, distinctHandleCount) = GetInlinePresentationSnapshotStatsForSmoke();
+        var (completedSnapshots, heldSnapshots, notReadyChecks) = GetInlinePresentationSynchronizationStatsForSmoke();
+        var (consumerNotReadyChecks, retiredLeases, maxConsumerInFlight) =
+            GpuPresentationBackend.GetSharedUnderlaySynchronizationSmokeStats();
+        int consumerResourceOpens = GpuPresentationBackend.GetSharedUnderlayResourceOpenCountForSmoke();
+        int totalPresentationDraws = _renderBackend.PresentationDrawCount - presentationDrawsBefore;
+        // WPF is allowed to coalesce invalidations, especially when this runs
+        // after the other GPU smokes in the combined suite. Progress and
+        // ordering are proven by the observed samples/last ID; an absolute
+        // logical-draw count would only turn normal coalescing into a flaky
+        // release gate. Pending leases superseded before a consumer copy retire
+        // without a query, while the explicit drain above proves that every copy
+        // that did begin releases its producer slot.
+        bool ok = presentedSamples >= 90 &&
+                  lastPresentedId >= iterations - 4 &&
+                  backwardFrames == 0 &&
+                  futureFrames == 0 &&
+                  tornFrames == 0 &&
+                  maxLag <= 10 &&
+                  stressPresentationDraws <= 220 &&
+                  pacedSubmissions == pacedSubmissionTarget &&
+                  // WPF can still issue an occasional compositor redraw of its
+                  // own; the regression produced one extra Draw for essentially
+                  // every paced submission, so a small 25% allowance stays
+                  // deterministic without masking the old 2x behavior.
+                  pacedExtraDraws <= pacedSubmissionTarget / 4 &&
+                  distinctHandleCount >= 2 &&
+                  heldSnapshots >= 4 &&
+                  notReadyChecks >= 4 &&
+                  consumerNotReadyChecks >= 12 &&
+                  retiredLeases >= 3 &&
+                  maxConsumerInFlight >= 3 &&
+                  activeConsumerQueries == 0 &&
+                  consumerResourceOpens <= distinctHandleCount + 1;
+        Logger.Info(
+            $"GPU snapshot ordering smoke: presentedSamples={presentedSamples}, drawAdvances={drawAdvances}/{iterations}, " +
+            $"stressDraws={stressPresentationDraws}, totalDraws={totalPresentationDraws}, " +
+            $"pacedSubmissions={pacedSubmissions}/{pacedSubmissionTarget}, pacedExtraDraws={pacedExtraDraws}, " +
+            $"lastId={lastPresentedId}, backwards={backwardFrames}, " +
+            $"future={futureFrames}, torn={tornFrames}, maxLag={maxLag}, " +
+            $"snapshots={snapshotCount}/{completedSnapshots}, handles={distinctHandleCount}, held={heldSnapshots}, " +
+            $"producerNotReady={notReadyChecks}, consumerNotReady={consumerNotReadyChecks}, " +
+            $"consumerRetired={retiredLeases}, consumerMaxInFlight={maxConsumerInFlight}, " +
+            $"consumerDrainDraws={consumerDrainDraws}, consumerActiveAfterDrain={activeConsumerQueries}, " +
+            $"consumerResourceOpens={consumerResourceOpens}, ok={ok}.");
+        return ok;
+    }
 
     internal bool RunSimGroupInlinePresentationFreshnessSmoke()
     {
@@ -2694,6 +3035,7 @@ public partial class MainWindow : Window
         _currentFps = _currentFpsFromConfig;
         _currentSimulationTargetFps = _currentFpsFromConfig;
         UpdateFramerateMenuChecks();
+        ApplyPerformancePreferences();
         ApplyDimensions(rows, null, _currentAspectRatio, persist: false);
         ResetFramePumpCadence(scheduleImmediate: true);
         return _currentFpsFromConfig;
@@ -3409,30 +3751,42 @@ public partial class MainWindow : Window
                 composite.GpuSurface.Width == width &&
                 composite.GpuSurface.Height == height)
             {
-                GpuCompositeSurface presentationSurface = composite.GpuSurface;
+                GpuCompositeSurface? presentationSurface = composite.GpuSurface;
                 if (composite.GpuSurface.SharedTextureHandle != IntPtr.Zero)
                 {
-                    GpuSharedDevice.FlushIfCreated();
-                    if (_inlineGpuPresentationSnapshotter.IsAvailable)
+                    if (!_inlineGpuPresentationSnapshotter.IsAvailable)
                     {
-                        var snappedSurface = _inlineGpuPresentationSnapshotter.Snapshot(composite.GpuSurface);
-                        if (snappedSurface != null)
-                        {
-                            presentationSurface = snappedSurface;
-                        }
+                        // Fail closed. Presenting the mutable producer handle would
+                        // reintroduce the exact cross-device stale-frame race this
+                        // path exists to prevent.
+                        _passthroughCompositedInPixelBuffer = false;
+                        return;
+                    }
+
+                    // Null means either the producer copy or consumer retirement is
+                    // still pending. Keep the presenter's private prior frame; never
+                    // substitute the live mutable shared texture.
+                    presentationSurface = _inlineGpuPresentationSnapshotter.Snapshot(composite.GpuSurface);
+                    if (presentationSurface == null)
+                    {
+                        _passthroughCompositedInPixelBuffer = false;
+                        return;
                     }
                 }
 
-                long presentInlineStamp = BeginProfileStamp();
-                presentedInlineGpu = _renderBackend.PresentSimulationComposition(
-                    Array.Empty<SimulationPresentationLayerData>(),
-                    null,
-                    presentationSurface,
-                    simulationBaseline: 0,
-                    useSignedAddSubPassthrough: false,
-                    useMixedAddSubPassthroughModel: false,
-                    invertComposite: _invertComposite);
-                EndProfileStamp("present_frame_ms", presentInlineStamp);
+                if (presentationSurface != null)
+                {
+                    long presentInlineStamp = BeginProfileStamp();
+                    presentedInlineGpu = _renderBackend.PresentSimulationComposition(
+                        Array.Empty<SimulationPresentationLayerData>(),
+                        null,
+                        presentationSurface,
+                        simulationBaseline: 0,
+                        useSignedAddSubPassthrough: false,
+                        useMixedAddSubPassthroughModel: false,
+                        invertComposite: _invertComposite);
+                    EndProfileStamp("present_frame_ms", presentInlineStamp);
+                }
             }
 
             if (presentedInlineGpu)
@@ -3834,7 +4188,7 @@ public partial class MainWindow : Window
 
         if (_recordingSession.TryGetError(out var errorMessage))
         {
-            StopRecording(showMessage: false);
+            StopRecording(showMessage: false, abortEncoder: true);
             ShowRecordingError(errorMessage ?? "Unknown encoder failure.");
             return;
         }
@@ -3887,7 +4241,10 @@ public partial class MainWindow : Window
         for (int i = 0; i < framesToEnqueue.Count; i++)
         {
             var frameToEnqueue = framesToEnqueue[i];
-            if (!_recordingSession.TryEnqueue(frameToEnqueue))
+            if (!_recordingSession.TryEnqueue(
+                    frameToEnqueue,
+                    waitForCapacity: _isOfflineRendering,
+                    failOnSaturation: true))
             {
                 Logger.Warn("Recording frame could not be queued because the encoder stopped.");
                 for (int j = i + 1; j < framesToEnqueue.Count; j++)
@@ -4528,7 +4885,9 @@ public partial class MainWindow : Window
             _offlineAudioMixBuffer = null;
             if (started && _isRecording)
             {
-                StopRecording(showMessage: false);
+                bool abortEncoder = _isShuttingDown ||
+                                    _recordingSession?.TryGetError(out _) == true;
+                StopRecording(showMessage: false, abortEncoder: abortEncoder);
             }
 
             _isOfflineRendering = false;
@@ -4844,7 +5203,7 @@ public partial class MainWindow : Window
         Logger.Info($"{mode} started: {filePath} ({width}x{height} @ {fps} fps, {settings.Quality}, {audioState})");
     }
 
-    private void StopRecording(bool showMessage, string? reason = null)
+    private void StopRecording(bool showMessage, string? reason = null, bool abortEncoder = false)
     {
         if (!_isRecording)
         {
@@ -4856,18 +5215,31 @@ public partial class MainWindow : Window
         _recordingStopwatch?.Stop();
         _recordingStopwatch = null;
 
+        RecordingSession? recordingSession = _recordingSession;
+        if (abortEncoder)
+        {
+            recordingSession?.Abort();
+        }
+        else
+        {
+            try
+            {
+                PadRecordingToElapsedDuration(elapsed);
+            }
+            catch (Exception ex)
+            {
+                Logger.Error("Recording padding failed during finalize.", ex);
+            }
+        }
+        _recordingSession = null;
+
         try
         {
-            PadRecordingToElapsedDuration(elapsed);
-            _recordingSession?.Dispose();
+            recordingSession?.Dispose();
         }
         catch (Exception ex)
         {
-            Logger.Error("Recording finalize failed.", ex);
-        }
-        finally
-        {
-            _recordingSession = null;
+            Logger.Error("Recording encoder finalize failed.", ex);
         }
 
         UpdateRecordingUi();
@@ -8328,10 +8700,12 @@ public partial class MainWindow : Window
             int nextRows = Math.Clamp(settings.Height, MinRows, MaxRows);
             int nextDepth = Math.Clamp(settings.Depth, 3, 96);
             bool dimensionsChanged = nextRows != _configuredRows || nextDepth != _configuredDepth;
+            double nextFps = Math.Clamp(settings.Framerate, 5, 144);
+            bool framerateChanged = Math.Abs(nextFps - _currentFpsFromConfig) > 0.0001;
 
             _configuredRows = nextRows;
             _configuredDepth = nextDepth;
-            _currentFpsFromConfig = Math.Clamp(settings.Framerate, 5, 144);
+            _currentFpsFromConfig = nextFps;
             _currentFps = _currentFpsFromConfig;
             _currentSimulationTargetFps = _currentFpsFromConfig;
             _lifeOpacity = Math.Clamp(settings.LifeOpacity, 0, 1);
@@ -8350,6 +8724,12 @@ public partial class MainWindow : Window
             {
                 _pulseStep = 0;
                 RenderFrame();
+            }
+
+            if (framerateChanged)
+            {
+                ApplyPerformancePreferences();
+                ResetFramePumpCadence(scheduleImmediate: true);
             }
 
             UpdateFramerateMenuChecks();
@@ -17126,6 +17506,7 @@ public partial class MainWindow : Window
         {
             _currentSimulationTargetFps = fps;
         }
+        ApplyPerformancePreferences();
         ResetFramePumpCadence(scheduleImmediate: true);
         UpdateFramerateMenuChecks();
         SaveConfig();
@@ -18497,6 +18878,8 @@ public partial class MainWindow : Window
 
     private void FlushPendingConfigSave()
     {
+        TimeSpan timeout = TimeSpan.FromSeconds(5);
+        var stopwatch = Stopwatch.StartNew();
         _configSaveTimer.Stop();
         if (_configReady && _configSaveDirty)
         {
@@ -18524,13 +18907,24 @@ public partial class MainWindow : Window
                 return;
             }
 
+            TimeSpan remaining = timeout - stopwatch.Elapsed;
+            if (remaining <= TimeSpan.Zero)
+            {
+                Logger.Warn("Timed out while flushing the final app configuration; shutdown will continue.");
+                return;
+            }
+
             try
             {
-                writeTask.GetAwaiter().GetResult();
+                if (!writeTask.Wait(remaining))
+                {
+                    Logger.Warn("Timed out while flushing the final app configuration; shutdown will continue.");
+                    return;
+                }
             }
-            catch (Exception ex)
+            catch (AggregateException ex)
             {
-                Logger.Warn($"Failed while flushing the app configuration. {ex.Message}");
+                Logger.Warn($"Failed while flushing the app configuration. {(ex.InnerException ?? ex).Message}");
                 return;
             }
         }

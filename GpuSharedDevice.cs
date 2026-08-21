@@ -1,4 +1,5 @@
 using System;
+using System.Threading;
 using Vortice.Direct3D;
 using Vortice.Direct3D11;
 using static Vortice.Direct3D11.D3D11;
@@ -101,13 +102,20 @@ internal sealed class GpuSharedDevice
 
 internal sealed class GpuCompositeSurface
 {
-    public GpuCompositeSurface(ID3D11Texture2D texture, ID3D11ShaderResourceView shaderResourceView, IntPtr sharedTextureHandle, int width, int height)
+    public GpuCompositeSurface(
+        ID3D11Texture2D texture,
+        ID3D11ShaderResourceView shaderResourceView,
+        IntPtr sharedTextureHandle,
+        int width,
+        int height,
+        GpuSurfaceLease? lease = null)
     {
         Texture = texture;
         ShaderResourceView = shaderResourceView;
         SharedTextureHandle = sharedTextureHandle;
         Width = width;
         Height = height;
+        Lease = lease;
     }
 
     public ID3D11Texture2D Texture { get; }
@@ -115,4 +123,28 @@ internal sealed class GpuCompositeSurface
     public IntPtr SharedTextureHandle { get; }
     public int Width { get; }
     public int Height { get; }
+    public GpuSurfaceLease? Lease { get; }
+}
+
+/// <summary>
+/// One-shot ownership token for a shared GPU surface. The producer may not
+/// overwrite the backing slot until the consumer retires this lease after its
+/// own GPU copy has completed (or without copying when a pending submission is
+/// superseded).
+/// </summary>
+internal sealed class GpuSurfaceLease
+{
+    private Action? _retire;
+
+    public GpuSurfaceLease(Action retire)
+    {
+        _retire = retire ?? throw new ArgumentNullException(nameof(retire));
+    }
+
+    public bool IsRetired => Volatile.Read(ref _retire) == null;
+
+    public void Retire()
+    {
+        Interlocked.Exchange(ref _retire, null)?.Invoke();
+    }
 }

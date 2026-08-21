@@ -1,4 +1,5 @@
 using System;
+using System.Buffers;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
@@ -95,6 +96,7 @@ internal static class SmokeTestRunner
                 "sim-group-stack-order" => RunSimGroupStackOrderSmokeTest(),
                 "sim-group-inline-hue" => RunSimGroupInlineHueSmokeTest(),
                 "sim-group-inline-presentation" => RunSimGroupInlinePresentationSmokeTest(),
+                "gpu-snapshot-order" => RunGpuSnapshotOrderingSmokeTest(),
                 "sim-group-enabled-toggle" => RunSimGroupEnabledToggleSmokeTest(),
                 "sim-group-remove-source" => RunSimGroupRemoveSourceSmokeTest(),
                 "sim-group-live-edit-selection" => RunSimGroupLiveEditSelectionSmokeTest(),
@@ -107,6 +109,7 @@ internal static class SmokeTestRunner
                 "offline-video-audio" => RunOfflineVideoAudioSmokeTest(smokeVideoPath),
                 "live-video-audio" => RunLiveVideoAudioSmokeTest(smokeVideoPath),
                 "autoclip" => RunAutoClipSmokeTest(smokeVideoPath),
+                "ffmpeg-lifecycle" => RunFfmpegLifecycleSmokeTest(),
                 "layer-transform-controls" => RunLayerTransformControlsSmokeTest(),
                 "chroma-key" => MainWindow.RunChromaKeySmoke() ? 0 : 1,
                 "gpu-sim" => RunGpuSimulationSmokeTest(),
@@ -121,7 +124,7 @@ internal static class SmokeTestRunner
                 "startup-recovery" => RunStartupRecoverySmokeTest(),
                 "config-save-coalescing" => RunConfigSaveCoalescingSmokeTest(),
                 "all" => RunAllSmokeTests(),
-                _ => throw new ArgumentException($"Unknown smoke test target '{target}'. Expected profile-240, profile-480, profile-rgb-240, profile-rgb-480, profile-file-240, profile-file-480, profile-file-rgb-240, profile-file-rgb-480, profile-current-scene, profile-current-scene-visible, profile-current-scene-fullscreen, profile-current-scene-bisect, profile-current-scene-presets, profile-current-scene-visible-presets, profile-current-scene-fullscreen-presets, profile-current-scene-<144|240|480|720|1080|1440|2160>, profile-current-scene-visible-<144|240|480|720|1080|1440|2160>, profile-current-scene-fullscreen-<144|240|480|720|1080|1440|2160>, profile-current-scene-interaction, current-scene-hover-presentation, pacing-current-scene-visible-presets, pacing-current-scene-fullscreen-presets, pacing-current-scene-interaction, pacing-current-scene-overlay-fullscreen-144, pacing-current-scene-suite, frame-pump-thread-safety, gpu-benchmark, gpu-handoff, gpu-rgb-threshold, gpu-passthrough-signed-model, passthrough-underlay-only, gpu-frequency-hue, simulation-reactive-mappings, pixel-sort-reactive-cell-size, simulation-reactive-persistence, simulation-reactive-legacy-migration, simulation-reactive-removal, simulation-reactive-editor-isolation, sim-group-legacy-migration, no-sim-group-renders-composite, sim-group-removal-clears-runtime, disabled-sim-group-renders-composite, sim-group-stack-order, sim-group-inline-hue, sim-group-inline-presentation, sim-group-enabled-toggle, sim-group-remove-source, sim-group-live-edit-selection, pixel-sort-editor-roundtrip, gpu-bitwise, gpu-pixel-sort, sim-group-pixel-sort-color, gpu-injection-mode, gpu-file-injection-mode, offline-video-audio, live-video-audio, autoclip, layer-transform-controls, chroma-key, gpu-sim, gpu-source, source-reset, gpu-render, profile-mainloop, profile-mainloop-sim-group, dimensions, shutdown, startup, startup-recovery, config-save-coalescing, or all.")
+                _ => throw new ArgumentException($"Unknown smoke test target '{target}'. Expected profile-240, profile-480, profile-rgb-240, profile-rgb-480, profile-file-240, profile-file-480, profile-file-rgb-240, profile-file-rgb-480, profile-current-scene, profile-current-scene-visible, profile-current-scene-fullscreen, profile-current-scene-bisect, profile-current-scene-presets, profile-current-scene-visible-presets, profile-current-scene-fullscreen-presets, profile-current-scene-<144|240|480|720|1080|1440|2160>, profile-current-scene-visible-<144|240|480|720|1080|1440|2160>, profile-current-scene-fullscreen-<144|240|480|720|1080|1440|2160>, profile-current-scene-interaction, current-scene-hover-presentation, pacing-current-scene-visible-presets, pacing-current-scene-fullscreen-presets, pacing-current-scene-interaction, pacing-current-scene-overlay-fullscreen-144, pacing-current-scene-suite, frame-pump-thread-safety, gpu-benchmark, gpu-handoff, gpu-rgb-threshold, gpu-passthrough-signed-model, passthrough-underlay-only, gpu-frequency-hue, simulation-reactive-mappings, pixel-sort-reactive-cell-size, simulation-reactive-persistence, simulation-reactive-legacy-migration, simulation-reactive-removal, simulation-reactive-editor-isolation, sim-group-legacy-migration, no-sim-group-renders-composite, sim-group-removal-clears-runtime, disabled-sim-group-renders-composite, sim-group-stack-order, sim-group-inline-hue, sim-group-inline-presentation, gpu-snapshot-order, sim-group-enabled-toggle, sim-group-remove-source, sim-group-live-edit-selection, pixel-sort-editor-roundtrip, gpu-bitwise, gpu-pixel-sort, sim-group-pixel-sort-color, gpu-injection-mode, gpu-file-injection-mode, offline-video-audio, live-video-audio, autoclip, ffmpeg-lifecycle, layer-transform-controls, chroma-key, gpu-sim, gpu-source, source-reset, gpu-render, profile-mainloop, profile-mainloop-sim-group, dimensions, shutdown, startup, startup-recovery, config-save-coalescing, or all.")
             };
         }
         catch (Exception ex)
@@ -1307,6 +1310,37 @@ internal static class SmokeTestRunner
         return exitCode;
     }
 
+    private static int RunGpuSnapshotOrderingSmokeTest()
+    {
+        int exitCode = 0;
+        var thread = new Thread(() =>
+        {
+            try
+            {
+                var app = new App();
+                app.InitializeComponent();
+                var window = new MainWindow();
+                window.Show();
+                window.Hide();
+                bool ok = window.RunGpuPresentationSnapshotOrderingSmoke();
+                window.Close();
+                app.Shutdown();
+                exitCode = ok ? 0 : 1;
+            }
+            catch (Exception ex)
+            {
+                Logger.Error("GPU snapshot ordering smoke failed.", ex);
+                Console.Error.WriteLine(ex);
+                exitCode = 1;
+            }
+        });
+
+        thread.SetApartmentState(ApartmentState.STA);
+        thread.Start();
+        thread.Join();
+        return exitCode;
+    }
+
     private static int RunSimGroupEnabledToggleSmokeTest()
     {
         int exitCode = 0;
@@ -1648,8 +1682,8 @@ internal static class SmokeTestRunner
         using var capture = new FileCaptureService();
         if (!capture.TryCreateAutoClip(
                 new[] { smokeVideoPath },
-                minClipSeconds: 0.1,
-                maxClipSeconds: 0.1,
+                minClipSeconds: 0.6,
+                maxClipSeconds: 0.6,
                 minDelaySeconds: 0.1,
                 maxDelaySeconds: 0.1,
                 out var autoClip,
@@ -1670,9 +1704,11 @@ internal static class SmokeTestRunner
             bool delayWasTransparent = true;
             bool clipAudioReceived = false;
             bool delayAudioSilent = true;
-            bool sawFadeEnvelope = false;
+            bool sawFadeStart = false;
+            bool sawFadePeak = false;
+            bool sawFadeOut = false;
             var audioSamples = new float[1600];
-            for (int frameIndex = 0; frameIndex < 12; frameIndex++)
+            for (int frameIndex = 0; frameIndex < 30; frameIndex++)
             {
                 Array.Clear(audioSamples);
                 bool mixedAudio = session.MixOfflineAudioFrame(audioSamples);
@@ -1687,15 +1723,19 @@ internal static class SmokeTestRunner
                 {
                     sawClipFrame |= frame.HasValue;
                     clipAudioReceived |= mixedAudio && audioSamples.Any(sample => Math.Abs(sample) > 0.000001f);
-                    double fadeOpacity = session.GetVisualOpacity(0.04);
-                    sawFadeEnvelope |= fadeOpacity >= 0 && fadeOpacity < 0.99;
+                    // At 30 fps, a 100 ms phase can jump directly from the
+                    // fade-out shoulder into Delay. Use a long-enough phase and
+                    // envelope that the rising edge, peak, and falling edge are
+                    // all sampled deterministically.
+                    double fadeOpacity = session.GetVisualOpacity(0.12);
+                    sawFadeStart |= fadeOpacity <= 0.1;
+                    sawFadePeak |= fadeOpacity >= 0.7;
+                    sawFadeOut |= sawFadePeak && fadeOpacity < 0.7;
                 }
             }
 
             bool overrideResolutionOk = MainWindow.RunAutoClipVideoOverrideResolutionSmoke(session, smokeVideoPath);
 
-            session.UpdateSettings(Array.Empty<string>(), 1, 1, 0, 0);
-            bool emptyIsTransparent = !session.CaptureFrame(160, 90, FitMode.Fill, includeSource: false).HasValue && session.IsEmpty;
             var editorSource = new LayerEditorSource
             {
                 Id = Guid.NewGuid(),
@@ -1747,19 +1787,360 @@ internal static class SmokeTestRunner
             var fittedWindow = FileCaptureService.AutoClipSession.FitClipWindowToSource(10, 3, 1);
             var oversizedWindow = FileCaptureService.AutoClipSession.FitClipWindowToSource(10, 30, 0.5);
             var loopingWindow = FileCaptureService.AutoClipSession.SelectClipWindow(10, 30, 0.75, loopSelectedFile: true);
+            var nonLoopingDecoderPlan = FileCaptureService.AutoClipSession.GetDecoderPlan(
+                loopSelectedFile: false,
+                clipSeconds: 10,
+                elapsedSeconds: 2);
+            var loopingDecoderPlan = FileCaptureService.AutoClipSession.GetDecoderPlan(
+                loopSelectedFile: true,
+                clipSeconds: 10,
+                elapsedSeconds: 2);
             bool clipWindowsFit = fittedWindow.StartSeconds + fittedWindow.ClipSeconds <= 9.8 + 0.0001 &&
                                   oversizedWindow.StartSeconds + oversizedWindow.ClipSeconds <= 9.8 + 0.0001 &&
                                   oversizedWindow.ClipSeconds < 10 &&
                                   Math.Abs(loopingWindow.StartSeconds) < 0.0001 &&
                                   Math.Abs(loopingWindow.ClipSeconds - 30) < 0.0001;
+            bool decoderPlansBounded = !nonLoopingDecoderPlan.LoopPlayback &&
+                                       loopingDecoderPlan.LoopPlayback &&
+                                       nonLoopingDecoderPlan.MaxDecodeDurationSeconds > 8 &&
+                                       nonLoopingDecoderPlan.MaxDecodeDurationSeconds <= 8.11 &&
+                                       loopingDecoderPlan.MaxDecodeDurationSeconds > 8 &&
+                                       loopingDecoderPlan.MaxDecodeDurationSeconds <= 8.11;
+
+            session.SetOfflineRenderMode(false, 0);
+            session.UpdateSettings(new[] { smokeVideoPath }, 0.6, 0.6, 0, 0);
+            session.SetPlaybackPaused(false);
+            FileCaptureService.FileCaptureFrame? livePhaseFrame = null;
+            for (int attempt = 0; attempt < 120 && !livePhaseFrame.HasValue; attempt++)
+            {
+                livePhaseFrame = session.CaptureFrame(160, 90, FitMode.Fill, includeSource: false);
+                if (!livePhaseFrame.HasValue)
+                {
+                    Thread.Sleep(25);
+                }
+            }
+
+            string? activePathBeforePause = session.CurrentPath;
+            session.SetPlaybackPaused(true);
+            double pausedTimelineBefore = session.GetTimelineSecondsForSmoke();
+            Thread.Sleep(750);
+            FileCaptureService.FileCaptureFrame? pausedFrame = session.CaptureFrame(160, 90, FitMode.Fill, includeSource: false);
+            double pausedTimelineAfter = session.GetTimelineSecondsForSmoke();
+            bool activePausedScheduleHeld = livePhaseFrame.HasValue &&
+                                            pausedFrame.HasValue &&
+                                            !session.IsDelaying &&
+                                            string.Equals(activePathBeforePause, session.CurrentPath, StringComparison.OrdinalIgnoreCase) &&
+                                            Math.Abs(pausedTimelineAfter - pausedTimelineBefore) < 0.01;
+            session.SetPlaybackPaused(false);
+            Thread.Sleep(700);
+            session.CaptureFrame(160, 90, FitMode.Fill, includeSource: false);
+            bool zeroFadePreparingContinuous = session.GetVisualOpacity(0) > 0.99;
+
+            session.UpdateSettings(Array.Empty<string>(), 1, 1, 0, 0);
+            bool emptyIsTransparent = !session.CaptureFrame(160, 90, FitMode.Fill, includeSource: false).HasValue && session.IsEmpty;
             bool ok = sawClipFrame && sawDelay && delayWasTransparent && clipAudioReceived && delayAudioSilent &&
-                      sawFadeEnvelope && emptyIsTransparent && persistenceOk && clipWindowsFit && overrideResolutionOk;
+                      sawFadeStart && sawFadePeak && sawFadeOut && emptyIsTransparent && persistenceOk && clipWindowsFit &&
+                      decoderPlansBounded && activePausedScheduleHeld && zeroFadePreparingContinuous && overrideResolutionOk;
             Logger.Info($"AutoClip smoke: sawClipFrame={sawClipFrame}, sawDelay={sawDelay}, " +
                         $"delayTransparent={delayWasTransparent}, clipAudio={clipAudioReceived}, delayAudioSilent={delayAudioSilent}, " +
-                        $"fadeEnvelope={sawFadeEnvelope}, emptyTransparent={emptyIsTransparent}, " +
-                        $"persistence={persistenceOk}, clipWindowsFit={clipWindowsFit}, overrides={overrideResolutionOk}, ok={ok}.");
+                        $"fadeStart={sawFadeStart}, fadePeak={sawFadePeak}, fadeOut={sawFadeOut}, " +
+                        $"emptyTransparent={emptyIsTransparent}, " +
+                        $"persistence={persistenceOk}, clipWindowsFit={clipWindowsFit}, " +
+                        $"decoderPlansBounded={decoderPlansBounded}, activePausedScheduleHeld={activePausedScheduleHeld}, " +
+                        $"zeroFadePreparingContinuous={zeroFadePreparingContinuous}, " +
+                        $"overrides={overrideResolutionOk}, ok={ok}.");
             return ok ? 0 : 1;
         }
+    }
+
+    private static int RunFfmpegLifecycleSmokeTest()
+    {
+        Logger.Info("Running FFmpeg lifecycle smoke test.");
+        int[] sharedProcessIdsBefore = FfmpegProcessManager.Shared.GetTrackedProcessIdsForSmokeTest();
+
+        bool explicitJobAvailable;
+        bool explicitTracked;
+        bool explicitTerminationReturned;
+        bool explicitProcessExited;
+        bool explicitUntracked;
+        using (var manager = FfmpegProcessManager.CreateIsolatedForSmokeTest())
+        {
+            explicitJobAvailable = manager.UsesKillOnCloseJob;
+            Process process = StartLongRunningFfmpegForLifecycleSmoke(manager);
+            int processId = process.Id;
+            explicitTracked = manager.GetTrackedProcessIdsForSmokeTest().Contains(processId);
+            explicitTerminationReturned = manager.TerminateAndDispose(process, TimeSpan.FromSeconds(3));
+            explicitProcessExited = WaitForProcessExit(processId, TimeSpan.FromSeconds(2));
+            explicitUntracked = manager.TrackedProcessCount == 0;
+        }
+
+        bool disposalJobAvailable;
+        bool disposalTracked;
+        bool disposalProcessExited;
+        bool disposalUntracked;
+        var disposalManager = FfmpegProcessManager.CreateIsolatedForSmokeTest();
+        try
+        {
+            disposalJobAvailable = disposalManager.UsesKillOnCloseJob;
+            Process process = StartLongRunningFfmpegForLifecycleSmoke(disposalManager);
+            int processId = process.Id;
+            disposalTracked = disposalManager.GetTrackedProcessIdsForSmokeTest().Contains(processId);
+
+            // Dispose the isolated owner while its child is still running. This
+            // exercises shutdown plus Job Object kill-on-close without touching
+            // the application-wide manager.
+            disposalManager.Dispose();
+            disposalProcessExited = WaitForProcessExit(processId, TimeSpan.FromSeconds(2));
+            disposalUntracked = disposalManager.TrackedProcessCount == 0;
+        }
+        finally
+        {
+            disposalManager.Dispose();
+        }
+
+        var recordingAbort = RunRecordingAbortLifecycleSmoke(sharedProcessIdsBefore);
+        int[] sharedProcessIdsAfter = FfmpegProcessManager.Shared.GetTrackedProcessIdsForSmokeTest();
+        bool sharedManagerUntouched = sharedProcessIdsBefore.SequenceEqual(sharedProcessIdsAfter);
+        bool jobContainmentAvailable = !OperatingSystem.IsWindows() ||
+                                       (explicitJobAvailable && disposalJobAvailable);
+        bool ok = jobContainmentAvailable &&
+                  explicitTracked &&
+                  explicitTerminationReturned &&
+                  explicitProcessExited &&
+                  explicitUntracked &&
+                  disposalTracked &&
+                  disposalProcessExited &&
+                  disposalUntracked &&
+                  recordingAbort.FrameQueued &&
+                  recordingAbort.ProcessTracked &&
+                  recordingAbort.ProcessAliveBeforeAbort &&
+                  recordingAbort.AbortWasBounded &&
+                  recordingAbort.TrackingRestored &&
+                  sharedManagerUntouched;
+
+        Logger.Info(
+            $"FFmpeg lifecycle smoke: job={jobContainmentAvailable}, explicitTracked={explicitTracked}, " +
+            $"explicitTerminated={explicitTerminationReturned && explicitProcessExited}, " +
+            $"explicitUntracked={explicitUntracked}, disposalTracked={disposalTracked}, " +
+            $"disposalTerminated={disposalProcessExited}, disposalUntracked={disposalUntracked}, " +
+            $"recordingFrameQueued={recordingAbort.FrameQueued}, recordingTracked={recordingAbort.ProcessTracked}, " +
+            $"recordingAlive={recordingAbort.ProcessAliveBeforeAbort}, " +
+            $"recordingAbortMs={recordingAbort.AbortMilliseconds:0.0}, " +
+            $"recordingAbortBounded={recordingAbort.AbortWasBounded}, " +
+            $"recordingTrackingRestored={recordingAbort.TrackingRestored}, " +
+            $"sharedUntouched={sharedManagerUntouched}, ok={ok}.");
+        return ok ? 0 : 1;
+    }
+
+    private static (
+        bool FrameQueued,
+        bool ProcessTracked,
+        bool ProcessAliveBeforeAbort,
+        bool AbortWasBounded,
+        bool TrackingRestored,
+        double AbortMilliseconds) RunRecordingAbortLifecycleSmoke(int[] baselineProcessIds)
+    {
+        const int width = 16;
+        const int height = 16;
+        const int fps = 1;
+        string outputPath = Path.Combine(
+            Path.GetTempPath(),
+            $"lifeviz-ffmpeg-abort-smoke-{Guid.NewGuid():N}.mkv");
+        RecordingSession? session = null;
+        bool sessionDisposed = false;
+
+        try
+        {
+            RecordingSettings settings = RecordingSettings.FromQuality(
+                RecordingQuality.Lossless,
+                width,
+                height,
+                fps);
+            session = new RecordingSession(outputPath, width, height, fps, settings);
+
+            byte[] frame = ArrayPool<byte>.Shared.Rent(width * height * 4);
+            Array.Clear(frame, 0, width * height * 4);
+            bool frameQueued = session.TryEnqueue(frame, waitForCapacity: true, failOnSaturation: true);
+
+            bool processTracked = WaitForAdditionalTrackedProcess(
+                baselineProcessIds,
+                TimeSpan.FromSeconds(3),
+                out int processId);
+            bool processAliveBeforeAbort = processTracked && IsProcessAlive(processId);
+
+            var abortStopwatch = Stopwatch.StartNew();
+            session.Abort();
+            session.Dispose();
+            sessionDisposed = true;
+            abortStopwatch.Stop();
+
+            bool abortWasBounded = abortStopwatch.Elapsed <= TimeSpan.FromSeconds(8);
+            bool trackingRestored = WaitForTrackedProcessSnapshot(
+                baselineProcessIds,
+                TimeSpan.FromSeconds(2));
+            return (
+                frameQueued,
+                processTracked,
+                processAliveBeforeAbort,
+                abortWasBounded,
+                trackingRestored,
+                abortStopwatch.Elapsed.TotalMilliseconds);
+        }
+        finally
+        {
+            if (!sessionDisposed && session != null)
+            {
+                try
+                {
+                    session.Abort();
+                    session.Dispose();
+                }
+                catch
+                {
+                    // The lifecycle assertions and final process snapshot report
+                    // any failed cleanup without hiding the original smoke failure.
+                }
+            }
+
+            try
+            {
+                if (File.Exists(outputPath))
+                {
+                    File.Delete(outputPath);
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.Warn($"Could not remove FFmpeg abort smoke output: {ex.Message}");
+            }
+        }
+    }
+
+    private static bool WaitForAdditionalTrackedProcess(
+        int[] baselineProcessIds,
+        TimeSpan timeout,
+        out int processId)
+    {
+        var baseline = baselineProcessIds.ToHashSet();
+        var stopwatch = Stopwatch.StartNew();
+        do
+        {
+            processId = FfmpegProcessManager.Shared
+                .GetTrackedProcessIdsForSmokeTest()
+                .FirstOrDefault(id => !baseline.Contains(id));
+            if (processId > 0)
+            {
+                return true;
+            }
+
+            Thread.Sleep(25);
+        }
+        while (stopwatch.Elapsed < timeout);
+
+        processId = 0;
+        return false;
+    }
+
+    private static bool WaitForTrackedProcessSnapshot(int[] expectedProcessIds, TimeSpan timeout)
+    {
+        var stopwatch = Stopwatch.StartNew();
+        do
+        {
+            if (expectedProcessIds.SequenceEqual(
+                    FfmpegProcessManager.Shared.GetTrackedProcessIdsForSmokeTest()))
+            {
+                return true;
+            }
+
+            Thread.Sleep(25);
+        }
+        while (stopwatch.Elapsed < timeout);
+
+        return false;
+    }
+
+    private static bool IsProcessAlive(int processId)
+    {
+        try
+        {
+            using Process process = Process.GetProcessById(processId);
+            return !process.HasExited;
+        }
+        catch (ArgumentException)
+        {
+            return false;
+        }
+    }
+
+    private static Process StartLongRunningFfmpegForLifecycleSmoke(FfmpegProcessManager manager)
+    {
+        var startInfo = new ProcessStartInfo
+        {
+            FileName = "ffmpeg",
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            RedirectStandardError = true
+        };
+        foreach (string argument in new[]
+                 {
+                     "-hide_banner",
+                     "-loglevel", "error",
+                     "-nostdin",
+                     "-re",
+                     "-f", "lavfi",
+                     "-i", "color=c=black:s=16x16:r=1",
+                     "-f", "null",
+                     "-"
+                 })
+        {
+            startInfo.ArgumentList.Add(argument);
+        }
+
+        Process process = manager.Start(startInfo);
+        Thread.Sleep(250);
+        if (!process.HasExited)
+        {
+            return process;
+        }
+
+        string error;
+        try
+        {
+            error = process.StandardError.ReadToEnd().Trim();
+        }
+        catch (Exception ex)
+        {
+            error = ex.Message;
+        }
+
+        manager.TerminateAndDispose(process, TimeSpan.Zero);
+        throw new InvalidOperationException(
+            $"The FFmpeg lifecycle fixture exited before it could be tested. {error}");
+    }
+
+    private static bool WaitForProcessExit(int processId, TimeSpan timeout)
+    {
+        var stopwatch = Stopwatch.StartNew();
+        do
+        {
+            try
+            {
+                using Process process = Process.GetProcessById(processId);
+                if (process.HasExited)
+                {
+                    return true;
+                }
+            }
+            catch (ArgumentException)
+            {
+                return true;
+            }
+
+            Thread.Sleep(25);
+        }
+        while (stopwatch.Elapsed < timeout);
+
+        return false;
     }
 
     private static int RunGpuPresentationSmokeTest()
@@ -1878,6 +2259,41 @@ internal static class SmokeTestRunner
                         !directResult.allLayerColumnsMatch)
                     {
                         failure ??= new InvalidOperationException("Direct dimension change did not propagate to all simulation layers and the presentation surface.");
+                        app.Shutdown(1);
+                        return;
+                    }
+
+                    var framerateResult = window.RunProjectFramerateChangeSmoke(24);
+                    Logger.Info($"Dimension smoke project FPS result: configuredFps={framerateResult.configuredFps:0.###}, effectiveVideoDecodeFps={framerateResult.effectiveVideoDecodeFps}.");
+                    if (Math.Abs(framerateResult.configuredFps - 24) > 0.01 ||
+                        framerateResult.effectiveVideoDecodeFps != 24)
+                    {
+                        failure ??= new InvalidOperationException("Scene Editor framerate change did not propagate to the automatic video decoder cap.");
+                        app.Shutdown(1);
+                        return;
+                    }
+
+                    const string directScale = "scale=426:240";
+                    string liveFilter = FileCaptureService.BuildVideoOutputFilterPlan(
+                        offlineRender: false,
+                        decodeFps: 30,
+                        directScale);
+                    string offlineFilter = FileCaptureService.BuildVideoOutputFilterPlan(
+                        offlineRender: true,
+                        decodeFps: 60,
+                        directScale);
+                    bool decodePlansOk =
+                        MainWindow.ResolveEffectiveVideoDecodeFps(0, 30) == 30 &&
+                        MainWindow.ResolveEffectiveVideoDecodeFps(0, 60) == 60 &&
+                        MainWindow.ResolveEffectiveVideoDecodeFps(0, 144) == 144 &&
+                        MainWindow.ResolveEffectiveVideoDecodeFps(15, 60) == 15 &&
+                        MainWindow.ResolveEffectiveVideoDecodeFps(30, 15) == 15 &&
+                        liveFilter.StartsWith("fps='if(gt(source_fps,0),min(source_fps,30),30)',scale", StringComparison.Ordinal) &&
+                        offlineFilter == $"{directScale},fps=60";
+                    Logger.Info($"Dimension smoke video decode plans: live={liveFilter}, offline={offlineFilter}, ok={decodePlansOk}.");
+                    if (!decodePlansOk)
+                    {
+                        failure ??= new InvalidOperationException("Automatic live decode cap or live/offline FFmpeg filter ordering regressed.");
                         app.Shutdown(1);
                         return;
                     }
@@ -2986,6 +3402,14 @@ internal static class SmokeTestRunner
                     if (GpuPresentationBackend.CompositePipelineInitializationCount > 0)
                     {
                         timer.Stop();
+                        if (!window.RunGpuPresentationSnapshotOrderingSmoke())
+                        {
+                            failure ??= new InvalidOperationException("GPU snapshot ordering/consumer-retirement smoke failed inside the combined UI suite.");
+                            window.Close();
+                            app.Shutdown(1);
+                            return;
+                        }
+
                         Logger.Info("GPU presentation smoke test passed.");
                         window.Close();
                         app.Shutdown(0);

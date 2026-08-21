@@ -350,7 +350,7 @@ internal sealed class FileCaptureService : IDisposable
     public void SetPerformanceSettings(bool lowContentionMode, int decoderThreadLimit, int videoDecodeFpsLimit)
     {
         decoderThreadLimit = Math.Clamp(decoderThreadLimit, 0, 8);
-        videoDecodeFpsLimit = videoDecodeFpsLimit == 15 || videoDecodeFpsLimit == 30 ? videoDecodeFpsLimit : 0;
+        videoDecodeFpsLimit = Math.Clamp(videoDecodeFpsLimit, 0, 144);
         List<FileSession>? sessionsToUpdate = null;
         lock (_lock)
         {
@@ -371,6 +371,41 @@ internal sealed class FileCaptureService : IDisposable
         {
             ApplyPerformanceSettingsToSession(session);
         }
+    }
+
+    internal int GetVideoDecodeFpsLimitForSmoke() => _videoDecodeFpsLimit;
+
+    internal static string BuildVideoOutputFilterPlan(bool offlineRender, int decodeFps, string? directFilter)
+    {
+        string? fpsFilter = decodeFps > 0
+            ? (offlineRender
+                ? $"fps={decodeFps}"
+                : $"fps='if(gt(source_fps,0),min(source_fps,{decodeFps}),{decodeFps})'")
+            : null;
+
+        if (string.IsNullOrWhiteSpace(directFilter))
+        {
+            return fpsFilter ?? string.Empty;
+        }
+
+        if (string.IsNullOrWhiteSpace(fpsFilter))
+        {
+            return directFilter;
+        }
+
+        if (offlineRender)
+        {
+            // Offline export may upsample a slower source to the exact export
+            // cadence. Scale each source frame before fps duplicates it so the
+            // duplicate frames do not repeat the expensive scale/crop work.
+            return $"{directFilter},{fpsFilter}";
+        }
+
+        // Live playback only ever drops surplus frames. Discard them before
+        // scaling, cropping, and BGRA conversion so a 60 fps source in a 30 fps
+        // scene does not pay that work twice. Unknown source rates fall back to
+        // the cap, while known 23.976/24 fps inputs keep their native cadence.
+        return $"{fpsFilter},{directFilter}";
     }
 
     public void BeginOfflineRender(int fps, double startTimeSeconds)
@@ -1166,7 +1201,14 @@ internal sealed class FileCaptureService : IDisposable
 
         foreach (var session in sessions)
         {
-            session.Dispose();
+            try
+            {
+                session.Dispose();
+            }
+            catch (Exception ex)
+            {
+                Logger.Warn($"Failed to dispose media session {session.DisplayName}: {ex.Message}");
+            }
         }
 
     }
@@ -1456,14 +1498,18 @@ internal sealed class FileCaptureService : IDisposable
         }
 
         private readonly bool _loopPlayback;
+        private readonly double? _maxDecodeDurationSeconds;
         private readonly Func<Task<ResolvedPlayback>>? _urlResolver;
         private readonly object _audioLock = new();
+        private readonly object _videoPipelineLock = new();
         private Process? _process;
         private Process? _audioDecodeProcess;
         private CancellationTokenSource? _cts;
         private Task? _workerTask;
+        private long _videoPipelineGeneration;
         private CancellationTokenSource? _audioDecodeCts;
         private Task? _audioDecodeTask;
+        private long _audioPipelineGeneration;
         private WaveOutEvent? _audioOutput;
         private BufferedWaveProvider? _audioBuffer;
         private const int LiveAudioAnalysisBufferCapacity = 48000 * 2;
@@ -1489,8 +1535,8 @@ internal sealed class FileCaptureService : IDisposable
         // Buffers
         private const int MaxQueuedOfflineRawFrames = 16;
         private const int MaxQueuedLiveRawFrames = 2;
+        private long _firstDecodedFrameTimestamp;
         private const int ParallelDownscalePixelThreshold = 640 * 360;
-        private byte[]? _readerBuffer;      // Worker writes here
         private byte[]? _readyDownscaled;   // Ready for UI
         private byte[]? _readyRaw;          // Ready for UI (Source)
         private long _readyFrameToken;
@@ -1514,6 +1560,7 @@ internal sealed class FileCaptureService : IDisposable
         private Process? _offlineAudioProcess;
         private Stream? _offlineAudioStream;
         private byte[]? _offlineAudioReadBuffer;
+        private long _offlineAudioGeneration;
         private bool _offlineAudioUnavailable;
 
         private int _nativeWidth;
@@ -1530,10 +1577,20 @@ internal sealed class FileCaptureService : IDisposable
         private int _readyDownscaledHeight;
         private Task _initializationTask = Task.CompletedTask;
         private bool _offlineInitializationWaitWarningLogged;
-        public VideoSession(string path, string displayName, bool loopPlayback, Func<Task<ResolvedPlayback>>? urlResolver = null, VideoProbeInfo? cachedProbe = null)
+        public VideoSession(
+            string path,
+            string displayName,
+            bool loopPlayback,
+            Func<Task<ResolvedPlayback>>? urlResolver = null,
+            VideoProbeInfo? cachedProbe = null,
+            double? maxDecodeDurationSeconds = null)
             : base(path, displayName, 0, 0)
         {
             _loopPlayback = loopPlayback;
+            _maxDecodeDurationSeconds = maxDecodeDurationSeconds.HasValue &&
+                                        double.IsFinite(maxDecodeDurationSeconds.Value)
+                ? Math.Max(0.05, maxDecodeDurationSeconds.Value)
+                : null;
             _urlResolver = urlResolver;
 
             if (_urlResolver == null)
@@ -1559,8 +1616,18 @@ internal sealed class FileCaptureService : IDisposable
         }
 
         // Constructor for legacy usage
-        public VideoSession(string path, bool loopPlayback, VideoProbeInfo? cachedProbe = null) 
-            : this(path, System.IO.Path.GetFileName(path), loopPlayback, null, cachedProbe)
+        public VideoSession(
+            string path,
+            bool loopPlayback,
+            VideoProbeInfo? cachedProbe = null,
+            double? maxDecodeDurationSeconds = null)
+            : this(
+                path,
+                System.IO.Path.GetFileName(path),
+                loopPlayback,
+                null,
+                cachedProbe,
+                maxDecodeDurationSeconds)
         {
         }
 
@@ -1657,16 +1724,31 @@ internal sealed class FileCaptureService : IDisposable
             }
         }
 
-        private async Task InitializeAsync()
+        private async Task InitializeAsync(
+            CancellationToken cancellationToken = default,
+            long? pipelineGeneration = null)
         {
             try
             {
+                cancellationToken.ThrowIfCancellationRequested();
+                if (_isDisposed ||
+                    (pipelineGeneration.HasValue && !IsCurrentVideoPipeline(pipelineGeneration.Value)))
+                {
+                    return;
+                }
+
                 string targetVideoUrl = Path;
                 string? targetAudioUrl = Path;
                 if (_urlResolver != null)
                 {
                     Logger.Info($"Resolving URL for: {DisplayName}...");
                     var resolved = await _urlResolver();
+                    cancellationToken.ThrowIfCancellationRequested();
+                    if (_isDisposed ||
+                        (pipelineGeneration.HasValue && !IsCurrentVideoPipeline(pipelineGeneration.Value)))
+                    {
+                        return;
+                    }
                     targetVideoUrl = resolved.VideoUrl;
                     targetAudioUrl = resolved.AudioUrl;
                     Logger.Info($"Resolved video URL: {targetVideoUrl}");
@@ -1681,13 +1763,28 @@ internal sealed class FileCaptureService : IDisposable
                 }
 
                 Logger.Info($"Probing video: {targetVideoUrl}");
-                if (!ProbeVideo(targetVideoUrl, out _nativeWidth, out _nativeHeight, out var durationSeconds))
+                if (!ProbeVideo(targetVideoUrl, out int probedWidth, out int probedHeight, out var durationSeconds))
                 {
+                    if (_isDisposed ||
+                        (pipelineGeneration.HasValue && !IsCurrentVideoPipeline(pipelineGeneration.Value)))
+                    {
+                        return;
+                    }
+
                     _hasError = true;
                     _errorMessage = "Failed to probe video dimensions.";
                     Logger.Error(_errorMessage);
                     return;
                 }
+                cancellationToken.ThrowIfCancellationRequested();
+                if (_isDisposed ||
+                    (pipelineGeneration.HasValue && !IsCurrentVideoPipeline(pipelineGeneration.Value)))
+                {
+                    return;
+                }
+
+                _nativeWidth = probedWidth;
+                _nativeHeight = probedHeight;
                 Logger.Info($"Probe success: {_nativeWidth}x{_nativeHeight}");
 
                 ConfigureDimensions();
@@ -1717,6 +1814,10 @@ internal sealed class FileCaptureService : IDisposable
                     RefreshAudioPlayback();
                 }
             }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                // Normal pipeline replacement or session shutdown.
+            }
             catch (Exception ex)
             {
                 _hasError = true;
@@ -1739,7 +1840,7 @@ internal sealed class FileCaptureService : IDisposable
         public void SetPerformanceSettings(bool lowContentionMode, int decoderThreadLimit, int videoDecodeFpsLimit)
         {
             decoderThreadLimit = Math.Clamp(decoderThreadLimit, 0, 8);
-            videoDecodeFpsLimit = videoDecodeFpsLimit == 15 || videoDecodeFpsLimit == 30 ? videoDecodeFpsLimit : 0;
+            videoDecodeFpsLimit = Math.Clamp(videoDecodeFpsLimit, 0, 144);
             if (_lowContentionMode == lowContentionMode &&
                 _decoderThreadLimit == decoderThreadLimit &&
                 _videoDecodeFpsLimit == videoDecodeFpsLimit)
@@ -2119,6 +2220,13 @@ internal sealed class FileCaptureService : IDisposable
             return $" -threads {threadLimit}";
         }
 
+        private string BuildDecodeDurationOutputArg()
+        {
+            return _maxDecodeDurationSeconds.HasValue
+                ? $" -t {_maxDecodeDurationSeconds.Value.ToString("0.######", CultureInfo.InvariantCulture)}"
+                : string.Empty;
+        }
+
         private string BuildVideoOutputFilter(bool produceExactTargetFrames, FitMode processOutputFitMode, int processWidth, int processHeight)
         {
             string? directFilter = produceExactTargetFrames
@@ -2126,21 +2234,7 @@ internal sealed class FileCaptureService : IDisposable
                 : null;
 
             int decodeFps = _offlineRenderEnabled ? _offlineRenderFps : _videoDecodeFpsLimit;
-            string? fpsFilter = decodeFps > 0
-                ? $"fps={decodeFps}"
-                : null;
-
-            if (string.IsNullOrWhiteSpace(directFilter))
-            {
-                return fpsFilter ?? string.Empty;
-            }
-
-            if (string.IsNullOrWhiteSpace(fpsFilter))
-            {
-                return directFilter;
-            }
-
-            return $"{directFilter},{fpsFilter}";
+            return BuildVideoOutputFilterPlan(_offlineRenderEnabled, decodeFps, directFilter);
         }
 
         private void EnsureProcessDimensionsForRequest(int targetWidth, int targetHeight, FitMode fitMode, bool includeSource)
@@ -2163,12 +2257,17 @@ internal sealed class FileCaptureService : IDisposable
                 : produceExactTargetFrames
                     ? (Math.Max(2, targetWidth) & ~1, Math.Max(2, targetHeight) & ~1)
                     : GetAdaptiveProcessDimensions(targetWidth, targetHeight);
+            // Fit mode only changes the ffmpeg command when ffmpeg performs the
+            // exact output crop/pad itself. Native/adaptive frames are fitted by
+            // the compositor, so restarting their decoder on Fill/Fit changes is
+            // pure process churn.
+            FitMode processFitMode = produceExactTargetFrames ? fitMode : FitMode.Fill;
 
             if (_processWidth == desired.width &&
                 _processHeight == desired.height &&
                 _preferNativeProcessFrames == preferNative &&
                 _processProducesExactTargetFrames == produceExactTargetFrames &&
-                _processOutputFitMode == fitMode)
+                _processOutputFitMode == processFitMode)
             {
                 return;
             }
@@ -2177,7 +2276,7 @@ internal sealed class FileCaptureService : IDisposable
             _processHeight = desired.height;
             _preferNativeProcessFrames = preferNative;
             _processProducesExactTargetFrames = produceExactTargetFrames;
-            _processOutputFitMode = fitMode;
+            _processOutputFitMode = processFitMode;
 
             Logger.Info($"Adjusted video decode resolution for {DisplayName}: Native={_nativeWidth}x{_nativeHeight}, Process={_processWidth}x{_processHeight}, Target={targetWidth}x{targetHeight}, NativeSource={preferNative}, DirectOutput={produceExactTargetFrames}, Fit={fitMode}.");
 
@@ -2283,12 +2382,15 @@ internal sealed class FileCaptureService : IDisposable
 
         private bool EnsureOfflineAudioDecoder()
         {
+            long generation;
             lock (_offlineAudioLock)
             {
                 if (_offlineAudioStream != null && _offlineAudioProcess != null)
                 {
                     return true;
                 }
+
+                generation = ++_offlineAudioGeneration;
             }
 
             string? playbackUrl;
@@ -2311,15 +2413,17 @@ internal sealed class FileCaptureService : IDisposable
             {
                 args += " -stream_loop -1";
             }
-            args += $" -i \"{playbackUrl}\"";
+            args += $" -i \"{playbackUrl}\"{BuildDecodeDurationOutputArg()}";
             // stream_loop restarts source timestamps. Rebase PCM timestamps to the emitted
             // sample count so the raw output muxer never receives non-monotonic DTS values.
             args += " -map 0:a:0? -vn -af \"asetpts=N/SR/TB\" -ac 1 -ar 48000 -acodec pcm_f32le -f f32le -";
 
+            Process? process = null;
+            bool published = false;
             try
             {
                 Logger.Info($"Starting offline audio analysis decode for {DisplayName}.");
-                var process = Process.Start(new ProcessStartInfo
+                process = FfmpegProcessManager.Shared.Start(new ProcessStartInfo
                 {
                     FileName = "ffmpeg",
                     Arguments = args,
@@ -2328,20 +2432,26 @@ internal sealed class FileCaptureService : IDisposable
                     RedirectStandardError = true,
                     RedirectStandardOutput = true
                 });
-                if (process == null)
-                {
-                    return false;
-                }
-
                 TryLowerChildProcessPriority(
                     process,
                     $"ffmpeg offline audio decode for {DisplayName}",
                     _lowContentionMode,
                     preferThroughput: true);
+                Stream outputStream = process.StandardOutput.BaseStream;
                 lock (_offlineAudioLock)
                 {
-                    _offlineAudioProcess = process;
-                    _offlineAudioStream = process.StandardOutput.BaseStream;
+                    if (generation == _offlineAudioGeneration && !_isDisposed)
+                    {
+                        _offlineAudioProcess = process;
+                        _offlineAudioStream = outputStream;
+                        published = true;
+                    }
+                }
+
+                if (!published)
+                {
+                    SafeKillProcess(process);
+                    return false;
                 }
 
                 process.ErrorDataReceived += (_, e) =>
@@ -2364,7 +2474,14 @@ internal sealed class FileCaptureService : IDisposable
             {
                 Logger.Warn($"Offline audio analysis unavailable for {DisplayName}: {ex.Message}");
                 _offlineAudioUnavailable = true;
-                StopOfflineAudioDecoder();
+                if (published)
+                {
+                    StopOfflineAudioDecoder();
+                }
+                else
+                {
+                    SafeKillProcess(process);
+                }
                 return false;
             }
         }
@@ -2375,6 +2492,7 @@ internal sealed class FileCaptureService : IDisposable
             Stream? stream;
             lock (_offlineAudioLock)
             {
+                _offlineAudioGeneration++;
                 process = _offlineAudioProcess;
                 stream = _offlineAudioStream;
                 _offlineAudioProcess = null;
@@ -2384,13 +2502,14 @@ internal sealed class FileCaptureService : IDisposable
 
             try { stream?.Dispose(); } catch { }
             SafeKillProcess(process);
-            try { process?.Dispose(); } catch { }
         }
 
-        private void FfmpegWorker(string url, CancellationToken token, double startOffsetSeconds)
+        private void FfmpegWorker(string url, CancellationToken token, double startOffsetSeconds, long generation)
         {
+            Process? process = null;
             try
             {
+                token.ThrowIfCancellationRequested();
                 int processWidth = _processWidth;
                 int processHeight = _processHeight;
                 bool produceExactTargetFrames = _processProducesExactTargetFrames;
@@ -2408,7 +2527,7 @@ internal sealed class FileCaptureService : IDisposable
                 {
                     args += " -re"; // Realtime reading for interactive playback.
                 }
-                args += $" -i \"{url}\" -map 0:v:0 -an -sn -dn";
+                args += $" -i \"{url}\"{BuildDecodeDurationOutputArg()} -map 0:v:0 -an -sn -dn";
                 string videoFilter = BuildVideoOutputFilter(produceExactTargetFrames, processOutputFitMode, processWidth, processHeight);
                 if (!string.IsNullOrWhiteSpace(videoFilter))
                 {
@@ -2435,15 +2554,29 @@ internal sealed class FileCaptureService : IDisposable
                     CreateNoWindow = true
                 };
 
-                var process = Process.Start(psi);
-                if (process == null) throw new InvalidOperationException("Failed to start ffmpeg.");
+                process = FfmpegProcessManager.Shared.Start(psi);
+                bool ownsCurrentPipeline;
+                lock (_videoPipelineLock)
+                {
+                    ownsCurrentPipeline = generation == _videoPipelineGeneration &&
+                                          !token.IsCancellationRequested &&
+                                          !_isDisposed;
+                    if (ownsCurrentPipeline)
+                    {
+                        _process = process;
+                    }
+                }
+
+                if (!ownsCurrentPipeline)
+                {
+                    return;
+                }
+
                 TryLowerChildProcessPriority(
                     process,
                     "ffmpeg video decode",
                     _lowContentionMode,
                     preferThroughput: _offlineRenderEnabled);
-                _process = process;
-
                 process.ErrorDataReceived += (s, e) =>
                 {
                     if (!string.IsNullOrWhiteSpace(e.Data)) Logger.Warn($"[ffmpeg] {e.Data}");
@@ -2452,18 +2585,12 @@ internal sealed class FileCaptureService : IDisposable
 
                 using var stream = process.StandardOutput.BaseStream;
                 int frameSize = processWidth * processHeight * 4;
-                _readerBuffer = new byte[frameSize];
+                byte[] readBuffer = new byte[frameSize];
                 
                 int framesRead = 0;
 
                 while (!token.IsCancellationRequested && IsProcessAlive(process))
                 {
-                    byte[]? readBuffer = _readerBuffer;
-                    if (readBuffer == null)
-                    {
-                        break;
-                    }
-
                     int totalRead = 0;
                     while (totalRead < frameSize)
                     {
@@ -2488,6 +2615,13 @@ internal sealed class FileCaptureService : IDisposable
                     }
 
                     framesRead++;
+                    if (framesRead == 1 && IsCurrentVideoPipeline(generation))
+                    {
+                        Interlocked.CompareExchange(
+                            ref _firstDecodedFrameTimestamp,
+                            Stopwatch.GetTimestamp(),
+                            comparand: 0);
+                    }
 
                     // We have a full frame. Publish it.
                     lock (_lock)
@@ -2510,19 +2644,51 @@ internal sealed class FileCaptureService : IDisposable
                         }
 
                         _pendingRawFrames.Enqueue(readBuffer);
-                        _readerBuffer = AcquireRawFrameBufferNoLock(frameSize);
+                        readBuffer = AcquireRawFrameBufferNoLock(frameSize);
                         Monitor.PulseAll(_lock);
                     }
                 }
             }
+            catch (OperationCanceledException) when (token.IsCancellationRequested)
+            {
+                // Normal pipeline replacement or session shutdown.
+            }
             catch (Exception ex)
             {
-                Logger.Error($"FFmpeg worker error: {ex.Message}", ex);
-                _hasError = true;
-                lock (_lock)
+                if (!token.IsCancellationRequested && IsCurrentVideoPipeline(generation))
                 {
-                    Monitor.PulseAll(_lock);
+                    Logger.Error($"FFmpeg worker error: {ex.Message}", ex);
+                    _hasError = true;
+                    lock (_lock)
+                    {
+                        Monitor.PulseAll(_lock);
+                    }
                 }
+            }
+            finally
+            {
+                if (process != null)
+                {
+                    lock (_videoPipelineLock)
+                    {
+                        if (ReferenceEquals(_process, process))
+                        {
+                            _process = null;
+                        }
+                    }
+
+                    FfmpegProcessManager.Shared.TerminateAndDispose(
+                        process,
+                        TimeSpan.FromMilliseconds(750));
+                }
+            }
+        }
+
+        private bool IsCurrentVideoPipeline(long generation)
+        {
+            lock (_videoPipelineLock)
+            {
+                return generation == _videoPipelineGeneration && !_isDisposed;
             }
         }
 
@@ -2667,6 +2833,14 @@ internal sealed class FileCaptureService : IDisposable
             }
         }
 
+        internal double GetFirstDecodedFrameAgeSeconds()
+        {
+            long timestamp = Volatile.Read(ref _firstDecodedFrameTimestamp);
+            return timestamp <= 0
+                ? 0
+                : Math.Max(0, Stopwatch.GetElapsedTime(timestamp).TotalSeconds);
+        }
+
         public bool TryGetPlaybackState(out VideoPlaybackState playbackState)
         {
             lock (_audioLock)
@@ -2716,23 +2890,29 @@ internal sealed class FileCaptureService : IDisposable
 
             if (forceReResolve || string.IsNullOrWhiteSpace(_videoPlaybackUrl))
             {
-                _cts = new CancellationTokenSource();
-                _workerTask = RunBackgroundLongRunning(
-                    () => InitializeAsync().GetAwaiter().GetResult(),
-                    "LifeViz.VideoInitialize"); // Re-initialize (and re-resolve URL if needed).
+                StartVideoReinitializationWorker(startOffsetSeconds);
                 return;
             }
 
-            _cts = new CancellationTokenSource();
-            _workerTask = RunBackgroundLongRunning(
-                () => FfmpegWorker(_videoPlaybackUrl!, _cts.Token, startOffsetSeconds),
-                "LifeViz.VideoDecode");
+            string playbackUrl = _videoPlaybackUrl;
+            StartVideoDecodeWorker(playbackUrl, startOffsetSeconds);
             RefreshAudioPlayback();
         }
 
         private void EnsureVideoWorkerStarted()
         {
-            if (_isDisposed || _workerTask != null || string.IsNullOrWhiteSpace(_videoPlaybackUrl))
+            string? playbackUrl;
+            lock (_videoPipelineLock)
+            {
+                if (_isDisposed || _workerTask != null)
+                {
+                    return;
+                }
+
+                playbackUrl = _videoPlaybackUrl;
+            }
+
+            if (string.IsNullOrWhiteSpace(playbackUrl))
             {
                 return;
             }
@@ -2748,31 +2928,114 @@ internal sealed class FileCaptureService : IDisposable
                 startOffsetSeconds = GetEstimatedPlaybackOffsetSecondsNoLock();
             }
 
-            _cts = new CancellationTokenSource();
-            _workerTask = RunBackgroundLongRunning(
-                () => FfmpegWorker(_videoPlaybackUrl!, _cts.Token, startOffsetSeconds),
-                "LifeViz.VideoDecode");
+            StartVideoDecodeWorker(playbackUrl, startOffsetSeconds);
             RefreshAudioPlayback();
+        }
+
+        private void StartVideoDecodeWorker(string playbackUrl, double startOffsetSeconds)
+        {
+            var cts = new CancellationTokenSource();
+            CancellationToken token = cts.Token;
+            lock (_videoPipelineLock)
+            {
+                if (_isDisposed || _workerTask != null)
+                {
+                    cts.Dispose();
+                    return;
+                }
+
+                long generation = ++_videoPipelineGeneration;
+                Interlocked.Exchange(ref _firstDecodedFrameTimestamp, 0);
+                _cts = cts;
+                try
+                {
+                    _workerTask = RunBackgroundLongRunning(
+                        () => FfmpegWorker(playbackUrl, token, startOffsetSeconds, generation),
+                        "LifeViz.VideoDecode");
+                }
+                catch
+                {
+                    _cts = null;
+                    _videoPipelineGeneration++;
+                    cts.Dispose();
+                    throw;
+                }
+            }
+        }
+
+        private void StartVideoReinitializationWorker(double startOffsetSeconds)
+        {
+            var cts = new CancellationTokenSource();
+            CancellationToken token = cts.Token;
+            lock (_videoPipelineLock)
+            {
+                if (_isDisposed || _workerTask != null)
+                {
+                    cts.Dispose();
+                    return;
+                }
+
+                long generation = ++_videoPipelineGeneration;
+                Interlocked.Exchange(ref _firstDecodedFrameTimestamp, 0);
+                _cts = cts;
+                try
+                {
+                    _workerTask = RunBackgroundLongRunning(
+                        () => ReinitializeAndDecode(token, startOffsetSeconds, generation),
+                        "LifeViz.VideoInitialize");
+                }
+                catch
+                {
+                    _cts = null;
+                    _videoPipelineGeneration++;
+                    cts.Dispose();
+                    throw;
+                }
+            }
+        }
+
+        private void ReinitializeAndDecode(CancellationToken token, double startOffsetSeconds, long generation)
+        {
+            InitializeAsync(token, generation).GetAwaiter().GetResult();
+            if (token.IsCancellationRequested || !IsCurrentVideoPipeline(generation))
+            {
+                return;
+            }
+
+            string? playbackUrl = _videoPlaybackUrl;
+            if (!string.IsNullOrWhiteSpace(playbackUrl))
+            {
+                FfmpegWorker(playbackUrl, token, startOffsetSeconds, generation);
+            }
         }
 
         private void StopVideoPipeline(bool preserveReadyFrame = false)
         {
-            var cts = _cts;
-            _cts = null;
-            var workerTask = _workerTask;
-            _workerTask = null;
+            CancellationTokenSource? cts;
+            Task? workerTask;
+            Process? process;
+            lock (_videoPipelineLock)
+            {
+                _videoPipelineGeneration++;
+                cts = _cts;
+                _cts = null;
+                workerTask = _workerTask;
+                _workerTask = null;
+                process = _process;
+                _process = null;
+            }
+
             try { cts?.Cancel(); } catch { }
-            try { _process?.Kill(); } catch { }
-            try { workerTask?.Wait(TimeSpan.FromMilliseconds(250)); } catch { }
-            _process?.Dispose();
-            _process = null;
+            FfmpegProcessManager.Shared.TerminateAndDispose(
+                process,
+                TimeSpan.FromMilliseconds(750));
+            try { workerTask?.Wait(TimeSpan.FromMilliseconds(750)); } catch { }
             try { cts?.Dispose(); } catch { }
 
             lock (_lock)
             {
                 _pendingRawFrames.Clear();
                 _rawFramePool.Clear();
-                _readerBuffer = null;
                 if (!preserveReadyFrame)
                 {
                     _readyDownscaled = null;
@@ -3002,9 +3265,11 @@ internal sealed class FileCaptureService : IDisposable
 
             int fatalAudioError = 0;
             bool analysisOnly;
+            long audioGeneration;
             lock (_audioLock)
             {
                 analysisOnly = _liveAudioAnalysisEnabled;
+                audioGeneration = ++_audioPipelineGeneration;
             }
             var seekSeconds = GetEstimatedPlaybackOffsetSeconds();
             string args = "-hide_banner -loglevel warning";
@@ -3013,9 +3278,17 @@ internal sealed class FileCaptureService : IDisposable
                 args += $" -ss {seekSeconds.ToString("0.###", CultureInfo.InvariantCulture)}";
             }
             args += $"{BuildDecoderThreadArgs()} -re";
-            args += $" -i \"{playbackUrl}\"";
+            if (_loopPlayback)
+            {
+                args += " -stream_loop -1";
+            }
+            args += $" -i \"{playbackUrl}\"{BuildDecodeDurationOutputArg()}";
             args += " -map 0:a:0 -vn -ac 2 -ar 48000 -acodec pcm_s16le -f s16le -";
 
+            Process? process = null;
+            WaveOutEvent? output = null;
+            CancellationTokenSource? audioCts = null;
+            bool published = false;
             try
             {
                 Logger.Info($"Starting ffmpeg audio decode: {args}");
@@ -3030,12 +3303,7 @@ internal sealed class FileCaptureService : IDisposable
                     RedirectStandardOutput = true
                 };
 
-                var process = Process.Start(psi);
-                if (process == null)
-                {
-                    Logger.Warn($"Failed to start ffmpeg audio decode process for {DisplayName}.");
-                    return;
-                }
+                process = FfmpegProcessManager.Shared.Start(psi);
 
                 TryLowerChildProcessPriority(process, $"ffmpeg audio decode for {DisplayName}", _lowContentionMode);
 
@@ -3053,7 +3321,6 @@ internal sealed class FileCaptureService : IDisposable
                 process.BeginErrorReadLine();
 
                 BufferedWaveProvider? bufferProvider = null;
-                WaveOutEvent? output = null;
                 if (!analysisOnly)
                 {
                     bufferProvider = new BufferedWaveProvider(new WaveFormat(48000, 16, 2))
@@ -3074,10 +3341,8 @@ internal sealed class FileCaptureService : IDisposable
                     output.Play();
                 }
 
-                var audioCts = new CancellationTokenSource();
-                var decodeTask = RunBackgroundLongRunning(
-                    () => AudioDecodeWorker(process, audioCts.Token, () => Volatile.Read(ref fatalAudioError) != 0),
-                    "LifeViz.AudioDecode");
+                audioCts = new CancellationTokenSource();
+                CancellationToken audioToken = audioCts.Token;
 
                 bool shouldAbort = false;
                 lock (_audioLock)
@@ -3086,14 +3351,18 @@ internal sealed class FileCaptureService : IDisposable
                                   !_audioEnabled ||
                                   _playbackPaused ||
                                   GetEffectiveVolumeNoLock() <= 0.0001 ||
-                                  _liveAudioAnalysisEnabled != analysisOnly;
+                                  _liveAudioAnalysisEnabled != analysisOnly ||
+                                  audioGeneration != _audioPipelineGeneration;
                     if (!shouldAbort)
                     {
                         _audioDecodeProcess = process;
                         _audioDecodeCts = audioCts;
-                        _audioDecodeTask = decodeTask;
                         _audioBuffer = bufferProvider;
                         _audioOutput = output;
+                        published = true;
+                        _audioDecodeTask = RunBackgroundLongRunning(
+                            () => AudioDecodeWorker(process, audioToken, () => Volatile.Read(ref fatalAudioError) != 0),
+                            "LifeViz.AudioDecode");
                     }
                 }
 
@@ -3112,6 +3381,17 @@ internal sealed class FileCaptureService : IDisposable
             }
             catch (Exception ex)
             {
+                if (published)
+                {
+                    StopAudioPlayback();
+                }
+                else
+                {
+                    try { audioCts?.Cancel(); } catch { }
+                    SafeStopOutput(output);
+                    SafeKillProcess(process);
+                    try { audioCts?.Dispose(); } catch { }
+                }
                 Logger.Warn($"Audio playback unavailable for {DisplayName}: {ex.Message}");
             }
         }
@@ -3265,6 +3545,7 @@ internal sealed class FileCaptureService : IDisposable
                         && !_playbackPaused
                         && !_isDisposed
                         && _loopPlayback
+                        && !_maxDecodeDurationSeconds.HasValue
                         && exitCode == 0
                         && !hasFatalError();
                 }
@@ -3327,6 +3608,7 @@ internal sealed class FileCaptureService : IDisposable
             WaveOutEvent? outputToStop;
             lock (_audioLock)
             {
+                _audioPipelineGeneration++;
                 processToStop = _audioDecodeProcess;
                 _audioDecodeProcess = null;
                 ctsToStop = _audioDecodeCts;
@@ -3438,33 +3720,9 @@ internal sealed class FileCaptureService : IDisposable
 
         private static void SafeKillProcess(Process? process)
         {
-            if (process == null)
-            {
-                return;
-            }
-
-            try
-            {
-                if (!process.HasExited)
-                {
-                    process.Kill();
-                }
-            }
-            catch
-            {
-                // Ignore cleanup failures.
-            }
-            finally
-            {
-                try
-                {
-                    process.Dispose();
-                }
-                catch
-                {
-                    // Ignore dispose failures.
-                }
-            }
+            FfmpegProcessManager.Shared.TerminateAndDispose(
+                process,
+                TimeSpan.FromMilliseconds(750));
         }
 
         internal static bool ProbeVideo(string path, out int width, out int height, out double durationSeconds)
@@ -3504,6 +3762,7 @@ internal sealed class FileCaptureService : IDisposable
 
         internal static VideoProbeInfo? ProbeVideoUncached(string path, int timeoutMilliseconds = VideoProbeTimeoutMilliseconds)
         {
+            Process? process = null;
             try
             {
                 timeoutMilliseconds = Math.Clamp(timeoutMilliseconds, 1, VideoProbeTimeoutMilliseconds);
@@ -3519,26 +3778,15 @@ internal sealed class FileCaptureService : IDisposable
                 psi.ArgumentList.Add("-i");
                 psi.ArgumentList.Add(path);
 
-                using var p = Process.Start(psi);
-                if (p == null)
-                {
-                    return null;
-                }
+                process = FfmpegProcessManager.Shared.Start(psi);
 
-                TryLowerChildProcessPriority(p, "ffmpeg video probe", lowContentionMode: true);
-                Task<string> stderrTask = p.StandardError.ReadToEndAsync();
-                if (!p.WaitForExit(timeoutMilliseconds))
+                TryLowerChildProcessPriority(process, "ffmpeg video probe", lowContentionMode: true);
+                Task<string> stderrTask = process.StandardError.ReadToEndAsync();
+                if (!process.WaitForExit(timeoutMilliseconds))
                 {
-                    try
-                    {
-                        p.Kill(entireProcessTree: true);
-                    }
-                    catch
-                    {
-                        // Best effort; disposing the process below still releases our handles.
-                    }
-
-                    try { p.WaitForExit(500); } catch { }
+                    FfmpegProcessManager.Shared.TerminateAndDispose(
+                        process,
+                        TimeSpan.FromMilliseconds(500));
                     try { stderrTask.Wait(TimeSpan.FromMilliseconds(500)); } catch { }
                     Logger.Warn($"Video probe timed out after {timeoutMilliseconds} ms: {System.IO.Path.GetFileName(path)}");
                     return null;
@@ -3570,6 +3818,12 @@ internal sealed class FileCaptureService : IDisposable
             catch (Exception ex)
             {
                 Logger.Warn($"Probe failed: {ex.Message}");
+            }
+            finally
+            {
+                FfmpegProcessManager.Shared.TerminateAndDispose(
+                    process,
+                    TimeSpan.FromMilliseconds(500));
             }
 
             return null;
@@ -3737,6 +3991,11 @@ internal sealed class FileCaptureService : IDisposable
 
         public void SetPlaybackPaused(bool paused)
         {
+            if (_playbackPaused == paused)
+            {
+                return;
+            }
+
             _playbackPaused = paused;
             _current?.SetPlaybackPaused(paused);
         }
@@ -3745,7 +4004,7 @@ internal sealed class FileCaptureService : IDisposable
         {
             _lowContentionMode = lowContentionMode;
             _decoderThreadLimit = Math.Clamp(decoderThreadLimit, 0, 8);
-            _videoDecodeFpsLimit = videoDecodeFpsLimit == 15 || videoDecodeFpsLimit == 30 ? videoDecodeFpsLimit : 0;
+            _videoDecodeFpsLimit = Math.Clamp(videoDecodeFpsLimit, 0, 144);
             _current?.SetPerformanceSettings(_lowContentionMode, _decoderThreadLimit, _videoDecodeFpsLimit);
         }
 
@@ -3846,9 +4105,7 @@ internal sealed class FileCaptureService : IDisposable
 
             if (previous != null)
             {
-                _ = RunBackgroundLongRunning(
-                    previous.Dispose,
-                    "LifeViz.SequenceDispose");
+                    MediaDisposalQueue.Enqueue(previous, "video sequence decoder");
             }
 
             return true;
@@ -4034,6 +4291,9 @@ internal sealed class FileCaptureService : IDisposable
 
     internal sealed class AutoClipSession : IDisposable
     {
+        private const double DecoderLifetimeGraceSeconds = 0.1;
+        private const double DecoderStartupTimeoutSeconds = 10.0;
+
         private enum Phase
         {
             Uninitialized,
@@ -4085,6 +4345,10 @@ internal sealed class FileCaptureService : IDisposable
         private Phase _phase = Phase.Uninitialized;
         private double _phaseStartSeconds;
         private double _phaseEndSeconds;
+        private bool _phaseAwaitingFirstFrame;
+        private double _pendingPhaseDurationSeconds;
+        private double _pendingPhaseElapsedSeconds;
+        private double _decoderStartupDeadlineSeconds;
         private double _lastCaptureTimelineSeconds;
         private double _minClipSeconds;
         private double _maxClipSeconds;
@@ -4112,6 +4376,7 @@ internal sealed class FileCaptureService : IDisposable
         private double _savedLivePhaseRemainingSeconds;
         private double _savedLivePhaseElapsedSeconds;
         private double _savedLiveClipDurationSeconds;
+        private bool _settingsInitialized;
         private bool _disposed;
 
         public AutoClipSession(
@@ -4147,9 +4412,26 @@ internal sealed class FileCaptureService : IDisposable
 
         public double GetVisualOpacity(double fadeSeconds)
         {
+            if (_phase == Phase.Preparing && _lastFrame.HasValue)
+            {
+                // A cached probe is normally promoted on the next capture tick.
+                // Keep a zero-fade handoff visually continuous during that brief
+                // preparing state; a faded-out prior phase remains transparent.
+                return fadeSeconds <= 0.0001 ? 1 : 0;
+            }
+
             if (_phase != Phase.Playing || _current == null)
             {
                 return 0;
+            }
+
+            if (_phaseAwaitingFirstFrame)
+            {
+                // With no fade, keep the prior clip's last frame visible while the
+                // replacement decoder warms. With a fade, the prior frame already
+                // faded out at its phase boundary; do not make it pop back in as if
+                // it belonged to the new phase.
+                return _lastFrame.HasValue && fadeSeconds <= 0.0001 ? 1 : 0;
             }
 
             double duration = Math.Max(0, _phaseEndSeconds - _phaseStartSeconds);
@@ -4176,8 +4458,10 @@ internal sealed class FileCaptureService : IDisposable
                 return;
             }
 
-            ApplySettings(paths, minClipSeconds, maxClipSeconds, minDelaySeconds, maxDelaySeconds);
-            ResetSchedule();
+            if (ApplySettings(paths, minClipSeconds, maxClipSeconds, minDelaySeconds, maxDelaySeconds))
+            {
+                ResetSchedule();
+            }
         }
 
         public void SetLoopSelectedFile(bool enabled)
@@ -4215,11 +4499,21 @@ internal sealed class FileCaptureService : IDisposable
             FileCaptureFrame? frame = _current.CaptureFrame(targetWidth, targetHeight, fitMode, includeSource);
             if (frame.HasValue)
             {
+                if (_phaseAwaitingFirstFrame)
+                {
+                    ArmPhaseFromFirstFrame(now);
+                }
+
                 _lastFrame = frame;
                 _lastFramePath = _currentPath;
             }
             else if (_current.State == FileCaptureState.Error)
             {
+                BeginNextPhase(now);
+            }
+            else if (_phaseAwaitingFirstFrame && now >= _decoderStartupDeadlineSeconds)
+            {
+                Logger.Warn($"AutoClip decoder did not publish its first frame within {DecoderStartupTimeoutSeconds:0.#}s; advancing from {Path.GetFileName(_currentPath)}.");
                 BeginNextPhase(now);
             }
 
@@ -4259,7 +4553,23 @@ internal sealed class FileCaptureService : IDisposable
 
         public void SetPlaybackPaused(bool paused)
         {
+            if (_playbackPaused == paused)
+            {
+                return;
+            }
+
             _playbackPaused = paused;
+            if (!_offlineRenderEnabled)
+            {
+                if (paused)
+                {
+                    _clock.Stop();
+                }
+                else
+                {
+                    _clock.Start();
+                }
+            }
             _current?.SetPlaybackPaused(paused);
         }
 
@@ -4267,7 +4577,7 @@ internal sealed class FileCaptureService : IDisposable
         {
             _lowContentionMode = lowContentionMode;
             _decoderThreadLimit = Math.Clamp(decoderThreadLimit, 0, 8);
-            _videoDecodeFpsLimit = videoDecodeFpsLimit == 15 || videoDecodeFpsLimit == 30 ? videoDecodeFpsLimit : 0;
+            _videoDecodeFpsLimit = Math.Clamp(videoDecodeFpsLimit, 0, 144);
             _current?.SetPerformanceSettings(_lowContentionMode, _decoderThreadLimit, _videoDecodeFpsLimit);
         }
 
@@ -4284,9 +4594,15 @@ internal sealed class FileCaptureService : IDisposable
                 double liveNow = _clock.Elapsed.TotalSeconds;
                 _savedLivePhase = _phase;
                 _savedLivePath = _currentPath;
-                _savedLivePhaseRemainingSeconds = Math.Max(0, _phaseEndSeconds - liveNow);
-                _savedLivePhaseElapsedSeconds = Math.Max(0, liveNow - _phaseStartSeconds);
-                _savedLiveClipDurationSeconds = Math.Max(0, _phaseEndSeconds - _phaseStartSeconds);
+                _savedLivePhaseRemainingSeconds = _phaseAwaitingFirstFrame
+                    ? Math.Max(0, _pendingPhaseDurationSeconds - _pendingPhaseElapsedSeconds)
+                    : Math.Max(0, _phaseEndSeconds - liveNow);
+                _savedLivePhaseElapsedSeconds = _phaseAwaitingFirstFrame
+                    ? Math.Max(0, _pendingPhaseElapsedSeconds)
+                    : Math.Max(0, liveNow - _phaseStartSeconds);
+                _savedLiveClipDurationSeconds = _phaseAwaitingFirstFrame
+                    ? Math.Max(0, _pendingPhaseDurationSeconds)
+                    : Math.Max(0, _phaseEndSeconds - _phaseStartSeconds);
                 _savedLivePlaybackSeconds = 0;
                 if (_current?.TryGetPlaybackState(out VideoPlaybackState playbackState) == true)
                 {
@@ -4304,6 +4620,10 @@ internal sealed class FileCaptureService : IDisposable
                 _phase = Phase.Uninitialized;
                 _phaseStartSeconds = 0;
                 _phaseEndSeconds = 0;
+                _phaseAwaitingFirstFrame = false;
+                _pendingPhaseDurationSeconds = 0;
+                _pendingPhaseElapsedSeconds = 0;
+                _decoderStartupDeadlineSeconds = 0;
                 _lastCaptureTimelineSeconds = 0;
                 _lastFrame = null;
                 _lastFramePath = null;
@@ -4317,9 +4637,17 @@ internal sealed class FileCaptureService : IDisposable
             _offlineProbeDeadlineTimestamp = 0;
             _offlineProbeBudgetExhausted = false;
             _clock.Restart();
+            if (_playbackPaused)
+            {
+                _clock.Stop();
+            }
             _random = new Random();
             _lastFrame = null;
             _lastFramePath = null;
+            _phaseAwaitingFirstFrame = false;
+            _pendingPhaseDurationSeconds = 0;
+            _pendingPhaseElapsedSeconds = 0;
+            _decoderStartupDeadlineSeconds = 0;
 
             if (_savedLivePhase == Phase.Delaying && _savedLivePhaseRemainingSeconds > 0.0001)
             {
@@ -4392,27 +4720,51 @@ internal sealed class FileCaptureService : IDisposable
             }
         }
 
-        private void ApplySettings(
+        private bool ApplySettings(
             IReadOnlyList<string> paths,
             double minClipSeconds,
             double maxClipSeconds,
             double minDelaySeconds,
             double maxDelaySeconds)
         {
-            lock (_pathsLock)
+            var normalizedPaths = new List<string>(paths.Count);
+            foreach (string path in paths)
             {
-                _paths.Clear();
-                foreach (string path in paths)
+                if (!normalizedPaths.Any(existing => string.Equals(existing, path, StringComparison.OrdinalIgnoreCase)))
                 {
-                    if (!_paths.Any(existing => string.Equals(existing, path, StringComparison.OrdinalIgnoreCase)))
-                    {
-                        _paths.Add(path);
-                    }
+                    normalizedPaths.Add(path);
                 }
             }
 
-            NormalizeRange(minClipSeconds, maxClipSeconds, minimum: 0.05, out _minClipSeconds, out _maxClipSeconds);
-            NormalizeRange(minDelaySeconds, maxDelaySeconds, minimum: 0, out _minDelaySeconds, out _maxDelaySeconds);
+            NormalizeRange(minClipSeconds, maxClipSeconds, minimum: 0.05, out double normalizedMinClip, out double normalizedMaxClip);
+            NormalizeRange(minDelaySeconds, maxDelaySeconds, minimum: 0, out double normalizedMinDelay, out double normalizedMaxDelay);
+
+            lock (_pathsLock)
+            {
+                bool unchanged = _settingsInitialized &&
+                                 _paths.Count == normalizedPaths.Count &&
+                                 _paths.Zip(normalizedPaths, (existing, replacement) =>
+                                         string.Equals(existing, replacement, StringComparison.OrdinalIgnoreCase))
+                                     .All(equal => equal) &&
+                                 Math.Abs(_minClipSeconds - normalizedMinClip) < 0.000001 &&
+                                 Math.Abs(_maxClipSeconds - normalizedMaxClip) < 0.000001 &&
+                                 Math.Abs(_minDelaySeconds - normalizedMinDelay) < 0.000001 &&
+                                 Math.Abs(_maxDelaySeconds - normalizedMaxDelay) < 0.000001;
+                if (unchanged)
+                {
+                    return false;
+                }
+
+                _paths.Clear();
+                _paths.AddRange(normalizedPaths);
+            }
+
+            _minClipSeconds = normalizedMinClip;
+            _maxClipSeconds = normalizedMaxClip;
+            _minDelaySeconds = normalizedMinDelay;
+            _maxDelaySeconds = normalizedMaxDelay;
+            _settingsInitialized = true;
+            return true;
         }
 
         private static void NormalizeRange(double min, double max, double minimum, out double normalizedMin, out double normalizedMax)
@@ -4476,6 +4828,10 @@ internal sealed class FileCaptureService : IDisposable
 
         private void BeginNextPhase(double now)
         {
+            _phaseAwaitingFirstFrame = false;
+            _pendingPhaseDurationSeconds = 0;
+            _pendingPhaseElapsedSeconds = 0;
+            _decoderStartupDeadlineSeconds = 0;
             DisposeCurrent(background: true);
             double delay = NextRange(_minDelaySeconds, _maxDelaySeconds);
             if (delay > 0.0001)
@@ -4566,7 +4922,7 @@ internal sealed class FileCaptureService : IDisposable
                     GetVideoProbeAsync(path),
                     clipSeconds,
                     randomUnit: 0,
-                    loopSelectedFile: true,
+                    loopSelectedFile: _loopSelectedFile,
                     explicitStartSeconds: startSeconds,
                     elapsedSeconds));
         }
@@ -4574,6 +4930,10 @@ internal sealed class FileCaptureService : IDisposable
         private void QueueClipPreparation(PendingClipRequest request)
         {
             DisposeCurrent(background: true);
+            _phaseAwaitingFirstFrame = false;
+            _pendingPhaseDurationSeconds = 0;
+            _pendingPhaseElapsedSeconds = 0;
+            _decoderStartupDeadlineSeconds = 0;
             _pendingClip = request;
             _currentPath = request.Path;
             _phase = Phase.Preparing;
@@ -4636,7 +4996,14 @@ internal sealed class FileCaptureService : IDisposable
                     pending.LoopSelectedFile);
             }
 
-            StartPreparedClip(pending.Path, probe.Value, startSeconds, now, clipSeconds, pending.ElapsedSeconds);
+            StartPreparedClip(
+                pending.Path,
+                probe.Value,
+                startSeconds,
+                now,
+                clipSeconds,
+                pending.LoopSelectedFile,
+                pending.ElapsedSeconds);
             return true;
         }
 
@@ -4646,10 +5013,18 @@ internal sealed class FileCaptureService : IDisposable
             double startSeconds,
             double now,
             double clipSeconds,
+            bool loopSelectedFile,
             double elapsedSeconds = 0)
         {
             DisposeCurrent(background: true);
-            var session = new VideoSession(path, loopPlayback: true, probe);
+            double duration = Math.Max(0.001, clipSeconds);
+            double elapsed = Math.Clamp(elapsedSeconds, 0, duration);
+            var decoderPlan = GetDecoderPlan(loopSelectedFile, duration, elapsed);
+            var session = new VideoSession(
+                path,
+                loopPlayback: decoderPlan.LoopPlayback,
+                cachedProbe: probe,
+                maxDecodeDurationSeconds: decoderPlan.MaxDecodeDurationSeconds);
             session.SetInitialPlaybackOffsetSeconds(startSeconds);
             session.SetMasterAudio(_masterAudioEnabled, _masterAudioVolume);
             session.SetLiveAudioAnalysisEnabled(_liveAudioAnalysisEnabled);
@@ -4664,13 +5039,54 @@ internal sealed class FileCaptureService : IDisposable
             _offlineProbeBudgetExhausted = false;
             _currentPath = path;
             _phase = Phase.Playing;
-            double duration = Math.Max(0.001, clipSeconds);
-            double elapsed = Math.Clamp(elapsedSeconds, 0, duration);
-            _phaseStartSeconds = now - elapsed;
-            _phaseEndSeconds = _phaseStartSeconds + duration;
+            _phaseAwaitingFirstFrame = true;
+            _pendingPhaseDurationSeconds = duration;
+            _pendingPhaseElapsedSeconds = elapsed;
+            _decoderStartupDeadlineSeconds = now + DecoderStartupTimeoutSeconds;
+            _phaseStartSeconds = now;
+            _phaseEndSeconds = double.PositiveInfinity;
             _lastCaptureTimelineSeconds = now;
             Logger.Info($"AutoClip selected {Path.GetFileName(path)} at {startSeconds:0.###}s for {clipSeconds:0.###}s.");
         }
+
+        private void ArmPhaseFromFirstFrame(double now)
+        {
+            double duration = Math.Max(0.05, _pendingPhaseDurationSeconds);
+            double elapsed = Math.Clamp(_pendingPhaseElapsedSeconds, 0, duration);
+            // Process launch/seek time before the decoder's first output does not
+            // consume the visible phase. If the UI itself was stalled after output
+            // began, however, FFmpeg's realtime clock has advanced and the live
+            // queue intentionally kept the newest frame. Subtract that queue age so
+            // the scheduler follows the media position instead of extending past
+            // EOF and freezing on the decoder's final retained frame.
+            double firstFrameQueueAge = _offlineRenderEnabled
+                ? 0
+                : Math.Clamp(
+                    _current?.GetFirstDecodedFrameAgeSeconds() ?? 0,
+                    0,
+                    Math.Max(0, duration - elapsed));
+            _phaseStartSeconds = now - elapsed;
+            _phaseEndSeconds = now + Math.Max(0.05, duration - elapsed - firstFrameQueueAge);
+            _phaseAwaitingFirstFrame = false;
+            _pendingPhaseDurationSeconds = 0;
+            _pendingPhaseElapsedSeconds = 0;
+            _decoderStartupDeadlineSeconds = 0;
+        }
+
+        internal static (bool LoopPlayback, double MaxDecodeDurationSeconds) GetDecoderPlan(
+            bool loopSelectedFile,
+            double clipSeconds,
+            double elapsedSeconds)
+        {
+            double duration = double.IsFinite(clipSeconds) ? Math.Max(0.05, clipSeconds) : 0.05;
+            double elapsed = double.IsFinite(elapsedSeconds)
+                ? Math.Clamp(elapsedSeconds, 0, duration)
+                : 0;
+            double remaining = Math.Max(0.05, duration - elapsed);
+            return (loopSelectedFile, remaining + DecoderLifetimeGraceSeconds);
+        }
+
+        internal double GetTimelineSecondsForSmoke() => GetTimelineSeconds();
 
         private void ResetSchedule()
         {
@@ -4682,6 +5098,10 @@ internal sealed class FileCaptureService : IDisposable
             _phase = _paths.Count == 0 ? Phase.Empty : Phase.Uninitialized;
             _phaseStartSeconds = 0;
             _phaseEndSeconds = 0;
+            _phaseAwaitingFirstFrame = false;
+            _pendingPhaseDurationSeconds = 0;
+            _pendingPhaseElapsedSeconds = 0;
+            _decoderStartupDeadlineSeconds = 0;
             _lastCaptureTimelineSeconds = 0;
             _offlineFrameIndex = 0;
             _probeFailureStreak = 0;
@@ -4781,7 +5201,7 @@ internal sealed class FileCaptureService : IDisposable
 
             if (background)
             {
-                _ = RunBackgroundLongRunning(previous.Dispose, "LifeViz.AutoClipDispose");
+                MediaDisposalQueue.Enqueue(previous, "AutoClip decoder");
             }
             else
             {

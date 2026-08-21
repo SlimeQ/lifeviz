@@ -104,6 +104,7 @@ internal readonly struct RecordingSettings
 internal interface IRecordingWriter : IDisposable
 {
     void WriteFrame(byte[] buffer, int length);
+    void Abort();
 }
 
 internal sealed class RecordingSession : IDisposable
@@ -121,8 +122,12 @@ internal sealed class RecordingSession : IDisposable
     private readonly RecordingSettings _settings;
     private AudioRecordingCapture? _audioCapture;
     private readonly object _errorLock = new();
+    private readonly object _writerLock = new();
+    private IRecordingWriter? _activeWriter;
     private string? _errorMessage;
     private bool _completed;
+    private int _abortRequested;
+    private int _resourcesReleased;
 
     public RecordingSession(string path, int width, int height, int fps, RecordingSettings settings, string? audioDeviceId = null)
     {
@@ -160,9 +165,12 @@ internal sealed class RecordingSession : IDisposable
         _writerTask = Task.Run(ProcessFrames);
     }
 
-    public bool TryEnqueue(byte[] buffer)
+    public bool TryEnqueue(
+        byte[] buffer,
+        bool waitForCapacity = false,
+        bool failOnSaturation = false)
     {
-        if (HasError)
+        if (HasError || _completed || Volatile.Read(ref _abortRequested) != 0)
         {
             ArrayPool<byte>.Shared.Return(buffer);
             return false;
@@ -176,7 +184,19 @@ internal sealed class RecordingSession : IDisposable
 
         try
         {
-            _frames.Add(buffer);
+            bool added = waitForCapacity
+                ? _frames.TryAdd(buffer, TimeSpan.FromSeconds(5))
+                : _frames.TryAdd(buffer);
+            if (!added)
+            {
+                ArrayPool<byte>.Shared.Return(buffer);
+                if (failOnSaturation)
+                {
+                    SetError(new InvalidOperationException(
+                        "The recording encoder queue remained full; recording was stopped to keep rendering responsive."));
+                }
+                return false;
+            }
         }
         catch (InvalidOperationException)
         {
@@ -192,14 +212,30 @@ internal sealed class RecordingSession : IDisposable
         IRecordingWriter? recorder = null;
         try
         {
+            if (Volatile.Read(ref _abortRequested) != 0)
+            {
+                return;
+            }
+
             recorder = _settings.UseFfmpeg
                 ? new FfmpegRecorder(_videoPath, _width, _height, _fps, _settings)
                 : new MediaFoundationRecorder(_videoPath, _width, _height, _fps, _settings);
+            lock (_writerLock)
+            {
+                _activeWriter = recorder;
+            }
+            if (Volatile.Read(ref _abortRequested) != 0)
+            {
+                recorder.Abort();
+            }
             foreach (var buffer in _frames.GetConsumingEnumerable())
             {
                 try
                 {
-                    recorder.WriteFrame(buffer, _frameSize);
+                    if (Volatile.Read(ref _abortRequested) == 0)
+                    {
+                        recorder.WriteFrame(buffer, _frameSize);
+                    }
                 }
                 finally
                 {
@@ -225,6 +261,17 @@ internal sealed class RecordingSession : IDisposable
                     SetError(ex);
                 }
             }
+            lock (_writerLock)
+            {
+                if (ReferenceEquals(_activeWriter, recorder))
+                {
+                    _activeWriter = null;
+                }
+            }
+            while (_frames.TryTake(out byte[]? queuedBuffer))
+            {
+                ArrayPool<byte>.Shared.Return(queuedBuffer);
+            }
         }
     }
 
@@ -239,20 +286,103 @@ internal sealed class RecordingSession : IDisposable
 
     public void Dispose()
     {
-        if (!_completed)
+        if (_completed)
         {
-            _frames.CompleteAdding();
-            try
-            {
-                _writerTask.Wait();
-            }
-            catch (AggregateException ex)
-            {
-                SetError(ex.InnerException ?? ex);
-            }
+            return;
+        }
 
+        _frames.CompleteAdding();
+        bool writerCompleted = WaitForWriter(
+            Volatile.Read(ref _abortRequested) != 0
+                ? TimeSpan.FromSeconds(5)
+                : TimeSpan.FromSeconds(30));
+        if (!writerCompleted)
+        {
+            SetError(new TimeoutException("The recording encoder did not stop within 30 seconds."));
+            Abort();
+            writerCompleted = WaitForWriter(TimeSpan.FromSeconds(5));
+        }
+
+        if (writerCompleted && Volatile.Read(ref _abortRequested) == 0)
+        {
             StopAudioCaptureAndMux();
-            _completed = true;
+        }
+        else
+        {
+            StopAudioCaptureWithoutMux();
+        }
+        _completed = true;
+
+        if (writerCompleted)
+        {
+            ReleaseResources();
+        }
+        else
+        {
+            SetError(new TimeoutException("The recording writer did not exit after it was aborted."));
+            _ = _writerTask.ContinueWith(
+                _ => ReleaseResources(),
+                CancellationToken.None,
+                TaskContinuationOptions.ExecuteSynchronously,
+                TaskScheduler.Default);
+        }
+    }
+
+    public void Abort()
+    {
+        Interlocked.Exchange(ref _abortRequested, 1);
+        try { _frames.CompleteAdding(); } catch (InvalidOperationException) { }
+
+        IRecordingWriter? writer;
+        lock (_writerLock)
+        {
+            writer = _activeWriter;
+        }
+
+        try
+        {
+            writer?.Abort();
+        }
+        catch (Exception ex)
+        {
+            SetError(ex);
+        }
+
+        StopAudioCaptureWithoutMux();
+    }
+
+    private bool WaitForWriter(TimeSpan timeout)
+    {
+        try
+        {
+            return _writerTask.Wait(timeout);
+        }
+        catch (AggregateException ex)
+        {
+            SetError(ex.InnerException ?? ex);
+            return true;
+        }
+    }
+
+    private void StopAudioCaptureWithoutMux()
+    {
+        AudioRecordingCapture? audioCapture = _audioCapture;
+        _audioCapture = null;
+        try
+        {
+            audioCapture?.Dispose();
+        }
+        catch (Exception ex)
+        {
+            SetError(ex);
+        }
+    }
+
+    private void ReleaseResources()
+    {
+        if (Interlocked.Exchange(ref _resourcesReleased, 1) != 0)
+        {
+            return;
         }
 
         _frames.Dispose();
@@ -372,15 +502,33 @@ internal sealed class RecordingSession : IDisposable
         startInfo.ArgumentList.Add("-shortest");
         startInfo.ArgumentList.Add(outputPath);
 
-        using var process = Process.Start(startInfo) ?? throw new InvalidOperationException("Failed to start ffmpeg for audio mux.");
-        string error = process.StandardError.ReadToEnd();
-        process.WaitForExit();
-        if (process.ExitCode != 0)
+        Process process = FfmpegProcessManager.Shared.Start(startInfo);
+        try
         {
-            string trimmed = error.Trim();
-            throw new InvalidOperationException(string.IsNullOrWhiteSpace(trimmed)
-                ? $"ffmpeg audio mux exited with code {process.ExitCode}."
-                : trimmed);
+            Task<string> errorTask = process.StandardError.ReadToEndAsync();
+            if (!process.WaitForExit((int)TimeSpan.FromMinutes(10).TotalMilliseconds))
+            {
+                FfmpegProcessManager.Shared.TerminateAndDispose(
+                    process,
+                    TimeSpan.FromSeconds(2));
+                try { errorTask.Wait(TimeSpan.FromSeconds(1)); } catch { }
+                throw new TimeoutException("ffmpeg audio mux did not finish within 10 minutes.");
+            }
+
+            string error = errorTask.ConfigureAwait(false).GetAwaiter().GetResult();
+            if (process.ExitCode != 0)
+            {
+                string trimmed = error.Trim();
+                throw new InvalidOperationException(string.IsNullOrWhiteSpace(trimmed)
+                    ? $"ffmpeg audio mux exited with code {process.ExitCode}."
+                    : trimmed);
+            }
+        }
+        finally
+        {
+            FfmpegProcessManager.Shared.TerminateAndDispose(
+                process,
+                TimeSpan.FromSeconds(2));
         }
     }
 
@@ -414,7 +562,7 @@ internal sealed class MediaFoundationRecorder : IRecordingWriter
     private long _nextTimestamp;
     private IMFSinkWriter? _writer;
     private int _streamIndex;
-    private bool _finalized;
+    private volatile bool _finalized;
 
     public MediaFoundationRecorder(string path, int width, int height, int fps, RecordingSettings settings)
     {
@@ -577,6 +725,13 @@ internal sealed class MediaFoundationRecorder : IRecordingWriter
         MfInterop.MFShutdown();
     }
 
+    public void Abort()
+    {
+        // Media Foundation has no child process to orphan. Skip finalization and
+        // let the writer thread release its COM objects when its current call returns.
+        _finalized = true;
+    }
+
     private void ConfigureEncoderQuality(RecordingSettings settings)
     {
         if (_writer == null || !settings.UseQualityRateControl)
@@ -668,9 +823,21 @@ internal sealed class FfmpegRecorder : IRecordingWriter
             CreateNoWindow = true
         };
 
-        _process = Process.Start(startInfo) ?? throw new InvalidOperationException("Failed to start ffmpeg.");
-        _stdin = _process.StandardInput.BaseStream;
-        _stderrTask = Task.Run(() => _process.StandardError.ReadToEnd());
+        Process? process = null;
+        try
+        {
+            process = FfmpegProcessManager.Shared.Start(startInfo);
+            _process = process;
+            _stdin = process.StandardInput.BaseStream;
+            _stderrTask = process.StandardError.ReadToEndAsync();
+        }
+        catch
+        {
+            FfmpegProcessManager.Shared.TerminateAndDispose(
+                process,
+                TimeSpan.FromSeconds(2));
+            throw;
+        }
     }
 
     public void WriteFrame(byte[] buffer, int length)
@@ -714,48 +881,69 @@ internal sealed class FfmpegRecorder : IRecordingWriter
             // Ignore close errors.
         }
 
+        bool exited = false;
+        int exitCode = -1;
+        string? exitMessage = null;
         try
         {
-            if (!_process.HasExited)
+            exited = _process.HasExited ||
+                     _process.WaitForExit((int)TimeSpan.FromSeconds(30).TotalMilliseconds);
+            if (exited)
             {
-                _process.WaitForExit();
+                exitCode = _process.ExitCode;
+                if (exitCode != 0)
+                {
+                    exitMessage = BuildExitMessage(exitCode);
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            exitMessage = $"Could not finalize ffmpeg recording: {ex.Message}";
+        }
+        finally
+        {
+            FfmpegProcessManager.Shared.TerminateAndDispose(
+                _process,
+                TimeSpan.FromSeconds(2));
+        }
+
+        if (!exited)
+        {
+            throw new TimeoutException(exitMessage ?? "ffmpeg did not finish the recording within 30 seconds.");
+        }
+        if (exitCode != 0)
+        {
+            throw new InvalidOperationException(exitMessage ?? $"ffmpeg exited with code {exitCode}.");
+        }
+    }
+
+    public void Abort()
+    {
+        FfmpegProcessManager.Shared.TerminateAndDispose(
+            _process,
+            TimeSpan.FromSeconds(2));
+    }
+
+    private string BuildExitMessage(int? knownExitCode = null)
+    {
+        string errorOutput = string.Empty;
+        try
+        {
+            if (_stderrTask.Wait(TimeSpan.FromSeconds(2)))
+            {
+                errorOutput = _stderrTask.ConfigureAwait(false).GetAwaiter().GetResult();
             }
         }
         catch
         {
-            // Ignore wait errors.
-        }
-
-        if (_process.HasExited && _process.ExitCode != 0)
-        {
-            throw new InvalidOperationException(BuildExitMessage());
-        }
-
-        _process.Dispose();
-    }
-
-    private string BuildExitMessage()
-    {
-        string errorOutput = string.Empty;
-        if (_stderrTask.IsCompletedSuccessfully)
-        {
-            errorOutput = _stderrTask.Result;
-        }
-        else
-        {
-            try
-            {
-                errorOutput = _process.StandardError.ReadToEnd();
-            }
-            catch
-            {
-                errorOutput = string.Empty;
-            }
+            errorOutput = string.Empty;
         }
 
         string trimmed = errorOutput.Trim();
+        int exitCode = knownExitCode ?? _process.ExitCode;
         return string.IsNullOrWhiteSpace(trimmed)
-            ? $"ffmpeg exited with code {_process.ExitCode}."
+            ? $"ffmpeg exited with code {exitCode}."
             : trimmed;
     }
 

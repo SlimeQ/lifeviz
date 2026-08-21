@@ -8,24 +8,31 @@ public static class Program
     [STAThread]
     public static void Main(string[] args)
     {
-        // Enable Per-Monitor V2 DPI Awareness before any WPF code runs
-        NativeMethods.SetProcessDpiAwarenessContext(NativeMethods.DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
-
-        if (SmokeTestRunner.TryRun(args, out int exitCode))
+        try
         {
-            Environment.ExitCode = exitCode;
-            return;
-        }
+            // Enable Per-Monitor V2 DPI Awareness before any WPF code runs
+            NativeMethods.SetProcessDpiAwarenessContext(NativeMethods.DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
 
-        if (DiagnosticTestRunner.TryRun(args, out exitCode))
+            if (SmokeTestRunner.TryRun(args, out int exitCode))
+            {
+                Environment.ExitCode = exitCode;
+                return;
+            }
+
+            if (DiagnosticTestRunner.TryRun(args, out exitCode))
+            {
+                Environment.ExitCode = exitCode;
+                return;
+            }
+
+            var app = new App();
+            app.InitializeComponent();
+            app.Run();
+        }
+        finally
         {
-            Environment.ExitCode = exitCode;
-            return;
+            FfmpegProcessManager.Shared.Shutdown(TimeSpan.FromSeconds(3));
         }
-
-        var app = new App();
-        app.InitializeComponent();
-        app.Run();
     }
 
     private static class NativeMethods

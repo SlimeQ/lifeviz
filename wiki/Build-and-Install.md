@@ -5,7 +5,9 @@
 - .NET SDK 9 (for local dev & running)
 - Visual Studio Build Tools 2022 or Visual Studio with MSBuild & ClickOnce components (for publishing)
 - GitHub CLI (`gh`) authenticated to your repo account (required only for pushing GitHub releases)
-- `ffmpeg` on PATH (required for auto-transcoding unsupported video file sources and lossless FFV1 recording)
+- `ffmpeg` on PATH (required for file-video/audio decode, probes, recording, and audio muxing)
+
+LifeViz resolves `ffmpeg.exe` once and launches it through a centralized child-process manager. Standard direct installs continue to use the executable discovered beside the app or on `PATH`. If that executable is a Chocolatey shim under `C:\ProgramData\chocolatey\bin`, LifeViz safely resolves the real package binary under Chocolatey's `lib` directory and launches it directly, avoiding an extra shim process for every decode/probe/mux operation. No transcode or frame cache is written by this resolution step.
 
 ## Local Development
 
@@ -41,6 +43,7 @@ dotnet bin\Debug\net9.0-windows-sbx\lifeviz.dll --smoke-test gpu-sim
 dotnet bin\Debug\net9.0-windows-sbx\lifeviz.dll --smoke-test gpu-source
 dotnet bin\Debug\net9.0-windows-sbx\lifeviz.dll --smoke-test source-reset
 dotnet bin\Debug\net9.0-windows-sbx\lifeviz.dll --smoke-test gpu-render
+dotnet bin\Debug\net9.0-windows-sbx\lifeviz.dll --smoke-test gpu-snapshot-order
 dotnet bin\Debug\net9.0-windows-sbx\lifeviz.dll --smoke-test profile-mainloop
 dotnet bin\Debug\net9.0-windows-sbx\lifeviz.dll --smoke-test profile-240
 dotnet bin\Debug\net9.0-windows-sbx\lifeviz.dll --smoke-test profile-480
@@ -70,6 +73,7 @@ dotnet bin\Debug\net9.0-windows-sbx\lifeviz.dll --smoke-test frame-pump-thread-s
 dotnet bin\Debug\net9.0-windows-sbx\lifeviz.dll --smoke-test dimensions
 dotnet bin\Debug\net9.0-windows-sbx\lifeviz.dll --smoke-test shutdown
 dotnet bin\Debug\net9.0-windows-sbx\lifeviz.dll --smoke-test startup
+dotnet bin\Debug\net9.0-windows-sbx\lifeviz.dll --smoke-test ffmpeg-lifecycle
 dotnet bin\Debug\net9.0-windows-sbx\lifeviz.dll --smoke-test all
 ```
 
@@ -94,6 +98,8 @@ dotnet bin\Debug\net9.0-windows-sbx\lifeviz.dll --smoke-test all
 - `gpu-render` launches a hidden `MainWindow` and verifies that the real GPU composite pipeline initializes through the normal render backend path.
 - `sim-group-inline-presentation` now uses the minimal repro stack for the inline flicker bug: rainbow background, inline `Sim Group` with `Pixel Sort`, and a portrait-style static source above it at `240p`. It has a dynamic phase that requires the presented output to keep changing with the evolving scene, a static phase that fails unless the presented frame stays bit-stable for the whole dwell window, and a redraw-pressure phase that hammers the chrome/UI invalidation path while manual redraw requests and frame submits keep running, failing unless the presented frame stays stable with zero inline GPU-present fallbacks.
 - `sim-group-inline-presentation` also includes a real file-backed `480p` hover phase plus an exact-repro `480p` phase that uses the copied rainbow JPG and converted Mona Lisa PNG from `Assets/SmokeRepro`. The exact phase keeps the real three-layer stack static and fails unless both the resolved inline composite and the presented frame remain bit-stable through hover pressure. It now also asserts that the inline scene was handed to presentation through the dedicated GPU snapshot ring instead of directly through a live source-compositor shared texture.
+- `gpu-snapshot-order` is the deterministic inline-snapshot ordering gate. It encodes increasing frame IDs across every pixel of an opaque top layer above an inline Sim Group, adds redraw pressure, and forcibly exercises both producer- and consumer-query not-ready paths until the consumer ring saturates. Repeated IDs are allowed while the GPU catches up. The run fails on backwards/future IDs, any torn frame whose pixels disagree on the ID, insufficient presentation progress, excessive lag, inadequate producer-handle rotation, missing held snapshots, insufficient lease retirement/consumer occupancy, failure to drain active consumer queries, repeated paced redraw amplification, or shared-resource open counts beyond the per-handle cache allowance.
+- `dimensions` changes project FPS through the Scene Editor path and verifies that the automatic live-video decode cap follows the new scene rate, so existing sessions cannot remain stuck at an obsolete cap. It also asserts Auto and explicit-cap resolution plus the exact generated filter order/string: the live unknown-rate-safe `fps` expression precedes scale/crop, while offline scale/crop precedes exact export FPS. These are command/filter-plan assertions, not an end-to-end decode of an unknown-rate media file or a test of actual adaptive decoder dimensions.
 - `current-scene-hover-presentation` loads the saved scene, applies hover-style chrome invalidation pressure while the live frame pump is running, and compares presented-frame delta statistics against a baseline window. It is useful when an interaction-only flicker still does not show up in the synthetic sim-group scene.
 - `profile-mainloop` runs the real frame loop against a hidden synthetic scene, writes a JSON timing report to `%LOCALAPPDATA%\lifeviz\profiles` in normal app runs, and writes to `bin\Debug\net9.0-windows-sbx\profiles\` in smoke-test mode so local test runs stay self-contained. The exported report also includes frame-gap spike counters (`>25ms`, `>33ms`, `>50ms`) so pacing regressions can be diagnosed separately from average stage cost.
 - `profile-mainloop-sim-group` runs that same hidden-scene profiler with an embedded `Sim Group` in the synthetic scene, which is the fastest way to compare inline scene-stack sim cost against the plain source-stack baseline after renderer changes.
@@ -120,7 +126,8 @@ dotnet bin\Debug\net9.0-windows-sbx\lifeviz.dll --smoke-test all
 - `dimensions` applies a live height/depth change through `MainWindow`, forces the reference simulation layer into `RGB Channel Bins`, then drives the real Scene Editor height dropdown in both Live Mode and deferred Apply mode, and verifies that every simulation layer plus the presentation surface resize together.
 - `shutdown` opens the real `MainWindow`, opens the Scene Editor, then closes the main window and fails if close-time teardown captures any exception or if the owned editor-close path throws.
 - `startup` launches `MainWindow` in a dedicated smoke-test mode that skips loading the persisted project plus file/video/audio capture pipelines, so WPF/render startup can be validated in isolation and should exit quickly.
-- `all` runs `gpu-sim` plus the combined GPU handoff/passthrough-render/source/render UI smoke suite.
+- `ffmpeg-lifecycle` launches a controlled FFmpeg child through an isolated process manager, verifies that the child is tracked, closes the manager's Windows Job Object, and fails if the child remains alive. It also exercises direct FFmpeg executable resolution, including Chocolatey shim bypass when applicable.
+- `all` runs `gpu-sim` plus the combined GPU handoff/passthrough-render/source/render UI smoke suite. That combined UI suite includes `gpu-snapshot-order`, including its forced producer/consumer not-ready and final consumer-query drain checks.
 
 ## Normal-Startup Diagnostics
 

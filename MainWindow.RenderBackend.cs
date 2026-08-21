@@ -228,6 +228,9 @@ public partial class MainWindow
 
         public int PresentationDrawCount => _presentationBackend.DrawCount;
 
+        public int GetActiveSharedUnderlayCopyQueryCountForSmoke()
+            => _presentationBackend.GetActiveSharedUnderlayCopyQueryCountForSmoke();
+
         public void Dispose()
         {
             _gpuSourceCompositor.Dispose();

@@ -1,6 +1,8 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
+using System.Linq;
 using System.Runtime.InteropServices;
 using System.Threading;
 using System.Windows;
@@ -17,6 +19,8 @@ namespace lifeviz;
 internal sealed class GpuPresentationBackend : IDisposable
 {
     private const int MaxSimulationLayers = 8;
+    private const int SharedUnderlayCopyQueryCount = 3;
+    private static readonly TimeSpan SharedUnderlayCopyTimeout = TimeSpan.FromSeconds(2);
 
     private enum PresentationBlendMode
     {
@@ -127,10 +131,14 @@ internal sealed class GpuPresentationBackend : IDisposable
     private bool _diagnosticCaptureLogged;
     private bool _diagnosticCaptureMissingLogged;
     private ID3D11Texture2D? _sharedUnderlayTexture;
-    private ID3D11ShaderResourceView? _sharedUnderlayTextureView;
+    private readonly Dictionary<IntPtr, ID3D11Texture2D> _sharedUnderlayTexturesByHandle = new();
     private IntPtr _underlaySharedHandle;
-    private IntPtr _openedUnderlaySharedHandle;
     private bool _underlayUsesSharedTexture;
+    private GpuSurfaceLease? _pendingSharedUnderlayLease;
+    private readonly ID3D11Query?[] _sharedUnderlayCopyQueries = new ID3D11Query?[SharedUnderlayCopyQueryCount];
+    private readonly GpuSurfaceLease?[] _sharedUnderlayCopyLeases = new GpuSurfaceLease?[SharedUnderlayCopyQueryCount];
+    private readonly long[] _sharedUnderlayCopyTimestamps = new long[SharedUnderlayCopyQueryCount];
+    private bool _sharedUnderlaySynchronizationFaulted;
     private int _simulationLayerCount;
     private bool _finalCompositePending;
     private bool _useFinalComposite;
@@ -190,11 +198,41 @@ internal sealed class GpuPresentationBackend : IDisposable
     internal static int CompositePipelineInitializationCount => _compositePipelineInitializationCount;
 
     private static int _compositePipelineInitializationCount;
+    private static int _sharedUnderlayConsumerNotReadyCount;
+    private static int _sharedUnderlayConsumerRetiredCount;
+    private static int _sharedUnderlayConsumerMaxInFlight;
+    private static int _forcedSharedUnderlayConsumerNotReadyChecks;
+    private static int _sharedUnderlayResourceOpenCount;
 
     internal static void ResetSmokeCounters()
     {
         Interlocked.Exchange(ref _compositePipelineInitializationCount, 0);
+        ResetSharedUnderlaySynchronizationSmokeCounters();
     }
+
+    internal static void ResetSharedUnderlaySynchronizationSmokeCounters()
+    {
+        Interlocked.Exchange(ref _sharedUnderlayConsumerNotReadyCount, 0);
+        Interlocked.Exchange(ref _sharedUnderlayConsumerRetiredCount, 0);
+        Interlocked.Exchange(ref _sharedUnderlayConsumerMaxInFlight, 0);
+        Interlocked.Exchange(ref _forcedSharedUnderlayConsumerNotReadyChecks, 0);
+        Interlocked.Exchange(ref _sharedUnderlayResourceOpenCount, 0);
+    }
+
+    internal static void ForceSharedUnderlayConsumerNotReadyChecksForSmoke(int count)
+    {
+        Interlocked.Exchange(
+            ref _forcedSharedUnderlayConsumerNotReadyChecks,
+            App.IsSmokeTestMode ? Math.Max(0, count) : 0);
+    }
+
+    internal static (int notReadyChecks, int retiredLeases, int maxInFlight) GetSharedUnderlaySynchronizationSmokeStats()
+        => (Volatile.Read(ref _sharedUnderlayConsumerNotReadyCount),
+            Volatile.Read(ref _sharedUnderlayConsumerRetiredCount),
+            Volatile.Read(ref _sharedUnderlayConsumerMaxInFlight));
+
+    internal static int GetSharedUnderlayResourceOpenCountForSmoke()
+        => Volatile.Read(ref _sharedUnderlayResourceOpenCount);
 
     public bool SupportsGpuSimulationComposition => true;
 
@@ -257,6 +295,7 @@ internal sealed class GpuPresentationBackend : IDisposable
 
         lock (_sync)
         {
+            RetirePendingSharedUnderlayLease();
             Buffer.BlockCopy(pixelBuffer, 0, _simulationUploadBuffer, 0, requiredLength);
             _simulationPending = true;
             _useFinalComposite = false;
@@ -319,6 +358,7 @@ internal sealed class GpuPresentationBackend : IDisposable
         bool hasUnderlay = underlayBuffer != null || underlaySurface != null;
         if ((layers.Count == 0 && !hasUnderlay) || layers.Count > MaxSimulationLayers || _surfaceWidth <= 0 || _surfaceHeight <= 0)
         {
+            underlaySurface?.Lease?.Retire();
             return false;
         }
 
@@ -350,6 +390,7 @@ internal sealed class GpuPresentationBackend : IDisposable
 
                 if (layer.Buffer == null || layer.Buffer.Length < requiredLength)
                 {
+                    underlaySurface?.Lease?.Retire();
                     return false;
                 }
 
@@ -375,17 +416,21 @@ internal sealed class GpuPresentationBackend : IDisposable
                 underlaySurface.Height == _surfaceHeight;
             if (useSharedUnderlay)
             {
+                ReplacePendingSharedUnderlayLease(underlaySurface!.Lease);
                 _underlayUsesSharedTexture = true;
-                _underlaySharedHandle = underlaySurface!.SharedTextureHandle;
+                _underlaySharedHandle = underlaySurface.SharedTextureHandle;
                 _underlayPending = false;
             }
             else if (underlayBuffer != null)
             {
                 if (underlayBuffer.Length < requiredLength)
                 {
+                    underlaySurface?.Lease?.Retire();
                     return false;
                 }
 
+                underlaySurface?.Lease?.Retire();
+                RetirePendingSharedUnderlayLease();
                 _underlayUploadBuffer ??= new byte[requiredLength];
                 if (_underlayUploadBuffer.Length != requiredLength)
                 {
@@ -399,6 +444,8 @@ internal sealed class GpuPresentationBackend : IDisposable
             }
             else
             {
+                underlaySurface?.Lease?.Retire();
+                RetirePendingSharedUnderlayLease();
                 _underlayUsesSharedTexture = false;
                 _underlaySharedHandle = IntPtr.Zero;
                 DisposeSharedUnderlayResource();
@@ -527,6 +574,7 @@ internal sealed class GpuPresentationBackend : IDisposable
 
             EnsureTextureResources(e.Device);
             EnsureCompositePipeline(e.Device);
+            PollSharedUnderlayCopyQueries(e);
 
             if (_simulationTexture == null || e.Surface.ColorTexture == null)
             {
@@ -592,7 +640,19 @@ internal sealed class GpuPresentationBackend : IDisposable
                         EnsureSharedUnderlayResource(e.Device);
                         if (_sharedUnderlayTexture != null && _underlayTexture != null)
                         {
-                            e.Context.CopyResource(_underlayTexture, _sharedUnderlayTexture);
+                            if (!TryCopySharedUnderlay(e))
+                            {
+                                // All three consumer queries are still in flight.
+                                // Render the private underlay from the prior draw and
+                                // retry on a later invalidation; never reuse the
+                                // producer slot before its lease retires.
+                                _drawingSurface.Invalidate();
+                                RenderFinalCompositePass(e);
+                                _drawCount++;
+                                _gpuCompositeDrawCount++;
+                                CapturePresentedFrameForSmokeIfEnabled(e);
+                                return;
+                            }
                         }
                     }
 
@@ -634,6 +694,15 @@ internal sealed class GpuPresentationBackend : IDisposable
             if (App.IsSmokeTestMode || App.IsDiagnosticTestMode)
             {
                 CapturePresentedFrameForSmoke(e);
+            }
+
+            if (!_sharedUnderlaySynchronizationFaulted &&
+                ActiveSharedUnderlayCopyQueryCount() >= SharedUnderlayCopyQueryCount)
+            {
+                // Normal frames poll retirement on the next logical draw. Only a
+                // saturated ring needs an extra redraw, otherwise every submission
+                // would be presented twice merely to poll a query.
+                _drawingSurface.Invalidate();
             }
         }
     }
@@ -909,17 +978,178 @@ internal sealed class GpuPresentationBackend : IDisposable
             return;
         }
 
-        if (_sharedUnderlayTextureView != null &&
-            _sharedUnderlayTexture != null &&
-            _openedUnderlaySharedHandle == _underlaySharedHandle)
+        if (_sharedUnderlayTexturesByHandle.TryGetValue(_underlaySharedHandle, out ID3D11Texture2D? cachedTexture))
+        {
+            _sharedUnderlayTexture = cachedTexture;
+            return;
+        }
+
+        _sharedUnderlayTexture = device.OpenSharedResource1<ID3D11Texture2D>(_underlaySharedHandle);
+        _sharedUnderlayTexturesByHandle.Add(_underlaySharedHandle, _sharedUnderlayTexture);
+        Interlocked.Increment(ref _sharedUnderlayResourceOpenCount);
+    }
+
+    private void ReplacePendingSharedUnderlayLease(GpuSurfaceLease? lease)
+    {
+        if (ReferenceEquals(_pendingSharedUnderlayLease, lease))
         {
             return;
         }
 
-        DisposeSharedUnderlayResource();
-        _sharedUnderlayTexture = device.OpenSharedResource1<ID3D11Texture2D>(_underlaySharedHandle);
-        _sharedUnderlayTextureView = device.CreateShaderResourceView(_sharedUnderlayTexture);
-        _openedUnderlaySharedHandle = _underlaySharedHandle;
+        _pendingSharedUnderlayLease?.Retire();
+        _pendingSharedUnderlayLease = lease;
+    }
+
+    private void RetirePendingSharedUnderlayLease()
+    {
+        _pendingSharedUnderlayLease?.Retire();
+        _pendingSharedUnderlayLease = null;
+    }
+
+    private void EnsureSharedUnderlayCopyQueries(ID3D11Device1 device)
+    {
+        for (int i = 0; i < SharedUnderlayCopyQueryCount; i++)
+        {
+            _sharedUnderlayCopyQueries[i] ??= device.CreateQuery(new QueryDescription(QueryType.Event));
+        }
+    }
+
+    private void PollSharedUnderlayCopyQueries(DrawEventArgs e)
+    {
+        for (int i = 0; i < SharedUnderlayCopyQueryCount; i++)
+        {
+            GpuSurfaceLease? lease = _sharedUnderlayCopyLeases[i];
+            ID3D11Query? query = _sharedUnderlayCopyQueries[i];
+            if (lease == null || query == null)
+            {
+                continue;
+            }
+
+            int code;
+            if (App.IsSmokeTestMode &&
+                Volatile.Read(ref _forcedSharedUnderlayConsumerNotReadyChecks) > 0)
+            {
+                Interlocked.Decrement(ref _forcedSharedUnderlayConsumerNotReadyChecks);
+                code = 1;
+            }
+            else
+            {
+                code = e.Context.GetData(query, IntPtr.Zero, 0, AsyncGetDataFlags.DoNotFlush).Code;
+            }
+
+            if (code == 0)
+            {
+                _sharedUnderlayCopyLeases[i] = null;
+                _sharedUnderlayCopyTimestamps[i] = 0;
+                lease.Retire();
+                Interlocked.Increment(ref _sharedUnderlayConsumerRetiredCount);
+            }
+            else if (code > 0)
+            {
+                Interlocked.Increment(ref _sharedUnderlayConsumerNotReadyCount);
+                if (_sharedUnderlayCopyTimestamps[i] > 0 &&
+                    Stopwatch.GetElapsedTime(_sharedUnderlayCopyTimestamps[i]) >= SharedUnderlayCopyTimeout &&
+                    !_sharedUnderlaySynchronizationFaulted)
+                {
+                    // S_FALSE does not prove that the consumer has stopped reading,
+                    // so keep every active lease owned until the presentation device
+                    // is reset. Stop accepting new shared copies and hold the last
+                    // private underlay instead of either reusing a slot or spinning.
+                    _sharedUnderlaySynchronizationFaulted = true;
+                    Logger.Warn("GPU presentation consumer copy did not complete within two seconds; holding the last presented frame until the presentation device resets.");
+                }
+            }
+            else
+            {
+                // A failed query is not proof that the GPU stopped reading the
+                // shared texture. Keep the lease owned and fail closed until the
+                // presentation device/resources are actually discarded; only that
+                // reset can safely retire an indeterminate copy.
+                if (!_sharedUnderlaySynchronizationFaulted)
+                {
+                    _sharedUnderlaySynchronizationFaulted = true;
+                    Logger.Warn($"GPU presentation consumer query failed (HRESULT 0x{code:X8}); holding all shared-surface leases until the presentation device resets.");
+                }
+            }
+        }
+    }
+
+    private bool TryCopySharedUnderlay(DrawEventArgs e)
+    {
+        if (_sharedUnderlayTexture == null || _underlayTexture == null)
+        {
+            return false;
+        }
+
+        GpuSurfaceLease? lease = _pendingSharedUnderlayLease;
+        if (_sharedUnderlaySynchronizationFaulted)
+        {
+            // This lease has never been read by the consumer, so it is safe to
+            // retire immediately while the already-private prior frame is held.
+            RetirePendingSharedUnderlayLease();
+            return true;
+        }
+
+        if (lease == null)
+        {
+            // Legacy shared surfaces do not carry a producer lease. Keep their
+            // established copy path; synchronized inline snapshots always do.
+            e.Context.CopyResource(_underlayTexture, _sharedUnderlayTexture);
+            return true;
+        }
+
+        EnsureSharedUnderlayCopyQueries(e.Device);
+        int queryIndex = -1;
+        for (int i = 0; i < SharedUnderlayCopyQueryCount; i++)
+        {
+            if (_sharedUnderlayCopyLeases[i] == null && _sharedUnderlayCopyQueries[i] != null)
+            {
+                queryIndex = i;
+                break;
+            }
+        }
+
+        if (queryIndex < 0)
+        {
+            return false;
+        }
+
+        e.Context.CopyResource(_underlayTexture, _sharedUnderlayTexture);
+        e.Context.End(_sharedUnderlayCopyQueries[queryIndex]!);
+        _sharedUnderlayCopyLeases[queryIndex] = lease;
+        _sharedUnderlayCopyTimestamps[queryIndex] = Stopwatch.GetTimestamp();
+        _pendingSharedUnderlayLease = null;
+
+        int inFlight = _sharedUnderlayCopyLeases.Count(candidate => candidate != null);
+        int observedMax;
+        while (inFlight > (observedMax = Volatile.Read(ref _sharedUnderlayConsumerMaxInFlight)))
+        {
+            if (Interlocked.CompareExchange(ref _sharedUnderlayConsumerMaxInFlight, inFlight, observedMax) == observedMax)
+            {
+                break;
+            }
+        }
+
+        return true;
+    }
+
+    private int ActiveSharedUnderlayCopyQueryCount()
+        => _sharedUnderlayCopyLeases.Count(lease => lease != null);
+
+    internal int GetActiveSharedUnderlayCopyQueryCountForSmoke()
+    {
+        lock (_sync)
+        {
+            return ActiveSharedUnderlayCopyQueryCount();
+        }
+    }
+
+    private void CapturePresentedFrameForSmokeIfEnabled(DrawEventArgs e)
+    {
+        if (App.IsSmokeTestMode || App.IsDiagnosticTestMode)
+        {
+            CapturePresentedFrameForSmoke(e);
+        }
     }
 
     private static FinalCompositeShaderParameters BuildFinalCompositeParameters(
@@ -1058,11 +1288,13 @@ internal sealed class GpuPresentationBackend : IDisposable
     private void DisposeDeviceResources()
     {
         DisposeTextureResources();
+        DisposeSharedUnderlayCopyQueries();
         DisposeCompositePipeline();
     }
 
     private void DisposeTextureResources()
     {
+        RetirePendingSharedUnderlayLease();
         DisposeSharedUnderlayResource();
         _smokeReadbackTexture?.Dispose();
         _smokeReadbackTexture = null;
@@ -1087,13 +1319,30 @@ internal sealed class GpuPresentationBackend : IDisposable
         }
     }
 
+    private void DisposeSharedUnderlayCopyQueries()
+    {
+        for (int i = 0; i < SharedUnderlayCopyQueryCount; i++)
+        {
+            _sharedUnderlayCopyQueries[i]?.Dispose();
+            _sharedUnderlayCopyQueries[i] = null;
+            _sharedUnderlayCopyTimestamps[i] = 0;
+            GpuSurfaceLease? lease = _sharedUnderlayCopyLeases[i];
+            _sharedUnderlayCopyLeases[i] = null;
+            lease?.Retire();
+        }
+
+        _sharedUnderlaySynchronizationFaulted = false;
+    }
+
     private void DisposeSharedUnderlayResource()
     {
-        _sharedUnderlayTextureView?.Dispose();
-        _sharedUnderlayTextureView = null;
-        _sharedUnderlayTexture?.Dispose();
+        foreach (ID3D11Texture2D texture in _sharedUnderlayTexturesByHandle.Values)
+        {
+            texture.Dispose();
+        }
+
+        _sharedUnderlayTexturesByHandle.Clear();
         _sharedUnderlayTexture = null;
-        _openedUnderlaySharedHandle = IntPtr.Zero;
     }
 
     private void DisposeSharedSimulationLayerResource(int index)

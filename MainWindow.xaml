@@ -468,7 +468,7 @@
                     </MenuItem>
                     <MenuItem Header="Video Decode FPS"
                               x:Name="VideoDecodeFpsMenu">
-                        <MenuItem Header="Full"
+                        <MenuItem Header="Auto (scene FPS)"
                                   Tag="0"
                                   IsCheckable="True"
                                   Click="VideoDecodeFpsItem_Click" />
