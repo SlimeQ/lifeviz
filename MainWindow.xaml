@@ -36,6 +36,9 @@
                 <MenuItem x:Name="OfflineRenderMenuItem"
                           Header="Render Fixed Duration..."
                           Click="OfflineRenderMenuItem_Click" />
+                <MenuItem x:Name="RecordingOutputFolderMenuItem"
+                          Header="Recording Output Folder..."
+                          Click="RecordingOutputFolderMenuItem_Click" />
                 <MenuItem Header="Recording Quality"
                           x:Name="RecordingQualityMenu">
                     <MenuItem Header="Lossless (FFV1, MKV)"

@@ -527,6 +527,7 @@
                         <Button Content="Window" Click="AddRootWindow_Click" />
                         <Button Content="Webcam" Click="AddRootWebcam_Click" />
                         <Button Content="File" Click="AddRootFile_Click" />
+                        <Button Content="Color Plane" Click="AddRootColorPlane_Click" />
                         <Button Content="YouTube" Click="AddRootYoutube_Click" />
                         <Button Content="Sequence" Click="AddRootSequence_Click" />
                         <Button Content="AutoClip" Click="AddRootAutoClip_Click" />
@@ -541,6 +542,7 @@
                         <Button Content="Window" Click="AddChildWindow_Click" />
                         <Button Content="Webcam" Click="AddChildWebcam_Click" />
                         <Button Content="File" Click="AddChildFile_Click" />
+                        <Button Content="Color Plane" Click="AddChildColorPlane_Click" />
                         <Button Content="YouTube" Click="AddChildYoutube_Click" />
                         <Button Content="Sequence" Click="AddChildSequence_Click" />
                         <Button Content="AutoClip" Click="AddChildAutoClip_Click" />
@@ -569,6 +571,7 @@
 
                     <WrapPanel Grid.Row="3" Margin="0,8,0,0">
                         <Button Content="Make Primary"
+                                IsEnabled="{Binding SelectedSource.CanDriveAspect}"
                                 Click="MakePrimary_Click" />
                         <Button Content="Move Up"
                                 Click="MoveUp_Click" />
@@ -732,6 +735,29 @@
                                                            Margin="6,0,0,0"
                                                            VerticalAlignment="Center" />
                                             </StackPanel>
+                                        </WrapPanel>
+
+                                        <WrapPanel Margin="0,0,0,4"
+                                                   Visibility="{Binding IsColorPlane, Converter={StaticResource BoolToVisibility}}">
+                                            <TextBlock Text="Plane Color"
+                                                       VerticalAlignment="Center"
+                                                       Margin="0,0,8,6" />
+                                            <TextBox Text="{Binding ColorHex}"
+                                                     Width="100"
+                                                     Margin="0,0,0,6"
+                                                     LostFocus="ColorPlaneHex_LostFocus"
+                                                     KeyDown="ColorPlaneHex_KeyDown" />
+                                            <Border Width="22"
+                                                    Height="22"
+                                                    Margin="8,0,12,6"
+                                                    VerticalAlignment="Center"
+                                                    BorderBrush="#808080"
+                                                    BorderThickness="1"
+                                                    Background="{Binding ColorHex}" />
+                                            <TextBlock Text="Use #RRGGBB"
+                                                       VerticalAlignment="Center"
+                                                       Foreground="#9A9A9A"
+                                                       Margin="0,0,0,6" />
                                         </WrapPanel>
 
                                         <WrapPanel Margin="0,0,0,4">
@@ -923,7 +949,7 @@
                                         </GroupBox>
 
                                         <WrapPanel Margin="0,0,0,0"
-                                                  IsEnabled="{Binding IsNormalBlend}">
+                                                  IsEnabled="{Binding SupportsKeying}">
                                             <CheckBox Content="Enable Color Mask / Keying (Normal)"
                                                       Margin="0,0,12,6"
                                                       IsChecked="{Binding KeyEnabled}"

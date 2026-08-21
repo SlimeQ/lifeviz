@@ -15,6 +15,16 @@ public partial class App : Application
     public static bool LoadUserConfigInSmokeTest { get; set; }
     public static bool CaptureGpuFallbackBuffersInSmokeTest { get; set; } = true;
 
+    /// <summary>
+    /// Smoke/diagnostic runs normally read every presented frame back from the GPU
+    /// so validation smokes can compare pixels. That readback plus its per-call
+    /// buffer copy is far more expensive than the frame work it sits next to, so
+    /// timing-oriented runs (profile/pacing) turn it off. Leaving it on made
+    /// profiling runs report roughly double the real memory footprint and added
+    /// GPU stalls that do not exist in the shipping app.
+    /// </summary>
+    public static bool CapturePresentedFramesForValidation { get; set; } = true;
+
     public App()
     {
         DispatcherUnhandledException += (_, args) =>

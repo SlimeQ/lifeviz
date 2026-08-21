@@ -84,6 +84,37 @@ public partial class MainWindow : Window
     private const double DefaultAudioReactiveSeedCooldownMs = 180.0;
     private const int MaxAudioReactiveSeedBurstsPerStep = 64;
     private const int MaxSimulationStepsPerRender = 8;
+
+    // Live frame-pump cap relative to the display refresh rate. Presentation runs on
+    // WPF composition, so frames built beyond this are discarded before being drawn.
+    // The headroom keeps the pump comfortably ahead of composition so an independent
+    // clock cannot beat against vsync and drop presented frames.
+    private const double DefaultPresentationRefreshCapHeadroom = 1.5;
+    private const double MinimumPresentationRefreshCapFps = 60.0;
+    private const double DisplayRefreshCacheSeconds = 5.0;
+
+    private static readonly bool PresentationRefreshCapEnabled =
+        !string.Equals(Environment.GetEnvironmentVariable("LIFEVIZ_DISABLE_REFRESH_CAP"), "1", StringComparison.Ordinal);
+
+    private static readonly double PresentationRefreshCapHeadroom = ResolvePresentationRefreshCapHeadroom();
+
+    private double _cachedDisplayRefreshHz;
+    private long _cachedDisplayRefreshTimestamp;
+
+    private static double ResolvePresentationRefreshCapHeadroom()
+    {
+        string? raw = Environment.GetEnvironmentVariable("LIFEVIZ_REFRESH_CAP_HEADROOM");
+        if (!string.IsNullOrWhiteSpace(raw) &&
+            double.TryParse(raw, NumberStyles.Float, CultureInfo.InvariantCulture, out double parsed) &&
+            parsed >= 1.0 &&
+            parsed <= 8.0)
+        {
+            return parsed;
+        }
+
+        return DefaultPresentationRefreshCapHeadroom;
+    }
+
     private const double MaxRgbHueShiftSpeedDegreesPerSecond = 180.0;
     private const int DefaultDecoderThreadLimit = 0;
     private const int DefaultVideoDecodeFpsLimit = 0;
@@ -160,6 +191,7 @@ public partial class MainWindow : Window
     private long _recordingFramesSubmitted;
     private byte[]? _lastRecordingFrame;
     private RecordingQuality _recordingQuality = RecordingQuality.High;
+    private string? _recordingOutputFolder;
     private string? _recordingPath;
     private ImageSource? _recordingOverlayIcon;
     private IReadOnlyList<WindowHandleInfo> _cachedWindows = Array.Empty<WindowHandleInfo>();
@@ -313,6 +345,13 @@ public partial class MainWindow : Window
     private int _pendingInlineSimulationStepsThisFrame;
     private DateTime _lastInlinePresentationFallbackLogUtc = DateTime.MinValue;
     private int _inlineGpuPresentationFallbackCount;
+
+    // Inline-present path attribution counters. The rewind diagnostic reads these
+    // to attribute any presented-frame regression to the branch that produced it.
+    private int _inlinePresentGpuOkCount;
+    private int _inlinePresentCpuCount;
+    private int _inlinePresentNoSurfaceCount;
+    private int _inlinePresentFellThroughCount;
 
     public MainWindow()
     {
@@ -1604,9 +1643,109 @@ public partial class MainWindow : Window
     private void ResetInlinePresentationDiagnosticsForSmoke()
     {
         _inlineGpuPresentationFallbackCount = 0;
+        _inlinePresentGpuOkCount = 0;
+        _inlinePresentCpuCount = 0;
+        _inlinePresentNoSurfaceCount = 0;
+        _inlinePresentFellThroughCount = 0;
         _lastInlinePresentationFallbackLogUtc = DateTime.MinValue;
         GpuPresentationSurfaceSnapshotter.ResetSmokeCounters();
         GpuPresentationBackend.ResetSharedUnderlaySynchronizationSmokeCounters();
+    }
+
+    private string DescribeInlinePresentPathCountersForSmoke() =>
+        $"gpuOk={_inlinePresentGpuOkCount}, cpuFallbackPresents={_inlinePresentCpuCount}, " +
+        $"gpuSurfaceFallbacks={_inlineGpuPresentationFallbackCount}, noGpuSurface={_inlinePresentNoSurfaceCount}, " +
+        $"fellThrough={_inlinePresentFellThroughCount}";
+
+    /// <summary>
+    /// Watches the real presented output for rewinds: any presented frame whose
+    /// pixel signature matches a frame shown earlier, with different content in
+    /// between. With multiple live video layers the composite never legitimately
+    /// repeats, so a match is direct evidence that presentation handed the screen
+    /// stale content. Counters attribute the event to the present branch used.
+    /// </summary>
+    internal async Task<bool> RunCurrentSceneRewindDetectionSmoke(TimeSpan duration, bool applyHoverPressure = false)
+    {
+        ResetInlinePresentationDiagnosticsForSmoke();
+
+        var lastSeenBySignature = new Dictionary<ulong, int>();
+        var rewindAges = new List<int>();
+        ulong? previousSignature = null;
+        int sampleIndex = 0;
+        int drawSamples = 0;
+        int nullCaptures = 0;
+        var sampleClock = Stopwatch.StartNew();
+        var lastSampleTimestamps = new Queue<(int Index, double Ms)>();
+
+        int hoverIteration = 0;
+        while (sampleClock.Elapsed < duration)
+        {
+            await Task.Delay(8);
+
+            if (applyHoverPressure)
+            {
+                // Mimic a user mousing over the window: chrome invalidations force
+                // extra WPF composition passes between producer submits.
+                ApplyChromeHoverStressForSmoke(hoverIteration++);
+            }
+
+            byte[]? presented = _renderBackend.GetPresentedFrameCopyForSmoke();
+            ulong? signature = ComputeSmokeBufferSignature(presented);
+            if (!signature.HasValue)
+            {
+                nullCaptures++;
+                continue;
+            }
+
+            if (previousSignature.HasValue && signature.Value == previousSignature.Value)
+            {
+                // No new draw since the last sample; not a rewind.
+                continue;
+            }
+
+            drawSamples++;
+            if (lastSeenBySignature.TryGetValue(signature.Value, out int lastIndex))
+            {
+                int age = sampleIndex - lastIndex;
+                if (age >= 3)
+                {
+                    rewindAges.Add(age);
+                    double? ageMs = null;
+                    foreach (var (index, ms) in lastSampleTimestamps)
+                    {
+                        if (index == lastIndex)
+                        {
+                            ageMs = sampleClock.Elapsed.TotalMilliseconds - ms;
+                            break;
+                        }
+                    }
+
+                    Logger.Warn(
+                        $"Presented-frame rewind detected: content from {age} draws ago " +
+                        $"({(ageMs.HasValue ? $"{ageMs.Value:F0} ms" : "age unknown")}) reappeared on screen. " +
+                        $"Paths: {DescribeInlinePresentPathCountersForSmoke()}.");
+                }
+            }
+
+            lastSeenBySignature[signature.Value] = sampleIndex;
+            lastSampleTimestamps.Enqueue((sampleIndex, sampleClock.Elapsed.TotalMilliseconds));
+            while (lastSampleTimestamps.Count > 900)
+            {
+                lastSampleTimestamps.Dequeue();
+            }
+
+            previousSignature = signature;
+            sampleIndex++;
+        }
+
+        var (snapshotCount, distinctSnapshotHandles) = GetInlinePresentationSnapshotStatsForSmoke();
+        Logger.Info(
+            $"Current-scene rewind detection: duration={duration.TotalSeconds:F0}s, drawSamples={drawSamples}, " +
+            $"rewinds={rewindAges.Count}, nullCaptures={nullCaptures}, " +
+            $"rewindAges=[{string.Join(",", rewindAges.Take(32))}]{(rewindAges.Count > 32 ? "..." : string.Empty)}, " +
+            $"snapshotCount={snapshotCount}, distinctSnapshotHandles={distinctSnapshotHandles}, " +
+            $"paths: {DescribeInlinePresentPathCountersForSmoke()}.");
+        return rewindAges.Count == 0;
     }
 
     private int GetInlinePresentationFallbackCountForSmoke() => _inlineGpuPresentationFallbackCount;
@@ -3132,7 +3271,7 @@ public partial class MainWindow : Window
     {
         _currentAspectRatio = _aspectRatioLocked
             ? _lockedAspectRatio
-            : (_sources.Count > 0 ? _sources[0].AspectRatio : DefaultAspectRatio);
+            : ResolveSourceStackAspectRatio(_sources, DefaultAspectRatio);
         ConfigureSimulationLayerEngines(_configuredRows, _configuredDepth, _currentAspectRatio, randomize: true);
         _configuredRows = GetReferenceSimulationEngine().Rows;
         SnapWindowToAspect(preserveHeight: true);
@@ -3356,8 +3495,104 @@ public partial class MainWindow : Window
         double throttledTargetFps = IsUiInteractionThrottled()
             ? Math.Min(Math.Max(_currentFpsFromConfig, 1.0), UiInteractionThrottleFps)
             : Math.Max(_currentFpsFromConfig, 1.0);
+        throttledTargetFps = ApplyPresentationRefreshCap(throttledTargetFps);
         double intervalSeconds = 1.0 / throttledTargetFps;
         return Math.Max(1L, (long)Math.Round(intervalSeconds * Stopwatch.Frequency));
+    }
+
+    /// <summary>
+    /// WPF composition drives the live presentation surface at the display refresh
+    /// rate, so building and submitting frames far above that rate produces work
+    /// that is discarded before it is ever drawn. Capping the live frame pump to a
+    /// small multiple of the refresh rate removes that waste while leaving the
+    /// simulation cadence intact: per-layer catch-up stepping still runs the
+    /// configured number of generations per second, just batched into fewer render
+    /// frames.
+    ///
+    /// The cap is deliberately skipped for offline rendering (which must run as
+    /// fast as it can) and for recording (whose encoder consumes composite frames
+    /// directly rather than through presentation).
+    /// </summary>
+    private double ApplyPresentationRefreshCap(double targetFps)
+    {
+        if (_isOfflineRendering || _isRecording || !PresentationRefreshCapEnabled)
+        {
+            return targetFps;
+        }
+
+        double refreshHz = GetDisplayRefreshHz();
+        if (refreshHz <= 0)
+        {
+            return targetFps;
+        }
+
+        double cap = Math.Max(MinimumPresentationRefreshCapFps, refreshHz * PresentationRefreshCapHeadroom);
+        return Math.Min(targetFps, cap);
+    }
+
+    private double GetDisplayRefreshHz()
+    {
+        long now = Stopwatch.GetTimestamp();
+        if (_cachedDisplayRefreshHz > 0 &&
+            now - _cachedDisplayRefreshTimestamp < Stopwatch.Frequency * DisplayRefreshCacheSeconds)
+        {
+            return _cachedDisplayRefreshHz;
+        }
+
+        double refreshHz = QueryDisplayRefreshHz();
+        _cachedDisplayRefreshHz = refreshHz;
+        _cachedDisplayRefreshTimestamp = now;
+        return refreshHz;
+    }
+
+    private double QueryDisplayRefreshHz()
+    {
+        try
+        {
+            string? deviceName = null;
+            const int MonitorDefaultToNearest = 2;
+            if (_windowHandle != IntPtr.Zero)
+            {
+                IntPtr monitor = MonitorFromWindow(_windowHandle, MonitorDefaultToNearest);
+                if (monitor != IntPtr.Zero)
+                {
+                    var info = new MonitorInfoEx
+                    {
+                        cbSize = Marshal.SizeOf<MonitorInfoEx>(),
+                        szDevice = string.Empty
+                    };
+                    if (GetMonitorInfoEx(monitor, ref info))
+                    {
+                        deviceName = info.szDevice;
+                    }
+                }
+            }
+
+            var mode = new DevMode
+            {
+                dmDeviceName = string.Empty,
+                dmFormName = string.Empty
+            };
+            mode.dmSize = (ushort)Marshal.SizeOf<DevMode>();
+
+            const int EnumCurrentSettings = -1;
+            if (!EnumDisplaySettings(deviceName, EnumCurrentSettings, ref mode))
+            {
+                // Fall back to the primary display when the per-monitor query fails.
+                if (deviceName == null || !EnumDisplaySettings(null, EnumCurrentSettings, ref mode))
+                {
+                    return 0;
+                }
+            }
+
+            // 0 and 1 are documented "hardware default" sentinels, not real rates.
+            return mode.dmDisplayFrequency <= 1 ? 0 : mode.dmDisplayFrequency;
+        }
+        catch (Exception ex)
+        {
+            Logger.Warn($"Display refresh-rate query failed; frame pump cap disabled. {ex.Message}");
+            return 0;
+        }
     }
 
     private bool WaitForFramePumpDelay(long delayTicks)
@@ -3853,6 +4088,7 @@ public partial class MainWindow : Window
 
             if (presentedInlineGpu)
             {
+                _inlinePresentGpuOkCount++;
                 _passthroughCompositedInPixelBuffer = false;
 
                 long inlineEffectStamp = BeginProfileStamp();
@@ -3880,11 +4116,16 @@ public partial class MainWindow : Window
                         $"CpuReadable={composite.Downscaled.Length >= requiredLength}.");
                 }
             }
+            else
+            {
+                _inlinePresentNoSurfaceCount++;
+            }
 
             if (composite.DownscaledWidth == width &&
                 composite.DownscaledHeight == height &&
                 composite.Downscaled.Length >= requiredLength)
             {
+                _inlinePresentCpuCount++;
                 Buffer.BlockCopy(composite.Downscaled, 0, _pixelBuffer, 0, requiredLength);
                 if (_invertComposite)
                 {
@@ -3909,6 +4150,11 @@ public partial class MainWindow : Window
                 EndProfileStamp("record_frame_ms", inlineRecordStamp);
                 return;
             }
+
+            // Inline scene present failed on both the GPU and CPU branches; the
+            // frame falls through to the non-inline path below, which renders
+            // without the scene-stack composite.
+            _inlinePresentFellThroughCount++;
         }
 
         byte[]? passthroughBuffer = null;
@@ -4783,6 +5029,41 @@ public partial class MainWindow : Window
         }
     }
 
+    private void RecordingOutputFolderMenuItem_Click(object sender, RoutedEventArgs e)
+    {
+        if (_isRecording || _isOfflineRendering)
+        {
+            return;
+        }
+
+        string currentFolder = GetRecordingOutputFolder();
+        string defaultFolder = GetDefaultRecordingOutputFolder();
+        var dialog = new OpenFolderDialog
+        {
+            Title = "Choose Recording Output Folder",
+            Multiselect = false,
+            InitialDirectory = Directory.Exists(currentFolder) ? currentFolder : defaultFolder
+        };
+
+        if (dialog.ShowDialog(this) != true || string.IsNullOrWhiteSpace(dialog.FolderName))
+        {
+            return;
+        }
+
+        try
+        {
+            _recordingOutputFolder = Path.GetFullPath(dialog.FolderName);
+            UpdateRecordingUi();
+            SaveConfig();
+            Logger.Info($"Recording output folder changed: {_recordingOutputFolder}");
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(this, $"That recording output folder could not be used.\n\n{ex.Message}",
+                "Recording Output Folder", MessageBoxButton.OK, MessageBoxImage.Error);
+        }
+    }
+
     private void OfflineRenderMenuItem_Click(object sender, RoutedEventArgs e)
     {
         if (_isRecording || _isOfflineRendering || _offlineRenderWindow != null)
@@ -5226,8 +5507,7 @@ public partial class MainWindow : Window
         int fps = Math.Clamp(fpsOverride ?? (int)Math.Round(_currentFpsFromConfig), 1, 144);
         var settings = RecordingSettings.FromQuality(_recordingQuality, targetWidth, targetHeight, fps);
 
-        string folder = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyVideos), "LifeViz");
-        Directory.CreateDirectory(folder);
+        string folder = GetRecordingOutputFolder();
         string extension = settings.FileExtension.StartsWith(".") ? settings.FileExtension : $".{settings.FileExtension}";
         string filePath = Path.Combine(folder, $"lifeviz_{DateTime.Now:yyyyMMdd_HHmmss}{extension}");
         string? recordingAudioDeviceId = offlineRender || IsVideoStackAudioSelection(_selectedAudioDeviceId)
@@ -5236,6 +5516,7 @@ public partial class MainWindow : Window
 
         try
         {
+            Directory.CreateDirectory(folder);
             _recordingSession = new RecordingSession(
                 filePath,
                 targetWidth,
@@ -5248,7 +5529,7 @@ public partial class MainWindow : Window
         {
             Logger.Error("Failed to start recording.", ex);
             _recordingSession = null;
-            ShowRecordingError(ex.Message);
+            ShowRecordingError($"{ex.Message}\n\nOutput folder: {folder}");
             return;
         }
 
@@ -5418,10 +5699,28 @@ public partial class MainWindow : Window
             OfflineRenderMenuItem.IsEnabled = !_isRecording && !_isOfflineRendering;
         }
 
+        if (RecordingOutputFolderMenuItem != null)
+        {
+            RecordingOutputFolderMenuItem.IsEnabled = !_isRecording && !_isOfflineRendering;
+            RecordingOutputFolderMenuItem.ToolTip = $"Current folder: {GetRecordingOutputFolder()}";
+        }
+
         if (TaskbarInfo != null)
         {
             TaskbarInfo.Overlay = _isRecording ? GetRecordingOverlayIcon() : null;
         }
+    }
+
+    private static string GetDefaultRecordingOutputFolder()
+    {
+        return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyVideos), "LifeViz");
+    }
+
+    private string GetRecordingOutputFolder()
+    {
+        return string.IsNullOrWhiteSpace(_recordingOutputFolder)
+            ? GetDefaultRecordingOutputFolder()
+            : _recordingOutputFolder;
     }
 
     private void UpdateRecordingQualityMenuChecks()
@@ -6153,6 +6452,7 @@ public partial class MainWindow : Window
         SourcesMenu.Items.Clear();
 
         SourcesMenu.Items.Add(BuildAddLayerGroupMenuItem(null));
+        SourcesMenu.Items.Add(BuildAddColorPlaneMenuItem(null));
         SourcesMenu.Items.Add(BuildAddWindowMenuItem(null));
         SourcesMenu.Items.Add(BuildAddWebcamMenuItem(null));
         SourcesMenu.Items.Add(BuildAddFileMenuItem(null));
@@ -6840,6 +7140,7 @@ public partial class MainWindow : Window
             }
 
             sourceItem.Items.Add(BuildAddLayerGroupMenuItem(source));
+            sourceItem.Items.Add(BuildAddColorPlaneMenuItem(source));
             sourceItem.Items.Add(BuildAddWindowMenuItem(source));
             sourceItem.Items.Add(BuildAddWebcamMenuItem(source));
             sourceItem.Items.Add(BuildAddFileMenuItem(source));
@@ -6878,6 +7179,9 @@ public partial class MainWindow : Window
         }
 
         var animationsMenu = BuildAnimationsMenu(source);
+        MenuItem? colorPlaneColorItem = source.Type == CaptureSource.SourceType.ColorPlane
+            ? BuildColorPlaneColorMenuItem(source)
+            : null;
 
         MenuItem? restartVideoItem = null;
         bool isVideoLayer = IsVideoSource(source);
@@ -7063,7 +7367,7 @@ public partial class MainWindow : Window
         var primaryItem = new MenuItem
         {
             Header = "Make Primary (adopt aspect)",
-            IsEnabled = index != 0
+            IsEnabled = index != 0 && !source.IsAspectNeutral
         };
         primaryItem.Click += (_, _) => MakePrimarySource(source);
 
@@ -7100,7 +7404,7 @@ public partial class MainWindow : Window
         var keyMenu = new MenuItem
         {
             Header = "Mask / Keying (Normal)",
-            IsEnabled = source.BlendMode == BlendMode.Normal
+            IsEnabled = source.BlendMode == BlendMode.Normal && source.Type != CaptureSource.SourceType.ColorPlane
         };
         var keyEnabledItem = new MenuItem
         {
@@ -7252,6 +7556,10 @@ public partial class MainWindow : Window
 
         sourceItem.Items.Add(blendMenu);
         sourceItem.Items.Add(fitMenu);
+        if (colorPlaneColorItem != null)
+        {
+            sourceItem.Items.Add(colorPlaneColorItem);
+        }
         sourceItem.Items.Add(animationsMenu);
         if (restartVideoItem != null)
         {
@@ -7305,6 +7613,7 @@ public partial class MainWindow : Window
         {
             CaptureSource.SourceType.Webcam => $"{prefix}Camera: {source.DisplayName}",
             CaptureSource.SourceType.File => $"{prefix}File: {source.DisplayName}",
+            CaptureSource.SourceType.ColorPlane => $"{prefix}Color Plane: {FormatHexColor(source.ColorPlaneR, source.ColorPlaneG, source.ColorPlaneB)}",
             CaptureSource.SourceType.VideoSequence => $"{prefix}Video Sequence: {source.DisplayName}",
             CaptureSource.SourceType.AutoClip => $"{prefix}AutoClip: {source.DisplayName}",
             CaptureSource.SourceType.Group => $"{prefix}Group: {source.DisplayName}",
@@ -8109,7 +8418,10 @@ public partial class MainWindow : Window
             return;
         }
 
-        if (!IsVideoSource(source))
+        bool isStreamingFile = source.Type == CaptureSource.SourceType.File &&
+                               !string.IsNullOrWhiteSpace(source.FilePath) &&
+                               _fileCapture.IsStreamingSource(source.FilePath);
+        if (!IsVideoSource(source) && !isStreamingFile)
         {
             return;
         }
@@ -9275,7 +9587,7 @@ public partial class MainWindow : Window
             return false;
         }
 
-        double target = _sources.Count > 0 ? _sources[0].AspectRatio : DefaultAspectRatio;
+        double target = ResolveSourceStackAspectRatio(_sources, DefaultAspectRatio);
         if (Math.Abs(target - _currentAspectRatio) > 0.0001)
         {
             ApplyDimensions(null, null, target, persist: false);
@@ -9285,8 +9597,26 @@ public partial class MainWindow : Window
         return false;
     }
 
+    private static double ResolveSourceStackAspectRatio(IReadOnlyList<CaptureSource> sources, double fallback)
+    {
+        foreach (var source in sources)
+        {
+            if (!source.IsAspectNeutral)
+            {
+                return source.AspectRatio;
+            }
+        }
+
+        return fallback > 0 && double.IsFinite(fallback) ? fallback : DefaultAspectRatio;
+    }
+
     private void MakePrimarySource(CaptureSource source)
     {
+        if (source.IsAspectNeutral)
+        {
+            return;
+        }
+
         var parentList = FindParentList(_sources, source);
         if (parentList == null || parentList.Count == 0 || parentList[0] == source)
         {
@@ -9355,7 +9685,7 @@ public partial class MainWindow : Window
         NotifyLayerEditorSourcesChanged();
     }
 
-    private void ClearSources()
+    private void ClearSources(bool persist = true)
     {
         bool hadSources = _sources.Count > 0;
         bool preservePassthrough = _passthroughEnabled;
@@ -9381,18 +9711,21 @@ public partial class MainWindow : Window
         if (_aspectRatioLocked)
         {
             _currentAspectRatio = _lockedAspectRatio;
-            ApplyDimensions(null, null, _currentAspectRatio);
+            ApplyDimensions(null, null, _currentAspectRatio, persist: persist);
         }
         else if (Math.Abs(_currentAspectRatio - DefaultAspectRatio) > 0.0001)
         {
             _currentAspectRatio = DefaultAspectRatio;
-            ApplyDimensions(null, null, _currentAspectRatio);
+            ApplyDimensions(null, null, _currentAspectRatio, persist: persist);
         }
         else if (hadSources)
         {
             RenderFrame();
         }
-        SaveConfig();
+        if (persist)
+        {
+            SaveConfig();
+        }
         NotifyLayerEditorSourcesChanged();
     }
 
@@ -9408,12 +9741,26 @@ public partial class MainWindow : Window
             ? _offlineAnimationTimeSeconds
             : _lifetimeStopwatch.Elapsed.TotalSeconds;
         long captureSourcesStamp = BeginProfileStamp();
-        bool removedAny = CaptureSourceList(_sources, animationTime);
+        bool removedFailedMedia = false;
+        bool removedAny = CaptureSourceList(_sources, animationTime, ref removedFailedMedia);
         EndProfileStamp("capture_sources_ms", captureSourcesStamp);
         if (_sources.Count == 0)
         {
-            ClearSources();
+            ClearSources(persist: removedFailedMedia);
             return;
+        }
+
+        if (removedAny)
+        {
+            RebuildSourcesMenu();
+            if (removedFailedMedia)
+            {
+                // Failed asynchronous media sources are removed after their startup
+                // grace period. Schedule persistence so a corrupt GIF/video cannot
+                // be restored and fail again on every launch.
+                SaveConfig();
+            }
+            NotifyLayerEditorSourcesChanged();
         }
 
         // Async media metadata may become available on the first decoded frame. Refresh once,
@@ -10523,6 +10870,15 @@ public partial class MainWindow : Window
 
     private bool CaptureSourceList(List<CaptureSource> sources, double animationTime)
     {
+        bool ignoredRemovedFailedMedia = false;
+        return CaptureSourceList(sources, animationTime, ref ignoredRemovedFailedMedia);
+    }
+
+    private bool CaptureSourceList(
+        List<CaptureSource> sources,
+        double animationTime,
+        ref bool removedFailedMedia)
+    {
         bool removedAny = false;
         List<CaptureSource>? removed = null;
 
@@ -10535,6 +10891,15 @@ public partial class MainWindow : Window
 
             if (source.UsePinnedFrameForSmoke && source.LastFrame != null)
             {
+                source.HasError = false;
+                source.MissedFrames = 0;
+                source.FirstFrameReceived = true;
+                continue;
+            }
+
+            if (source.Type == CaptureSource.SourceType.ColorPlane)
+            {
+                source.EnsureColorPlaneFrame();
                 source.HasError = false;
                 source.MissedFrames = 0;
                 source.FirstFrameReceived = true;
@@ -10555,7 +10920,7 @@ public partial class MainWindow : Window
             {
                 if (source.Children.Count > 0)
                 {
-                    removedAny |= CaptureSourceList(source.Children, animationTime);
+                    removedAny |= CaptureSourceList(source.Children, animationTime, ref removedFailedMedia);
                 }
 
                 var groupDownscaled = source.CompositeDownscaledBuffer;
@@ -10831,7 +11196,23 @@ public partial class MainWindow : Window
                     }
                 }
 
+                bool isAsyncMedia = source.Type == CaptureSource.SourceType.File ||
+                                    source.Type == CaptureSource.SourceType.VideoSequence ||
+                                    source.Type == CaptureSource.SourceType.AutoClip;
+                if (isAsyncMedia && (source.FirstFrameReceived || _isOfflineRendering))
+                {
+                    if (!source.HasError)
+                    {
+                        Logger.Warn(
+                            $"Source frame missing; retaining previously loaded media source " +
+                            $"{source.DisplayName} ({source.Type}) for retry/removal.");
+                    }
+                    source.HasError = true;
+                    continue;
+                }
+
                 Logger.Warn($"Source frame missing; removing source {source.DisplayName} ({source.Type})");
+                removedFailedMedia |= isAsyncMedia;
                 (removed ??= new List<CaptureSource>()).Add(source);
                 continue;
             }
@@ -10911,7 +11292,7 @@ public partial class MainWindow : Window
         }
         else
         {
-            double target = _sources.Count > 0 ? _sources[0].AspectRatio : DefaultAspectRatio;
+            double target = ResolveSourceStackAspectRatio(_sources, DefaultAspectRatio);
             ApplyDimensions(null, null, target);
         }
 
@@ -11120,11 +11501,66 @@ public partial class MainWindow : Window
         public uint dwFlags;
     }
 
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    private struct MonitorInfoEx
+    {
+        public int cbSize;
+        public NativeRect rcMonitor;
+        public NativeRect rcWork;
+        public uint dwFlags;
+
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)]
+        public string szDevice;
+    }
+
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    private struct DevMode
+    {
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)]
+        public string dmDeviceName;
+        public ushort dmSpecVersion;
+        public ushort dmDriverVersion;
+        public ushort dmSize;
+        public ushort dmDriverExtra;
+        public uint dmFields;
+        public int dmPositionX;
+        public int dmPositionY;
+        public uint dmDisplayOrientation;
+        public uint dmDisplayFixedOutput;
+        public short dmColor;
+        public short dmDuplex;
+        public short dmYResolution;
+        public short dmTTOption;
+        public short dmCollate;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)]
+        public string dmFormName;
+        public ushort dmLogPixels;
+        public uint dmBitsPerPel;
+        public uint dmPelsWidth;
+        public uint dmPelsHeight;
+        public uint dmDisplayFlags;
+        public uint dmDisplayFrequency;
+        public uint dmICMMethod;
+        public uint dmICMIntent;
+        public uint dmMediaType;
+        public uint dmDitherType;
+        public uint dmReserved1;
+        public uint dmReserved2;
+        public uint dmPanningWidth;
+        public uint dmPanningHeight;
+    }
+
     [DllImport("user32.dll")]
     private static extern IntPtr MonitorFromWindow(IntPtr hwnd, int flags);
 
     [DllImport("user32.dll", SetLastError = true)]
     private static extern bool GetMonitorInfo(IntPtr monitor, ref MonitorInfo info);
+
+    [DllImport("user32.dll", EntryPoint = "GetMonitorInfoW", SetLastError = true, CharSet = CharSet.Unicode)]
+    private static extern bool GetMonitorInfoEx(IntPtr monitor, ref MonitorInfoEx info);
+
+    [DllImport("user32.dll", EntryPoint = "EnumDisplaySettingsW", SetLastError = true, CharSet = CharSet.Unicode)]
+    private static extern bool EnumDisplaySettings(string? deviceName, int modeNum, ref DevMode devMode);
 
     [DllImport("winmm.dll", EntryPoint = "timeBeginPeriod")]
     private static extern uint timeBeginPeriod(uint uPeriod);
@@ -12964,7 +13400,7 @@ public partial class MainWindow : Window
             return false;
         }
 
-        double aspect = sources[0].AspectRatio;
+        double aspect = ResolveSourceStackAspectRatio(sources, _currentAspectRatio > 0 ? _currentAspectRatio : DefaultAspectRatio);
         if (aspect <= 0 || double.IsNaN(aspect) || double.IsInfinity(aspect))
         {
             width = maxWidth;
@@ -16111,7 +16547,7 @@ public partial class MainWindow : Window
         var roundTrip = config.ToEditorSources()
             .First(candidate => candidate.Kind == LayerEditorSourceKind.Group &&
                                 string.Equals(candidate.DisplayName, "Transform Smoke", StringComparison.Ordinal));
-        bool persistenceOk = config.Version == 10 &&
+        bool persistenceOk = config.Version == 11 &&
                              Math.Abs(roundTrip.Scale - 1.75) < 0.0001 &&
                              roundTrip.Animations.Count == 1 &&
                              Math.Abs(roundTrip.Animations[0].StartAngleDegrees - 123) < 0.0001;
@@ -18559,6 +18995,9 @@ public partial class MainWindow : Window
             {
                 _recordingQuality = recordingQuality;
             }
+            _recordingOutputFolder = string.IsNullOrWhiteSpace(config.RecordingOutputFolder)
+                ? null
+                : config.RecordingOutputFolder;
             if (config.Height > 0)
             {
                 _configuredRows = Math.Clamp(config.Height, MinRows, MaxRows);
@@ -18655,7 +19094,7 @@ public partial class MainWindow : Window
             if (_pendingLegacyColumns.HasValue)
             {
                 double targetAspect = _aspectRatioLocked ? _lockedAspectRatio
-                    : (_sources.Count > 0 ? _sources[0].AspectRatio : DefaultAspectRatio);
+                    : ResolveSourceStackAspectRatio(_sources, DefaultAspectRatio);
                 _configuredRows = Math.Clamp((int)Math.Round(_pendingLegacyColumns.Value / targetAspect), MinRows, MaxRows);
                 _pendingLegacyColumns = null;
             }
@@ -18792,6 +19231,7 @@ public partial class MainWindow : Window
             AnimationBpm = _animationBpm,
             AnimationAudioSyncEnabled = _animationAudioSyncEnabled,
             RecordingQuality = _recordingQuality.ToString(),
+            RecordingOutputFolder = _recordingOutputFolder,
             Height = _configuredRows,
             Depth = _configuredDepth,
             Passthrough = _passthroughEnabled,
@@ -19182,6 +19622,9 @@ public partial class MainWindow : Window
                 WindowTitle = source.Window?.Title,
                 WebcamId = source.WebcamId,
                 FilePath = source.FilePath,
+                Color = source.Type == CaptureSource.SourceType.ColorPlane
+                    ? FormatHexColor(source.ColorPlaneR, source.ColorPlaneG, source.ColorPlaneB)
+                    : null,
                 DisplayName = source.DisplayName,
                 BlendMode = source.BlendMode.ToString(),
                 FitMode = source.FitMode.ToString(),
@@ -19323,6 +19766,7 @@ public partial class MainWindow : Window
                     CaptureSource.SourceType.Window => LayerEditorSourceKind.Window,
                     CaptureSource.SourceType.Webcam => LayerEditorSourceKind.Webcam,
                     CaptureSource.SourceType.File => LayerEditorSourceKind.File,
+                    CaptureSource.SourceType.ColorPlane => LayerEditorSourceKind.ColorPlane,
                     CaptureSource.SourceType.VideoSequence => LayerEditorSourceKind.VideoSequence,
                     CaptureSource.SourceType.AutoClip => LayerEditorSourceKind.AutoClip,
                     CaptureSource.SourceType.Group => LayerEditorSourceKind.Group,
@@ -19335,6 +19779,9 @@ public partial class MainWindow : Window
                 WindowHandle = source.Window?.Handle,
                 WebcamId = source.WebcamId,
                 FilePath = source.FilePath,
+                ColorHex = source.Type == CaptureSource.SourceType.ColorPlane
+                    ? FormatHexColor(source.ColorPlaneR, source.ColorPlaneG, source.ColorPlaneB)
+                    : "#000000",
                 BlendMode = source.BlendMode.ToString(),
                 FitMode = source.FitMode.ToString(),
                 Opacity = source.Opacity,
@@ -19578,6 +20025,13 @@ public partial class MainWindow : Window
                 return null;
             }
 
+            case LayerEditorSourceKind.ColorPlane:
+            {
+                return TryParseHexColor(model.ColorHex, out byte r, out byte g, out byte b)
+                    ? CaptureSource.CreateColorPlane(r, g, b, string.IsNullOrWhiteSpace(model.DisplayName) ? null : model.DisplayName)
+                    : CaptureSource.CreateColorPlane(0, 0, 0, string.IsNullOrWhiteSpace(model.DisplayName) ? null : model.DisplayName);
+            }
+
             case LayerEditorSourceKind.VideoSequence:
             {
                 var sequencePaths = model.FilePaths.Count > 0
@@ -19690,6 +20144,10 @@ public partial class MainWindow : Window
             source.KeyColorR = keyR;
             source.KeyColorG = keyG;
             source.KeyColorB = keyB;
+        }
+        if (source.Type == CaptureSource.SourceType.ColorPlane)
+        {
+            TrySetColorPlaneColor(source, model.ColorHex);
         }
         ApplySourceVideoAudioState(source);
 
@@ -19889,7 +20347,7 @@ public partial class MainWindow : Window
         }
 
         double targetAspect = _aspectRatioLocked ? _lockedAspectRatio
-            : (_sources.Count > 0 ? _sources[0].AspectRatio : DefaultAspectRatio);
+            : ResolveSourceStackAspectRatio(_sources, DefaultAspectRatio);
 
         if (_pendingLegacyColumns.HasValue)
         {
@@ -19972,6 +20430,25 @@ public partial class MainWindow : Window
                     }
                     break;
 
+                case CaptureSource.SourceType.ColorPlane:
+                    if (TryParseHexColor(config.Color, out byte colorR, out byte colorG, out byte colorB))
+                    {
+                        restored = CaptureSource.CreateColorPlane(
+                            colorR,
+                            colorG,
+                            colorB,
+                            string.IsNullOrWhiteSpace(config.DisplayName) ? null : config.DisplayName);
+                    }
+                    else
+                    {
+                        restored = CaptureSource.CreateColorPlane(
+                            0,
+                            0,
+                            0,
+                            string.IsNullOrWhiteSpace(config.DisplayName) ? null : config.DisplayName);
+                    }
+                    break;
+
                 case CaptureSource.SourceType.VideoSequence:
                     var sequencePaths = config.FilePaths != null && config.FilePaths.Count > 0
                         ? config.FilePaths
@@ -20046,6 +20523,10 @@ public partial class MainWindow : Window
             source.KeyColorR = keyR;
             source.KeyColorG = keyG;
             source.KeyColorB = keyB;
+        }
+        if (source.Type == CaptureSource.SourceType.ColorPlane)
+        {
+            TrySetColorPlaneColor(source, config.Color);
         }
         ApplySourceVideoAudioState(source);
         source.AutoClip?.SetLoopSelectedFile(source.AutoClipLoopSelectedFile);
@@ -20130,6 +20611,7 @@ public partial class MainWindow : Window
         public double AnimationBpm { get; set; } = DefaultAnimationBpm;
         public bool AnimationAudioSyncEnabled { get; set; }
         public string RecordingQuality { get; set; } = global::lifeviz.RecordingQuality.High.ToString();
+        public string? RecordingOutputFolder { get; set; }
         public int Height { get; set; } = DefaultRows;
         [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
         public int Columns { get; set; }
@@ -20219,6 +20701,7 @@ public partial class MainWindow : Window
             public string? WindowTitle { get; set; }
             public string? WebcamId { get; set; }
             public string? FilePath { get; set; }
+            public string? Color { get; set; } = "#000000";
             public List<string> FilePaths { get; set; } = new();
             public string? DisplayName { get; set; }
             public string BlendMode { get; set; } = MainWindow.BlendMode.Additive.ToString();
@@ -20321,6 +20804,7 @@ public partial class MainWindow : Window
             Window,
             Webcam,
             File,
+            ColorPlane,
             VideoSequence,
             AutoClip,
             Group,
@@ -20349,6 +20833,19 @@ public partial class MainWindow : Window
             int? fileWidth = width > 0 ? width : null;
             int? fileHeight = height > 0 ? height : null;
             return new(SourceType.File, null, null, filePath, displayName, fileWidth, fileHeight) { AddedUtc = DateTime.UtcNow };
+        }
+
+        public static CaptureSource CreateColorPlane(byte r, byte g, byte b, string? displayName = null)
+        {
+            var source = new CaptureSource(SourceType.ColorPlane, null, null, null, displayName ?? "Color Plane", null, null)
+            {
+                AddedUtc = DateTime.UtcNow,
+                BlendMode = BlendMode.Normal,
+                FitMode = FitMode.Stretch,
+                FirstFrameReceived = true
+            };
+            source.SetColorPlaneColor(r, g, b);
+            return source;
         }
 
         public static CaptureSource CreateVideoSequence(FileCaptureService.VideoSequenceSession session)
@@ -20426,6 +20923,9 @@ public partial class MainWindow : Window
         public byte KeyColorR { get; set; }
         public byte KeyColorG { get; set; }
         public byte KeyColorB { get; set; }
+        public byte ColorPlaneR { get; private set; }
+        public byte ColorPlaneG { get; private set; }
+        public byte ColorPlaneB { get; private set; }
         public bool UsePinnedFrameForSmoke { get; set; }
         public bool RetryInitializationAttempted { get; set; }
         public long LastObservedFrameToken { get; set; }
@@ -20440,6 +20940,25 @@ public partial class MainWindow : Window
             DisplayName = string.IsNullOrWhiteSpace(displayName)
                 ? (Type == SourceType.SimGroup ? "Sim Group" : "Layer Group")
                 : displayName.Trim();
+        }
+
+        public void SetColorPlaneColor(byte r, byte g, byte b)
+        {
+            ColorPlaneR = r;
+            ColorPlaneG = g;
+            ColorPlaneB = b;
+            LastFrame = new SourceFrame(new[] { b, g, r, (byte)255 }, 1, 1, null, 1, 1);
+            HasError = false;
+            MissedFrames = 0;
+            FirstFrameReceived = true;
+        }
+
+        public void EnsureColorPlaneFrame()
+        {
+            if (Type == SourceType.ColorPlane && LastFrame == null)
+            {
+                SetColorPlaneColor(ColorPlaneR, ColorPlaneG, ColorPlaneB);
+            }
         }
 
         public void SetVideoSequence(FileCaptureService.VideoSequenceSession session)
@@ -20495,14 +21014,15 @@ public partial class MainWindow : Window
             {
                 if (Type == SourceType.Group)
                 {
-                    if (Children.Count > 0)
+                    var aspectSource = Children.FirstOrDefault(child => !child.IsAspectNeutral);
+                    if (aspectSource != null)
                     {
-                        return Children[0].AspectRatio;
+                        return aspectSource.AspectRatio;
                     }
                     return DefaultAspectRatio;
                 }
 
-                if (Type == SourceType.SimGroup)
+                if (Type == SourceType.SimGroup || Type == SourceType.ColorPlane)
                 {
                     return DefaultAspectRatio;
                 }
@@ -20531,10 +21051,15 @@ public partial class MainWindow : Window
             }
         }
 
+        public bool IsAspectNeutral =>
+            Type == SourceType.ColorPlane ||
+            (Type == SourceType.Group && Children.Count > 0 && Children.All(child => child.IsAspectNeutral));
+
         public int? FallbackWidth => Type switch
         {
             SourceType.Window => Window?.Width,
             SourceType.File => FileWidth,
+            SourceType.ColorPlane => null,
             SourceType.VideoSequence => FileWidth,
             SourceType.AutoClip => FileWidth,
             SourceType.Group => Children.Count > 0 ? Children[0].FallbackWidth : null,
@@ -20546,6 +21071,7 @@ public partial class MainWindow : Window
         {
             SourceType.Window => Window?.Height,
             SourceType.File => FileHeight,
+            SourceType.ColorPlane => null,
             SourceType.VideoSequence => FileHeight,
             SourceType.AutoClip => FileHeight,
             SourceType.Group => Children.Count > 0 ? Children[0].FallbackHeight : null,

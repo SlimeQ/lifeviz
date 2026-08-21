@@ -28,9 +28,19 @@ internal static class DiagnosticTestRunner
         try
         {
             string target = args[1].Trim();
+
+            // Presented-frame readback is only needed by the pixel-comparison
+            // diagnostics. Timing targets pay a full GPU->CPU copy per draw for it,
+            // which inflates both frame cost and reported memory.
+            App.CapturePresentedFramesForValidation =
+                target.StartsWith("current-scene-hover-presentation", StringComparison.OrdinalIgnoreCase) ||
+                target.StartsWith("current-scene-rewind-detect", StringComparison.OrdinalIgnoreCase);
+
             exitCode = target.ToLowerInvariant() switch
             {
                 "current-scene-hover-presentation" => RunCurrentSceneHoverPresentationDiagnostic(),
+                "current-scene-rewind-detect" => RunCurrentSceneRewindDetectionDiagnostic(applyHoverPressure: false),
+                "current-scene-rewind-detect-hover" => RunCurrentSceneRewindDetectionDiagnostic(applyHoverPressure: true),
                 "profile-current-scene-visible" => RunCurrentSceneProfileDiagnostic(visibleWindow: true, forcedRows: null, fullscreen: false),
                 "profile-current-scene-fullscreen" => RunCurrentSceneProfileDiagnostic(visibleWindow: true, forcedRows: null, fullscreen: true),
                 "profile-current-scene-interaction" => RunCurrentSceneInteractionDiagnostic(),
@@ -216,6 +226,83 @@ internal static class DiagnosticTestRunner
         }
 
         Logger.Info("Diagnostic current-scene profile passed.");
+        return result;
+    }
+
+    private static int RunCurrentSceneRewindDetectionDiagnostic(bool applyHoverPressure)
+    {
+        Logger.Info($"Running diagnostic current-scene rewind detection (hoverPressure={applyHoverPressure}).");
+
+        Exception? failure = null;
+        bool closePending = false;
+        var app = new App();
+        app.InitializeComponent();
+        app.ShutdownMode = ShutdownMode.OnExplicitShutdown;
+        app.DispatcherUnhandledException += (_, args) =>
+        {
+            if (closePending && IsIgnorableDrawingSurfaceShutdownException(args.Exception))
+            {
+                args.Handled = true;
+                return;
+            }
+
+            failure ??= args.Exception;
+            args.Handled = true;
+            app.Shutdown(1);
+        };
+
+        app.Startup += (_, _) =>
+        {
+            var waitForWindow = new DispatcherTimer(DispatcherPriority.ApplicationIdle)
+            {
+                Interval = TimeSpan.FromMilliseconds(50)
+            };
+
+            waitForWindow.Tick += (_, _) =>
+            {
+                if (app.MainWindow is not MainWindow window)
+                {
+                    return;
+                }
+
+                waitForWindow.Stop();
+
+                window.Dispatcher.BeginInvoke(new Func<Task>(async () =>
+                {
+                    try
+                    {
+                        // Let decoders and AutoClips settle before watching output.
+                        await Task.Delay(TimeSpan.FromSeconds(8));
+                        bool ok = await window.RunCurrentSceneRewindDetectionSmoke(TimeSpan.FromSeconds(75), applyHoverPressure);
+                        if (!ok)
+                        {
+                            throw new InvalidOperationException("Diagnostic current-scene rewind detection observed presented-frame rewinds.");
+                        }
+
+                        closePending = true;
+                        window.Close();
+                        app.Shutdown(0);
+                    }
+                    catch (Exception ex)
+                    {
+                        failure ??= ex;
+                        closePending = true;
+                        window.Close();
+                        app.Shutdown(1);
+                    }
+                }), DispatcherPriority.ApplicationIdle);
+            };
+
+            waitForWindow.Start();
+        };
+
+        int result = app.Run();
+        if (failure != null)
+        {
+            throw new InvalidOperationException("Diagnostic current-scene rewind detection failed.", failure);
+        }
+
+        Logger.Info("Diagnostic current-scene rewind detection passed (no rewinds observed).");
         return result;
     }
 

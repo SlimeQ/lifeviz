@@ -198,8 +198,20 @@ public partial class MainWindow
             double keyedGreen = ComputeKeyAlpha(0x07, 0xED, 0x0C, keying);
             double nearGreen = ComputeKeyAlpha(0x20, 0xD8, 0x20, keying);
             double black = ComputeKeyAlpha(0x00, 0x00, 0x00, keying);
-            bool ok = keyedGreen < 0.0001 && nearGreen < 0.0001 && black > 0.9999;
-            Logger.Info($"Chroma-key math smoke: green={keyedGreen:0.###}, nearGreen={nearGreen:0.###}, black={black:0.###}, ok={ok}.");
+            double keyedBlue = ComputeKeyAlpha(
+                sb: 0xFF,
+                sg: 0x00,
+                sr: 0x00,
+                keying: new KeyingSettings(enabled: true, useAlpha: false, r: 0x00, g: 0x00, b: 0xFF, tolerance: 0.0));
+            double keyedRed = ComputeKeyAlpha(
+                sb: 0x00,
+                sg: 0x00,
+                sr: 0xFF,
+                keying: new KeyingSettings(enabled: true, useAlpha: false, r: 0xFF, g: 0x00, b: 0x00, tolerance: 0.0));
+            bool ok = keyedGreen < 0.0001 && nearGreen < 0.0001 && black > 0.9999 &&
+                      keyedBlue < 0.0001 && keyedRed < 0.0001;
+            Logger.Info($"Chroma-key math smoke: green={keyedGreen:0.###}, nearGreen={nearGreen:0.###}, " +
+                        $"blue={keyedBlue:0.###}, red={keyedRed:0.###}, black={black:0.###}, ok={ok}.");
             return ok;
         }
 

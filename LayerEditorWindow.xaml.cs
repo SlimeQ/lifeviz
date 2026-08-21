@@ -1590,6 +1590,55 @@ public partial class LayerEditorWindow : Window
         }
     }
 
+    private void ColorPlaneHex_LostFocus(object sender, RoutedEventArgs e) => CommitColorPlaneColor(sender);
+
+    private void ColorPlaneHex_KeyDown(object sender, KeyEventArgs e)
+    {
+        if (e.Key != Key.Enter)
+        {
+            return;
+        }
+
+        CommitColorPlaneColor(sender);
+        e.Handled = true;
+        Keyboard.ClearFocus();
+    }
+
+    private void CommitColorPlaneColor(object sender)
+    {
+        if (sender is TextBox textBox)
+        {
+            textBox.GetBindingExpression(TextBox.TextProperty)?.UpdateSource();
+        }
+
+        var source = ResolveSourceContext(sender);
+        if (source?.IsColorPlane != true)
+        {
+            return;
+        }
+
+        if (!MainWindow.TryNormalizeHexColor(source.ColorHex, out string normalized))
+        {
+            MessageBox.Show(this, "Invalid color value. Use #RRGGBB or R,G,B.", "Color Plane",
+                MessageBoxButton.OK, MessageBoxImage.Warning);
+            if (ShouldApplyLive())
+            {
+                RefreshFromSources(source.Id);
+            }
+            else
+            {
+                source.ColorHex = source.LastValidColorHex;
+            }
+            return;
+        }
+
+        source.ColorHex = normalized;
+        if (ShouldApplyLive())
+        {
+            _owner.UpdateColorPlaneColor(source.Id, normalized);
+        }
+    }
+
     private void GroupName_Changed(object sender, TextChangedEventArgs e)
     {
         if (!ShouldApplyLive())
@@ -1625,7 +1674,7 @@ public partial class LayerEditorWindow : Window
     private void MakePrimary_Click(object sender, RoutedEventArgs e)
     {
         var source = ResolveSourceContext(sender);
-        if (source == null)
+        if (source == null || !source.CanDriveAspect)
         {
             return;
         }
@@ -2025,6 +2074,8 @@ public partial class LayerEditorWindow : Window
 
     private void AddRootFile_Click(object sender, RoutedEventArgs e) => AddSource(null, LayerEditorSourceKind.File);
 
+    private void AddRootColorPlane_Click(object sender, RoutedEventArgs e) => AddSource(null, LayerEditorSourceKind.ColorPlane);
+
     private void AddRootYoutube_Click(object sender, RoutedEventArgs e) => AddSource(null, LayerEditorSourceKind.Youtube);
 
     private void AddRootSequence_Click(object sender, RoutedEventArgs e) => AddSource(null, LayerEditorSourceKind.VideoSequence);
@@ -2072,6 +2123,15 @@ public partial class LayerEditorWindow : Window
         if (parent != null)
         {
             AddSource(parent, LayerEditorSourceKind.File);
+        }
+    }
+
+    private void AddChildColorPlane_Click(object sender, RoutedEventArgs e)
+    {
+        var parent = ResolveSelectedGroup(sender);
+        if (parent != null)
+        {
+            AddSource(parent, LayerEditorSourceKind.ColorPlane);
         }
     }
 
@@ -2184,6 +2244,18 @@ public partial class LayerEditorWindow : Window
                 }
 
                 _owner.AddFileSourceFromEditor(path, parentId);
+                return true;
+            }
+
+            case LayerEditorSourceKind.ColorPlane:
+            {
+                string? color = PromptForColorPlane();
+                if (color == null)
+                {
+                    return false;
+                }
+
+                _owner.AddColorPlaneFromEditor(color, parentId);
                 return true;
             }
 
@@ -2314,6 +2386,29 @@ public partial class LayerEditorWindow : Window
                     BlendMode = "Additive",
                     FitMode = "Fill",
                     Opacity = 1.0,
+                    KeyColorHex = "#000000",
+                    KeyTolerance = 0.1
+                };
+            }
+
+            case LayerEditorSourceKind.ColorPlane:
+            {
+                string? color = PromptForColorPlane();
+                if (color == null)
+                {
+                    return null;
+                }
+
+                return new LayerEditorSource
+                {
+                    Id = Guid.NewGuid(),
+                    Kind = LayerEditorSourceKind.ColorPlane,
+                    DisplayName = "Color Plane",
+                    ColorHex = color,
+                    BlendMode = "Normal",
+                    FitMode = "Stretch",
+                    Opacity = 1.0,
+                    Scale = 1.0,
                     KeyColorHex = "#000000",
                     KeyTolerance = 0.1
                 };
@@ -2694,5 +2789,30 @@ public partial class LayerEditorWindow : Window
     {
         var dialog = new TextInputDialog("Add YouTube Source", "Enter YouTube URL:") { Owner = this };
         return dialog.ShowDialog() == true && !string.IsNullOrWhiteSpace(dialog.InputText) ? dialog.InputText.Trim() : null;
+    }
+
+    private string? PromptForColorPlane()
+    {
+        var dialog = new TextInputDialog(
+            "Add Color Plane",
+            "Enter a solid color (#RRGGBB or R,G,B):",
+            "#000000")
+        {
+            Owner = this
+        };
+
+        if (dialog.ShowDialog() != true)
+        {
+            return null;
+        }
+
+        if (MainWindow.TryNormalizeHexColor(dialog.InputText, out string normalized))
+        {
+            return normalized;
+        }
+
+        MessageBox.Show(this, "Invalid color value. Use #RRGGBB or R,G,B.", "Color Plane",
+            MessageBoxButton.OK, MessageBoxImage.Warning);
+        return null;
     }
 }

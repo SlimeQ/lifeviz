@@ -1,12 +1,15 @@
 using System;
 using System.Buffers;
 using System.Diagnostics;
+using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
+using System.Windows.Media;
+using System.Windows.Media.Imaging;
 using System.Windows.Threading;
 
 namespace lifeviz;
@@ -14,11 +17,56 @@ namespace lifeviz;
 internal static class SmokeTestRunner
 {
     private static readonly int[] CurrentScenePresetRows = { 144, 240, 480, 720, 1080, 1440, 2160 };
-    private static readonly int[] RealtimePacingRows = { 144, 240, 480 };
+    private static readonly int[] DefaultRealtimePacingRows = { 144, 240, 480 };
+
+    /// <summary>
+    /// Pacing smokes normally walk the low preset ladder. Set
+    /// <c>LIFEVIZ_PACING_ROWS</c> to a comma-separated preset list (for example
+    /// <c>1080,2160</c>) to benchmark heavier resolutions.
+    /// </summary>
+    private static readonly int[] RealtimePacingRows = ResolveRealtimePacingRows();
+
+    private static int[] ResolveRealtimePacingRows()
+    {
+        string? raw = Environment.GetEnvironmentVariable("LIFEVIZ_PACING_ROWS");
+        if (string.IsNullOrWhiteSpace(raw))
+        {
+            return DefaultRealtimePacingRows;
+        }
+
+        var rows = raw
+            .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Select(part => int.TryParse(part, NumberStyles.Integer, CultureInfo.InvariantCulture, out int value) ? value : 0)
+            .Where(value => value >= 16 && value <= 4320)
+            .ToArray();
+
+        return rows.Length > 0 ? rows : DefaultRealtimePacingRows;
+    }
     private static readonly TimeSpan CurrentSceneProfileWarmupDuration = TimeSpan.FromSeconds(4);
     private static readonly TimeSpan CurrentScenePresetProfileDuration = TimeSpan.FromSeconds(6);
     private static readonly TimeSpan RealtimePacingProfileDuration = TimeSpan.FromSeconds(8);
-    private const double RealtimePacingTargetFps = 60.0;
+    private const double DefaultRealtimePacingTargetFps = 60.0;
+
+    /// <summary>
+    /// Pacing smokes normally validate against a 60 fps budget. Set
+    /// <c>LIFEVIZ_PACING_FPS</c> to benchmark the same scenarios against a
+    /// different cadence (for example <c>144</c>) without editing the harness.
+    /// </summary>
+    private static readonly double RealtimePacingTargetFps = ResolveRealtimePacingTargetFps();
+
+    private static double ResolveRealtimePacingTargetFps()
+    {
+        string? raw = Environment.GetEnvironmentVariable("LIFEVIZ_PACING_FPS");
+        if (!string.IsNullOrWhiteSpace(raw) &&
+            double.TryParse(raw, NumberStyles.Float, CultureInfo.InvariantCulture, out double parsed) &&
+            parsed >= 1.0 &&
+            parsed <= 240.0)
+        {
+            return parsed;
+        }
+
+        return DefaultRealtimePacingTargetFps;
+    }
     private static readonly string[] CurrentSceneBisectVariants =
     {
         "baseline",
@@ -43,10 +91,17 @@ internal static class SmokeTestRunner
         try
         {
             string target = args[1].Trim();
-            App.CaptureGpuFallbackBuffersInSmokeTest =
-                !(target.StartsWith("profile-", StringComparison.OrdinalIgnoreCase) ||
-                  target.StartsWith("pacing-", StringComparison.OrdinalIgnoreCase));
-            string? smokeVideoPath = args.Length >= 3 ? args[2] : Environment.GetEnvironmentVariable("LIFEVIZ_SMOKE_VIDEO");
+            bool timingOnlyTarget =
+                target.StartsWith("profile-", StringComparison.OrdinalIgnoreCase) ||
+                target.StartsWith("pacing-", StringComparison.OrdinalIgnoreCase);
+            App.CaptureGpuFallbackBuffersInSmokeTest = !timingOnlyTarget;
+
+            // Presented-frame readback exists for pixel-comparison smokes. In timing
+            // targets it only distorts the measurement, so keep it off there.
+            App.CapturePresentedFramesForValidation = !timingOnlyTarget;
+            string? explicitSmokePath = args.Length >= 3 ? args[2] : null;
+            string? smokeVideoPath = explicitSmokePath ?? Environment.GetEnvironmentVariable("LIFEVIZ_SMOKE_VIDEO");
+            string? smokeGifPath = explicitSmokePath ?? Environment.GetEnvironmentVariable("LIFEVIZ_SMOKE_GIF");
             if (TryRunCurrentScenePresetProfileTarget(target, out exitCode))
             {
                 return true;
@@ -111,8 +166,10 @@ internal static class SmokeTestRunner
                 "live-video-audio" => RunLiveVideoAudioSmokeTest(smokeVideoPath),
                 "autoclip" => RunAutoClipSmokeTest(smokeVideoPath),
                 "ffmpeg-lifecycle" => RunFfmpegLifecycleSmokeTest(),
+                "gif-source-recovery" => RunGifSourceRecoverySmokeTest(smokeGifPath),
                 "layer-transform-controls" => RunLayerTransformControlsSmokeTest(),
-                "chroma-key" => MainWindow.RunChromaKeySmoke() ? 0 : 1,
+                "color-plane" => RunColorPlaneSmokeTest(),
+                "chroma-key" => RunChromaKeySmokeTest(),
                 "gpu-sim" => RunGpuSimulationSmokeTest(),
                 "gpu-source" => RunGpuSourceCompositeSmokeTest(),
                 "source-reset" => RunSourceResetSmokeTest(),
@@ -125,7 +182,7 @@ internal static class SmokeTestRunner
                 "startup-recovery" => RunStartupRecoverySmokeTest(),
                 "config-save-coalescing" => RunConfigSaveCoalescingSmokeTest(),
                 "all" => RunAllSmokeTests(),
-                _ => throw new ArgumentException($"Unknown smoke test target '{target}'. Expected profile-240, profile-480, profile-rgb-240, profile-rgb-480, profile-file-240, profile-file-480, profile-file-rgb-240, profile-file-rgb-480, profile-current-scene, profile-current-scene-visible, profile-current-scene-fullscreen, profile-current-scene-bisect, profile-current-scene-presets, profile-current-scene-visible-presets, profile-current-scene-fullscreen-presets, profile-current-scene-<144|240|480|720|1080|1440|2160>, profile-current-scene-visible-<144|240|480|720|1080|1440|2160>, profile-current-scene-fullscreen-<144|240|480|720|1080|1440|2160>, profile-current-scene-interaction, current-scene-hover-presentation, pacing-current-scene-visible-presets, pacing-current-scene-fullscreen-presets, pacing-current-scene-interaction, pacing-current-scene-overlay-fullscreen-144, pacing-current-scene-suite, frame-pump-thread-safety, gpu-benchmark, gpu-handoff, gpu-rgb-threshold, gpu-passthrough-signed-model, passthrough-underlay-only, gpu-frequency-hue, simulation-reactive-mappings, pixel-sort-reactive-cell-size, simulation-reactive-persistence, simulation-reactive-legacy-migration, simulation-reactive-removal, simulation-reactive-editor-isolation, sim-group-legacy-migration, no-sim-group-renders-composite, sim-group-removal-clears-runtime, disabled-sim-group-renders-composite, sim-group-stack-order, sim-group-inline-hue, sim-group-inline-presentation, gpu-snapshot-order, sim-group-enabled-toggle, sim-group-remove-source, sim-group-live-edit-selection, pixel-sort-editor-roundtrip, gpu-bitwise, gpu-pixel-sort, sim-group-pixel-sort-color, gpu-injection-mode, gpu-file-injection-mode, webm-alpha, offline-video-audio, live-video-audio, autoclip, ffmpeg-lifecycle, layer-transform-controls, chroma-key, gpu-sim, gpu-source, source-reset, gpu-render, profile-mainloop, profile-mainloop-sim-group, dimensions, shutdown, startup, startup-recovery, config-save-coalescing, or all.")
+                _ => throw new ArgumentException($"Unknown smoke test target '{target}'. See wiki/Build-and-Install.md for the supported targets, including webm-alpha, autoclip, ffmpeg-lifecycle, gif-source-recovery, color-plane, and chroma-key.")
             };
         }
         catch (Exception ex)
@@ -148,6 +205,12 @@ internal static class SmokeTestRunner
 
     private static int RunAllSmokeTests()
     {
+        int gifResult = RunGifSourceRecoverySmokeTest(null);
+        if (gifResult != 0)
+        {
+            return gifResult;
+        }
+
         int gpuResult = RunGpuSimulationSmokeTest();
         if (gpuResult != 0)
         {
@@ -561,6 +624,92 @@ internal static class SmokeTestRunner
         {
             App.IsDiagnosticTestMode = previousDiagnosticMode;
         }
+    }
+
+    private static int RunColorPlaneSmokeTest()
+    {
+        Logger.Info("Running color-plane smoke test.");
+        bool previousDiagnosticMode = App.IsDiagnosticTestMode;
+        App.IsDiagnosticTestMode = true;
+        var app = new App();
+        app.InitializeComponent();
+        app.ShutdownMode = ShutdownMode.OnExplicitShutdown;
+        (bool ok, string detail) result = default;
+        Exception? failure = null;
+        app.DispatcherUnhandledException += (_, args) =>
+        {
+            failure ??= args.Exception;
+            args.Handled = true;
+            app.Shutdown(1);
+        };
+
+        app.Startup += (_, _) =>
+        {
+            var window = new MainWindow();
+            result = window.RunColorPlaneSmoke();
+            app.Shutdown(result.ok ? 0 : 1);
+        };
+
+        try
+        {
+            int exitCode = app.Run();
+            if (failure != null)
+            {
+                throw new InvalidOperationException("Color-plane smoke test failed.", failure);
+            }
+            if (!result.ok)
+            {
+                throw new InvalidOperationException($"Color-plane smoke test failed: {result.detail}.");
+            }
+
+            Logger.Info($"Color-plane smoke test passed: {result.detail}.");
+            return exitCode;
+        }
+        finally
+        {
+            App.IsDiagnosticTestMode = previousDiagnosticMode;
+        }
+    }
+
+    private static int RunChromaKeySmokeTest()
+    {
+        Logger.Info("Running CPU/GPU chroma-key smoke test.");
+        if (!MainWindow.RunChromaKeySmoke())
+        {
+            throw new InvalidOperationException("CPU chroma-key math smoke test failed.");
+        }
+
+        var app = new App();
+        app.InitializeComponent();
+        app.ShutdownMode = ShutdownMode.OnExplicitShutdown;
+        (bool ok, string detail) result = default;
+        Exception? failure = null;
+        app.DispatcherUnhandledException += (_, args) =>
+        {
+            failure ??= args.Exception;
+            args.Handled = true;
+            app.Shutdown(1);
+        };
+
+        app.Startup += (_, _) =>
+        {
+            var window = new MainWindow();
+            result = window.RunGpuChromaKeyColorSmoke();
+            app.Shutdown(result.ok ? 0 : 1);
+        };
+
+        int exitCode = app.Run();
+        if (failure != null)
+        {
+            throw new InvalidOperationException("GPU chroma-key smoke test failed.", failure);
+        }
+        if (!result.ok)
+        {
+            throw new InvalidOperationException($"GPU chroma-key smoke test failed: {result.detail}.");
+        }
+
+        Logger.Info($"CPU/GPU chroma-key smoke test passed: {result.detail}.");
+        return exitCode;
     }
 
     private static int RunSourceResetSmokeTest()
@@ -1744,6 +1893,270 @@ internal static class SmokeTestRunner
         return 0;
     }
 
+    private static int RunGifSourceRecoverySmokeTest(string? suppliedGifPath)
+    {
+        const int targetWidth = 1280;
+        const int targetHeight = 720;
+        Logger.Info("Running bounded GIF source + recovery smoke test.");
+        string? normalizedSuppliedGifPath = string.IsNullOrWhiteSpace(suppliedGifPath)
+            ? null
+            : Path.GetFullPath(suppliedGifPath);
+        if (normalizedSuppliedGifPath != null &&
+            !string.Equals(Path.GetExtension(normalizedSuppliedGifPath), ".gif", StringComparison.OrdinalIgnoreCase))
+        {
+            throw new ArgumentException("gif-source-recovery requires a GIF path as the third argument.");
+        }
+
+        string tempDirectory = Path.Combine(Path.GetTempPath(), $"lifeviz-gif-smoke-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(tempDirectory);
+        string gifPath = normalizedSuppliedGifPath ?? Path.Combine(tempDirectory, "animated-smoke.gif");
+        string corruptGifPath = Path.Combine(tempDirectory, "corrupt-smoke.gif");
+
+        try
+        {
+            if (normalizedSuppliedGifPath == null)
+            {
+                CreateAnimatedGifSmokeFile(gifPath);
+            }
+
+            File.WriteAllBytes(corruptGifPath, "not a gif"u8.ToArray());
+            using var capture = new FileCaptureService();
+            var setupClock = Stopwatch.StartNew();
+            bool added = capture.TryGetOrAdd(gifPath, out var info, out string? error);
+            setupClock.Stop();
+            if (!added)
+            {
+                throw new InvalidOperationException(error ?? "GIF source could not be opened.");
+            }
+
+            bool setupWasNonblocking = setupClock.Elapsed < TimeSpan.FromSeconds(1);
+            bool retainedGifKind = info.Kind == FileCaptureService.FileSourceKind.Gif;
+            bool usesStreaming = capture.IsStreamingSource(gifPath);
+            bool pendingPauseResumeAccepted = capture.SetVideoPaused(gifPath, paused: true) &&
+                                              capture.SetVideoPaused(gifPath, paused: false);
+            FileCaptureService.FileCaptureFrame? firstFrame = null;
+            FileCaptureService.FileCaptureFrame? advancedFrame = null;
+            long firstToken = 0;
+            ulong firstSignature = 0;
+            ulong advancedSignature = 0;
+            var frameClock = Stopwatch.StartNew();
+            while (frameClock.Elapsed < TimeSpan.FromSeconds(8))
+            {
+                FileCaptureService.FileCaptureFrame? candidate =
+                    capture.CaptureFrame(gifPath, targetWidth, targetHeight, FitMode.Fill, includeSource: false);
+                if (candidate.HasValue)
+                {
+                    if (!firstFrame.HasValue)
+                    {
+                        firstFrame = candidate;
+                        firstToken = candidate.Value.FrameToken;
+                        firstSignature = ComputeGifSmokeFrameSignature(candidate.Value.OverlayDownscaled);
+                    }
+                    else if (candidate.Value.FrameToken > firstToken &&
+                             ComputeGifSmokeFrameSignature(candidate.Value.OverlayDownscaled) != firstSignature)
+                    {
+                        advancedFrame = candidate;
+                        advancedSignature = ComputeGifSmokeFrameSignature(candidate.Value.OverlayDownscaled);
+                        break;
+                    }
+                }
+
+                Thread.Sleep(20);
+            }
+
+            int residentBuffers = capture.GetResidentFrameBufferCountForDiagnostics(gifPath) ?? int.MaxValue;
+            bool frameReady = firstFrame is { } first &&
+                              first.DownscaledWidth > 0 &&
+                              first.DownscaledHeight > 0 &&
+                              first.OverlayDownscaled.Length == first.DownscaledWidth * first.DownscaledHeight * 4 &&
+                              first.SourceWidth > 0 &&
+                              first.SourceHeight > 0 &&
+                              (normalizedSuppliedGifPath != null ||
+                               (first.SourceWidth == 48 &&
+                                first.SourceHeight == 32 &&
+                                first.DownscaledWidth == 48 &&
+                                first.DownscaledHeight == 32));
+            bool frameAdvanced = advancedFrame.HasValue;
+            bool buffersBounded = residentBuffers <= 10;
+
+            bool activePauseResume = false;
+            if (advancedFrame.HasValue)
+            {
+                bool paused = capture.SetVideoPaused(gifPath, paused: true);
+                bool reportsPaused = capture.TryGetVideoPlaybackState(gifPath, out var pausedState) &&
+                                     pausedState.IsPaused;
+                bool stayedWithoutFrames = true;
+                for (int attempt = 0; attempt < 4; attempt++)
+                {
+                    Thread.Sleep(50);
+                    stayedWithoutFrames &= !capture.CaptureFrame(
+                        gifPath,
+                        targetWidth,
+                        targetHeight,
+                        FitMode.Fill,
+                        includeSource: false).HasValue;
+                }
+
+                bool resumed = capture.SetVideoPaused(gifPath, paused: false);
+                bool resumedWithDistinctFrame = false;
+                var resumeClock = Stopwatch.StartNew();
+                while (resumeClock.Elapsed < TimeSpan.FromSeconds(4))
+                {
+                    FileCaptureService.FileCaptureFrame? candidate = capture.CaptureFrame(
+                        gifPath,
+                        targetWidth,
+                        targetHeight,
+                        FitMode.Fill,
+                        includeSource: false);
+                    if (candidate.HasValue &&
+                        ComputeGifSmokeFrameSignature(candidate.Value.OverlayDownscaled) != advancedSignature)
+                    {
+                        resumedWithDistinctFrame = true;
+                        break;
+                    }
+
+                    Thread.Sleep(20);
+                }
+
+                activePauseResume = paused &&
+                                    reportsPaused &&
+                                    stayedWithoutFrames &&
+                                    resumed &&
+                                    resumedWithDistinctFrame;
+            }
+            bool pauseResumeAccepted = pendingPauseResumeAccepted && activePauseResume;
+
+            var removeClock = Stopwatch.StartNew();
+            capture.Remove(gifPath);
+            removeClock.Stop();
+            bool removedPromptly = removeClock.Elapsed < TimeSpan.FromSeconds(1) &&
+                                   capture.GetKind(gifPath) == null &&
+                                   !capture.IsStreamingSource(gifPath);
+
+            var corruptSetupClock = Stopwatch.StartNew();
+            bool corruptAdded = capture.TryGetOrAdd(corruptGifPath, out var corruptInfo, out _);
+            corruptSetupClock.Stop();
+            bool corruptRemovable = corruptAdded &&
+                                    corruptInfo.Kind == FileCaptureService.FileSourceKind.Gif &&
+                                    capture.IsStreamingSource(corruptGifPath) &&
+                                    corruptSetupClock.Elapsed < TimeSpan.FromSeconds(1);
+            var corruptErrorClock = Stopwatch.StartNew();
+            while (capture.GetState(corruptGifPath) == FileCaptureService.FileCaptureState.Pending &&
+                   corruptErrorClock.Elapsed < TimeSpan.FromSeconds(18))
+            {
+                Thread.Sleep(20);
+            }
+            bool corruptRejected = capture.GetState(corruptGifPath) == FileCaptureService.FileCaptureState.Error;
+            capture.Remove(corruptGifPath);
+            corruptRemovable &= capture.GetKind(corruptGifPath) == null &&
+                                corruptRejected;
+
+            bool ok = setupWasNonblocking &&
+                      retainedGifKind &&
+                      usesStreaming &&
+                      pauseResumeAccepted &&
+                      frameReady &&
+                      frameAdvanced &&
+                      buffersBounded &&
+                      removedPromptly &&
+                      corruptRemovable;
+            Logger.Info(
+                $"GIF source recovery smoke: setupMs={setupClock.Elapsed.TotalMilliseconds:F1}, " +
+                $"kind={retainedGifKind}, streaming={usesStreaming}, pauseResume={pauseResumeAccepted}, " +
+                $"frameReady={frameReady}, " +
+                $"frameAdvanced={frameAdvanced}, residentBuffers={residentBuffers}, " +
+                $"removedPromptly={removedPromptly}, corruptRejected={corruptRejected}, " +
+                $"corruptRemovable={corruptRemovable}, ok={ok}.");
+            return ok ? 0 : 1;
+        }
+        finally
+        {
+            DeleteGifSmokeDirectory(tempDirectory);
+        }
+    }
+
+    private static ulong ComputeGifSmokeFrameSignature(byte[] buffer)
+    {
+        const ulong offsetBasis = 14695981039346656037UL;
+        const ulong prime = 1099511628211UL;
+        ulong hash = offsetBasis;
+        int step = Math.Max(1, buffer.Length / 4096);
+        for (int i = 0; i < buffer.Length; i += step)
+        {
+            hash ^= buffer[i];
+            hash *= prime;
+        }
+
+        hash ^= (uint)buffer.Length;
+        return hash * prime;
+    }
+
+    private static void DeleteGifSmokeDirectory(string path)
+    {
+        for (int attempt = 0; attempt < 10; attempt++)
+        {
+            try
+            {
+                Directory.Delete(path, recursive: true);
+                return;
+            }
+            catch (IOException) when (attempt < 9)
+            {
+                Thread.Sleep(50);
+            }
+            catch (UnauthorizedAccessException) when (attempt < 9)
+            {
+                Thread.Sleep(50);
+            }
+            catch (Exception ex)
+            {
+                Logger.Warn($"Could not remove GIF smoke directory: {ex.Message}");
+                return;
+            }
+        }
+    }
+
+    private static void CreateAnimatedGifSmokeFile(string path)
+    {
+        const int width = 48;
+        const int height = 32;
+        const int frameCount = 12;
+        var encoder = new GifBitmapEncoder();
+        for (int frameIndex = 0; frameIndex < frameCount; frameIndex++)
+        {
+            var pixels = new byte[width * height * 4];
+            for (int y = 0; y < height; y++)
+            {
+                for (int x = 0; x < width; x++)
+                {
+                    int offset = ((y * width) + x) * 4;
+                    pixels[offset] = (byte)((x * 5 + frameIndex * 17) & 0xFF);
+                    pixels[offset + 1] = (byte)((y * 7 + frameIndex * 29) & 0xFF);
+                    pixels[offset + 2] = (byte)(((x + y) * 3 + frameIndex * 41) & 0xFF);
+                    pixels[offset + 3] = 0xFF;
+                }
+            }
+
+            BitmapSource bitmap = BitmapSource.Create(
+                width,
+                height,
+                96,
+                96,
+                PixelFormats.Bgra32,
+                null,
+                pixels,
+                width * 4);
+            bitmap.Freeze();
+            var metadata = new BitmapMetadata("gif");
+            metadata.SetQuery("/grctlext/Delay", (ushort)4);
+            metadata.SetQuery("/grctlext/Disposal", (byte)2);
+            encoder.Frames.Add(BitmapFrame.Create(bitmap, null, metadata, null));
+        }
+
+        using var stream = new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.None);
+        encoder.Save(stream);
+    }
+
     private static int RunOfflineVideoAudioSmokeTest(string? smokeVideoPath)
     {
         if (string.IsNullOrWhiteSpace(smokeVideoPath))
@@ -2200,6 +2613,7 @@ internal static class SmokeTestRunner
             }
 
             bool overrideResolutionOk = MainWindow.RunAutoClipVideoOverrideResolutionSmoke(session, smokeVideoPath);
+            bool alphaDecoderOk = FileCaptureService.RunWebmAlphaDecoderResolutionSmoke();
 
             var editorSource = new LayerEditorSource
             {
@@ -2580,7 +2994,8 @@ internal static class SmokeTestRunner
                       liveVisiblePhaseArmed && activationClockReleased && activePausedScheduleHeld && resumeClockHeld &&
                       repeatedResumeHeld && repeatedWarmupPreserved && freshResumeActivated &&
                       performanceRestartClockHeld && performanceRestartActivated &&
-                      zeroFadePreparingContinuous && movingHandoffCompleted && overrideResolutionOk;
+                      zeroFadePreparingContinuous && movingHandoffCompleted && overrideResolutionOk &&
+                      alphaDecoderOk;
             Logger.Info($"AutoClip smoke: sawClipFrame={sawClipFrame}, sawDelay={sawDelay}, " +
                         $"delayTransparent={delayWasTransparent}, clipAudio={clipAudioReceived}, delayAudioSilent={delayAudioSilent}, " +
                         $"fadeStart={sawFadeStart}, fadePeak={sawFadePeak}, fadeOut={sawFadeOut}, " +
@@ -2615,7 +3030,7 @@ internal static class SmokeTestRunner
                         $"peakOwnedVideoSessions={peakOwnedVideoSessions}, peakTrackedHandoffProcesses={peakTrackedHandoffProcesses}, " +
                         $"outgoingProcessRetired={outgoingProcessRetired}, " +
                         $"ordinaryLiveFilter={ordinaryLiveFilter}, unpacedLiveFilter={unpacedLiveFilter}, " +
-                        $"overrides={overrideResolutionOk}, ok={ok}.");
+                        $"overrides={overrideResolutionOk}, alphaDecoder={alphaDecoderOk}, ok={ok}.");
             return ok ? 0 : 1;
         }
     }
@@ -4179,6 +4594,44 @@ internal static class SmokeTestRunner
 
             Logger.Info("GPU source composite smoke test passed.");
 
+            if (!MainWindow.RunChromaKeySmoke())
+            {
+                failure ??= new InvalidOperationException("CPU chroma-key math smoke test failed.");
+                app.Shutdown(1);
+                return;
+            }
+
+            var chromaKeyResult = window.RunGpuChromaKeyColorSmoke();
+            if (!chromaKeyResult.ok)
+            {
+                failure ??= new InvalidOperationException($"GPU chroma-key smoke test failed: {chromaKeyResult.detail}.");
+                app.Shutdown(1);
+                return;
+            }
+
+            Logger.Info($"CPU/GPU chroma-key smoke test passed: {chromaKeyResult.detail}.");
+
+            var colorPlaneResult = window.RunColorPlaneSmoke();
+            if (!colorPlaneResult.ok)
+            {
+                failure ??= new InvalidOperationException($"Color-plane smoke test failed: {colorPlaneResult.detail}.");
+                app.Shutdown(1);
+                return;
+            }
+
+            Logger.Info($"Color-plane smoke test passed: {colorPlaneResult.detail}.");
+
+            var gifRecoveryResult = window.RunGifSceneRecoverySmoke();
+            if (!gifRecoveryResult.ok)
+            {
+                failure ??= new InvalidOperationException(
+                    $"GIF scene recovery smoke test failed: {gifRecoveryResult.detail}.");
+                app.Shutdown(1);
+                return;
+            }
+
+            Logger.Info($"GIF scene recovery smoke test passed: {gifRecoveryResult.detail}.");
+
             window.Loaded += (_, _) =>
             {
                 int attempts = 0;
@@ -4597,5 +5050,3 @@ internal static class SmokeTestRunner
         }
     }
 }
-
-

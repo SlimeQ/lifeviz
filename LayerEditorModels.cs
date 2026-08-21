@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.IO;
+using System.Linq;
 using System.Runtime.CompilerServices;
 
 namespace lifeviz;
@@ -12,6 +13,7 @@ internal enum LayerEditorSourceKind
     Window,
     Webcam,
     File,
+    ColorPlane,
     VideoSequence,
     AutoClip,
     Group,
@@ -424,6 +426,8 @@ internal sealed class LayerEditorSource : LayerEditorNotify
     private IntPtr? _windowHandle;
     private string? _webcamId;
     private string? _filePath;
+    private string _colorHex = "#000000";
+    private string _lastValidColorHex = "#000000";
     private string _blendMode = "Additive";
     private string _fitMode = "Fill";
     private double _opacity = 1.0;
@@ -456,6 +460,7 @@ internal sealed class LayerEditorSource : LayerEditorNotify
     {
         AutoClipVideoPaths.CollectionChanged += (_, _) => OnPropertyChanged(nameof(Details));
         AutoClipVideoOverrides.CollectionChanged += (_, _) => OnPropertyChanged(nameof(Details));
+        Children.CollectionChanged += (_, _) => OnPropertyChanged(nameof(CanDriveAspect));
     }
 
     public Guid Id
@@ -476,6 +481,9 @@ internal sealed class LayerEditorSource : LayerEditorNotify
                 OnPropertyChanged(nameof(IsContainerGroup));
                 OnPropertyChanged(nameof(IsWebcam));
                 OnPropertyChanged(nameof(IsWindow));
+                OnPropertyChanged(nameof(IsColorPlane));
+                OnPropertyChanged(nameof(CanDriveAspect));
+                OnPropertyChanged(nameof(SupportsKeying));
                 OnPropertyChanged(nameof(IsVideo));
                 OnPropertyChanged(nameof(IsAutoClip));
                 OnPropertyChanged(nameof(SupportsVideoTransport));
@@ -553,6 +561,24 @@ internal sealed class LayerEditorSource : LayerEditorNotify
         set => SetField(ref _selectedAutoClipVideoOverride, value);
     }
 
+    public string ColorHex
+    {
+        get => _colorHex;
+        set
+        {
+            if (SetField(ref _colorHex, value))
+            {
+                if (MainWindow.TryNormalizeHexColor(value, out string normalized))
+                {
+                    _lastValidColorHex = normalized;
+                }
+                OnPropertyChanged(nameof(Details));
+            }
+        }
+    }
+
+    public string LastValidColorHex => _lastValidColorHex;
+
     public double AutoClipMinClipSeconds
     {
         get => _autoClipMinClipSeconds;
@@ -597,6 +623,7 @@ internal sealed class LayerEditorSource : LayerEditorNotify
             if (SetField(ref _blendMode, value))
             {
                 OnPropertyChanged(nameof(IsNormalBlend));
+                OnPropertyChanged(nameof(SupportsKeying));
             }
         }
     }
@@ -752,8 +779,12 @@ internal sealed class LayerEditorSource : LayerEditorNotify
     public bool IsContainerGroup => IsGroup || IsSimulationGroup;
     public bool IsWebcam => Kind == LayerEditorSourceKind.Webcam;
     public bool IsWindow => Kind == LayerEditorSourceKind.Window;
+    public bool IsColorPlane => Kind == LayerEditorSourceKind.ColorPlane;
+    public bool CanDriveAspect => !IsColorPlane &&
+                                  (!IsGroup || Children.Count == 0 || Children.Any(child => child.CanDriveAspect));
     public bool IsAutoClip => Kind == LayerEditorSourceKind.AutoClip;
     public bool IsNormalBlend => string.Equals(BlendMode, "Normal", StringComparison.OrdinalIgnoreCase);
+    public bool SupportsKeying => IsNormalBlend && !IsColorPlane;
     public bool IsVideo =>
         Kind == LayerEditorSourceKind.VideoSequence ||
         Kind == LayerEditorSourceKind.AutoClip ||
@@ -769,6 +800,7 @@ internal sealed class LayerEditorSource : LayerEditorNotify
     {
         LayerEditorSourceKind.Webcam => "Camera",
         LayerEditorSourceKind.File => "File",
+        LayerEditorSourceKind.ColorPlane => "Color Plane",
         LayerEditorSourceKind.Youtube => "YouTube",
         LayerEditorSourceKind.VideoSequence => "Video Sequence",
         LayerEditorSourceKind.AutoClip => "AutoClip",
@@ -787,6 +819,7 @@ internal sealed class LayerEditorSource : LayerEditorNotify
         LayerEditorSourceKind.Window => string.IsNullOrWhiteSpace(WindowTitle) ? "Window source" : WindowTitle,
         LayerEditorSourceKind.Webcam => string.IsNullOrWhiteSpace(WebcamId) ? "Webcam source" : $"Id: {WebcamId}",
         LayerEditorSourceKind.File => string.IsNullOrWhiteSpace(FilePath) ? "File source" : FilePath,
+        LayerEditorSourceKind.ColorPlane => string.IsNullOrWhiteSpace(ColorHex) ? "Solid color" : ColorHex,
         LayerEditorSourceKind.Youtube => string.IsNullOrWhiteSpace(FilePath) ? "YouTube source" : FilePath,
         LayerEditorSourceKind.VideoSequence => FilePaths.Count > 0 ? $"{FilePaths.Count} files" : "Video sequence",
         LayerEditorSourceKind.AutoClip => $"{AutoClipVideoPaths.Count} video{(AutoClipVideoPaths.Count == 1 ? string.Empty : "s")}",

@@ -273,6 +273,30 @@ internal sealed class FileCaptureService : IDisposable
         }
     }
 
+    internal static bool RunWebmAlphaDecoderResolutionSmoke()
+    {
+        string vp9Alpha = "Stream #0:0: Video: vp9 (Profile 0), yuv420p(tv), 64x64\n" +
+                          "      Metadata:\n        alpha_mode      : 1\n";
+        string vp8Alpha = "Stream #0:0: Video: vp8, yuv420p, 64x64\n" +
+                          "      Metadata:\n        alpha_mode      : 1\n";
+        string vp9Opaque = "Stream #0:0: Video: vp9 (Profile 0), yuv420p(tv), 64x64\n";
+        string h264Tagged = "Stream #0:0: Video: h264 (High), yuv420p, 64x64\n" +
+                            "      Metadata:\n        alpha_mode      : 1\n";
+
+        static string? Resolve(string probeOutput)
+        {
+            var (codecName, hasAlpha, _) = VideoSession.ParsePrimaryVideoStreamMetadata(probeOutput);
+            return VideoSession.ResolvePreferredVideoDecoder(codecName, hasAlpha);
+        }
+
+        bool ok = Resolve(vp9Alpha) == "libvpx-vp9" &&
+                  Resolve(vp8Alpha) == "libvpx" &&
+                  Resolve(vp9Opaque) == null &&
+                  Resolve(h264Tagged) == null;
+        Logger.Info($"WebM alpha decoder resolution smoke: ok={ok}.");
+        return ok;
+    }
+
     private static int GetRemainingProbeMilliseconds(long deadlineTimestamp)
     {
         long remainingTicks = deadlineTimestamp - Stopwatch.GetTimestamp();
@@ -1285,6 +1309,47 @@ internal sealed class FileCaptureService : IDisposable
         return null;
     }
 
+    internal bool IsStreamingSource(string path)
+    {
+        FileSession? session = FindSession(path);
+        return session is VideoSession;
+    }
+
+    internal int? GetResidentFrameBufferCountForDiagnostics(string path)
+    {
+        FileSession? session = FindSession(path);
+        return session switch
+        {
+            ImageSequenceSession imageSession => imageSession.ResidentFrameBufferCount,
+            VideoSession videoSession => videoSession.GetResidentFrameBufferCountForDiagnostics(),
+            _ => null
+        };
+    }
+
+    private FileSession? FindSession(string path)
+    {
+        if (string.IsNullOrWhiteSpace(path))
+        {
+            return null;
+        }
+
+        lock (_lock)
+        {
+            if (_sessions.TryGetValue(path, out var session))
+            {
+                return session;
+            }
+
+            if (TryNormalizePath(path, out var fullPath) &&
+                _sessions.TryGetValue(fullPath, out session))
+            {
+                return session;
+            }
+        }
+
+        return null;
+    }
+
     public void Remove(string path)
     {
         if (string.IsNullOrWhiteSpace(path))
@@ -1339,20 +1404,23 @@ internal sealed class FileCaptureService : IDisposable
     private static FileSession CreateSession(string path)
     {
         string extension = Path.GetExtension(path);
-        if (VideoExtensions.Contains(extension))
+        bool isGif = string.Equals(extension, ".gif", StringComparison.OrdinalIgnoreCase);
+        if (VideoExtensions.Contains(extension) || isGif)
         {
-            return new VideoSession(path, System.IO.Path.GetFileName(path), loopPlayback: true);
+            // Animated GIFs can contain hundreds or thousands of frames. Loading every
+            // frame through WPF's BitmapDecoder expands the entire animation into BGRA
+            // memory on the caller (normally UI) thread. Stream them through the same
+            // bounded ffmpeg pipeline as video while retaining their GIF identity in
+            // the UI and config model.
+            return new VideoSession(
+                path,
+                System.IO.Path.GetFileName(path),
+                loopPlayback: true,
+                sourceKind: isGif ? FileSourceKind.Gif : FileSourceKind.Video);
         }
 
-        bool isGif = string.Equals(extension, ".gif", StringComparison.OrdinalIgnoreCase);
         using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
         var decoder = BitmapDecoder.Create(stream, BitmapCreateOptions.PreservePixelFormat, BitmapCacheOption.OnLoad);
-
-        if (isGif)
-        {
-            return new ImageSequenceSession(path, decoder.Frames, useDelays: true);
-        }
-
         return new ImageSequenceSession(path, decoder.Frames.Take(1).ToList(), useDelays: false);
     }
 
@@ -1447,6 +1515,7 @@ internal sealed class FileCaptureService : IDisposable
         }
 
         public override FileSourceKind Kind => _frames.Length > 1 ? FileSourceKind.Gif : FileSourceKind.Image;
+        internal int ResidentFrameBufferCount => _frames.Length;
 
         public override FileCaptureFrame? CaptureFrame(int targetWidth, int targetHeight, FitMode fitMode, bool includeSource)
         {
@@ -1633,6 +1702,7 @@ internal sealed class FileCaptureService : IDisposable
         private readonly bool _loopPlayback;
         private readonly double? _maxDecodeDurationSeconds;
         private readonly bool _ownerControlsLivePlaybackActivation;
+        private readonly FileSourceKind _sourceKind;
         private readonly Func<Task<ResolvedPlayback>>? _urlResolver;
         private readonly object _audioLock = new();
         private readonly object _videoPipelineLock = new();
@@ -1667,7 +1737,6 @@ internal sealed class FileCaptureService : IDisposable
         private double _estimatedDurationSeconds;
         private string? _videoPlaybackUrl;
         private string? _audioPlaybackUrl;
-        
         // Buffers
         private const int MaxQueuedOfflineRawFrames = 16;
         private const int MaxQueuedLiveRawFrames = 2;
@@ -1723,7 +1792,8 @@ internal sealed class FileCaptureService : IDisposable
             Func<Task<ResolvedPlayback>>? urlResolver = null,
             VideoProbeInfo? cachedProbe = null,
             double? maxDecodeDurationSeconds = null,
-            bool ownerControlsLivePlaybackActivation = false)
+            bool ownerControlsLivePlaybackActivation = false,
+            FileSourceKind sourceKind = FileSourceKind.Video)
             : base(path, displayName, 0, 0)
         {
             _loopPlayback = loopPlayback;
@@ -1733,6 +1803,7 @@ internal sealed class FileCaptureService : IDisposable
                 : null;
             _ownerControlsLivePlaybackActivation = ownerControlsLivePlaybackActivation;
             _livePlaybackActivationPending = true;
+            _sourceKind = sourceKind;
             _urlResolver = urlResolver;
 
             if (_urlResolver == null)
@@ -1771,7 +1842,8 @@ internal sealed class FileCaptureService : IDisposable
                 null,
                 cachedProbe,
                 maxDecodeDurationSeconds,
-                ownerControlsLivePlaybackActivation)
+                ownerControlsLivePlaybackActivation,
+                FileSourceKind.Video)
         {
         }
 
@@ -2078,8 +2150,25 @@ internal sealed class FileCaptureService : IDisposable
             }
         }
 
-        public override FileSourceKind Kind => FileSourceKind.Video;
+        public override FileSourceKind Kind => _sourceKind;
         public override FileCaptureState State => _hasError ? FileCaptureState.Error : (_readyDownscaled != null ? FileCaptureState.Ready : FileCaptureState.Pending);
+
+        internal int GetResidentFrameBufferCountForDiagnostics()
+        {
+            lock (_lock)
+            {
+                int count = _pendingRawFrames.Count + _rawFramePool.Count;
+                if (_readyRaw != null)
+                {
+                    count++;
+                }
+                if (_readyDownscaled != null)
+                {
+                    count++;
+                }
+                return count;
+            }
+        }
 
         public override FileCaptureFrame? CaptureFrame(int targetWidth, int targetHeight, FitMode fitMode, bool includeSource)
         {
@@ -3033,6 +3122,14 @@ internal sealed class FileCaptureService : IDisposable
 
             if (shouldRestart)
             {
+                if (!_initializationTask.IsCompleted && string.IsNullOrWhiteSpace(_videoPlaybackUrl))
+                {
+                    // Local metadata initialization is already running through the
+                    // shared bounded probe. Let it finish; the next capture request
+                    // will start the decoder without spawning a duplicate probe.
+                    return;
+                }
+
                 RestartVideoPipeline(seekOffset, shouldPause: false, forceReResolve: false);
             }
         }
@@ -4165,7 +4262,6 @@ internal sealed class FileCaptureService : IDisposable
 
             return (codecName, alphaMetadata || alphaPixelFormat, frameRate);
         }
-
         internal static VideoProbeInfo? ProbeVideoUncached(string path, int timeoutMilliseconds = VideoProbeTimeoutMilliseconds)
         {
             Process? process = null;

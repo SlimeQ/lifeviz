@@ -10,6 +10,7 @@
 LifeViz resolves `ffmpeg.exe` once and launches it through a centralized child-process manager. Standard direct installs continue to use the executable discovered beside the app or on `PATH`. If that executable is a Chocolatey shim under `C:\ProgramData\chocolatey\bin`, LifeViz safely resolves the real package binary under Chocolatey's `lib` directory and launches it directly, avoiding an extra shim process for every decode/probe/mux operation. No transcode or frame cache is written by this resolution step.
 
 For transparent WebM input, use an FFmpeg build that exposes the `libvpx` VP8 decoder and `libvpx-vp9` decoder. LifeViz selects them only when the existing cached input probe reports the matching VP8/VP9 codec plus an alpha tag; ordinary WebM and other inputs keep FFmpeg's default/native decoder path. Alpha-tagged **Fit** output uses transparent-black padding. The metadata extension and decoder choice do not add another probe, a persistent media cache, or ongoing disk writes.
+- `ffmpeg` on PATH (required for animated GIF/video streaming, unsupported-video transcoding, and lossless FFV1 recording)
 
 ## Local Development
 
@@ -43,6 +44,9 @@ dotnet bin\Debug\net9.0-windows-sbx\lifeviz.dll --smoke-test gpu-injection-mode
 dotnet bin\Debug\net9.0-windows-sbx\lifeviz.dll --smoke-test gpu-file-injection-mode C:\path\to\video.mp4
 dotnet bin\Debug\net9.0-windows-sbx\lifeviz.dll --smoke-test gpu-sim
 dotnet bin\Debug\net9.0-windows-sbx\lifeviz.dll --smoke-test gpu-source
+dotnet bin\Debug\net9.0-windows-sbx\lifeviz.dll --smoke-test chroma-key
+dotnet bin\Debug\net9.0-windows-sbx\lifeviz.dll --smoke-test color-plane
+dotnet bin\Debug\net9.0-windows-sbx\lifeviz.dll --smoke-test gif-source-recovery
 dotnet bin\Debug\net9.0-windows-sbx\lifeviz.dll --smoke-test source-reset
 dotnet bin\Debug\net9.0-windows-sbx\lifeviz.dll --smoke-test gpu-render
 dotnet bin\Debug\net9.0-windows-sbx\lifeviz.dll --smoke-test gpu-snapshot-order
@@ -99,6 +103,9 @@ dotnet bin\Debug\net9.0-windows-sbx\lifeviz.dll --smoke-test all
 - `gpu-file-injection-mode <video>` runs that same density comparison against a real decoded file frame, which is the right tool when a report reproduces only on actual media.
 - `gpu-sim` verifies the D3D11 simulation backend end to end in both `Naive Grayscale` and `RGB Channel Bins`.
 - `gpu-source` instantiates `MainWindow` without showing it and verifies that the GPU source compositor actually executes through the normal `BuildCompositeFrame` path.
+- `chroma-key` verifies exact green, blue, and red keys through both CPU and GPU compositors, including standard `#RRGGBB` handling over BGRA frame memory, and fails on red/blue channel swaps.
+- `color-plane` verifies exact solid-color output, capture-loop survival, grouped and deferred-editor rendering, app/scene-project persistence, invalid-edit preservation, and aspect-neutral behavior for procedural Color Plane layers.
+- `gif-source-recovery [path.gif]` verifies nonblocking GIF setup, bounded resident buffers, content-changing streamed playback, active pause/resume, prompt session removal, and terminal error detection/removal for corrupt GIF data. With no path it generates its own animation; pass a reported GIF (or set `LIFEVIZ_SMOKE_GIF`) to exercise the valid-file checks against that exact file. `all` also drives a corrupt GIF through a hidden `MainWindow` and verifies the isolated persisted scene drops the failed path.
 - `source-reset` clears the scene source stack, preserves passthrough state, re-adds a synthetic source, and fails unless the source composite becomes visible again.
 - `gpu-render` launches a hidden `MainWindow` and verifies that the real GPU composite pipeline initializes through the normal render backend path.
 - `sim-group-inline-presentation` now uses the minimal repro stack for the inline flicker bug: rainbow background, inline `Sim Group` with `Pixel Sort`, and a portrait-style static source above it at `240p`. It has a dynamic phase that requires the presented output to keep changing with the evolving scene, a static phase that fails unless the presented frame stays bit-stable for the whole dwell window, and a redraw-pressure phase that hammers the chrome/UI invalidation path while manual redraw requests and frame submits keep running, failing unless the presented frame stays stable with zero inline GPU-present fallbacks.
@@ -136,6 +143,7 @@ dotnet bin\Debug\net9.0-windows-sbx\lifeviz.dll --smoke-test all
 - `autoclip <path>` uses one real video to cover deterministic offline clip/delay/audio/fade behavior and the live handoff contract. It verifies the unified live output `realtime` plan with no input `-re`, the capped three-effective-frame limit, cached source-FPS parsing, expected realtime/arealtime reset-warning suppression, offline filter selection, a playback clock held before publication and advancing afterward, repeated pause/resume generations that remain held until a fresh token, and an active performance-triggered decoder restart that preserves the same phase. Its zero-delay case forces a tail-adjacent non-loop selection and a `100 ms` promotion delay for three consecutive handoffs, requires the outgoing `FramePublishTimestamp` to keep moving, and fails if publication is stale for more than `300 ms`. It caps owned/tracked sessions and newly observed FFmpeg PIDs at two during each seam, requires one session after promotion, and verifies final session/process cleanup. Delayed/offline plans stay sequential and exact. The target uses the normal in-memory decode path and creates no library-wide prewarm, persistent frame/transcode cache, staged transcode, or disk writes.
 - `webm-alpha <path>` expects an alpha-tagged VP8 or VP9 WebM. It exercises the existing cached metadata probe plus a real first-frame BGRA decode and fails if the matching `libvpx` decoder is not selected, the frame contains no non-opaque alpha, or the alpha-aware **Fit** plan stops using transparent padding. This target is intentionally scoped to alpha-tagged VP8/VP9; it does not change or characterize ordinary opaque WebM decoding.
 - `all` runs `gpu-sim` plus the combined GPU handoff/passthrough-render/source/render UI smoke suite. That combined UI suite includes `gpu-snapshot-order`, including its forced producer/consumer not-ready and final consumer-query drain checks.
+- `all` runs the generated bounded-GIF recovery smoke, the hidden-window corrupt-source persistence check, `gpu-sim`, and the combined GPU handoff/passthrough-render/source/render UI smoke suite.
 
 ## Normal-Startup Diagnostics
 
@@ -235,7 +243,6 @@ What it does:
 - Refuses to release from a dirty/uncommitted worktree, then creates a GitHub release for the supplied tag (draftable via `-Draft`) and uploads only that exe as the release asset. If the tag does not yet exist, the script passes the exact built `HEAD` commit to `gh release create --target`; the resulting GitHub tag therefore identifies the committed source that produced the stamped installer rather than implicitly using whatever commit the default branch currently references.
 
 Downloaders should grab the single `lifeviz_installer.exe` from the release and run it; it self-extracts the payload, changes away from any inherited staged-install working directory, and launches `Install-ClickOnce.ps1` with the extracted temp directory as the helper's working directory. The helper transactionally stages and validates the new payload, waits for any running staged LifeViz instance, narrowly retires only legacy `ffmpeg.exe` processes proven to have a current directory below that install root, swaps the validated directory into place, rewrites the manifest for consistency, removes old `.appref-ms` shortcuts, and creates normal `LifeViz` shortcuts to the staged exe. The bootstrapper removes its extracted temp payload after success and retains an install log/error message on failure.
-
 ## Troubleshooting
 
 - `MSB4803` or similar errors usually mean you ran `dotnet publish` instead of full MSBuild; re-run through `Publish-Installer.ps1`/`deploy.ps1` (or the **lifeviz: Publish Installer (MSBuild.exe)** run config in Rider).

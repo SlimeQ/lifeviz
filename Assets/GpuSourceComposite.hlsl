@@ -116,14 +116,15 @@ bool TryMapSamplePoint(float2 destPoint, out float2 samplePoint)
     return true;
 }
 
-float ComputeKeyAlpha(float3 sourceBgr)
+float ComputeKeyAlpha(float3 sourceRgb)
 {
     if ((Flags & FlagKeyEnabled) == 0u)
     {
         return 1.0f;
     }
 
-    float3 delta = sourceBgr - float3(KeyB, KeyG, KeyR);
+    // B8G8R8A8 describes memory layout; shader sampling exposes logical RGB.
+    float3 delta = sourceRgb - float3(KeyR, KeyG, KeyB);
     float distance = length(delta * 255.0f) / MaxColorDistance;
     if (Tolerance <= 0.0f)
     {

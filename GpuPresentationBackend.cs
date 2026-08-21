@@ -691,7 +691,7 @@ internal sealed class GpuPresentationBackend : IDisposable
                 _cpuFallbackDrawCount++;
             }
 
-            if (App.IsSmokeTestMode || App.IsDiagnosticTestMode)
+            if ((App.IsSmokeTestMode || App.IsDiagnosticTestMode) && App.CapturePresentedFramesForValidation)
             {
                 CapturePresentedFrameForSmoke(e);
             }

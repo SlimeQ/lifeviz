@@ -7,7 +7,7 @@ namespace lifeviz;
 
 internal sealed class LayerConfigFile
 {
-    public int Version { get; set; } = 10;
+    public int Version { get; set; } = 11;
     public DateTime SavedUtc { get; set; } = DateTime.UtcNow;
     public LayerConfigProjectSettings ProjectSettings { get; set; } = new();
     public List<LayerConfigSimulationLayer> SimulationLayers { get; set; } = new();
@@ -154,6 +154,7 @@ internal sealed class LayerConfigFile
             WindowTitle = source.WindowTitle,
             WebcamId = source.WebcamId,
             FilePath = source.FilePath,
+            Color = source.IsColorPlane ? source.ColorHex : null,
             DisplayName = source.DisplayName,
             BlendMode = source.BlendMode,
             FitMode = source.FitMode,
@@ -282,8 +283,13 @@ internal sealed class LayerConfigFile
             WindowTitle = config.WindowTitle,
             WebcamId = config.WebcamId,
             FilePath = config.FilePath,
-            BlendMode = string.IsNullOrWhiteSpace(config.BlendMode) ? "Additive" : config.BlendMode,
-            FitMode = string.IsNullOrWhiteSpace(config.FitMode) ? "Fill" : config.FitMode,
+            ColorHex = string.IsNullOrWhiteSpace(config.Color) ? "#000000" : config.Color,
+            BlendMode = string.IsNullOrWhiteSpace(config.BlendMode)
+                ? (kind == LayerEditorSourceKind.ColorPlane ? "Normal" : "Additive")
+                : config.BlendMode,
+            FitMode = string.IsNullOrWhiteSpace(config.FitMode)
+                ? (kind == LayerEditorSourceKind.ColorPlane ? "Stretch" : "Fill")
+                : config.FitMode,
             Opacity = Math.Clamp(config.Opacity, 0, 1),
             Scale = Math.Clamp(config.Scale, 0.1, 4.0),
             VideoAudioEnabled = config.VideoAudioEnabled,
@@ -644,6 +650,7 @@ internal sealed class LayerConfigSource
     public string? WindowTitle { get; set; }
     public string? WebcamId { get; set; }
     public string? FilePath { get; set; }
+    public string? Color { get; set; } = "#000000";
     public List<string> FilePaths { get; set; } = new();
     public string? DisplayName { get; set; }
     public string? BlendMode { get; set; }
