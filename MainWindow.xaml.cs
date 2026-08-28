@@ -51,8 +51,8 @@ public partial class MainWindow : Window
     private const double AnimationTranslateFactor = 0.1;
     private const double AnimationRotateDegrees = 12;
     private const double AnimationDvdScale = 0.2;
-    private const double MinLayerScale = 0.1;
-    private const double MaxLayerScale = 4.0;
+    private const double MinLayerScale = LayerEditorOptions.MinimumLayerScale;
+    private const double MaxLayerScale = LayerEditorOptions.MaximumLayerScale;
     private const double AnimationDvdCycleBeats = 4.0;
     private const double AnimationDvdAspectFactor = 1.3;
     private const double AnimationBeatShakeFactor = 0.03;
@@ -7558,31 +7558,84 @@ public partial class MainWindow : Window
             Header = "Scale",
             StaysOpenOnClick = true
         };
-        var scaleValueItem = new MenuItem
+        var scaleTextBox = new TextBox
         {
-            Header = $"{source.Scale:0.00}×",
-            IsEnabled = false
+            Text = $"{source.Scale:0.00}",
+            Width = 64,
+            HorizontalContentAlignment = HorizontalAlignment.Right,
+            ToolTip = "Enter a scale from 0.10 to 4.00",
+            Margin = new Thickness(12, 6, 12, 2)
         };
         var scaleSlider = new Slider
         {
-            Minimum = MinLayerScale,
-            Maximum = MaxLayerScale,
-            Value = Math.Clamp(source.Scale, MinLayerScale, MaxLayerScale),
+            Minimum = -1,
+            Maximum = 1,
+            Value = LayerEditorOptions.LayerScaleToSliderPosition(source.Scale),
             Width = 140,
-            SmallChange = 0.05,
-            LargeChange = 0.25,
+            SmallChange = 0.02,
+            LargeChange = 0.1,
+            TickPlacement = TickPlacement.BottomRight,
+            Ticks = new DoubleCollection { 0 },
+            ToolTip = "1.00× is centered and snaps into place",
             Margin = new Thickness(12, 4, 12, 8)
         };
-        scaleSlider.ValueChanged += (_, args) =>
+        bool updatingScaleControls = false;
+
+        void ApplyScale(double scale)
         {
-            source.Scale = Math.Clamp(args.NewValue, MinLayerScale, MaxLayerScale);
+            double normalizedScale = LayerEditorOptions.NormalizeLayerScale(scale);
+            bool changed = Math.Abs(source.Scale - normalizedScale) > 0.000001;
+            source.Scale = normalizedScale;
+
+            updatingScaleControls = true;
+            scaleSlider.Value = LayerEditorOptions.LayerScaleToSliderPosition(normalizedScale);
+            scaleTextBox.Text = $"{normalizedScale:0.00}";
+            updatingScaleControls = false;
+
+            if (!changed)
+            {
+                return;
+            }
+
             Logger.Info($"Source scale changed: {source.DisplayName} ({source.Type}) = {source.Scale:F2}");
-            scaleValueItem.Header = $"{source.Scale:0.00}×";
             RenderFrame();
             SaveConfig();
             NotifyLayerEditorSourcesChanged();
+        }
+
+        void CommitScaleTextBox()
+        {
+            if (double.TryParse(
+                scaleTextBox.Text,
+                NumberStyles.Float | NumberStyles.AllowThousands,
+                CultureInfo.CurrentCulture,
+                out double scale))
+            {
+                ApplyScale(scale);
+            }
+            else
+            {
+                scaleTextBox.Text = $"{source.Scale:0.00}";
+            }
+        }
+
+        scaleSlider.ValueChanged += (_, args) =>
+        {
+            if (!updatingScaleControls)
+            {
+                ApplyScale(LayerEditorOptions.SliderPositionToLayerScale(args.NewValue));
+            }
         };
-        scaleItem.Items.Add(scaleValueItem);
+        scaleTextBox.LostKeyboardFocus += (_, _) => CommitScaleTextBox();
+        scaleTextBox.PreviewKeyDown += (_, args) =>
+        {
+            if (args.Key == Key.Enter)
+            {
+                CommitScaleTextBox();
+                args.Handled = true;
+            }
+        };
+        scaleItem.Items.Add(scaleTextBox);
         scaleItem.Items.Add(scaleSlider);
 
         var removeItem = new MenuItem
@@ -9011,7 +9064,7 @@ public partial class MainWindow : Window
                 return;
             }
 
-            source.Scale = Math.Clamp(scale, MinLayerScale, MaxLayerScale);
+            source.Scale = LayerEditorOptions.NormalizeLayerScale(scale);
             RenderFrame();
             SaveConfig();
         });
@@ -13752,6 +13805,24 @@ public partial class MainWindow : Window
                     return null;
                 }
 
+                if (Math.Abs(source.Scale - LayerEditorOptions.DefaultLayerScale) > 0.000001)
+                {
+                    simulationComposite = _inlineGpuSourceCompositor.ComposeCompositeFrameOntoSurface(
+                        currentSurface: null,
+                        simulationComposite,
+                        source,
+                        downscaledWidth,
+                        downscaledHeight,
+                        animationTime,
+                        firstLayer: true,
+                        ref scratchBuffer,
+                        includeCpuReadback: false);
+                    if (simulationComposite == null)
+                    {
+                        return null;
+                    }
+                }
+
                 currentComposite = simulationComposite;
                 wroteAny = true;
                 sourceIndex++;
@@ -13950,7 +14021,28 @@ public partial class MainWindow : Window
                     continue;
                 }
 
-                Buffer.BlockCopy(simulationComposite.Downscaled, 0, downscaledBuffer, 0, requiredLength);
+                if (Math.Abs(source.Scale - LayerEditorOptions.DefaultLayerScale) > 0.000001)
+                {
+                    var simulationFrame = new SourceFrame(
+                        simulationComposite.Downscaled,
+                        simulationComposite.DownscaledWidth,
+                        simulationComposite.DownscaledHeight,
+                        source: null,
+                        sourceWidth: simulationComposite.DownscaledWidth,
+                        sourceHeight: simulationComposite.DownscaledHeight);
+                    _inlineSourceCompositor.CompositeSourceFrameIntoBuffer(
+                        downscaledBuffer,
+                        downscaledWidth,
+                        downscaledHeight,
+                        simulationFrame,
+                        source,
+                        animationTime,
+                        firstLayer: true);
+                }
+                else
+                {
+                    Buffer.BlockCopy(simulationComposite.Downscaled, 0, downscaledBuffer, 0, requiredLength);
+                }
                 currentComposite = new CompositeFrame(downscaledBuffer, downscaledWidth, downscaledHeight);
                 wroteAny = true;
                 continue;
@@ -16545,6 +16637,16 @@ public partial class MainWindow : Window
 
     internal bool RunLayerTransformControlsSmoke()
     {
+        bool scaleSliderMappingOk =
+            Math.Abs(LayerEditorOptions.LayerScaleToSliderPosition(MinLayerScale) + 1.0) < 0.0001 &&
+            Math.Abs(LayerEditorOptions.LayerScaleToSliderPosition(1.0)) < 0.0001 &&
+            Math.Abs(LayerEditorOptions.LayerScaleToSliderPosition(MaxLayerScale) - 1.0) < 0.0001 &&
+            Math.Abs(LayerEditorOptions.SliderPositionToLayerScale(-1.0) - MinLayerScale) < 0.0001 &&
+            Math.Abs(LayerEditorOptions.SliderPositionToLayerScale(1.0) - MaxLayerScale) < 0.0001;
+        bool scaleCenterSnapOk =
+            Math.Abs(LayerEditorOptions.SliderPositionToLayerScale(0.03) - 1.0) < 0.0001 &&
+            LayerEditorOptions.SliderPositionToLayerScale(0.05) > 1.0;
+
         var source = CaptureSource.CreateGroup("Transform Smoke");
         source.Scale = 2.0;
         var scaleTransform = BuildAnimationTransform(source, 101, 101, 0);
@@ -16569,6 +16671,12 @@ public partial class MainWindow : Window
             DisplayName = "Transform Smoke",
             Scale = 1.75
         };
+        double editorSliderPosition = editorSource.ScaleSliderPosition;
+        editorSource.ScaleSliderPosition = 0.02;
+        bool editorScaleBindingOk =
+            Math.Abs(editorSliderPosition - 0.25) < 0.0001 &&
+            Math.Abs(editorSource.Scale - 1.0) < 0.0001;
+        editorSource.Scale = 1.75;
         editorSource.Animations.Add(new LayerEditorAnimation
         {
             Id = Guid.NewGuid(),
@@ -16589,8 +16697,12 @@ public partial class MainWindow : Window
                              roundTrip.Animations.Count == 1 &&
                              Math.Abs(roundTrip.Animations[0].StartAngleDegrees - 123) < 0.0001;
 
-        bool ok = scaleTransformOk && startAngleTransformOk && persistenceOk;
-        Logger.Info($"Layer transform controls smoke: scale={scaleTransformOk}, startAngle={startAngleTransformOk}, persistence={persistenceOk}, ok={ok}.");
+        bool ok = scaleSliderMappingOk && scaleCenterSnapOk && editorScaleBindingOk &&
+                  scaleTransformOk && startAngleTransformOk && persistenceOk;
+        Logger.Info(
+            $"Layer transform controls smoke: sliderMapping={scaleSliderMappingOk}, centerSnap={scaleCenterSnapOk}, " +
+            $"editorBinding={editorScaleBindingOk}, " +
+            $"scale={scaleTransformOk}, startAngle={startAngleTransformOk}, persistence={persistenceOk}, ok={ok}.");
         return ok;
     }
 

@@ -49,6 +49,43 @@ internal sealed class LayerEditorOption
 
 internal static class LayerEditorOptions
 {
+    public const double MinimumLayerScale = 0.1;
+    public const double MaximumLayerScale = 4.0;
+    public const double DefaultLayerScale = 1.0;
+    public const double LayerScaleCenterSnapDistance = 0.04;
+
+    public static double NormalizeLayerScale(double scale)
+    {
+        if (double.IsNaN(scale) || double.IsInfinity(scale))
+        {
+            return DefaultLayerScale;
+        }
+
+        return Math.Clamp(scale, MinimumLayerScale, MaximumLayerScale);
+    }
+
+    public static double LayerScaleToSliderPosition(double scale)
+    {
+        scale = NormalizeLayerScale(scale);
+        return scale <= DefaultLayerScale
+            ? (scale - DefaultLayerScale) / (DefaultLayerScale - MinimumLayerScale)
+            : (scale - DefaultLayerScale) / (MaximumLayerScale - DefaultLayerScale);
+    }
+
+    public static double SliderPositionToLayerScale(double position, bool snapToCenter = true)
+    {
+        position = Math.Clamp(position, -1.0, 1.0);
+        if (snapToCenter && Math.Abs(position) <= LayerScaleCenterSnapDistance)
+        {
+            return DefaultLayerScale;
+        }
+
+        double scale = position <= 0
+            ? DefaultLayerScale + (position * (DefaultLayerScale - MinimumLayerScale))
+            : DefaultLayerScale + (position * (MaximumLayerScale - DefaultLayerScale));
+        return NormalizeLayerScale(scale);
+    }
+
     public static readonly IReadOnlyList<int> SimulationHeightPresets = new[]
     {
         144, 240, 480, 720, 1080, 1440, 2160
@@ -643,7 +680,19 @@ internal sealed class LayerEditorSource : LayerEditorNotify
     public double Scale
     {
         get => _scale;
-        set => SetField(ref _scale, value);
+        set
+        {
+            if (SetField(ref _scale, LayerEditorOptions.NormalizeLayerScale(value)))
+            {
+                OnPropertyChanged(nameof(ScaleSliderPosition));
+            }
+        }
+    }
+
+    public double ScaleSliderPosition
+    {
+        get => LayerEditorOptions.LayerScaleToSliderPosition(Scale);
+        set => Scale = LayerEditorOptions.SliderPositionToLayerScale(value);
     }
 
     public bool VideoAudioEnabled

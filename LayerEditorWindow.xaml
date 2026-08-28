@@ -670,6 +670,35 @@
                                                      TextChanged="GroupName_Changed" />
                                         </WrapPanel>
 
+                                        <WrapPanel Margin="0,0,0,4"
+                                                   Visibility="{Binding IsSimulationGroup, Converter={StaticResource BoolToVisibility}}">
+                                            <StackPanel Orientation="Horizontal" Margin="0,0,12,6">
+                                                <TextBlock Text="Scale"
+                                                           VerticalAlignment="Center" />
+                                                <Slider Minimum="-1"
+                                                        Maximum="1"
+                                                        Value="{Binding ScaleSliderPosition}"
+                                                        Width="150"
+                                                        SmallChange="0.02"
+                                                        LargeChange="0.1"
+                                                        TickPlacement="BottomRight"
+                                                        Ticks="0"
+                                                        Margin="6,0,0,0"
+                                                        ToolTip="1.00× is centered and snaps into place"
+                                                        ValueChanged="Scale_Changed" />
+                                                <TextBox Text="{Binding Scale, Mode=TwoWay, UpdateSourceTrigger=LostFocus, StringFormat={}{0:0.00}}"
+                                                         Width="58"
+                                                         Margin="6,0,0,0"
+                                                         HorizontalContentAlignment="Right"
+                                                         ToolTip="Enter a scale from 0.10 to 4.00"
+                                                         LostFocus="ScaleTextBox_LostFocus"
+                                                         KeyDown="ScaleTextBox_KeyDown" />
+                                                <TextBlock Text="×"
+                                                           Margin="3,0,0,0"
+                                                           VerticalAlignment="Center" />
+                                            </StackPanel>
+                                        </WrapPanel>
+
                                         <StackPanel>
                                             <StackPanel.Style>
                                                 <Style TargetType="StackPanel">
@@ -723,16 +752,26 @@
                                             <StackPanel Orientation="Horizontal" Margin="0,0,12,6">
                                                 <TextBlock Text="Scale"
                                                            VerticalAlignment="Center" />
-                                                <Slider Minimum="0.1"
-                                                        Maximum="4"
-                                                        Value="{Binding Scale}"
+                                                <Slider Minimum="-1"
+                                                        Maximum="1"
+                                                        Value="{Binding ScaleSliderPosition}"
                                                         Width="150"
-                                                        SmallChange="0.05"
-                                                        LargeChange="0.25"
+                                                        SmallChange="0.02"
+                                                        LargeChange="0.1"
+                                                        TickPlacement="BottomRight"
+                                                        Ticks="0"
                                                         Margin="6,0,0,0"
+                                                        ToolTip="1.00× is centered and snaps into place"
                                                         ValueChanged="Scale_Changed" />
-                                                <TextBlock Text="{Binding Scale, StringFormat={}{0:0.00}×}"
-                                                           Margin="6,0,0,0"
+                                                <TextBox Text="{Binding Scale, Mode=TwoWay, UpdateSourceTrigger=LostFocus, StringFormat={}{0:0.00}}"
+                                                         Width="58"
+                                                         Margin="6,0,0,0"
+                                                         HorizontalContentAlignment="Right"
+                                                         ToolTip="Enter a scale from 0.10 to 4.00"
+                                                         LostFocus="ScaleTextBox_LostFocus"
+                                                         KeyDown="ScaleTextBox_KeyDown" />
+                                                <TextBlock Text="×"
+                                                           Margin="3,0,0,0"
                                                            VerticalAlignment="Center" />
                                             </StackPanel>
                                         </WrapPanel>

@@ -8,7 +8,7 @@ Live authoring can use the video stack itself as the reactive soundtrack without
 
 Live frame production is scheduled alongside WPF/D3D presentation work, keeping movie, simulation-group, and BPM-animation updates on a stable cadence even while the presentation surface is continuously invalidating.
 
-Every source layer has a centered **Scale** control from `0.10×` to `4.00×`, available in both the Scene Editor and the right-click Sources menu. Rotate animations also have a persisted `0-360°` **Start Angle**, applied before their clockwise/counterclockwise animated rotation. Both controls affect live playback and fixed-duration renders.
+Every main scene-tree layer—including source layers, layer groups, and `Sim Group` output—has a centered **Scale** control from `0.10×` to `4.00×`, available in both the Scene Editor and the right-click Sources menu. The nonlinear slider places `1.00×` at its physical midpoint and snaps into that neutral value; an adjacent text box accepts exact values and clamps them to the supported range. Rotate animations also have a persisted `0-360°` **Start Angle**, applied before their clockwise/counterclockwise animated rotation. Both controls affect live playback and fixed-duration renders.
 
 AutoClip layers add a symmetric **Fade In / Out** control (`0-10 s`); the effective fade is capped at half of the visible phase available when the new frame is presented so the two ramps meet cleanly. AutoClip also uses the same **Mask / Keying (Normal)** color, range, CPU/GPU compositing, and persistence path as ordinary file layers. The chroma-key range has a solid transparent interior and a narrow feathered boundary, avoiding translucent green-screen rectangles while preserving distant dark colors.
 
@@ -111,6 +111,8 @@ dotnet bin\Debug\net9.0-windows-sbx\lifeviz.dll --smoke-test ffmpeg-lifecycle
 dotnet bin\Debug\net9.0-windows-sbx\lifeviz.dll --smoke-test webm-alpha C:\path\to\transparent.webm
 dotnet bin\Debug\net9.0-windows-sbx\lifeviz.dll --smoke-test all
 ```
+
+`layer-transform-controls` verifies the centered scale-slider mapping, the `1.00×` snap detent, the Scene Editor binding, render transforms, and config persistence.
 
 The live renderer now keeps source-layer sampling pixel-sharp by default on the GPU path too; the source compositor uses point sampling rather than linear filtering unless a future explicit smoothing control is added.
 

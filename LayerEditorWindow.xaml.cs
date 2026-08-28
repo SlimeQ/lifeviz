@@ -914,6 +914,32 @@ public partial class LayerEditorWindow : Window
         }
     }
 
+    private static void CommitScaleTextBox(TextBox textBox)
+    {
+        var binding = textBox.GetBindingExpression(TextBox.TextProperty);
+        binding?.UpdateSource();
+        binding?.UpdateTarget();
+    }
+
+    private void ScaleTextBox_LostFocus(object sender, RoutedEventArgs e)
+    {
+        if (sender is TextBox textBox)
+        {
+            CommitScaleTextBox(textBox);
+        }
+    }
+
+    private void ScaleTextBox_KeyDown(object sender, KeyEventArgs e)
+    {
+        if (e.Key != Key.Enter || sender is not TextBox textBox)
+        {
+            return;
+        }
+
+        CommitScaleTextBox(textBox);
+        e.Handled = true;
+    }
+
     private void Mirror_Changed(object sender, RoutedEventArgs e)
     {
         if (!ShouldApplyLive())
