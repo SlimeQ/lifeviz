@@ -2,6 +2,8 @@
 
 The UI stays invisible until you right-click anywhere on the canvas, revealing the context menu.
 
+Configuration is per Windows user at `%APPDATA%\lifeviz\config.json`. If a user launches LifeViz without a usable config, startup creates and saves a visible starter scene with one `Sim Group` containing one `Life Sim` layer. A valid config that deliberately contains no sources is respected as an empty scene.
+
 - The main output window now uses a custom chrome strip instead of the native title bar. Its title includes the running semantic release (for example `LifeViz v4.4.1`); ordinary IDE/CLI builds display `dev` plus their short commit instead of pretending to be a release. The strip also includes buttons for the root app menu (`...`), Scene Editor (`SE`), minimize, fullscreen, and close. Dragging anywhere on the output background moves the window, double-clicking that background toggles fullscreen, and resizing from the left/right/bottom edges stays inside LifeViz's own pointer handling instead of entering the OS non-client drag loop. Custom resize now preserves the active aspect ratio during the drag itself, so the window does not snap back when you release the mouse.
 - Minimizing the main output window or suspending Windows stops live media decoders instead of leaving hidden video/audio work running or charging sleep time to media. Restoring/waking resumes sources from their held positions and waits for a fresh decoder-generation frame before releasing playback clocks/audio. **Render Fixed Duration...** is intentionally exempt from minimization: an active offline export continues while the main window is minimized.
 

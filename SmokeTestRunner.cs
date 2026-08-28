@@ -4740,6 +4740,14 @@ internal static class SmokeTestRunner
                             $"menu='{versionState.VersionMenuHeader}', disabled={versionState.VersionMenuDisabled}.");
                     }
 
+                    var (firstRunOk, firstRunDetail) = window.RunFirstRunDefaultSceneSmoke();
+                    Logger.Info($"First-run default-scene smoke: {firstRunDetail}.");
+                    if (!firstRunOk)
+                    {
+                        throw new InvalidOperationException(
+                            $"First-run startup did not create a usable default scene. {firstRunDetail}.");
+                    }
+
                     window.Close();
                     app.Shutdown(0);
                 };

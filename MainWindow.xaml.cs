@@ -384,7 +384,8 @@ public partial class MainWindow : Window
         {
             if (!App.IsSmokeTestMode || allowFullSmokeStartup)
             {
-                LoadConfig();
+                bool configLoaded = LoadConfig();
+                EnsureDefaultSceneForStartup(configLoaded);
                 InitializeVisualizer();
                 if (_pendingFullscreen)
                 {
@@ -3239,6 +3240,42 @@ public partial class MainWindow : Window
             ShowFpsMenuItem.IsChecked = _showFps;
         }
         UpdateFpsOverlay();
+    }
+
+    internal (bool ok, string detail) RunFirstRunDefaultSceneSmoke()
+    {
+        _sources.Clear();
+        ClearSimulationLayers();
+
+        bool preservedSavedEmptyScene = !EnsureDefaultSceneForStartup(configLoaded: true, persist: false) &&
+                                        _sources.Count == 0 &&
+                                        _simulationLayers.Count == 0;
+        bool createdDefaultScene = EnsureDefaultSceneForStartup(configLoaded: false, persist: false);
+        CaptureSource? defaultSource = _sources.SingleOrDefault();
+        int configuredSimulationLayers = defaultSource?.SimulationLayers.Count ?? 0;
+        int runtimeSimulationLayers = EnumerateSimulationLeafLayers(_simulationLayers).Count();
+
+        if (!_renderLoopAttached)
+        {
+            InitializeVisualizer();
+        }
+        InjectCaptureFrames(injectLayers: true);
+        RenderFrame();
+        bool visibleOutput = BufferHasNonBlackPixel(_lastCompositeFrame?.Downscaled) ||
+                             BufferHasNonBlackPixel(_pixelBuffer);
+
+        bool ok = preservedSavedEmptyScene &&
+                  createdDefaultScene &&
+                  defaultSource?.Type == CaptureSource.SourceType.SimGroup &&
+                  configuredSimulationLayers > 0 &&
+                  runtimeSimulationLayers > 0 &&
+                  visibleOutput;
+        string detail =
+            $"preservedSavedEmpty={preservedSavedEmptyScene}, createdDefault={createdDefaultScene}, " +
+            $"sourceType={defaultSource?.Type.ToString() ?? "none"}, " +
+            $"configuredSimulationLayers={configuredSimulationLayers}, runtimeSimulationLayers={runtimeSimulationLayers}, " +
+            $"visibleOutput={visibleOutput}";
+        return (ok, detail);
     }
 
     private bool WaitForPresentationDrawForSmoke(int priorDrawCount, int maxIdlePasses = 8)
@@ -18943,14 +18980,15 @@ public partial class MainWindow : Window
         }
     }
 
-    private void LoadConfig()
+    private bool LoadConfig()
     {
         bool clearedLegacyGlobalSimulationConfig = false;
+        bool configLoaded = false;
         try
         {
             if (!File.Exists(ConfigPath))
             {
-                return;
+                return false;
             }
 
             string json = File.ReadAllText(ConfigPath);
@@ -18958,8 +18996,10 @@ public partial class MainWindow : Window
             var config = JsonSerializer.Deserialize<AppConfig>(json);
             if (config == null)
             {
-                return;
+                return false;
             }
+
+            configLoaded = true;
 
             _captureThresholdMin = Math.Clamp(config.CaptureThresholdMin, 0, 1);
             _captureThresholdMax = Math.Clamp(config.CaptureThresholdMax, 0, 1);
@@ -19099,9 +19139,10 @@ public partial class MainWindow : Window
                 _pendingLegacyColumns = null;
             }
         }
-        catch
+        catch (Exception ex)
         {
-            // Ignore config load errors.
+            configLoaded = false;
+            Logger.Warn($"Failed to load the app configuration; the default scene will be used. {ex.Message}");
         }
         finally
         {
@@ -19112,6 +19153,43 @@ public partial class MainWindow : Window
                 SaveConfig();
             }
         }
+
+        return configLoaded;
+    }
+
+    private bool EnsureDefaultSceneForStartup(bool configLoaded, bool persist = true)
+    {
+        if (configLoaded)
+        {
+            // An explicitly saved empty scene is valid and must stay empty.
+            return false;
+        }
+
+        foreach (var source in _sources.ToList())
+        {
+            CleanupSource(source);
+        }
+        _fileCapture.Clear();
+        _sources.Clear();
+        ClearSimulationLayers();
+        _lastCompositeFrame = null;
+
+        var simulationGroup = CaptureSource.CreateSimulationGroup("Simulation");
+        foreach (var simulationLayer in BuildDefaultSimulationLayerSpecs())
+        {
+            simulationGroup.SimulationLayers.Add(simulationLayer);
+        }
+
+        _sources.Add(simulationGroup);
+        ApplySimulationLayersFromSourceStack(fallbackToDefault: false);
+        Logger.Info("Created the default first-run scene because no usable user configuration was found.");
+
+        if (persist)
+        {
+            SaveConfig();
+        }
+
+        return true;
     }
 
     private void ApplyStartupRecoveryOverridesIfNeeded()
