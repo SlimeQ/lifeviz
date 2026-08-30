@@ -2,7 +2,7 @@
 
 Windows 11-ready WPF visualization of a 3D-stacked Game of Life grid. The UI stays minimalist-16:9 canvas, no chrome, with controls centered in the right-click context menu plus a dedicated Scene Editor for source stack workflows-and it supports open desktop windows, webcams, media files, and procedural solid-color planes as live depth sources.
 
-Each Windows user keeps an independent scene in `%APPDATA%\lifeviz\config.json`. On a first launch—or when that configuration cannot be read—LifeViz creates and persists a visible starter scene containing a `Sim Group` with one `Life Sim` layer. A valid configuration whose source list was deliberately saved empty remains empty.
+Each Windows user keeps an independent scene in `%APPDATA%\lifeviz\config.json`. On a first launch—or when that configuration cannot be read—LifeViz creates and persists a visible starter scene containing a `Sim Group` with one `Life Sim` layer. Unversioned empty configs left behind by the earlier black-screen startup bug are migrated to that starter scene once; after the current config-version marker is saved, a source list deliberately cleared by the user remains empty.
 
 Live authoring can use the video stack itself as the reactive soundtrack without playing that soundtrack through the speakers. Under **Audio Source**, choose **Video Stack (Silent)**. Every enabled, playing video/YouTube/sequence layer with **Play Audio** on is decoded in real time, mixed with its per-layer and master source-audio volume, and fed directly into the normal level/beat/band/frequency analysis. LifeViz suppresses its source-audio output while this mode is selected, so another music app can keep playing independently. Switching back to a hardware input/output restores normal monitoring for the checked video tracks. This analysis-only selection is not muxed into ordinary recordings.
 
@@ -41,7 +41,7 @@ The new Rider solution (`lifeviz.sln`) includes a "lifeviz: Run App" configurati
 
 For runtime validation without launching your saved scene manually:
 
-The `startup` smoke also checks the per-user first-run decision: a missing or unusable config must produce the starter sim scene, while a successfully loaded empty scene must stay empty.
+The `startup` smoke also checks the per-user first-run decision: a missing or unusable config and an unversioned legacy empty config must produce the starter sim scene, while a current-version empty scene must stay empty.
 
 ```powershell
 dotnet bin\Debug\net9.0-windows-sbx\lifeviz.dll --smoke-test gpu-benchmark

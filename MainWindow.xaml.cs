@@ -118,6 +118,7 @@ public partial class MainWindow : Window
     private const double MaxRgbHueShiftSpeedDegreesPerSecond = 180.0;
     private const int DefaultDecoderThreadLimit = 0;
     private const int DefaultVideoDecodeFpsLimit = 0;
+    private const int CurrentConfigVersion = 1;
     private const int ConfigSaveDebounceMilliseconds = 500;
     private const string VideoStackAudioSourceId = "video-stack:silent";
     private const int LiveVideoAudioMixSampleCount = 4096;
@@ -384,8 +385,8 @@ public partial class MainWindow : Window
         {
             if (!App.IsSmokeTestMode || allowFullSmokeStartup)
             {
-                bool configLoaded = LoadConfig();
-                EnsureDefaultSceneForStartup(configLoaded);
+                var (configLoaded, migrateLegacyEmptyScene) = LoadConfig();
+                EnsureDefaultSceneForStartup(configLoaded, migrateLegacyEmptyScene);
                 InitializeVisualizer();
                 if (_pendingFullscreen)
                 {
@@ -3247,10 +3248,36 @@ public partial class MainWindow : Window
         _sources.Clear();
         ClearSimulationLayers();
 
-        bool preservedSavedEmptyScene = !EnsureDefaultSceneForStartup(configLoaded: true, persist: false) &&
+        bool preservedCurrentEmptyScene = !EnsureDefaultSceneForStartup(
+                                               configLoaded: true,
+                                               migrateLegacyEmptyScene: false,
+                                               persist: false) &&
                                         _sources.Count == 0 &&
                                         _simulationLayers.Count == 0;
-        bool createdDefaultScene = EnsureDefaultSceneForStartup(configLoaded: false, persist: false);
+        bool migratedLegacyEmptyScene = EnsureDefaultSceneForStartup(
+            configLoaded: true,
+            migrateLegacyEmptyScene: true,
+            persist: false);
+        bool migratedLegacyStructure = HasUsableDefaultScene();
+        bool migrationDecisionOk = ShouldMigrateLegacyEmptyScene(new AppConfig()) &&
+                                   !ShouldMigrateLegacyEmptyScene(new AppConfig
+                                   {
+                                       ConfigVersion = CurrentConfigVersion
+                                   }) &&
+                                   !ShouldMigrateLegacyEmptyScene(new AppConfig
+                                   {
+                                       Sources = new List<AppConfig.SourceConfig>
+                                       {
+                                           new() { Type = CaptureSource.SourceType.ColorPlane.ToString() }
+                                       }
+                                   });
+
+        _sources.Clear();
+        ClearSimulationLayers();
+        bool createdMissingConfigScene = EnsureDefaultSceneForStartup(
+            configLoaded: false,
+            migrateLegacyEmptyScene: false,
+            persist: false);
         CaptureSource? defaultSource = _sources.SingleOrDefault();
         int configuredSimulationLayers = defaultSource?.SimulationLayers.Count ?? 0;
         int runtimeSimulationLayers = EnumerateSimulationLeafLayers(_simulationLayers).Count();
@@ -3264,18 +3291,39 @@ public partial class MainWindow : Window
         bool visibleOutput = BufferHasNonBlackPixel(_lastCompositeFrame?.Downscaled) ||
                              BufferHasNonBlackPixel(_pixelBuffer);
 
-        bool ok = preservedSavedEmptyScene &&
-                  createdDefaultScene &&
+        using JsonDocument serializedConfig = JsonDocument.Parse(SerializeCurrentConfig());
+        int serializedConfigVersion = serializedConfig.RootElement.TryGetProperty(
+            nameof(AppConfig.ConfigVersion),
+            out JsonElement configVersionProperty)
+            ? configVersionProperty.GetInt32()
+            : 0;
+
+        bool ok = preservedCurrentEmptyScene &&
+                  migratedLegacyEmptyScene &&
+                  migratedLegacyStructure &&
+                  migrationDecisionOk &&
+                  createdMissingConfigScene &&
                   defaultSource?.Type == CaptureSource.SourceType.SimGroup &&
                   configuredSimulationLayers > 0 &&
                   runtimeSimulationLayers > 0 &&
-                  visibleOutput;
+                  visibleOutput &&
+                  serializedConfigVersion == CurrentConfigVersion;
         string detail =
-            $"preservedSavedEmpty={preservedSavedEmptyScene}, createdDefault={createdDefaultScene}, " +
+            $"preservedCurrentEmpty={preservedCurrentEmptyScene}, migratedLegacyEmpty={migratedLegacyEmptyScene}, " +
+            $"migratedLegacyStructure={migratedLegacyStructure}, migrationDecision={migrationDecisionOk}, " +
+            $"createdMissing={createdMissingConfigScene}, " +
             $"sourceType={defaultSource?.Type.ToString() ?? "none"}, " +
             $"configuredSimulationLayers={configuredSimulationLayers}, runtimeSimulationLayers={runtimeSimulationLayers}, " +
-            $"visibleOutput={visibleOutput}";
+            $"visibleOutput={visibleOutput}, configVersion={serializedConfigVersion}";
         return (ok, detail);
+    }
+
+    private bool HasUsableDefaultScene()
+    {
+        CaptureSource? source = _sources.SingleOrDefault();
+        return source?.Type == CaptureSource.SourceType.SimGroup &&
+               source.SimulationLayers.Count > 0 &&
+               EnumerateSimulationLeafLayers(_simulationLayers).Any();
     }
 
     private bool WaitForPresentationDrawForSmoke(int priorDrawCount, int maxIdlePasses = 8)
@@ -19092,15 +19140,17 @@ public partial class MainWindow : Window
         }
     }
 
-    private bool LoadConfig()
+    private (bool loaded, bool migrateLegacyEmptyScene) LoadConfig()
     {
         bool clearedLegacyGlobalSimulationConfig = false;
         bool configLoaded = false;
+        bool configSchemaUpgradeNeeded = false;
+        bool migrateLegacyEmptyScene = false;
         try
         {
             if (!File.Exists(ConfigPath))
             {
-                return false;
+                return (false, false);
             }
 
             string json = File.ReadAllText(ConfigPath);
@@ -19108,10 +19158,12 @@ public partial class MainWindow : Window
             var config = JsonSerializer.Deserialize<AppConfig>(json);
             if (config == null)
             {
-                return false;
+                return (false, false);
             }
 
             configLoaded = true;
+            configSchemaUpgradeNeeded = config.ConfigVersion < CurrentConfigVersion;
+            migrateLegacyEmptyScene = ShouldMigrateLegacyEmptyScene(config);
 
             _captureThresholdMin = Math.Clamp(config.CaptureThresholdMin, 0, 1);
             _captureThresholdMax = Math.Clamp(config.CaptureThresholdMax, 0, 1);
@@ -19254,26 +19306,36 @@ public partial class MainWindow : Window
         catch (Exception ex)
         {
             configLoaded = false;
+            migrateLegacyEmptyScene = false;
             Logger.Warn($"Failed to load the app configuration; the default scene will be used. {ex.Message}");
         }
         finally
         {
             // Allow saves after the first load attempt so startup events don't clobber existing config.
             _configReady = true;
-            if (clearedLegacyGlobalSimulationConfig)
+            if (clearedLegacyGlobalSimulationConfig ||
+                (configLoaded && configSchemaUpgradeNeeded && !migrateLegacyEmptyScene))
             {
                 SaveConfig();
             }
         }
 
-        return configLoaded;
+        return (configLoaded, migrateLegacyEmptyScene);
     }
 
-    private bool EnsureDefaultSceneForStartup(bool configLoaded, bool persist = true)
+    private static bool ShouldMigrateLegacyEmptyScene(AppConfig config) =>
+        config.ConfigVersion < CurrentConfigVersion &&
+        (config.Sources == null || config.Sources.Count == 0);
+
+    private bool EnsureDefaultSceneForStartup(
+        bool configLoaded,
+        bool migrateLegacyEmptyScene = false,
+        bool persist = true)
     {
-        if (configLoaded)
+        if (configLoaded && !migrateLegacyEmptyScene)
         {
-            // An explicitly saved empty scene is valid and must stay empty.
+            // Once a config has the current schema marker, an explicitly saved
+            // empty scene is valid and must stay empty.
             return false;
         }
 
@@ -19294,7 +19356,9 @@ public partial class MainWindow : Window
 
         _sources.Add(simulationGroup);
         ApplySimulationLayersFromSourceStack(fallbackToDefault: false);
-        Logger.Info("Created the default first-run scene because no usable user configuration was found.");
+        Logger.Info(migrateLegacyEmptyScene
+            ? "Migrated an unversioned empty user configuration to the default starter scene."
+            : "Created the default first-run scene because no usable user configuration was found.");
 
         if (persist)
         {
@@ -19405,6 +19469,7 @@ public partial class MainWindow : Window
         bool hasEmbeddedSimulationGroups = EnumerateSources(_sources).Any(source => source.Type == CaptureSource.SourceType.SimGroup);
         var config = new AppConfig
         {
+            ConfigVersion = CurrentConfigVersion,
             CaptureThresholdMin = _captureThresholdMin,
             CaptureThresholdMax = _captureThresholdMax,
             InvertThreshold = _invertThreshold,
@@ -20785,6 +20850,7 @@ public partial class MainWindow : Window
 
     private sealed class AppConfig
     {
+        public int ConfigVersion { get; set; }
         public double CaptureThresholdMin { get; set; } = 0.35;
         public double CaptureThresholdMax { get; set; } = 0.75;
         public bool InvertThreshold { get; set; }
