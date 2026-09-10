@@ -599,7 +599,11 @@
                                 BorderThickness="0"
                                 Padding="0">
                         <TabItem Header="Selected Layer">
-                            <StackPanel>
+                            <Grid>
+                                <Grid.RowDefinitions>
+                                    <RowDefinition Height="Auto" />
+                                    <RowDefinition Height="*" />
+                                </Grid.RowDefinitions>
                         <TextBlock Text="Select a layer or group in the tree to edit its settings."
                                    Foreground="#A0A0A0"
                                    FontSize="14"
@@ -616,7 +620,7 @@
                             </TextBlock.Style>
                         </TextBlock>
 
-                        <ScrollViewer VerticalScrollBarVisibility="Auto">
+                        <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto">
                             <StackPanel DataContext="{Binding SelectedSource}">
                                 <StackPanel.Style>
                                     <Style TargetType="StackPanel">
@@ -865,11 +869,25 @@
                                                      Visibility="{Binding IsContainerGroup, Converter={StaticResource BoolToVisibility}}" />
                                         </WrapPanel>
 
+                                        <GroupBox Header="Visibility Group" Margin="0,0,0,10"
+                                                  Visibility="{Binding SupportsVisibilityGroup, Converter={StaticResource BoolToVisibility}}">
+                                            <StackPanel Margin="8">
+                                                <TextBox Text="{Binding VisibilityGroup, UpdateSourceTrigger=LostFocus}"
+                                                         LostFocus="VisibilityGroup_LostFocus" ToolTip="Give related sibling layers the same name, such as main visuals. Blank means independent." />
+                                                <CheckBox Content="Take over this visibility group while playing" Margin="0,8,0,4"
+                                                          Visibility="{Binding IsAutoClip, Converter={StaticResource BoolToVisibility}}"
+                                                          IsChecked="{Binding AutoClipTakeover}"
+                                                          Checked="VisibilityTakeover_Changed" Unchecked="VisibilityTakeover_Changed" />
+                                                <TextBlock Text="Matching layers at this stack level fade out during takeover and return during gaps. Hidden playback keeps running. Leave backgrounds and logos unassigned."
+                                                           TextWrapping="Wrap" Foreground="#9A9A9A" />
+                                            </StackPanel>
+                                        </GroupBox>
+
                                         <GroupBox Header="AutoClip Settings"
                                                   Margin="0,8,0,8"
                                                   Visibility="{Binding IsAutoClip, Converter={StaticResource BoolToVisibility}}">
                                             <StackPanel Margin="8">
-                                                <TextBlock Text="Videos are selected randomly, begin at a random timeline point, and disappear during non-zero delays."
+                                                <TextBlock Text="Choose random excerpts, timed loops, or whole files. Set gaps, fades, and playback order below."
                                                            Foreground="#AFAFAF"
                                                            TextWrapping="Wrap"
                                                            Margin="0,0,0,8" />
@@ -882,6 +900,8 @@
                                                 <WrapPanel Margin="0,0,0,8">
                                                     <Button Content="Add Videos..." Click="AutoClipAddVideos_Click" />
                                                     <Button Content="Remove Selected" Click="AutoClipRemoveVideo_Click" />
+                                                    <Button Content="Move Up" Click="AutoClipMoveUp_Click" />
+                                                    <Button Content="Move Down" Click="AutoClipMoveDown_Click" />
                                                 </WrapPanel>
                                                 <GroupBox Header="Selected Video Overrides"
                                                           Margin="0,0,0,8"
@@ -979,6 +999,17 @@
                                                                VerticalAlignment="Center"
                                                                Margin="0,0,0,6" />
                                                 </StackPanel>
+                                                <CheckBox Content="Play files in list order (unchecked = random)" Margin="0,4,0,4"
+                                                          IsChecked="{Binding AutoClipPlayInOrder}"
+                                                          Checked="AutoClipPlaybackOptions_Changed" Unchecked="AutoClipPlaybackOptions_Changed" />
+                                                <CheckBox Content="Play whole file from beginning to end" Margin="0,0,0,4"
+                                                          ToolTip="Uses the source duration instead of Clip Time. Overrides Loop selected file. Gaps and fades still apply."
+                                                          IsChecked="{Binding AutoClipPlayWholeFile}"
+                                                          Checked="AutoClipPlaybackOptions_Changed" Unchecked="AutoClipPlaybackOptions_Changed" />
+                                                <CheckBox Content="Start with delay" Margin="0,0,0,4"
+                                                          ToolTip="Waits for a random Delay Time before the first clip, including at the start of a fixed-duration render."
+                                                          IsChecked="{Binding AutoClipStartWithDelay}"
+                                                          Checked="AutoClipPlaybackOptions_Changed" Unchecked="AutoClipPlaybackOptions_Changed" />
                                                 <CheckBox Content="Loop selected file until clip time expires"
                                                           IsChecked="{Binding AutoClipLoopSelectedFile}"
                                                           Checked="AutoClipLoopSelectedFile_Changed"
@@ -1547,7 +1578,7 @@
                                 </GroupBox>
                             </StackPanel>
                         </ScrollViewer>
-                            </StackPanel>
+                            </Grid>
                         </TabItem>
                         <TabItem Header="Simulation Layers">
                             <ScrollViewer VerticalScrollBarVisibility="Auto">

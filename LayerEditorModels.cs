@@ -482,6 +482,11 @@ internal sealed class LayerEditorSource : LayerEditorNotify
     private double _autoClipMaxDelaySeconds;
     private double _autoClipFadeSeconds;
     private bool _autoClipLoopSelectedFile;
+    private string _visibilityGroup = string.Empty;
+    private bool _autoClipTakeover;
+    private bool _autoClipStartWithDelay;
+    private bool _autoClipPlayInOrder;
+    private bool _autoClipPlayWholeFile;
     private bool _mirror;
     private bool _keyEnabled;
     private string _keyColorHex = "#000000";
@@ -645,6 +650,38 @@ internal sealed class LayerEditorSource : LayerEditorNotify
         get => _autoClipFadeSeconds;
         set => SetField(ref _autoClipFadeSeconds, value);
     }
+
+    public string VisibilityGroup
+    {
+        get => _visibilityGroup;
+        set => SetField(ref _visibilityGroup, value);
+    }
+
+    public bool AutoClipTakeover
+    {
+        get => _autoClipTakeover;
+        set => SetField(ref _autoClipTakeover, value);
+    }
+
+    public bool AutoClipStartWithDelay
+    {
+        get => _autoClipStartWithDelay;
+        set => SetField(ref _autoClipStartWithDelay, value);
+    }
+
+    public bool AutoClipPlayInOrder
+    {
+        get => _autoClipPlayInOrder;
+        set => SetField(ref _autoClipPlayInOrder, value);
+    }
+
+    public bool AutoClipPlayWholeFile
+    {
+        get => _autoClipPlayWholeFile;
+        set => SetField(ref _autoClipPlayWholeFile, value);
+    }
+
+    public bool SupportsVisibilityGroup => !IsSimulationGroup;
 
     public bool AutoClipLoopSelectedFile
     {

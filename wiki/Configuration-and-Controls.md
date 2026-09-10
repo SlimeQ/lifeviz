@@ -125,3 +125,13 @@ Configuration is per Windows user at `%APPDATA%\lifeviz\config.json`. If a user 
 - Depth is clamped between 3 and 96.
 - Rows never fall below 9, avoiding degenerate grids when height values are tiny.
 - Window captures gracefully detach if a source closes or becomes inaccessible; the next source in the stack becomes primary, and removing the last source restores the default aspect ratio.
+
+## AutoClip takeovers and playlists
+
+The Scene Editor exposes **Visibility Group** on sources and Layer Groups. Enter a shared name on sibling layers to coordinate their visibility without flattening their blending. On AutoClip, **Take over this visibility group while playing** fades ordinary members out during its visible phase and restores them during gaps. Leave backgrounds and logos unassigned. Hidden playback and audio routing continue unchanged. Names are case-insensitive and scoped to one sibling stack; Sim Group output remains independent. Overlapping takeover layers remain visible together, with the strongest fade controlling fallback visibility.
+
+AutoClip Settings also includes **Start with delay**, **Play files in list order**, **Play whole file from beginning to end**, and **Move Up / Move Down** for the selected file. Whole-file playback uses source duration and overrides Clip Time and Loop selected file. The right-click Sources menu exposes **Visibility Group...**, **Take Over Visibility Group**, **Start with Delay**, **Play Files in List Order**, and **Play Whole File**. Timing, playlist, and playback-option edits restart that AutoClip schedule; visibility and fade edits do not.
+
+See [AutoClip takeovers and playlists](AutoClip-Takeovers.md) for the movie/short-loop/long-clip recipe, transparency behavior, and fixed-duration export setup. Existing Video Sequence layers and older AutoClip defaults remain supported.
+
+The Selected Layer tab keeps its settings inside a bounded scroll area, so long AutoClip and keying controls remain reachable at the normal editor size.

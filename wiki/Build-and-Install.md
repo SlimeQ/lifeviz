@@ -251,4 +251,15 @@ Downloaders should grab the single `lifeviz_installer.exe` from the release and 
 - ClickOnce `.appref-ms` entries or "already installed from a different location" errors: rerun `Install-ClickOnce.ps1` without `-RegisterClickOnce`. The default flow stages to `%LOCALAPPDATA%\lifeviz-clickonce`, removes stale appref shortcuts, and replaces them with a direct `LifeViz.lnk`.
 - Installer popup or nonzero exit: read `%TEMP%\lifeviz-install.log`, which contains the complete captured helper output even when the popup is closed. Pre-swap failures leave the old install intact. Close LifeViz and retry the downloaded installer; if the log still says `%LOCALAPPDATA%\lifeviz-clickonce` is in use, attach that log to the report. The helper may terminate a legacy process named `ffmpeg.exe` whose current directory is proven to be inside that install root, but it deliberately does not stop unrelated FFmpeg jobs or any non-FFmpeg holder elsewhere on the machine.
 
+## AutoClip takeover regression
 
+Build, create a disposable one-second fixture, then exercise the real AutoClip export scheduler and CPU/GPU compositors:
+
+```powershell
+dotnet build
+New-Item -ItemType Directory -Force artifacts/takeover | Out-Null
+ffmpeg -hide_banner -loglevel error -f lavfi -i "testsrc2=size=32x32:rate=30:duration=1" -an -c:v libx264 -pix_fmt yuv420p -y artifacts/takeover/one-second.mp4
+dotnet bin/Debug/net9.0-windows/lifeviz.dll --smoke-test autoclip-takeover artifacts/takeover/one-second.mp4
+```
+
+The `autoclip-takeover` fixture must be one second long. The smoke checks repeated whole-file ordered playback, initial gaps, fades, CPU/GPU parity, transparent takeover holes, independent background/logo layers, disabled/failed controllers, sibling isolation, application/scene persistence, editor bindings, and playlist reordering. It writes `takeover-editor.png` and `takeover-editor.playback.png` beside the fixture for visual inspection and checks that the settings pane scrolls. Run the existing `autoclip` smoke with a longer video to validate live pause/resume and decoder handoffs as well. Smokes skip the user's saved scene and configuration writes.

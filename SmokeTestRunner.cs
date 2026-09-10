@@ -165,6 +165,7 @@ internal static class SmokeTestRunner
                 "offline-video-audio" => RunOfflineVideoAudioSmokeTest(smokeVideoPath),
                 "live-video-audio" => RunLiveVideoAudioSmokeTest(smokeVideoPath),
                 "autoclip" => RunAutoClipSmokeTest(smokeVideoPath),
+                "autoclip-takeover" => RunAutoClipTakeoverSmokeTest(smokeVideoPath),
                 "ffmpeg-lifecycle" => RunFfmpegLifecycleSmokeTest(),
                 "gif-source-recovery" => RunGifSourceRecoverySmokeTest(smokeGifPath),
                 "layer-transform-controls" => RunLayerTransformControlsSmokeTest(),
@@ -579,6 +580,51 @@ internal static class SmokeTestRunner
 
         Logger.Info("GPU source composite smoke test passed.");
         return exitCode;
+    }
+
+    private static int RunAutoClipTakeoverSmokeTest(string? videoPath)
+    {
+        Logger.Info("Running AutoClip takeover smoke test.");
+        bool previousDiagnosticMode = App.IsDiagnosticTestMode;
+        App.IsDiagnosticTestMode = true;
+        var app = new App();
+        app.InitializeComponent();
+        app.ShutdownMode = ShutdownMode.OnExplicitShutdown;
+        bool ok = false;
+        Exception? failure = null;
+        app.DispatcherUnhandledException += (_, args) =>
+        {
+            failure ??= args.Exception;
+            args.Handled = true;
+            app.Shutdown(1);
+        };
+
+        app.Startup += (_, _) =>
+        {
+            var window = new MainWindow();
+            ok = window.RunAutoClipTakeoverSmoke(videoPath ?? throw new ArgumentException("Provide a one-second video fixture."));
+            app.Shutdown(ok ? 0 : 1);
+        };
+
+        try
+        {
+            int exitCode = app.Run();
+            if (failure != null)
+            {
+                throw new InvalidOperationException("AutoClip takeover smoke test failed.", failure);
+            }
+            if (!ok)
+            {
+                throw new InvalidOperationException("AutoClip takeover smoke failed.");
+            }
+
+            Logger.Info("AutoClip takeover smoke test passed.");
+            return exitCode;
+        }
+        finally
+        {
+            App.IsDiagnosticTestMode = previousDiagnosticMode;
+        }
     }
 
     private static int RunLayerTransformControlsSmokeTest()

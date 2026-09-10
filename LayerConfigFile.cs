@@ -160,6 +160,11 @@ internal sealed class LayerConfigFile
             FitMode = source.FitMode,
             Opacity = source.Opacity,
             Scale = source.Scale,
+            VisibilityGroup = (source.VisibilityGroup ?? string.Empty).Trim(),
+            AutoClipTakeover = source.AutoClipTakeover,
+            AutoClipStartWithDelay = source.AutoClipStartWithDelay,
+            AutoClipPlayInOrder = source.AutoClipPlayInOrder,
+            AutoClipPlayWholeFile = source.AutoClipPlayWholeFile,
             VideoAudioEnabled = source.VideoAudioEnabled,
             VideoAudioVolume = source.VideoAudioVolume,
             Mirror = source.Mirror,
@@ -292,6 +297,11 @@ internal sealed class LayerConfigFile
                 : config.FitMode,
             Opacity = Math.Clamp(config.Opacity, 0, 1),
             Scale = Math.Clamp(config.Scale, 0.1, 4.0),
+            VisibilityGroup = (config.VisibilityGroup ?? string.Empty).Trim(),
+            AutoClipTakeover = config.AutoClipTakeover,
+            AutoClipStartWithDelay = config.AutoClipStartWithDelay,
+            AutoClipPlayInOrder = config.AutoClipPlayInOrder,
+            AutoClipPlayWholeFile = config.AutoClipPlayWholeFile,
             VideoAudioEnabled = config.VideoAudioEnabled,
             VideoAudioVolume = Math.Clamp(config.VideoAudioVolume, 0, 1),
             Mirror = config.Mirror,
@@ -657,6 +667,11 @@ internal sealed class LayerConfigSource
     public string? FitMode { get; set; }
     public double Opacity { get; set; } = 1.0;
     public double Scale { get; set; } = 1.0;
+    public string VisibilityGroup { get; set; } = string.Empty;
+    public bool AutoClipTakeover { get; set; }
+    public bool AutoClipStartWithDelay { get; set; }
+    public bool AutoClipPlayInOrder { get; set; }
+    public bool AutoClipPlayWholeFile { get; set; }
     public bool VideoAudioEnabled { get; set; }
     public double VideoAudioVolume { get; set; } = 1.0;
     public double AutoClipMinClipSeconds { get; set; } = 2.0;

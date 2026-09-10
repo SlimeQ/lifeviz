@@ -30,6 +30,8 @@ Transparent WebM decode is handled as a narrow exception to FFmpeg's normal deco
 
 Animated GIFs use the same nonblocking, bounded `ffmpeg` stream as video instead of expanding every animation frame into BGRA memory on the UI thread. Only a short live queue is retained, GIF canvas offsets/disposal are composed by the decoder, and decoder-sized frames are handed to the compositor for scaling. This keeps large or high-frame-count GIFs responsive enough to remove. If a newly restored asynchronous media source fails before producing its first frame, its automatic removal is scheduled for persistence so it cannot trap the next launch in a retry loop.
 
+AutoClip can now coordinate whole sections of a scene with **Visibility Groups**. Give a movie and short AutoClip the same group name as a long AutoClip, then enable **Take over this visibility group while playing** on the long layer. Its fade hides the matching layers while it plays and restores them during gaps; hidden playback continues, and unassigned backgrounds/logos remain independent. **Start with delay**, **Play files in list order**, playlist reordering, and **Play whole file** combine AutoClip timing with the useful Video Sequence workflow. Existing Sequence layers remain supported. See the [one-hour scene setup recipe](wiki/AutoClip-Takeovers.md).
+
 ## Development
 
 ```powershell

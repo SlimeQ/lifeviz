@@ -1978,6 +1978,47 @@ public partial class LayerEditorWindow : Window
         ApplyAutoClipChange(source);
     }
 
+    private void VisibilityGroup_LostFocus(object sender, RoutedEventArgs e) => ApplyVisibilityGroupChange(sender);
+
+    private void VisibilityTakeover_Changed(object sender, RoutedEventArgs e) => ApplyVisibilityGroupChange(sender);
+
+    private void ApplyVisibilityGroupChange(object sender)
+    {
+        var source = ResolveSourceContext(sender);
+        if (source != null && ShouldApplyLive())
+        {
+            _owner.UpdateSourceVisibilityFromEditor(source.Id, source.VisibilityGroup, source.AutoClipTakeover);
+        }
+    }
+
+    private void AutoClipPlaybackOptions_Changed(object sender, RoutedEventArgs e)
+    {
+        var source = ResolveSourceContext(sender);
+        if (source?.IsAutoClip == true && ShouldApplyLive())
+        {
+            _owner.UpdateAutoClipPlaybackOptionsFromEditor(source.Id, source.AutoClipStartWithDelay, source.AutoClipPlayInOrder, source.AutoClipPlayWholeFile);
+        }
+    }
+
+    private void AutoClipMoveUp_Click(object sender, RoutedEventArgs e) => MoveAutoClipVideo(-1);
+    private void AutoClipMoveDown_Click(object sender, RoutedEventArgs e) => MoveAutoClipVideo(1);
+
+    private void MoveAutoClipVideo(int delta)
+    {
+        var source = _viewModel.SelectedSource;
+        var selected = source?.SelectedAutoClipVideoOverride;
+        if (source?.IsAutoClip != true || selected == null) return;
+        int index = source.AutoClipVideoOverrides.IndexOf(selected);
+        int next = index + delta;
+        if (index < 0 || next < 0 || next >= source.AutoClipVideoOverrides.Count) return;
+        source.AutoClipVideoOverrides.Move(index, next);
+        source.AutoClipVideoPaths.Clear();
+        foreach (var item in source.AutoClipVideoOverrides) source.AutoClipVideoPaths.Add(item.FilePath);
+        source.SelectedAutoClipVideoOverride = selected;
+        SyncAutoClipFilePaths(source);
+        ApplyAutoClipChange(source);
+    }
+
     private void AutoClipTiming_LostFocus(object sender, RoutedEventArgs e)
     {
         if (sender is TextBox textBox)

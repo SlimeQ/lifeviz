@@ -4,6 +4,8 @@ Welcome to the documentation hub for LifeViz, a minimalist Windows 11 WPF experi
 
 ## Pages
 
+- [AutoClip takeovers and playlists](AutoClip-Takeovers.md)
+
 - [Rendering Pipeline](Rendering-Pipeline.md)
 - [Configuration & Controls](Configuration-and-Controls.md)
 - [Build & Install](Build-and-Install.md)

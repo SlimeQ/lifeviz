@@ -7327,6 +7327,7 @@ public partial class MainWindow : Window
                 {
                     source.AutoClipLoopSelectedFile = !source.AutoClipLoopSelectedFile;
                     source.AutoClip?.SetLoopSelectedFile(source.AutoClipLoopSelectedFile);
+                    ApplyAutoClipPlaybackOptions(source);
                     autoClipLoopItem.IsChecked = source.AutoClipLoopSelectedFile;
                     source.LastFrame = null;
                     RenderFrame();
@@ -7738,6 +7739,7 @@ public partial class MainWindow : Window
         sourceItem.Items.Add(keyMenu);
         sourceItem.Items.Add(opacityItem);
         sourceItem.Items.Add(scaleItem);
+        AddVisibilityGroupMenu(sourceItem, source);
         sourceItem.Items.Add(new Separator());
         sourceItem.Items.Add(removeItem);
 
@@ -8885,6 +8887,7 @@ public partial class MainWindow : Window
             source.AutoClipMaxDelaySeconds = Math.Max(minDelaySeconds, maxDelaySeconds);
             replacement!.SetLoopSelectedFile(source.AutoClipLoopSelectedFile);
             source.SetAutoClip(replacement!);
+            ApplyAutoClipPlaybackOptions(source);
             SyncAutoClipVideoOverrides(source, videoOverrides);
             source.LastFrame = null;
             source.FirstFrameReceived = false;
@@ -13738,7 +13741,10 @@ public partial class MainWindow : Window
     }
 
     private CompositeFrame? BuildCompositeFrame(List<CaptureSource> sources, ref byte[]? downscaledBuffer, bool useEngineDimensions, double animationTime, bool includeCpuReadback = true)
-        => _renderBackend.BuildCompositeFrame(sources, ref downscaledBuffer, useEngineDimensions, animationTime, includeCpuReadback);
+    {
+        UpdateVisibilityGroups(sources);
+        return _renderBackend.BuildCompositeFrame(sources, ref downscaledBuffer, useEngineDimensions, animationTime, includeCpuReadback);
+    }
 
     private bool HasEmbeddedSimulationGroups(IEnumerable<CaptureSource> sources)
     {
@@ -13812,6 +13818,7 @@ public partial class MainWindow : Window
         ref int steppedPassCount,
         bool includeCpuReadback)
     {
+        UpdateVisibilityGroups(sources);
         if (sources.Count == 0)
         {
             return null;
@@ -14023,6 +14030,7 @@ public partial class MainWindow : Window
         ref bool injectedAnyLayer,
         ref int steppedPassCount)
     {
+        UpdateVisibilityGroups(sources);
         if (sources.Count == 0)
         {
             return null;
@@ -17019,7 +17027,10 @@ public partial class MainWindow : Window
         return inverse;
     }
 
-    private double BuildAnimationOpacity(CaptureSource source, double timeSeconds)
+    private double BuildAnimationOpacity(CaptureSource source, double timeSeconds) =>
+        source.VisibilityOpacity * BuildBaseAnimationOpacity(source, timeSeconds);
+
+    private double BuildBaseAnimationOpacity(CaptureSource source, double timeSeconds)
     {
         double opacity = source.Type == CaptureSource.SourceType.AutoClip
             ? source.AutoClip?.GetVisualOpacity(source.AutoClipFadeSeconds) ?? 0
@@ -19885,6 +19896,11 @@ public partial class MainWindow : Window
                 FitMode = source.FitMode.ToString(),
                 Opacity = source.Opacity,
                 Scale = source.Scale,
+                VisibilityGroup = source.VisibilityGroup,
+                AutoClipTakeover = source.AutoClipTakeover,
+                AutoClipStartWithDelay = source.AutoClipStartWithDelay,
+                AutoClipPlayInOrder = source.AutoClipPlayInOrder,
+                AutoClipPlayWholeFile = source.AutoClipPlayWholeFile,
                 VideoAudioEnabled = source.VideoAudioEnabled,
                 VideoAudioVolume = source.VideoAudioVolume,
                 Mirror = source.Mirror,
@@ -20041,6 +20057,11 @@ public partial class MainWindow : Window
                 FitMode = source.FitMode.ToString(),
                 Opacity = source.Opacity,
                 Scale = source.Scale,
+                VisibilityGroup = source.VisibilityGroup,
+                AutoClipTakeover = source.AutoClipTakeover,
+                AutoClipStartWithDelay = source.AutoClipStartWithDelay,
+                AutoClipPlayInOrder = source.AutoClipPlayInOrder,
+                AutoClipPlayWholeFile = source.AutoClipPlayWholeFile,
                 VideoAudioEnabled = source.VideoAudioEnabled,
                 VideoAudioVolume = source.VideoAudioVolume,
                 VideoPlaybackPaused = source.VideoPlaybackPaused,
@@ -20389,6 +20410,11 @@ public partial class MainWindow : Window
 
         source.Opacity = Math.Clamp(model.Opacity, 0, 1);
         source.Scale = Math.Clamp(model.Scale, MinLayerScale, MaxLayerScale);
+        source.VisibilityGroup = (model.VisibilityGroup ?? string.Empty).Trim();
+        source.AutoClipTakeover = model.AutoClipTakeover;
+        source.AutoClipStartWithDelay = model.AutoClipStartWithDelay;
+        source.AutoClipPlayInOrder = model.AutoClipPlayInOrder;
+        source.AutoClipPlayWholeFile = model.AutoClipPlayWholeFile;
         source.VideoAudioEnabled = model.VideoAudioEnabled;
         source.VideoAudioVolume = Math.Clamp(model.VideoAudioVolume, 0, 1);
         source.Mirror = model.Mirror;
@@ -20424,6 +20450,7 @@ public partial class MainWindow : Window
                 source.AutoClipMinDelaySeconds,
                 source.AutoClipMaxDelaySeconds);
             source.AutoClip.SetLoopSelectedFile(source.AutoClipLoopSelectedFile);
+            ApplyAutoClipPlaybackOptions(source);
             SyncAutoClipVideoOverrides(source, model.AutoClipVideoOverrides);
             source.FilePaths.Clear();
             source.FilePaths.AddRange(paths);
@@ -20766,6 +20793,11 @@ public partial class MainWindow : Window
 
         source.Opacity = Math.Clamp(config.Opacity, 0, 1);
         source.Scale = Math.Clamp(config.Scale, MinLayerScale, MaxLayerScale);
+        source.VisibilityGroup = (config.VisibilityGroup ?? string.Empty).Trim();
+        source.AutoClipTakeover = config.AutoClipTakeover;
+        source.AutoClipStartWithDelay = config.AutoClipStartWithDelay;
+        source.AutoClipPlayInOrder = config.AutoClipPlayInOrder;
+        source.AutoClipPlayWholeFile = config.AutoClipPlayWholeFile;
         source.AutoClipFadeSeconds = Math.Clamp(config.AutoClipFadeSeconds, 0, 10);
         source.AutoClipLoopSelectedFile = config.AutoClipLoopSelectedFile;
         source.VideoAudioEnabled = config.VideoAudioEnabled;
@@ -20785,6 +20817,7 @@ public partial class MainWindow : Window
         }
         ApplySourceVideoAudioState(source);
         source.AutoClip?.SetLoopSelectedFile(source.AutoClipLoopSelectedFile);
+        ApplyAutoClipPlaybackOptions(source);
         if (source.Type == CaptureSource.SourceType.AutoClip)
         {
             SyncAutoClipVideoOverrides(source, config.AutoClipVideoOverrides);
@@ -20964,6 +20997,11 @@ public partial class MainWindow : Window
             public string FitMode { get; set; } = lifeviz.FitMode.Fill.ToString();
             public double Opacity { get; set; } = 1.0;
             public double Scale { get; set; } = 1.0;
+            public string VisibilityGroup { get; set; } = string.Empty;
+            public bool AutoClipTakeover { get; set; }
+            public bool AutoClipStartWithDelay { get; set; }
+            public bool AutoClipPlayInOrder { get; set; }
+            public bool AutoClipPlayWholeFile { get; set; }
             public bool VideoAudioEnabled { get; set; }
             public double VideoAudioVolume { get; set; } = 1.0;
             public double AutoClipMinClipSeconds { get; set; } = 2.0;
@@ -21158,12 +21196,18 @@ public partial class MainWindow : Window
         public FitMode FitMode { get; set; } = FitMode.Fill;
         public bool Enabled { get; set; } = true;
         public SourceFrame? LastFrame { get; set; }
+        public double VisibilityOpacity { get; set; } = 1;
         public bool HasError { get; set; }
         public int MissedFrames { get; set; }
         public bool FirstFrameReceived { get; set; }
         public DateTime AddedUtc { get; set; }
         public double Opacity { get; set; } = 1.0;
         public double Scale { get; set; } = 1.0;
+        public string VisibilityGroup { get; set; } = string.Empty;
+        public bool AutoClipTakeover { get; set; }
+        public bool AutoClipStartWithDelay { get; set; }
+        public bool AutoClipPlayInOrder { get; set; }
+        public bool AutoClipPlayWholeFile { get; set; }
         public bool VideoAudioEnabled { get; set; }
         public double VideoAudioVolume { get; set; } = 1.0;
         public bool VideoPlaybackPaused { get; set; }

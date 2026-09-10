@@ -4887,6 +4887,11 @@ internal sealed class FileCaptureService : IDisposable
         private double _minDelaySeconds;
         private double _maxDelaySeconds;
         private bool _loopSelectedFile;
+        private bool _startWithDelay;
+        private bool _playInOrder;
+        private bool _playWholeFile;
+        private int _nextFileIndex;
+        private int _savedLiveNextFileIndex;
         private int _probeFailureStreak;
         private bool _audioEnabled;
         private double _audioVolume = 1.0;
@@ -5014,6 +5019,18 @@ internal sealed class FileCaptureService : IDisposable
 
             if (ApplySettings(paths, minClipSeconds, maxClipSeconds, minDelaySeconds, maxDelaySeconds))
             {
+                ResetSchedule();
+            }
+        }
+
+        public void SetPlaybackOptions(bool startWithDelay, bool playInOrder, bool playWholeFile)
+        {
+            lock (_stateLock)
+            {
+                if (_startWithDelay == startWithDelay && _playInOrder == playInOrder && _playWholeFile == playWholeFile) return;
+                _startWithDelay = startWithDelay;
+                _playInOrder = playInOrder;
+                _playWholeFile = playWholeFile;
                 ResetSchedule();
             }
         }
@@ -5353,6 +5370,8 @@ internal sealed class FileCaptureService : IDisposable
                 _offlineFrameIndex = 0;
                 _offlineProbeDeadlineTimestamp = 0;
                 _offlineProbeBudgetExhausted = false;
+                _savedLiveNextFileIndex = _nextFileIndex;
+                _nextFileIndex = 0;
                 _random = new Random(_offlineSeed);
                 _phase = Phase.Uninitialized;
                 _phaseStartSeconds = 0;
@@ -5382,6 +5401,7 @@ internal sealed class FileCaptureService : IDisposable
                 _clock.Stop();
             }
             _random = new Random();
+            _nextFileIndex = _savedLiveNextFileIndex;
             _lastFrame = null;
             _lastFramePath = null;
             _phaseAwaitingFirstFrame = false;
@@ -5580,6 +5600,11 @@ internal sealed class FileCaptureService : IDisposable
             {
                 if (_phase == Phase.Uninitialized || _phase == Phase.Empty)
                 {
+                    if (_startWithDelay && _maxDelaySeconds > 0.0001)
+                    {
+                        BeginNextPhase(now, preserveCurrentForHandoff: false);
+                        return;
+                    }
                     StartRandomClip(now);
                     return;
                 }
@@ -5678,12 +5703,13 @@ internal sealed class FileCaptureService : IDisposable
                 return;
             }
 
-            int index = _random.Next(_paths.Count);
-            if (_paths.Count > 1 && string.Equals(_paths[index], _currentPath, StringComparison.OrdinalIgnoreCase))
+            int index = _playInOrder ? _nextFileIndex % _paths.Count : _random.Next(_paths.Count);
+            if (!_playInOrder && _paths.Count > 1 && string.Equals(_paths[index], _currentPath, StringComparison.OrdinalIgnoreCase))
             {
                 index = (index + 1 + _random.Next(_paths.Count - 1)) % _paths.Count;
             }
 
+            _nextFileIndex = (index + 1) % _paths.Count;
             string path = _paths[index];
             double requestedClipSeconds = NextRange(_minClipSeconds, _maxClipSeconds);
             double randomUnit = _smokeNextClipRandomUnit ?? _random.NextDouble();
@@ -5694,7 +5720,7 @@ internal sealed class FileCaptureService : IDisposable
                     GetVideoProbeAsync(path),
                     requestedClipSeconds,
                     randomUnit,
-                    _loopSelectedFile));
+                    _loopSelectedFile && !_playWholeFile));
         }
 
         internal static (double StartSeconds, double ClipSeconds) SelectClipWindow(
@@ -5792,7 +5818,7 @@ internal sealed class FileCaptureService : IDisposable
                     GetVideoProbeAsync(path),
                     clipSeconds,
                     randomUnit: 0,
-                    loopSelectedFile: _loopSelectedFile,
+                    loopSelectedFile: _loopSelectedFile && !_playWholeFile,
                     explicitStartSeconds: startSeconds,
                     elapsedSeconds));
         }
@@ -5844,7 +5870,8 @@ internal sealed class FileCaptureService : IDisposable
             }
 
             _pendingClip = null;
-            if (!probe.HasValue)
+            if (!probe.HasValue || (_playWholeFile && !pending.ExplicitStartSeconds.HasValue &&
+                (!double.IsFinite(probe.Value.DurationSeconds) || probe.Value.DurationSeconds <= 0)))
             {
                 if (_paths.Count == 0)
                 {
@@ -5867,6 +5894,13 @@ internal sealed class FileCaptureService : IDisposable
             {
                 startSeconds = Math.Max(0, pending.ExplicitStartSeconds.Value);
                 clipSeconds = Math.Max(0.05, pending.RequestedClipSeconds);
+            }
+            else if (_playWholeFile && double.IsFinite(probe.Value.DurationSeconds) && probe.Value.DurationSeconds > 0)
+            {
+                // Whole-file mode preserves the actual end rather than reserving
+                // an excerpt tail. Natural EOF may retain its final frame at a live seam.
+                startSeconds = 0;
+                clipSeconds = probe.Value.DurationSeconds;
             }
             else
             {
@@ -6068,6 +6102,7 @@ internal sealed class FileCaptureService : IDisposable
 
         private void ResetSchedule()
         {
+            _nextFileIndex = 0;
             ClearPendingClip();
             DisposeCurrent(background: true);
             DisposeHandoffOutgoing(background: true);
