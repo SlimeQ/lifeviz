@@ -1,5 +1,11 @@
 # Configuration & Controls
 
+### Replace a file layer's media
+
+Select an existing **File** layer in the Layer Editor, then click **Replace File...** beneath its current path to choose another image, GIF, or video. Its name, parent, stack position, enabled state, blend/fit, opacity, scale, mirror, keying, visibility group, audio settings, and animations are preserved. The path display updates; hover it to see the full path. Video controls follow the replacement's media type. Live mode switches immediately; with Live mode off, the replacement is saved in the draft and takes effect on **Apply**. Scene saves and recovery retain the new path.
+
+Cancel leaves the layer unchanged. A missing or unsupported file rejected during opening leaves the current media intact and reports an error. A file already assigned to another direct File layer cannot be selected, since direct file layers share playback sessions by path. Fresh video/GIF sessions prepare asynchronously using the normal media loading/error handling and start from the beginning; the layer's paused state is retained. AutoClip playlists and Video Sequence layers keep their existing workflows.
+
 Fixed-duration exports preserve the selected quality, FPS, and pixel-perfect output size while using a faster scaler and a smaller memory-budgeted encoder queue. Editor interactions do not throttle the export clock. A failure while draining/finalizing the encoder is reported as a render failure rather than a completed export. No additional controls are required; see [Optimizations](Optimizations.md#fixed-duration-export).
 
 The UI stays invisible until you right-click anywhere on the canvas, revealing the context menu.

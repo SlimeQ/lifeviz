@@ -1,5 +1,7 @@
 # Rendering Pipeline
 
+File-layer replacement opens the new capture session before changing the existing `CaptureSource` path. The source object/ID and authored configuration remain in place, including animations and its parent/order. Only file dimensions, cached frames, and capture initialization/error tracking reset. The old path's session is released when no other direct file source references it; audio and effective decode activation are reapplied, and automatic aspect selection is recalculated unless locked. Both live editor replacement and draft Apply use this path. Direct layers cannot replace their media with another active direct layer's file because sessions are keyed by path. GIF/video decoding retains the existing nonblocking preparation and failure handling; no extra decode cache is introduced.
+
 ## Layout
 
 - `Bitwise RGB` is implemented as a third Conway life mode, not as a separate effect layer. On the live GPU path it quantizes the sampled RGB input to bytes, injects every `1` bit into its corresponding Conway plane, then reconstructs output RGB bytes from the 24 evolving planes.

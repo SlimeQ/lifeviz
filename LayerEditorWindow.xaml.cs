@@ -2829,11 +2829,42 @@ public partial class LayerEditorWindow : Window
         return null;
     }
 
-    private string? PromptForFile()
+    private void ReplaceFile_Click(object sender, RoutedEventArgs e)
+    {
+        var source = ResolveSourceContext(sender);
+        if (_ownerIsShuttingDown || source?.IsFile != true)
+        {
+            return;
+        }
+
+        string? path = PromptForFile("Replace Layer File", source.FilePath);
+        if (path == null)
+        {
+            return;
+        }
+
+        if (_viewModel.LiveMode)
+        {
+            if (!_owner.ReplaceFileSourceFromEditor(source.Id, path, out var error))
+            {
+                MessageBox.Show(this, error ?? "Could not replace the file.", "Replace File Failed",
+                    MessageBoxButton.OK, MessageBoxImage.Warning);
+                return;
+            }
+            RefreshFromSources(source.Id);
+        }
+        else
+        {
+            source.FilePath = path;
+        }
+    }
+
+    private string? PromptForFile(string title = "Select Image, GIF, or Video", string? currentPath = null)
     {
         var dialog = new OpenFileDialog
         {
-            Title = "Select Image, GIF, or Video",
+            Title = title,
+            FileName = currentPath ?? string.Empty,
             Filter = "Media Files|*.png;*.jpg;*.jpeg;*.bmp;*.gif;*.webp;*.mp4;*.mov;*.wmv;*.avi;*.mkv;*.webm;*.mpg;*.mpeg|Image Files|*.png;*.jpg;*.jpeg;*.bmp;*.gif;*.webp|Video Files|*.mp4;*.mov;*.wmv;*.avi;*.mkv;*.webm;*.mpg;*.mpeg|All Files|*.*",
             Multiselect = false,
             CheckFileExists = true

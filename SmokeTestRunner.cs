@@ -178,6 +178,7 @@ internal static partial class SmokeTestRunner
                 "gpu-sim" => RunGpuSimulationSmokeTest(),
                 "gpu-source" => RunGpuSourceCompositeSmokeTest(),
                 "source-reset" => RunSourceResetSmokeTest(),
+                "file-replacement" => RunFileReplacementSmokeTest(),
                 "gpu-render" => RunGpuPresentationSmokeTest(),
                 "profile-mainloop" => RunFrameProfileSmokeTest(),
                 "profile-mainloop-sim-group" => RunFrameProfileSmokeTest(240, "smoke-mainloop-sim-group", rgbMode: false, smokeVideoPath: null, includeSimGroup: true),

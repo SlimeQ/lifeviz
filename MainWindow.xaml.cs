@@ -20261,15 +20261,19 @@ public partial class MainWindow : Window
         }
 
         used.Add(source.Id);
+        if (model.IsFile && source.Type == CaptureSource.SourceType.File &&
+            !string.Equals(source.FilePath, model.FilePath, StringComparison.OrdinalIgnoreCase) &&
+            !TryReplaceFileSource(source, model.FilePath ?? string.Empty, out var replacementError))
+        {
+            throw new InvalidOperationException($"Could not replace file for '{source.DisplayName}': {replacementError}");
+        }
         ApplySourceModel(source, model);
 
         if (source.Type == CaptureSource.SourceType.Group)
         {
+            var children = BuildSourcesFromEditor(model.Children, existing, used, windows, webcams);
             source.Children.Clear();
-            foreach (var child in BuildSourcesFromEditor(model.Children, existing, used, windows, webcams))
-            {
-                source.Children.Add(child);
-            }
+            source.Children.AddRange(children);
         }
         else if (source.Children.Count > 0)
         {
@@ -21216,7 +21220,7 @@ public partial class MainWindow : Window
         public SourceType Type { get; }
         public WindowHandleInfo? Window { get; set; }
         public string? WebcamId { get; }
-        public string? FilePath { get; }
+        public string? FilePath { get; private set; }
         public List<string> FilePaths { get; } = new();
         public FileCaptureService.VideoSequenceSession? VideoSequence { get; private set; }
         public FileCaptureService.AutoClipSession? AutoClip { get; private set; }
@@ -21267,6 +21271,22 @@ public partial class MainWindow : Window
         public int? FileWidth { get; private set; }
         public int? FileHeight { get; private set; }
         public byte[]? CompositeDownscaledBuffer { get; set; }
+
+        public void ReplaceFile(FileCaptureService.FileSourceInfo info)
+        {
+            FilePath = info.Path;
+            FileWidth = info.Width > 0 ? info.Width : null;
+            FileHeight = info.Height > 0 ? info.Height : null;
+            LastFrame = null;
+            CompositeDownscaledBuffer = null;
+            HasError = false;
+            MissedFrames = 0;
+            FirstFrameReceived = false;
+            RetryInitializationAttempted = false;
+            LastObservedFrameToken = 0;
+            IsInitialized = false;
+            AddedUtc = DateTime.UtcNow;
+        }
 
         public void SetDisplayName(string displayName)
         {

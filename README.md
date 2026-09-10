@@ -1,5 +1,7 @@
 # LifeViz
 
+To change the media on an existing file layer, select it in the Layer Editor and click **Replace File...** below the current path. The layer keeps its name, position, settings, and animations. Live mode updates immediately; draft mode waits for **Apply**. Validate with `dotnet bin\Debug\net9.0-windows\lifeviz.dll --smoke-test file-replacement` after a Debug build. See [Configuration & Controls](wiki/Configuration-and-Controls.md).
+
 Bake fixed-duration videos in the background and queue the next scene while editing. Validate the workflow with `dotnet bin\Debug\net9.0-windows\lifeviz.dll --smoke-test background-bake` after a Debug build. The test runs real queued workers and checks scene isolation, output timing, cancellation, failure continuation, and editor responsiveness. The regular installer includes this feature without additional setup; see [Background Baking](wiki/Background-Baking.md).
 
 Fixed-duration export now uses faster row-based pixel-perfect upscaling, skips live-recording padding copies, budgets its frame queue by memory, and disables Media Foundation's input throttling for offline work. Scaler component benchmarks measured about 3.3–5.7× improvement for representative HD/4K upscales; overall export speed still depends on the scene and encoder. Export logs report total FPS, encoder write time, and queue wait. Details and limitations are in [Optimizations](wiki/Optimizations.md#fixed-duration-export).

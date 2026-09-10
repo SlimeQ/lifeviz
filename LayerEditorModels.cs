@@ -523,6 +523,7 @@ internal sealed class LayerEditorSource : LayerEditorNotify
                 OnPropertyChanged(nameof(IsContainerGroup));
                 OnPropertyChanged(nameof(IsWebcam));
                 OnPropertyChanged(nameof(IsWindow));
+                OnPropertyChanged(nameof(IsFile));
                 OnPropertyChanged(nameof(IsColorPlane));
                 OnPropertyChanged(nameof(CanDriveAspect));
                 OnPropertyChanged(nameof(SupportsKeying));
@@ -588,6 +589,7 @@ internal sealed class LayerEditorSource : LayerEditorNotify
             {
                 OnPropertyChanged(nameof(IsVideo));
                 OnPropertyChanged(nameof(DisplayLabel));
+                OnPropertyChanged(nameof(SupportsVideoTransport));
                 OnPropertyChanged(nameof(Details));
             }
         }
@@ -865,6 +867,7 @@ internal sealed class LayerEditorSource : LayerEditorNotify
     public bool IsContainerGroup => IsGroup || IsSimulationGroup;
     public bool IsWebcam => Kind == LayerEditorSourceKind.Webcam;
     public bool IsWindow => Kind == LayerEditorSourceKind.Window;
+    public bool IsFile => Kind == LayerEditorSourceKind.File;
     public bool IsColorPlane => Kind == LayerEditorSourceKind.ColorPlane;
     public bool CanDriveAspect => !IsColorPlane &&
                                   (!IsGroup || Children.Count == 0 || Children.Any(child => child.CanDriveAspect));

@@ -655,7 +655,15 @@
                                         </DockPanel>
                                         <TextBlock Text="{Binding Details}"
                                                    Foreground="#9A9A9A"
+                                                   TextTrimming="CharacterEllipsis"
+                                                   ToolTip="{Binding Details}"
                                                    Margin="0,4,0,0" />
+                                        <Button Content="Replace File..."
+                                                HorizontalAlignment="Left"
+                                                Margin="0,8,0,0"
+                                                Visibility="{Binding IsFile, Converter={StaticResource BoolToVisibility}}"
+                                                ToolTip="Choose another image or video while keeping this layer's settings and animations."
+                                                Click="ReplaceFile_Click" />
                                     </StackPanel>
                                 </Border>
 
