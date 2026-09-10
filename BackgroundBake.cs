@@ -15,7 +15,8 @@ internal interface IOfflineRenderProgress
     void Complete(string message, bool succeeded);
 }
 
-internal sealed record BakeRequest(string SceneJson, double DurationSeconds, int OutputFps);
+internal sealed record BakeRequest(string SceneJson, double DurationSeconds, int OutputFps,
+    bool Profile = false, string? ProfilePriority = null);
 internal sealed record BakeStatus(string State, string Message, long CompletedFrames = 0,
     long TotalFrames = 0, double ElapsedSeconds = 0, double? RemainingSeconds = null, string? OutputPath = null);
 
@@ -48,6 +49,8 @@ internal static class BackgroundBakeWorker
     public static bool IsWorker => DirectoryPath != null;
     public static bool CancellationRequested => IsWorker && File.Exists(Path.Combine(DirectoryPath!, "cancel"));
     public static string? ConfigPath => IsWorker ? Path.Combine(DirectoryPath!, "scene.json") : null;
+    // Process isolation keeps the editor usable; lowering CPU priority starves offline work.
+    internal static ProcessPriorityClass RenderPriority { get; private set; } = ProcessPriorityClass.AboveNormal;
     internal static string FormatClock(TimeSpan value) => $"{(int)value.TotalHours}:{value.Minutes:00}:{value.Seconds:00}";
 
     public static void WriteJson<T>(string path, T value)
@@ -95,6 +98,17 @@ internal static class BackgroundBakeWorker
                 ?? throw new InvalidDataException("Missing bake request.");
             if (request.DurationSeconds is < 1 or > 86400 || !double.IsFinite(request.DurationSeconds) || request.OutputFps is < 1 or > 144)
                 throw new InvalidDataException("Invalid bake duration or FPS.");
+            if (request.Profile)
+            {
+                if (request.DurationSeconds > 30) throw new InvalidDataException("Bake profiling is limited to 30 seconds of output.");
+                if (request.ProfilePriority != null)
+                {
+                    if (!Enum.TryParse(request.ProfilePriority, out ProcessPriorityClass priority) ||
+                        priority is not (ProcessPriorityClass.BelowNormal or ProcessPriorityClass.Normal or ProcessPriorityClass.AboveNormal))
+                        throw new InvalidDataException("Profile priority must be BelowNormal, Normal, or AboveNormal.");
+                    RenderPriority = priority;
+                }
+            }
             File.WriteAllText(ConfigPath!, request.SceneJson);
             var app = new App { ShutdownMode = ShutdownMode.OnExplicitShutdown };
             app.DispatcherUnhandledException += (_, e) =>

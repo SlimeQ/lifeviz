@@ -6,6 +6,16 @@ Background bakes ship in the ordinary application payload; no service or extra i
 
 Run `dotnet bin\Debug\net9.0-windows\lifeviz.dll --smoke-test background-bake` after a Debug build. This integration smoke runs real workers for captured red/blue scenes and verifies decoded output colors, dimensions, FPS, frame counts, separate destinations, editor dispatcher activity, queued removal, active cancellation, failure continuation, and scratch cleanup. It also verifies a Pixel Sort simulation group, closes and reopens the queue window during work, and checks graceful app-exit cancellation. The smoke also reproduces the old access-denied status-file failure, keeps both legacy status paths blocked while a real worker completes, tests bounded status delivery with a stalled receiver and a failing writer, and verifies retained diagnostics for an actual output-folder failure. Fixtures use a private temporary directory; failures retain their output for diagnosis.
 
+## Measure background bake throughput
+
+After a Release build, use PowerShell 7 to run `./tests/Measure-BackgroundBake.ps1 -RequestPath <job-folder>/request.json -ExecutablePath bin/Release/net9.0-windows/lifeviz.exe` to investigate slow fixed-duration exports. Active or retained failed job requests are under `%TEMP%\lifeviz-bakes`. The script reads that snapshot without editing it, redirects output to a fresh `artifacts/bake-profile-*` directory, and runs sequential ten-second probes at BelowNormal and AboveNormal process priority. It leaves reports, logs, and videos for inspection. It does not stop or reprioritize an existing bake, but probes share hardware with running apps and can temporarily slow them down.
+
+Use `-DurationSeconds 20` (allowed range 1–30), `-Priorities BelowNormal,AboveNormal,AboveNormal,BelowNormal` for a repeated comparison, or `-OutputRoot <new-artifact-folder>` to choose the report destination. Existing probe directories are rejected. Each worker has a three-minute timeout. Output includes overall export FPS (including initialization/finalization inside the render operation), settled FPS after two seconds of output frames when available, and the JSON frame-stage profile path. Short-run results include decoder startup and randomized AutoClip selection; compare repeated runs under comparable load rather than promising a fixed multiple of realtime.
+
+Profiling uses optional internal request fields `Profile` and `ProfilePriority`; ordinary queued jobs do not collect timings or accept a priority override. Profile requests are limited to 30 seconds. The shipping worker uses AboveNormal process and render-thread priority; the script changes only process priority for comparison.
+
+The `offline-render` smoke requests cancellation through the progress interface at the first submitted frame and validates exactly one decoded frame. Its cancellation point is independent of dispatcher timing under machine load; the background queue smoke separately checks editor dispatcher activity during rendering.
+
 ## Prerequisites
 
 - .NET SDK 9 (for local dev & running)

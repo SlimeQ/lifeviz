@@ -181,6 +181,15 @@ public partial class MainWindow
         _pendingFullscreen = false;
         InitializeVisualizer();
         DetachRenderLoop();
-        await RunOfflineRenderAsync(progress, TimeSpan.FromSeconds(request.DurationSeconds), request.OutputFps);
+        if (request.Profile) _frameProfiler.Start("background-bake");
+        try { await RunOfflineRenderAsync(progress, TimeSpan.FromSeconds(request.DurationSeconds), request.OutputFps); }
+        finally
+        {
+            if (request.Profile)
+            {
+                var report = _frameProfiler.Stop();
+                _frameProfiler.Export(report, BackgroundBakeWorker.DirectoryPath!);
+            }
+        }
     }
 }

@@ -5208,7 +5208,7 @@ public partial class MainWindow : Window
             {
                 using var currentProcess = Process.GetCurrentProcess();
                 previousProcessPriority = currentProcess.PriorityClass;
-                currentProcess.PriorityClass = BackgroundBakeWorker.IsWorker ? ProcessPriorityClass.BelowNormal : ProcessPriorityClass.AboveNormal;
+                currentProcess.PriorityClass = BackgroundBakeWorker.IsWorker ? BackgroundBakeWorker.RenderPriority : ProcessPriorityClass.AboveNormal;
             }
             catch (Exception ex)
             {
@@ -5217,7 +5217,7 @@ public partial class MainWindow : Window
             try
             {
                 previousUiThreadPriority = Thread.CurrentThread.Priority;
-                Thread.CurrentThread.Priority = BackgroundBakeWorker.IsWorker ? ThreadPriority.Normal : ThreadPriority.AboveNormal;
+                Thread.CurrentThread.Priority = ThreadPriority.AboveNormal;
             }
             catch (Exception ex)
             {

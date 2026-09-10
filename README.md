@@ -1,5 +1,7 @@
 # LifeViz
 
+Background bakes again use the earlier exporter's above-normal process and render-thread priority, preventing CPU starvation while the editor remains available in its own process. To investigate throughput, build Release and run `./tests/Measure-BackgroundBake.ps1 -RequestPath <job-folder>/request.json -ExecutablePath bin/Release/net9.0-windows/lifeviz.exe`. It bakes short copies into private artifact folders and compares scheduling priorities; see [Build & Install](wiki/Build-and-Install.md#measure-background-bake-throughput).
+
 Background-bake progress now travels over a bounded process pipe, so a locked progress file cannot abort a video. Failed jobs retain their scene/request and worker log, accessible through **Open diagnostics** in the bake queue.
 
 To change the media on an existing file layer, select it in the Layer Editor and click **Replace File...** below the current path. The layer name updates to the selected filename while its position, settings, and animations stay intact. Live mode updates immediately; draft mode waits for **Apply**. Validate with `dotnet bin\Debug\net9.0-windows\lifeviz.dll --smoke-test file-replacement` after a Debug build. See [Configuration & Controls](wiki/Configuration-and-Controls.md).
