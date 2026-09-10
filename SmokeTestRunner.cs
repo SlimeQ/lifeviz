@@ -166,6 +166,7 @@ internal static class SmokeTestRunner
                 "live-video-audio" => RunLiveVideoAudioSmokeTest(smokeVideoPath),
                 "autoclip" => RunAutoClipSmokeTest(smokeVideoPath),
                 "autoclip-takeover" => RunAutoClipTakeoverSmokeTest(smokeVideoPath),
+                "render-failure-cleanup" => RunRenderFailureCleanupSmokeTest(),
                 "ffmpeg-lifecycle" => RunFfmpegLifecycleSmokeTest(),
                 "gif-source-recovery" => RunGifSourceRecoverySmokeTest(smokeGifPath),
                 "layer-transform-controls" => RunLayerTransformControlsSmokeTest(),
@@ -580,6 +581,29 @@ internal static class SmokeTestRunner
 
         Logger.Info("GPU source composite smoke test passed.");
         return exitCode;
+    }
+
+    private static int RunRenderFailureCleanupSmokeTest()
+    {
+        var fatal = new System.Runtime.InteropServices.COMException("Synthetic render-thread failure", unchecked((int)0x88980406));
+        if (!App.IsRenderThreadFailure(fatal) || !App.IsRenderThreadFailure(new InvalidOperationException("Wrapper", fatal)) ||
+            App.IsRenderThreadFailure(new System.Runtime.InteropServices.COMException("Unrelated COM failure", unchecked((int)0x80004005))))
+            throw new InvalidOperationException("Fatal rendering failure classification failed.");
+        var app = new App();
+        app.InitializeComponent();
+        app.ShutdownMode = ShutdownMode.OnExplicitShutdown;
+        bool ok = false;
+        app.Startup += (_, _) =>
+        {
+            var window = new MainWindow();
+            window.ShutdownResources();
+            window.ShutdownResources();
+            ok = window.GetShutdownErrorMessage() == null;
+            Console.WriteLine($"Render-failure cleanup smoke: classification=True, idempotentCleanup={ok}.");
+            app.Shutdown(ok ? 0 : 1);
+        };
+        int result = app.Run();
+        return ok ? result : 1;
     }
 
     private static int RunAutoClipTakeoverSmokeTest(string? videoPath)

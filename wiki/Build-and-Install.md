@@ -263,3 +263,13 @@ dotnet bin/Debug/net9.0-windows/lifeviz.dll --smoke-test autoclip-takeover artif
 ```
 
 The `autoclip-takeover` fixture must be one second long. The smoke checks repeated whole-file ordered playback, initial gaps, fades, CPU/GPU parity, transparent takeover holes, independent background/logo layers, disabled/failed controllers, sibling isolation, application/scene persistence, editor bindings, and playlist reordering. It writes `takeover-editor.png` and `takeover-editor.playback.png` beside the fixture for visual inspection and checks that the settings pane scrolls. Run the existing `autoclip` smoke with a longer video to validate live pause/resume and decoder handoffs as well. Smokes skip the user's saved scene and configuration writes.
+
+## Graphics recovery and playlist validation
+
+`autoclip-takeover` also checks nonadjacent multi-selection, group moves and boundary no-ops, top/bottom ordering, selection retention, bulk removal, remove-all, override identity, and synchronization of persisted playback paths.
+
+```powershell
+dotnet bin/Release/net9.0-windows/lifeviz.dll --smoke-test render-failure-cleanup
+```
+
+`render-failure-cleanup` checks fatal HRESULT classification (including wrapped exceptions) and idempotent cleanup of initialized rendering resources. It does not induce a real driver/standby fault or exercise the native Retry dialog. For a running old version stuck in rendering-error popups, use the latest standalone `lifeviz_installer.exe` from GitHub Releases rather than relying on that process's updater UI. Keep `%APPDATA%\lifeviz\logs\render-failure-last.log` when reporting a repeat after installing the recovery update.

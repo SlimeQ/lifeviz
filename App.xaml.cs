@@ -29,6 +29,12 @@ public partial class App : Application
     {
         DispatcherUnhandledException += (_, args) =>
         {
+            if (IsRenderThreadFailure(args.Exception))
+            {
+                args.Handled = true;
+                HandleRenderThreadFailure(args.Exception);
+                return;
+            }
             Logger.Error("Unhandled UI exception.", args.Exception);
             if (!SuppressErrorDialogs)
             {

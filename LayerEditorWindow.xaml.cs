@@ -1960,23 +1960,10 @@ public partial class LayerEditorWindow : Window
         }
         SyncAutoClipFilePaths(source);
         ApplyAutoClipChange(source);
+        RefreshAutoClipFileSelection();
     }
 
-    private void AutoClipRemoveVideo_Click(object sender, RoutedEventArgs e)
-    {
-        LayerEditorSource? source = ResolveSourceContext(sender);
-        if (source?.IsAutoClip != true || source.SelectedAutoClipVideoOverride == null)
-        {
-            return;
-        }
-
-        string path = source.SelectedAutoClipVideoOverride.FilePath;
-        source.AutoClipVideoPaths.Remove(path);
-        source.AutoClipVideoOverrides.Remove(source.SelectedAutoClipVideoOverride);
-        source.SelectedAutoClipVideoOverride = null;
-        SyncAutoClipFilePaths(source);
-        ApplyAutoClipChange(source);
-    }
+    private void AutoClipRemoveVideo_Click(object sender, RoutedEventArgs e) => RemoveSelectedAutoClipFiles();
 
     private void VisibilityGroup_LostFocus(object sender, RoutedEventArgs e) => ApplyVisibilityGroupChange(sender);
 
@@ -2002,22 +1989,8 @@ public partial class LayerEditorWindow : Window
 
     private void AutoClipMoveUp_Click(object sender, RoutedEventArgs e) => MoveAutoClipVideo(-1);
     private void AutoClipMoveDown_Click(object sender, RoutedEventArgs e) => MoveAutoClipVideo(1);
-
-    private void MoveAutoClipVideo(int delta)
-    {
-        var source = _viewModel.SelectedSource;
-        var selected = source?.SelectedAutoClipVideoOverride;
-        if (source?.IsAutoClip != true || selected == null) return;
-        int index = source.AutoClipVideoOverrides.IndexOf(selected);
-        int next = index + delta;
-        if (index < 0 || next < 0 || next >= source.AutoClipVideoOverrides.Count) return;
-        source.AutoClipVideoOverrides.Move(index, next);
-        source.AutoClipVideoPaths.Clear();
-        foreach (var item in source.AutoClipVideoOverrides) source.AutoClipVideoPaths.Add(item.FilePath);
-        source.SelectedAutoClipVideoOverride = selected;
-        SyncAutoClipFilePaths(source);
-        ApplyAutoClipChange(source);
-    }
+    private void AutoClipMoveTop_Click(object sender, RoutedEventArgs e) => MoveAutoClipVideo(-2);
+    private void AutoClipMoveBottom_Click(object sender, RoutedEventArgs e) => MoveAutoClipVideo(2);
 
     private void AutoClipTiming_LostFocus(object sender, RoutedEventArgs e)
     {

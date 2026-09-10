@@ -135,3 +135,11 @@ AutoClip Settings also includes **Start with delay**, **Play files in list order
 See [AutoClip takeovers and playlists](AutoClip-Takeovers.md) for the movie/short-loop/long-clip recipe, transparency behavior, and fixed-duration export setup. Existing Video Sequence layers and older AutoClip defaults remain supported.
 
 The Selected Layer tab keeps its settings inside a bounded scroll area, so long AutoClip and keying controls remain reachable at the normal editor size.
+
+## Managing AutoClip files
+
+AutoClip's taller file list supports Ctrl/Shift multi-selection, Select All / Ctrl+A, Remove Selected / Delete, and moving selections up/down or directly to the top/bottom. Selected rows stay highlighted when the list loses focus. Alt+Up/Down and Alt+Home/End work while the list has focus. Moves preserve relative order, selection, and per-file overrides; removals only change playlist membership and never delete media on disk. A count shows how many files are selected and hovering a row shows the full path. Per-file blend/keying controls appear only when exactly one file is selected. Each bulk edit applies once in Live Mode; in non-live mode it remains part of the pending scene until Apply.
+
+## Fatal graphics recovery
+
+A WPF rendering-thread failure (`0x88980406`) now stops the failed session and presents one native Windows **Retry / Cancel** dialog. Retry launches a fresh LifeViz process from the saved scene; Cancel exits. Recordings/exports in progress are stopped and partial output needs verification. The error log is preserved at `%APPDATA%\lifeviz\logs\render-failure-last.log`, overwritten only by the next such failure. Other UI errors retain the existing handler. This is recovery from a fatal rendering failure, not an assurance that a hardware/driver or sleep-transition cause is fixed.

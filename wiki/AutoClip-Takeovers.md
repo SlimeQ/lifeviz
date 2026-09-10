@@ -45,7 +45,10 @@ For predictable alternation, put all long videos in one takeover AutoClip. If mu
 AutoClip now includes the useful sequential playback workflow from Video Sequence while retaining fades, gaps, keying, per-file overrides, and takeovers:
 
 - **Play files in list order:** cycles from the first file through the last, then returns to the first. Unchecked retains random selection with immediate repeats avoided when possible.
-- **Move Up / Move Down:** select a video in AutoClip Settings to reorder the playlist. Its per-file blend/keying override moves with it.
+- **Multi-select:** Ctrl-click individual files or Shift-click a range. **Select All** and Ctrl+A select the entire playlist. The list shows a selected count and full paths on hover.
+- **Move Up / Move Down:** move every selected run by one position. **Move to Top / Move to Bottom** gather all selected files at that end. Selection and relative file order are preserved, and per-file blend/keying overrides travel with their entries. Alt+Up/Down and Alt+Home/End provide the same moves while the list has focus.
+- **Remove Selected / Delete:** remove all selected playlist entries in one edit; original media stays on disk. A surviving neighbor is selected afterward. Select all, then remove, to empty the playlist.
+- Select exactly one file to edit its blend/keying overrides. Multiple selection hides those controls to avoid accidentally applying a change to just one file.
 - **Play whole file:** plays each source once from its beginning to its actual duration. With list order enabled and delay/fade set to zero, this is a repeating ordered playlist.
 
 Changing playback options, timing, or the file list restarts that AutoClip's schedule. Changing its visibility group, takeover checkbox, or fade does not restart its decoder. A fixed-duration render starts its ordered playlist at the first file and uses the export frame clock; live playback position and the next ordered file are restored afterward.

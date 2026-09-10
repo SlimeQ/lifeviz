@@ -891,19 +891,59 @@
                                                            Foreground="#AFAFAF"
                                                            TextWrapping="Wrap"
                                                            Margin="0,0,0,8" />
-                                                <ListBox ItemsSource="{Binding AutoClipVideoOverrides}"
-                                                         SelectedItem="{Binding SelectedAutoClipVideoOverride}"
+                                                <ListBox x:Name="AutoClipFileList"
+                                                         ItemsSource="{Binding AutoClipVideoOverrides}"
+                                                         SelectionMode="Extended"
+                                                         DataContextChanged="AutoClipFileList_DataContextChanged"
+                                                         SelectionChanged="AutoClipFileSelection_Changed"
+                                                         PreviewKeyDown="AutoClipFileList_KeyDown"
                                                          DisplayMemberPath="DisplayName"
-                                                         Height="110"
+                                                         Height="180"
+                                                         Background="#151515"
+                                                         Foreground="#E8E8E8"
+                                                         BorderBrush="#404040"
                                                          HorizontalContentAlignment="Stretch"
-                                                         Margin="0,0,0,6" />
+                                                         Margin="0,0,0,6">
+                                                    <ListBox.ItemContainerStyle>
+                                                        <Style TargetType="ListBoxItem">
+                                                            <Setter Property="ToolTip" Value="{Binding FilePath}" />
+                                                            <Setter Property="Padding" Value="6,4" />
+                                                            <Setter Property="Template">
+                                                                <Setter.Value>
+                                                                    <ControlTemplate TargetType="ListBoxItem">
+                                                                        <Border x:Name="FileRow" Background="Transparent" Padding="{TemplateBinding Padding}">
+                                                                            <ContentPresenter />
+                                                                        </Border>
+                                                                        <ControlTemplate.Triggers>
+                                                                            <Trigger Property="IsMouseOver" Value="True">
+                                                                                <Setter TargetName="FileRow" Property="Background" Value="#303030" />
+                                                                            </Trigger>
+                                                                            <Trigger Property="IsSelected" Value="True">
+                                                                                <Setter TargetName="FileRow" Property="Background" Value="#285386" />
+                                                                                <Setter Property="Foreground" Value="White" />
+                                                                            </Trigger>
+                                                                        </ControlTemplate.Triggers>
+                                                                    </ControlTemplate>
+                                                                </Setter.Value>
+                                                            </Setter>
+                                                        </Style>
+                                                    </ListBox.ItemContainerStyle>
+                                                </ListBox>
+                                                <TextBlock Text="Ctrl-click to select files; Shift-click for a range. Ctrl+A selects all. Delete removes entries; Alt+arrows moves the selection."
+                                                           TextWrapping="Wrap" Foreground="#AFAFAF" Margin="0,0,0,6" />
+                                                <TextBlock x:Name="AutoClipFileSelectionSummary" Text="No files selected" Foreground="#AFAFAF" Margin="0,0,0,6" />
                                                 <WrapPanel Margin="0,0,0,8">
                                                     <Button Content="Add Videos..." Click="AutoClipAddVideos_Click" />
-                                                    <Button Content="Remove Selected" Click="AutoClipRemoveVideo_Click" />
-                                                    <Button Content="Move Up" Click="AutoClipMoveUp_Click" />
-                                                    <Button Content="Move Down" Click="AutoClipMoveDown_Click" />
+                                                    <Button Content="Select All" Click="AutoClipSelectAll_Click" />
+                                                    <Button x:Name="AutoClipRemoveFilesButton" Content="Remove Selected" Click="AutoClipRemoveVideo_Click" IsEnabled="False" ToolTip="Remove selected entries from this AutoClip. The files on disk are kept." />
+                                                    <Button x:Name="AutoClipMoveFilesUpButton" Content="Move Up" Click="AutoClipMoveUp_Click" IsEnabled="False" ToolTip="Alt+Up" />
+                                                    <Button x:Name="AutoClipMoveFilesDownButton" Content="Move Down" Click="AutoClipMoveDown_Click" IsEnabled="False" ToolTip="Alt+Down" />
+                                                    <Button x:Name="AutoClipMoveFilesTopButton" Content="Move to Top" Click="AutoClipMoveTop_Click" IsEnabled="False" ToolTip="Alt+Home" />
+                                                    <Button x:Name="AutoClipMoveFilesBottomButton" Content="Move to Bottom" Click="AutoClipMoveBottom_Click" IsEnabled="False" ToolTip="Alt+End" />
                                                 </WrapPanel>
-                                                <GroupBox Header="Selected Video Overrides"
+                                                <TextBlock x:Name="AutoClipSingleFileHint" Text="Select one file to edit its blend and keying overrides."
+                                                           Foreground="#AFAFAF" Margin="0,0,0,8" />
+                                                <GroupBox x:Name="AutoClipFileOverrides" Header="Selected Video Overrides" Visibility="Collapsed"
                                                           Margin="0,0,0,8"
                                                           DataContext="{Binding SelectedAutoClipVideoOverride}">
                                                     <WrapPanel Margin="8">

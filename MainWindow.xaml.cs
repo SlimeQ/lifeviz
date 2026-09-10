@@ -414,74 +414,76 @@ public partial class MainWindow : Window
 
             UpdateChromeUi();
         };
-        Closed += (_, _) =>
+        Closed += (_, _) => ShutdownResources();
+    }
+
+    internal void ShutdownResources()
+    {
+        if (_isShuttingDown)
         {
-            if (_isShuttingDown)
+            return;
+        }
+
+        _isShuttingDown = true;
+        DetachRenderLoop();
+        _uiThreadLatencyProbe.Stop();
+
+        RunShutdownStep("layer editor", () =>
+        {
+            if (_layerEditorWindow != null)
             {
-                return;
+                _layerEditorWindow.PrepareForOwnerShutdown();
+                _layerEditorWindow.Close();
+                _layerEditorWindow = null;
             }
+        });
 
-            _isShuttingDown = true;
-            DetachRenderLoop();
-            _uiThreadLatencyProbe.Stop();
+        RunShutdownStep("recording", () => StopRecording(showMessage: false, abortEncoder: true));
+        RunShutdownStep("render backends", () =>
+        {
+            var renderBackend = _renderBackend;
+            _renderBackend = new NullRenderBackend();
+            _pixelBuffer = null;
+            renderBackend.Dispose();
+            _inlineGpuSourceCompositor.Dispose();
+            _gpuSimulationGroupCompositor.Dispose();
+            _inlineGpuPresentationSnapshotter.Dispose();
+            foreach (var backend in EnumerateSimulationLeafLayers(_simulationLayers).Select(layer => layer.Engine).OfType<ISimulationBackend>().Distinct())
+            {
+                backend.Dispose();
+            }
+            foreach (var backend in _retiredSimulationBackends.Distinct())
+            {
+                backend.Dispose();
+            }
+            _retiredSimulationBackends.Clear();
+        });
+        RunShutdownStep("source sessions", DisposeSourceSessionsForShutdown);
+        RunShutdownStep("webcam capture", () => _webcamCapture.Reset());
+        RunShutdownStep("file capture", _fileCapture.Dispose);
+        RunShutdownStep("queued media disposal", () =>
+        {
+            if (!MediaDisposalQueue.Drain(TimeSpan.FromSeconds(3)))
+            {
+                Logger.Warn($"Timed out waiting for {MediaDisposalQueue.PendingCount} queued media disposal(s) during shutdown.");
+            }
+        });
+        RunShutdownStep("FFmpeg process owner", () =>
+        {
+            if (!FfmpegProcessManager.Shared.Shutdown(TimeSpan.FromSeconds(3)))
+            {
+                Logger.Warn("Timed out waiting for all remaining FFmpeg processes during shutdown.");
+            }
+        });
+        RunShutdownStep("audio analysis", _audioBeatDetector.Dispose);
+        RunShutdownStep("timer cleanup", () =>
+        {
+            MarkStartupComplete();
+            DisableHighResolutionTimer();
+        });
+        RunShutdownStep("configuration flush", FlushPendingConfigSave);
 
-            RunShutdownStep("layer editor", () =>
-            {
-                if (_layerEditorWindow != null)
-                {
-                    _layerEditorWindow.PrepareForOwnerShutdown();
-                    _layerEditorWindow.Close();
-                    _layerEditorWindow = null;
-                }
-            });
-
-            RunShutdownStep("recording", () => StopRecording(showMessage: false, abortEncoder: true));
-            RunShutdownStep("render backends", () =>
-            {
-                var renderBackend = _renderBackend;
-                _renderBackend = new NullRenderBackend();
-                _pixelBuffer = null;
-                renderBackend.Dispose();
-                _inlineGpuSourceCompositor.Dispose();
-                _gpuSimulationGroupCompositor.Dispose();
-                _inlineGpuPresentationSnapshotter.Dispose();
-                foreach (var backend in EnumerateSimulationLeafLayers(_simulationLayers).Select(layer => layer.Engine).OfType<ISimulationBackend>().Distinct())
-                {
-                    backend.Dispose();
-                }
-                foreach (var backend in _retiredSimulationBackends.Distinct())
-                {
-                    backend.Dispose();
-                }
-                _retiredSimulationBackends.Clear();
-            });
-            RunShutdownStep("source sessions", DisposeSourceSessionsForShutdown);
-            RunShutdownStep("webcam capture", () => _webcamCapture.Reset());
-            RunShutdownStep("file capture", _fileCapture.Dispose);
-            RunShutdownStep("queued media disposal", () =>
-            {
-                if (!MediaDisposalQueue.Drain(TimeSpan.FromSeconds(3)))
-                {
-                    Logger.Warn($"Timed out waiting for {MediaDisposalQueue.PendingCount} queued media disposal(s) during shutdown.");
-                }
-            });
-            RunShutdownStep("FFmpeg process owner", () =>
-            {
-                if (!FfmpegProcessManager.Shared.Shutdown(TimeSpan.FromSeconds(3)))
-                {
-                    Logger.Warn("Timed out waiting for all remaining FFmpeg processes during shutdown.");
-                }
-            });
-            RunShutdownStep("audio analysis", _audioBeatDetector.Dispose);
-            RunShutdownStep("timer cleanup", () =>
-            {
-                MarkStartupComplete();
-                DisableHighResolutionTimer();
-            });
-            RunShutdownStep("configuration flush", FlushPendingConfigSave);
-
-            Logger.Shutdown();
-        };
+        Logger.Shutdown();
     }
 
     internal string? GetShutdownErrorMessage() => _shutdownException?.ToString();
