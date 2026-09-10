@@ -111,6 +111,7 @@ internal static partial class SmokeTestRunner
             {
                 "offline-recording" => RunOfflineRecordingSmokeTest(),
                 "offline-render" => RunOfflineRenderSmokeTest(),
+                "background-bake" => RunBackgroundBakeSmokeTest(),
                 "profile-240" => RunFrameProfileSmokeTest(240, "smoke-mainloop-240p"),
                 "profile-480" => RunFrameProfileSmokeTest(480, "smoke-mainloop-480p"),
                 "profile-rgb-240" => RunFrameProfileSmokeTest(240, "smoke-mainloop-rgb-240p", rgbMode: true),
@@ -185,6 +186,7 @@ internal static partial class SmokeTestRunner
                 "startup" => RunStartupSmokeTest(),
                 "startup-recovery" => RunStartupRecoverySmokeTest(),
                 "config-save-coalescing" => RunConfigSaveCoalescingSmokeTest(),
+                "scene-persistence" => RunScenePersistenceSmokeTest(),
                 "all" => RunAllSmokeTests(),
                 _ => throw new ArgumentException($"Unknown smoke test target '{target}'. See wiki/Build-and-Install.md for the supported targets, including webm-alpha, autoclip, ffmpeg-lifecycle, gif-source-recovery, color-plane, and chroma-key.")
             };
@@ -4878,32 +4880,20 @@ internal static partial class SmokeTestRunner
                 {
                     timer.Stop();
                     var state = window.GetStartupRecoveryStateForSmoke();
-                    string configPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "lifeviz", "config.json");
-                    string persistedJson = File.ReadAllText(configPath);
-                    using JsonDocument persistedDocument = JsonDocument.Parse(persistedJson);
-                    JsonElement root = persistedDocument.RootElement;
-                    int persistedRows = root.TryGetProperty("Height", out var heightProperty) ? heightProperty.GetInt32() : 0;
-                    double persistedFps = root.TryGetProperty("Framerate", out var fpsProperty) ? fpsProperty.GetDouble() : 0;
-                    bool persistedFullscreen = root.TryGetProperty("Fullscreen", out var fullscreenProperty) && fullscreenProperty.GetBoolean();
-                    bool persistedShowFps = root.TryGetProperty("ShowFps", out var showFpsProperty) && showFpsProperty.GetBoolean();
-                    bool persistedLevelToFramerate = root.TryGetProperty("AudioReactiveLevelToFpsEnabled", out var levelToFpsProperty) && levelToFpsProperty.GetBoolean();
+                    // Safe launch adjusts runtime settings. It must no longer
+                    // eagerly rewrite user data before complete restoration.
                     if (state.rows > 480 ||
                         state.renderFps > 60.0 ||
                         state.simulationFps > 60.0 ||
                         state.fullscreen ||
                         state.showFps ||
                         state.levelToFramerate ||
-                        persistedRows > 480 ||
-                        persistedFps > 60.0 ||
-                        persistedFullscreen ||
-                        persistedShowFps ||
-                        persistedLevelToFramerate ||
                         state.sourceCount <= 0)
                     {
                         failure ??= new InvalidOperationException(
                             $"Startup recovery did not apply safe launch overrides before scene restore. " +
                             $"rows={state.rows}, renderFps={state.renderFps:0.##}, simFps={state.simulationFps:0.##}, fullscreen={state.fullscreen}, showFps={state.showFps}, levelToFramerate={state.levelToFramerate}, " +
-                            $"persistedRows={persistedRows}, persistedFps={persistedFps:0.##}, persistedFullscreen={persistedFullscreen}, persistedShowFps={persistedShowFps}, persistedLevelToFramerate={persistedLevelToFramerate}, sourceCount={state.sourceCount}.");
+                            $"sourceCount={state.sourceCount}.");
                     }
 
                     window.Close();

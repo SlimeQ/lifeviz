@@ -5,8 +5,10 @@ using System.Windows.Controls;
 
 namespace lifeviz;
 
-public partial class OfflineRenderWindow : Window
+public partial class OfflineRenderWindow : Window, IOfflineRenderProgress
 {
+    public bool IsCancellationRequested => false;
+    internal bool QueueMode { get; set; }
     private bool _isRendering;
     private bool _allowClose;
 
@@ -39,6 +41,12 @@ public partial class OfflineRenderWindow : Window
         }
 
         ValidationText.Visibility = Visibility.Collapsed;
+        if (QueueMode)
+        {
+            int queueFps = OutputFpsComboBox.SelectedItem is ComboBoxItem { Tag: int selectedFps } ? selectedFps : 30;
+            StartRequested?.Invoke(this, new OfflineRenderRequestEventArgs(duration, queueFps));
+            return;
+        }
         _isRendering = true;
         DurationPanel.IsEnabled = false;
         StartButton.Visibility = Visibility.Collapsed;
@@ -50,6 +58,14 @@ public partial class OfflineRenderWindow : Window
             : 30;
         StartRequested?.Invoke(this, new OfflineRenderRequestEventArgs(duration, outputFps));
     }
+
+    internal void ShowEnqueueError(string message)
+    {
+        ValidationText.Text = message;
+        ValidationText.Visibility = Visibility.Visible;
+    }
+
+    private void CloseButton_Click(object sender, RoutedEventArgs e) => Close();
 
     private void CancelRenderButton_Click(object sender, RoutedEventArgs e)
     {

@@ -13,6 +13,12 @@ public static class Program
             // Enable Per-Monitor V2 DPI Awareness before any WPF code runs
             NativeMethods.SetProcessDpiAwarenessContext(NativeMethods.DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
 
+            if (BackgroundBakeWorker.TryRun(args, out int bakeExitCode))
+            {
+                Environment.ExitCode = bakeExitCode;
+                return;
+            }
+
             if (SmokeTestRunner.TryRun(args, out int exitCode))
             {
                 Environment.ExitCode = exitCode;

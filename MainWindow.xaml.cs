@@ -142,7 +142,6 @@ public partial class MainWindow : Window
     private static readonly Uri GitHubLatestReleaseUri = new($"https://api.github.com/repos/{GitHubRepoOwner}/{GitHubRepoName}/releases/latest");
     private static readonly JsonSerializerOptions GitHubJsonOptions = new() { PropertyNameCaseInsensitive = true };
     private static readonly JsonSerializerOptions ConfigJsonOptions = new() { WriteIndented = true };
-    private static readonly UTF8Encoding ConfigUtf8Encoding = new(encoderShouldEmitUTF8Identifier: false);
     private static readonly (int rowOffset, int colOffset)[] GliderPattern =
     {
         (0, 1), (1, 2), (2, 0), (2, 1), (2, 2)
@@ -254,6 +253,10 @@ public partial class MainWindow : Window
     private bool _webcamErrorShown;
     private bool _primaryAspectRefreshPending;
     private bool _configReady;
+    private bool _configLoadBlocked;
+    private bool _configWriteFailed;
+    private bool _configConflict;
+    private string? _configSaveError;
     private readonly DispatcherTimer _configSaveTimer;
     private readonly object _configWriteSync = new();
     private string? _pendingConfigJson;
@@ -372,6 +375,7 @@ public partial class MainWindow : Window
         };
         _configSaveTimer.Tick += ConfigSaveTimer_Tick;
         InitializeComponent();
+        Closing += BackgroundBakeWindow_Closing;
         StateChanged += MainWindow_StateChanged;
         ApplyVersionIdentity();
         _renderBackend = CreateRenderBackend(this, RenderSurfaceHost, GameImage);
@@ -383,7 +387,7 @@ public partial class MainWindow : Window
 
         Loaded += (_, _) =>
         {
-            if (!App.IsSmokeTestMode || allowFullSmokeStartup)
+            if ((!App.IsSmokeTestMode || allowFullSmokeStartup) && !BackgroundBakeWorker.IsWorker)
             {
                 var (configLoaded, migrateLegacyEmptyScene) = LoadConfig();
                 EnsureDefaultSceneForStartup(configLoaded, migrateLegacyEmptyScene);
@@ -425,8 +429,22 @@ public partial class MainWindow : Window
         }
 
         _isShuttingDown = true;
+        AbortBackgroundBakes();
         DetachRenderLoop();
         _uiThreadLatencyProbe.Stop();
+
+        // Capture the authored scene before editor/recording/source teardown can
+        // mutate it. Shutdown is never a scene edit, even on a dead WPF channel.
+        RunShutdownStep("scene snapshot", () =>
+        {
+            _configSaveTimer.Stop();
+            if (_configReady && !_configLoadBlocked)
+            {
+                QueueConfigWrite(SerializeCurrentConfig());
+                _configSaveDirty = false;
+            }
+        });
+        _configReady = false;
 
         RunShutdownStep("layer editor", () =>
         {
@@ -4627,7 +4645,8 @@ public partial class MainWindow : Window
         {
             // Offline output submits exactly one frame per tick and never pads
             // to wall time. Avoid retaining/copying a full-size padding frame.
-            if (_recordingSession.TryEnqueue(frame, waitForCapacity: true, failOnSaturation: true))
+            if (_recordingSession.TryEnqueue(frame, waitForCapacity: true, failOnSaturation: true,
+                    isCancellationRequested: () => _offlineRenderCancellation?.IsCancellationRequested == true || BackgroundBakeWorker.CancellationRequested))
             {
                 _recordingFramesSubmitted++;
             }
@@ -5127,17 +5146,25 @@ public partial class MainWindow : Window
 
     private void OfflineRenderMenuItem_Click(object sender, RoutedEventArgs e)
     {
-        if (_isRecording || _isOfflineRendering || _offlineRenderWindow != null)
+        if (_offlineRenderWindow != null)
         {
+            _offlineRenderWindow.Activate();
             return;
         }
 
         int sceneFps = Math.Clamp((int)Math.Round(_currentFpsFromConfig), 1, 144);
-        var dialog = new OfflineRenderWindow(sceneFps) { Owner = this };
+        var dialog = new OfflineRenderWindow(sceneFps) { Owner = this, QueueMode = true };
         _offlineRenderWindow = dialog;
-        dialog.CancelRequested += (_, _) => _offlineRenderCancellation?.Cancel();
-        dialog.StartRequested += async (_, request) =>
-            await RunOfflineRenderAsync(dialog, request.Duration, request.OutputFps);
+        dialog.StartRequested += (_, request) =>
+        {
+            try
+            {
+                EnqueueBake(request.Duration, request.OutputFps);
+                dialog.Close();
+                ShowBakeQueue();
+            }
+            catch (Exception ex) { dialog.ShowEnqueueError($"Could not queue bake: {ex.Message}"); }
+        };
         dialog.Closed += (_, _) =>
         {
             if (ReferenceEquals(_offlineRenderWindow, dialog))
@@ -5145,10 +5172,10 @@ public partial class MainWindow : Window
                 _offlineRenderWindow = null;
             }
         };
-        dialog.ShowDialog();
+        dialog.Show();
     }
 
-    private async Task RunOfflineRenderAsync(OfflineRenderWindow dialog, TimeSpan duration, int outputFps)
+    private async Task RunOfflineRenderAsync(IOfflineRenderProgress dialog, TimeSpan duration, int outputFps)
     {
         if (_isRecording || _isOfflineRendering)
         {
@@ -5164,13 +5191,14 @@ public partial class MainWindow : Window
         bool completed = false;
         bool started = false;
         bool offlineAudioInputStarted = false;
+        long finalSubmittedFrames = 0;
         string? finalizeError = null;
         ProcessPriorityClass? previousProcessPriority = null;
         ThreadPriority? previousUiThreadPriority = null;
 
         try
         {
-            double animationStart = _lifetimeStopwatch.Elapsed.TotalSeconds;
+            double animationStart = BackgroundBakeWorker.IsWorker ? 0 : _lifetimeStopwatch.Elapsed.TotalSeconds;
             if (renderLoopWasAttached)
             {
                 DetachRenderLoop();
@@ -5180,7 +5208,7 @@ public partial class MainWindow : Window
             {
                 using var currentProcess = Process.GetCurrentProcess();
                 previousProcessPriority = currentProcess.PriorityClass;
-                currentProcess.PriorityClass = ProcessPriorityClass.AboveNormal;
+                currentProcess.PriorityClass = BackgroundBakeWorker.IsWorker ? ProcessPriorityClass.BelowNormal : ProcessPriorityClass.AboveNormal;
             }
             catch (Exception ex)
             {
@@ -5189,7 +5217,7 @@ public partial class MainWindow : Window
             try
             {
                 previousUiThreadPriority = Thread.CurrentThread.Priority;
-                Thread.CurrentThread.Priority = ThreadPriority.AboveNormal;
+                Thread.CurrentThread.Priority = BackgroundBakeWorker.IsWorker ? ThreadPriority.Normal : ThreadPriority.AboveNormal;
             }
             catch (Exception ex)
             {
@@ -5207,6 +5235,7 @@ public partial class MainWindow : Window
             }
 
             outputPath = _recordingPath;
+            if (dialog is BackgroundBakeWorker.WorkerProgress workerProgress) workerProgress.OutputPath = outputPath;
             _offlineFrameDeltaSeconds = 1.0 / Math.Max(1, _recordingFps);
             long totalFrames = Math.Max(1, (long)Math.Round(duration.TotalSeconds * _recordingFps));
             _fileCapture.BeginOfflineRender(_recordingFps, _offlineAnimationTimeSeconds);
@@ -5227,6 +5256,7 @@ public partial class MainWindow : Window
             long lastUiUpdateStamp = 0;
             for (long frameIndex = 0; frameIndex < totalFrames; frameIndex++)
             {
+                if (dialog.IsCancellationRequested) _offlineRenderCancellation.Cancel();
                 if (cancellationToken.IsCancellationRequested || _isShuttingDown || !_isRecording)
                 {
                     break;
@@ -5270,7 +5300,9 @@ public partial class MainWindow : Window
                 }
             }
 
+            dialog.UpdateProgress(_recordingFramesSubmitted, totalFrames, exportStopwatch.Elapsed, TimeSpan.Zero);
             completed = !cancellationToken.IsCancellationRequested &&
+                        !dialog.IsCancellationRequested &&
                         !_isShuttingDown &&
                         _recordingFramesSubmitted >= totalFrames;
         }
@@ -5288,9 +5320,12 @@ public partial class MainWindow : Window
             // Reapply a minimized preview's pause while sessions are still in
             // offline mode. They can then return to live mode without launching a
             // decoder that would be killed again a moment later.
-            RefreshMinimizedMediaSuspension(forceSuspendWhileOffline: true);
-            SetVideoSequenceOfflineRenderMode(_sources, enabled: false, fps: 0);
-            _fileCapture.EndOfflineRender();
+            if (!BackgroundBakeWorker.IsWorker)
+            {
+                RefreshMinimizedMediaSuspension(forceSuspendWhileOffline: true);
+                SetVideoSequenceOfflineRenderMode(_sources, enabled: false, fps: 0);
+                _fileCapture.EndOfflineRender();
+            }
             if (offlineAudioInputStarted)
             {
                 _audioBeatDetector.EndOfflineInput();
@@ -5301,6 +5336,7 @@ public partial class MainWindow : Window
             {
                 RecordingSession? finishingSession = _recordingSession;
                 long submittedFrames = _recordingFramesSubmitted;
+                finalSubmittedFrames = submittedFrames;
                 bool abortEncoder = _isShuttingDown ||
                                     _recordingSession?.TryGetError(out _) == true;
                 StopRecording(showMessage: false, abortEncoder: abortEncoder);
@@ -5336,6 +5372,7 @@ public partial class MainWindow : Window
             }
 
             if (offlineAudioInputStarted &&
+                !BackgroundBakeWorker.IsWorker &&
                 !_isShuttingDown &&
                 !string.IsNullOrWhiteSpace(_selectedAudioDeviceId))
             {
@@ -5363,7 +5400,9 @@ public partial class MainWindow : Window
             return;
         }
         dialog.Complete(
-            completed ? $"Render complete: {fileName}" : $"Render cancelled. Partial video saved as {fileName}",
+            completed ? $"Render complete: {fileName}"
+                : finalSubmittedFrames > 0 ? $"Render cancelled. Partial video saved as {fileName}"
+                : "Render cancelled. No video frames were saved.",
             succeeded: completed);
     }
 
@@ -5554,6 +5593,7 @@ public partial class MainWindow : Window
 
         if (_displayWidth <= 0 || _displayHeight <= 0)
         {
+            if (BackgroundBakeWorker.IsWorker) throw new InvalidOperationException("The bake renderer could not be initialized.");
             MessageBox.Show(this, "Recording is unavailable until the renderer is initialized.", "Recording", MessageBoxButton.OK, MessageBoxImage.Information);
             return;
         }
@@ -5564,6 +5604,7 @@ public partial class MainWindow : Window
         int sourceHeight = height - (height % 2);
         if (sourceWidth <= 0 || sourceHeight <= 0)
         {
+            if (BackgroundBakeWorker.IsWorker) throw new InvalidOperationException("Recording requires an even output size.");
             MessageBox.Show(this, "Recording requires an even output size.", "Recording", MessageBoxButton.OK, MessageBoxImage.Information);
             return;
         }
@@ -5581,7 +5622,7 @@ public partial class MainWindow : Window
 
         string folder = GetRecordingOutputFolder();
         string extension = settings.FileExtension.StartsWith(".") ? settings.FileExtension : $".{settings.FileExtension}";
-        string filePath = Path.Combine(folder, $"lifeviz_{DateTime.Now:yyyyMMdd_HHmmss}{extension}");
+        string filePath = Path.Combine(folder, $"lifeviz_{DateTime.Now:yyyyMMdd_HHmmss_fff}_{Guid.NewGuid():N}{extension}");
         string? recordingAudioDeviceId = offlineRender || IsVideoStackAudioSelection(_selectedAudioDeviceId)
             ? null
             : _selectedAudioDeviceId;
@@ -5769,7 +5810,7 @@ public partial class MainWindow : Window
 
         if (OfflineRenderMenuItem != null)
         {
-            OfflineRenderMenuItem.IsEnabled = !_isRecording && !_isOfflineRendering;
+            OfflineRenderMenuItem.IsEnabled = !_bakeQueueClosing;
         }
 
         if (RecordingOutputFolderMenuItem != null)
@@ -5831,6 +5872,7 @@ public partial class MainWindow : Window
 
     private void ShowRecordingError(string message)
     {
+        if (BackgroundBakeWorker.IsWorker) throw new InvalidOperationException(message);
         string fullMessage = $"Recording failed:\n{message}";
         try
         {
@@ -6115,6 +6157,8 @@ public partial class MainWindow : Window
 
     private void RootContextMenu_OnOpened(object sender, RoutedEventArgs e)
     {
+        SceneSaveStatusMenuItem.Header = SceneSaveStatus;
+        SceneSaveStatusMenuItem.ToolTip = SceneSaveError;
         if (PassthroughMenuItem != null)
         {
             PassthroughMenuItem.IsChecked = _passthroughEnabled;
@@ -8371,7 +8415,7 @@ public partial class MainWindow : Window
 
     private static bool TryConsumeStartupRecoveryFlag()
     {
-        if (App.IsDiagnosticTestMode)
+        if (App.IsDiagnosticTestMode || App.IsSmokeTestMode || BackgroundBakeWorker.IsWorker)
         {
             return false;
         }
@@ -8396,7 +8440,7 @@ public partial class MainWindow : Window
 
     private static void MarkStartupPending()
     {
-        if (App.IsDiagnosticTestMode)
+        if (App.IsDiagnosticTestMode || App.IsSmokeTestMode || BackgroundBakeWorker.IsWorker)
         {
             return;
         }
@@ -8419,7 +8463,7 @@ public partial class MainWindow : Window
 
     private static void MarkStartupComplete()
     {
-        if (App.IsDiagnosticTestMode)
+        if (App.IsDiagnosticTestMode || App.IsSmokeTestMode || BackgroundBakeWorker.IsWorker)
         {
             return;
         }
@@ -19147,18 +19191,12 @@ public partial class MainWindow : Window
         bool migrateLegacyEmptyScene = false;
         try
         {
-            if (!File.Exists(ConfigPath))
-            {
-                return (false, false);
-            }
-
-            string json = File.ReadAllText(ConfigPath);
-            _lastPersistedConfigJson = json;
-            var config = JsonSerializer.Deserialize<AppConfig>(json);
-            if (config == null)
-            {
-                return (false, false);
-            }
+            _lastPersistedConfigJson = File.Exists(ConfigPath) ? File.ReadAllText(ConfigPath) : null;
+            var (json, recoveredFrom) = SceneFileStore.ReadRecoverable(ConfigPath, ValidateAppConfigJson);
+            if (json == null) return (false, false);
+            var config = JsonSerializer.Deserialize<AppConfig>(json)!;
+            if (!string.Equals(recoveredFrom, ConfigPath, StringComparison.OrdinalIgnoreCase))
+                ReportScenePersistenceIssue($"LifeViz recovered your scene from {recoveredFrom}. The original file has been preserved.");
 
             configLoaded = true;
             configSchemaUpgradeNeeded = config.ConfigVersion < CurrentConfigVersion;
@@ -19259,7 +19297,7 @@ public partial class MainWindow : Window
             // Apply startup recovery before any heavyweight scene/audio/simulation restore.
             ApplyStartupRecoveryOverridesIfNeeded();
 
-            if (!string.IsNullOrWhiteSpace(_selectedAudioDeviceId))
+            if (!BackgroundBakeWorker.IsWorker && !string.IsNullOrWhiteSpace(_selectedAudioDeviceId))
             {
                 if (IsVideoStackAudioSelection(_selectedAudioDeviceId))
                 {
@@ -19306,12 +19344,13 @@ public partial class MainWindow : Window
         {
             configLoaded = false;
             migrateLegacyEmptyScene = false;
-            Logger.Warn($"Failed to load the app configuration; the default scene will be used. {ex.Message}");
+            _configLoadBlocked = true;
+            ReportScenePersistenceIssue($"Your saved scene could not be fully loaded. Autosave is paused to protect it. Use the layer editor to export any new work or recover a backup. {ex.Message}");
         }
         finally
         {
             // Allow saves after the first load attempt so startup events don't clobber existing config.
-            _configReady = true;
+            _configReady = !_configLoadBlocked;
             if (clearedLegacyGlobalSimulationConfig ||
                 (configLoaded && configSchemaUpgradeNeeded && !migrateLegacyEmptyScene))
             {
@@ -19389,7 +19428,8 @@ public partial class MainWindow : Window
         _fpsOscillationEnabled = false;
         _audioReactiveLevelToFpsEnabled = false;
 
-        PersistStartupRecoveryOverridesToConfig();
+        // Do not eagerly rewrite the saved scene before its sources have even
+        // finished loading. Later complete saves use the normal protected writer.
 
         Logger.Warn(
             $"Startup recovery applied safe launch overrides. " +
@@ -19397,70 +19437,53 @@ public partial class MainWindow : Window
             $"ShowFps {wasShowFps}->{_showFps}, LevelToFramerate {wasReactiveFpsEnabled}->{_audioReactiveLevelToFpsEnabled}.");
     }
 
-    private void PersistStartupRecoveryOverridesToConfig()
-    {
-        try
-        {
-            if (!File.Exists(ConfigPath))
-            {
-                return;
-            }
-
-            string json = File.ReadAllText(ConfigPath);
-            var config = JsonSerializer.Deserialize<AppConfig>(json);
-            if (config == null)
-            {
-                return;
-            }
-
-            config.Height = _configuredRows;
-            config.Columns = 0;
-            config.Framerate = _currentFpsFromConfig;
-            config.Fullscreen = false;
-            config.ShowFps = false;
-            config.OscillationEnabled = false;
-            config.AudioReactiveLevelToFpsEnabled = false;
-
-            string updatedJson = JsonSerializer.Serialize(config, ConfigJsonOptions);
-            WriteTextAtomically(ConfigPath, updatedJson);
-            _lastPersistedConfigJson = updatedJson;
-        }
-        catch (Exception ex)
-        {
-            Logger.Warn($"Failed to persist startup recovery overrides. {ex.Message}");
-        }
-    }
-
     private void SaveConfig()
     {
-        if (!_configReady)
+        if (BackgroundBakeWorker.IsWorker) return;
+        if (!_configReady || _isShuttingDown || _configLoadBlocked)
         {
             return;
         }
 
         _configSaveDirty = true;
-        _configSaveTimer.Stop();
-        _configSaveTimer.Start();
+        _configSaveTimer.Interval = TimeSpan.FromMilliseconds(ConfigSaveDebounceMilliseconds);
+        // Start once: continuous slider edits must not postpone autosave forever.
+        if (!_configSaveTimer.IsEnabled) _configSaveTimer.Start();
     }
 
     private void ConfigSaveTimer_Tick(object? sender, EventArgs e)
     {
         _configSaveTimer.Stop();
-        if (!_configSaveDirty || !_configReady)
+        if (!_configReady || _isShuttingDown || _configLoadBlocked || _configConflict)
         {
             return;
         }
 
         try
         {
-            _configSaveDirty = false;
-            QueueConfigWrite(SerializeCurrentConfig());
+            if (_configSaveDirty)
+            {
+                QueueConfigWrite(SerializeCurrentConfig());
+                _configSaveDirty = false;
+            }
+            else
+            {
+                lock (_configWriteSync)
+                {
+                    if (_pendingConfigJson != null && _configWriteTask == null)
+                    {
+                        string path = ConfigPath;
+                        _configWriteTask = Task.Run(() => ProcessConfigWrites(path));
+                    }
+                }
+            }
         }
         catch (Exception ex)
         {
             _configSaveDirty = true;
             Logger.Warn($"Failed to prepare the app configuration for saving. {ex.Message}");
         }
+        if (_configSaveDirty || _configWriteFailed) _configSaveTimer.Start();
     }
 
     private string SerializeCurrentConfig()
@@ -19534,10 +19557,21 @@ public partial class MainWindow : Window
 
     private void QueueConfigWrite(string json)
     {
+        if (BackgroundBakeWorker.IsWorker) return;
         lock (_configWriteSync)
         {
+            if (_configConflict)
+            {
+                _pendingConfigJson = json;
+                return;
+            }
             if (string.Equals(json, _pendingConfigJson, StringComparison.Ordinal))
             {
+                if (_configWriteTask == null)
+                {
+                    string path = ConfigPath;
+                    _configWriteTask = Task.Run(() => ProcessConfigWrites(path));
+                }
                 return;
             }
 
@@ -19554,6 +19588,9 @@ public partial class MainWindow : Window
 
             if (string.Equals(json, _lastPersistedConfigJson, StringComparison.Ordinal))
             {
+                _pendingConfigJson = null;
+                _configWriteFailed = false;
+                _configSaveError = null;
                 return;
             }
 
@@ -19592,13 +19629,15 @@ public partial class MainWindow : Window
                 {
                     Thread.Sleep(smokeDelay);
                 }
-                WriteTextAtomically(path, json);
+                SceneFileStore.Write(path, json, _lastPersistedConfigJson, checkForConflict: true);
                 Interlocked.Increment(ref _configPersistedWriteCount);
                 persisted = true;
             }
             catch (Exception ex)
             {
                 Logger.Warn($"Failed to save the app configuration. {ex.Message}");
+                _configSaveError = ex.Message;
+                _configConflict = ex is SceneSaveConflictException;
             }
 
             lock (_configWriteSync)
@@ -19607,6 +19646,28 @@ public partial class MainWindow : Window
                 if (persisted)
                 {
                     _lastPersistedConfigJson = json;
+                    _configWriteFailed = false;
+                    _configSaveError = null;
+                }
+                else
+                {
+                    _pendingConfigJson ??= json;
+                    _configWriteFailed = true;
+                    _configWriteTask = null;
+                    Dispatcher.BeginInvoke(new Action(() =>
+                    {
+                        if (!_isShuttingDown)
+                        {
+                            if (!_configWriteFailed) return;
+                            ReportScenePersistenceIssue("LifeViz could not save your scene. " + _configSaveError);
+                            if (!_configConflict)
+                            {
+                                _configSaveTimer.Interval = TimeSpan.FromSeconds(2);
+                                _configSaveTimer.Start();
+                            }
+                        }
+                    }));
+                    return;
                 }
 
                 if (_pendingConfigJson == null)
@@ -19614,36 +19675,6 @@ public partial class MainWindow : Window
                     _configWriteTask = null;
                     return;
                 }
-            }
-        }
-    }
-
-    private static void WriteTextAtomically(string path, string contents)
-    {
-        string directory = Path.GetDirectoryName(path) ?? string.Empty;
-        if (!Directory.Exists(directory))
-        {
-            Directory.CreateDirectory(directory);
-        }
-
-        string temporaryPath = path + ".tmp";
-        try
-        {
-            File.WriteAllText(temporaryPath, contents, ConfigUtf8Encoding);
-            File.Move(temporaryPath, path, overwrite: true);
-        }
-        finally
-        {
-            try
-            {
-                if (File.Exists(temporaryPath))
-                {
-                    File.Delete(temporaryPath);
-                }
-            }
-            catch
-            {
-                // A stale temp file is harmless and can be replaced by the next save.
             }
         }
     }
@@ -19666,16 +19697,24 @@ public partial class MainWindow : Window
             }
         }
 
+        bool retried = false;
         while (true)
         {
             Task? writeTask;
             lock (_configWriteSync)
             {
+                if (_configWriteTask == null && _pendingConfigJson != null && !_configConflict && !retried)
+                {
+                    retried = true;
+                    string path = ConfigPath;
+                    _configWriteTask = Task.Run(() => ProcessConfigWrites(path));
+                }
                 writeTask = _configWriteTask;
             }
 
             if (writeTask == null)
             {
+                PreserveUncommittedScene();
                 return;
             }
 
@@ -19683,6 +19722,7 @@ public partial class MainWindow : Window
             if (remaining <= TimeSpan.Zero)
             {
                 Logger.Warn("Timed out while flushing the final app configuration; shutdown will continue.");
+                PreserveUncommittedScene();
                 return;
             }
 
@@ -19691,6 +19731,7 @@ public partial class MainWindow : Window
                 if (!writeTask.Wait(remaining))
                 {
                     Logger.Warn("Timed out while flushing the final app configuration; shutdown will continue.");
+                    PreserveUncommittedScene();
                     return;
                 }
             }
@@ -20639,6 +20680,8 @@ public partial class MainWindow : Window
         {
             if (!Enum.TryParse<CaptureSource.SourceType>(config.Type, true, out var type))
             {
+                _configLoadBlocked = true;
+                ReportScenePersistenceIssue($"The scene contains an unsupported source type ({config.Type}). Autosave is paused to preserve the original scene.");
                 continue;
             }
 
@@ -20756,6 +20799,8 @@ public partial class MainWindow : Window
 
             if (restored == null)
             {
+                _configLoadBlocked = true;
+                ReportScenePersistenceIssue("Some saved inputs are unavailable. Autosave is paused so missing layers cannot be erased from the saved scene. Reconnect the inputs and restart, or export a separate scene from the layer editor.");
                 continue;
             }
 
@@ -20865,9 +20910,9 @@ public partial class MainWindow : Window
         }
     }
 
-    private string ConfigPath => App.IsSmokeTestMode && !App.LoadUserConfigInSmokeTest
-        ? Path.Combine(AppContext.BaseDirectory, "smoke-config.json")
-        : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "lifeviz", "config.json");
+    private string ConfigPath => BackgroundBakeWorker.ConfigPath ?? (App.IsSmokeTestMode && !App.LoadUserConfigInSmokeTest
+        ? _scenePersistenceTestPath ?? Path.Combine(AppContext.BaseDirectory, "smoke-config.json")
+        : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "lifeviz", "config.json"));
 
     private sealed class AppConfig
     {

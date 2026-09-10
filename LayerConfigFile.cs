@@ -2,11 +2,34 @@ using System;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.Linq;
+using System.IO;
+using System.Text.Json;
 
 namespace lifeviz;
 
 internal sealed class LayerConfigFile
 {
+    internal static LayerConfigFile Parse(string json)
+    {
+        SceneFileStore.ValidateSceneJson(json);
+        using var document = JsonDocument.Parse(json);
+        var file = JsonSerializer.Deserialize<LayerConfigFile>(json)
+            ?? throw new InvalidDataException("The scene is empty.");
+        if (document.RootElement.TryGetProperty("ConfigVersion", out var configVersion))
+        {
+            if (configVersion.GetInt32() > 1)
+                throw new InvalidDataException("This autosave requires a newer version of LifeViz.");
+            // Autosaves store project controls at the root; exported projects
+            // store the same authored controls in ProjectSettings.
+            file.ProjectSettings = JsonSerializer.Deserialize<LayerConfigProjectSettings>(json)!;
+            if (document.RootElement.TryGetProperty("BlendMode", out var blendMode))
+                file.ProjectSettings.CompositeBlendMode = blendMode.GetString() ?? "Additive";
+        }
+        else if (!document.RootElement.TryGetProperty("Version", out _) || file.Version > 11)
+            throw new InvalidDataException("This is not a supported LifeViz scene project.");
+        return file;
+    }
+
     public int Version { get; set; } = 11;
     public DateTime SavedUtc { get; set; } = DateTime.UtcNow;
     public LayerConfigProjectSettings ProjectSettings { get; set; } = new();

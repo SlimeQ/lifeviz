@@ -351,7 +351,9 @@ internal static class Logger
                 "lifeviz",
                 "logs");
             Directory.CreateDirectory(directory);
-            string path = Path.Combine(directory, "lifeviz.log");
+            string path = BackgroundBakeWorker.IsWorker
+                ? Path.Combine(BackgroundBakeWorker.DirectoryPath!, "worker.log")
+                : Path.Combine(directory, "lifeviz.log");
             stream = new FileStream(
                 path,
                 FileMode.Create,

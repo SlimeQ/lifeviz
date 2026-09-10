@@ -186,7 +186,8 @@ internal sealed class RecordingSession : IDisposable
     public bool TryEnqueue(
         byte[] buffer,
         bool waitForCapacity = false,
-        bool failOnSaturation = false)
+        bool failOnSaturation = false,
+        Func<bool>? isCancellationRequested = null)
     {
         if (HasError || _completed || Volatile.Read(ref _abortRequested) != 0)
         {
@@ -203,9 +204,23 @@ internal sealed class RecordingSession : IDisposable
         try
         {
             long enqueueStamp = _offlineRender ? Stopwatch.GetTimestamp() : 0;
-            bool added = waitForCapacity
-                ? _frames.TryAdd(buffer, TimeSpan.FromSeconds(5))
-                : _frames.TryAdd(buffer);
+            bool cancelled = false;
+            bool added;
+            if (waitForCapacity)
+            {
+                // A background encoder can be starved briefly while the editor
+                // is busy. Keep backpressure bounded, but check cancellation
+                // frequently instead of failing a valid bake after five seconds.
+                long deadline = Stopwatch.GetTimestamp() + (long)(Stopwatch.Frequency * (_offlineRender ? 60.0 : 5.0));
+                added = false;
+                while (!HasError && !_completed && Volatile.Read(ref _abortRequested) == 0)
+                {
+                    if (isCancellationRequested?.Invoke() == true) { cancelled = true; break; }
+                    if (_frames.TryAdd(buffer, 100)) { added = true; break; }
+                    if (Stopwatch.GetTimestamp() >= deadline) break;
+                }
+            }
+            else added = _frames.TryAdd(buffer);
             if (_offlineRender)
             {
                 _queueWaitTicks += Stopwatch.GetTimestamp() - enqueueStamp;
@@ -213,10 +228,12 @@ internal sealed class RecordingSession : IDisposable
             if (!added)
             {
                 ArrayPool<byte>.Shared.Return(buffer);
-                if (failOnSaturation)
+                if (failOnSaturation && !cancelled && !HasError)
                 {
                     SetError(new InvalidOperationException(
-                        "The recording encoder queue remained full; recording was stopped to keep rendering responsive."));
+                        _offlineRender
+                            ? "The bake encoder made no queue progress for 60 seconds. Check the output drive and encoder."
+                            : "The recording encoder queue remained full; recording was stopped to keep rendering responsive."));
                 }
                 return false;
             }

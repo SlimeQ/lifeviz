@@ -240,6 +240,7 @@ public partial class MainWindow
 
     private static IRenderBackend CreateRenderBackend(MainWindow owner, Grid renderHost, Image fallbackImage)
     {
+        if (BackgroundBakeWorker.IsWorker) return new BakeRenderBackend(owner);
         try
         {
             Logger.Info("Initializing GPU render backend.");

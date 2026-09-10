@@ -2,7 +2,7 @@
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         Title="Render Fixed Duration"
-        Width="500"
+        Width="580"
         Height="350"
         WindowStartupLocation="CenterOwner"
         ResizeMode="NoResize"
@@ -19,9 +19,9 @@
             <RowDefinition Height="Auto" />
         </Grid.RowDefinitions>
 
-        <TextBlock FontSize="18" FontWeight="SemiBold" Text="Offline video render" />
+        <TextBlock FontSize="18" FontWeight="SemiBold" Text="Bake a video in the background" />
         <TextBlock Grid.Row="1" Margin="0,8,0,14" Foreground="#BDBDBD" TextWrapping="Wrap"
-                   Text="Enter the finished video duration. LifeViz will render every frame as fast as the machine and encoder allow. Unmuted video tracks drive audio reactivity; the output video remains silent." />
+                   Text="Capture the current preview scene and output settings, then keep designing. If a bake is running, this video waits in the queue. Apply any pending editor changes first. Video audio drives reactivity; output stays silent." />
 
         <StackPanel x:Name="DurationPanel" Grid.Row="2" Orientation="Horizontal">
             <TextBlock VerticalAlignment="Center" Margin="0,0,10,0" Text="Duration (H:MM:SS)" />
@@ -39,10 +39,10 @@
         </StackPanel>
 
         <StackPanel Grid.Row="5" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,16,0,0">
-            <Button x:Name="CloseButton" Content="Close" Width="88" Margin="0,0,8,0" IsCancel="True" />
+            <Button x:Name="CloseButton" Content="Close" Width="88" Margin="0,0,8,0" IsCancel="True" Click="CloseButton_Click" />
             <Button x:Name="CancelRenderButton" Content="Cancel Render" Width="105" Margin="0,0,8,0"
                     Visibility="Collapsed" Click="CancelRenderButton_Click" />
-            <Button x:Name="StartButton" Content="Start Render" Width="105" IsDefault="True" Click="StartButton_Click" />
+            <Button x:Name="StartButton" Content="Add to Queue" Width="105" IsDefault="True" Click="StartButton_Click" />
         </StackPanel>
     </Grid>
 </Window>

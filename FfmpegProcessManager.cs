@@ -597,7 +597,7 @@ internal sealed class FfmpegProcessManager : IDisposable
         internal int DisposeWhenExited;
     }
 
-    private sealed class KillOnCloseJob : IDisposable
+    internal sealed class KillOnCloseJob : IDisposable
     {
         private const uint JobObjectLimitKillOnJobClose = 0x00002000;
         private SafeJobHandle? _handle;

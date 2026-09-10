@@ -63,6 +63,8 @@ public partial class App
 
     private static void PreserveRenderFailureLog()
     {
+        // A worker already has its own log. Never replace the editor's crash report.
+        if (BackgroundBakeWorker.IsWorker) return;
         try
         {
             string directory = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "lifeviz", "logs");

@@ -54,6 +54,16 @@ public partial class LayerEditorWindow : Window
 
     public void PrepareForOwnerShutdown()
     {
+        if (!_viewModel.LiveMode)
+        {
+            try
+            {
+                var draft = LayerConfigFile.FromEditorSources(_viewModel.Sources,
+                    Array.Empty<LayerEditorSimulationLayer>(), _pendingProjectSettings ?? _owner.GetProjectSettingsForEditor());
+                SceneFileStore.Write(_owner.EditorDraftRecoveryPath, JsonSerializer.Serialize(draft, LayerConfigJsonOptions));
+            }
+            catch (Exception ex) { Logger.Error("Could not preserve the unapplied layer editor draft.", ex); }
+        }
         _ownerIsShuttingDown = true;
         _suppressLiveUpdates = true;
         _pendingProjectSettings = null;
@@ -751,15 +761,29 @@ public partial class LayerEditorWindow : Window
             return;
         }
 
-        if (_pendingProjectSettings != null)
+        try
         {
-            _owner.ApplyProjectSettingsFromEditor(_pendingProjectSettings);
-            _pendingProjectSettings = null;
+            _owner.BeginSceneReplacement();
+            bool complete = false;
+            try
+            {
+                if (_pendingProjectSettings != null)
+                {
+                    _owner.ApplyProjectSettingsFromEditor(_pendingProjectSettings);
+                    _pendingProjectSettings = null;
+                }
+                int expectedCount = EnumerateSources(_viewModel.Sources).Count();
+                var selectedId = _viewModel.SelectedSource?.Id;
+                _owner.ApplyLayerEditorSources(_viewModel.Sources.ToList());
+                complete = EnumerateSources(_owner.BuildLayerEditorSources()).Count() == expectedCount;
+                if (complete) RefreshFromSources(selectedId);
+            }
+            finally { _owner.CompleteSceneReplacement(complete); }
         }
-
-        var selectedId = _viewModel.SelectedSource?.Id;
-        _owner.ApplyLayerEditorSources(_viewModel.Sources.ToList());
-        RefreshFromSources(selectedId);
+        catch (Exception ex)
+        {
+            MessageBox.Show(this, $"Failed to apply scene:\n{ex.Message}", "Apply Failed", MessageBoxButton.OK, MessageBoxImage.Error);
+        }
     }
 
     private void OpenAppControls_Click(object sender, RoutedEventArgs e)
@@ -797,7 +821,7 @@ public partial class LayerEditorWindow : Window
                 Array.Empty<LayerEditorSimulationLayer>(),
                 projectSettings);
             string json = JsonSerializer.Serialize(config, LayerConfigJsonOptions);
-            File.WriteAllText(dialog.FileName, json);
+            SceneFileStore.Write(dialog.FileName, json);
         }
         catch (Exception ex)
         {
@@ -807,14 +831,26 @@ public partial class LayerEditorWindow : Window
     }
 
     private void LoadLayerConfig_Click(object sender, RoutedEventArgs e)
+        => LoadLayerConfig(recoverAutosave: false);
+
+    private void RecoverAutosave_Click(object sender, RoutedEventArgs e)
+        => LoadLayerConfig(recoverAutosave: true);
+
+    private void LoadLayerConfig(bool recoverAutosave)
     {
         var dialog = new OpenFileDialog
         {
-            Title = "Load Layer Configuration",
+            Title = recoverAutosave ? "Recover Scene Revision" : "Load Layer Configuration",
             Filter = "LifeViz Layer Config (*.lifevizlayers.json)|*.lifevizlayers.json|JSON Files|*.json|All Files|*.*",
             CheckFileExists = true,
             Multiselect = false
         };
+        if (recoverAutosave)
+        {
+            Directory.CreateDirectory(_owner.SceneRecoveryDirectory);
+            dialog.InitialDirectory = _owner.SceneRecoveryDirectory;
+            dialog.Filter = "Scene revisions (*.json)|*.json|All Files|*.*";
+        }
 
         if (dialog.ShowDialog(this) != true)
         {
@@ -824,7 +860,7 @@ public partial class LayerEditorWindow : Window
         try
         {
             string json = File.ReadAllText(dialog.FileName);
-            var config = JsonSerializer.Deserialize<LayerConfigFile>(json);
+            var config = LayerConfigFile.Parse(json);
             if (config == null)
             {
                 MessageBox.Show(this, "That file did not contain a layer configuration.", "Load Failed",
@@ -836,9 +872,16 @@ public partial class LayerEditorWindow : Window
             var projectSettings = config.ToEditorProjectSettings();
             if (_viewModel.LiveMode)
             {
-                _owner.ApplyProjectSettingsFromEditor(projectSettings);
-                _owner.ApplyLayerEditorSources(sources);
-                RefreshFromSources();
+                _owner.BeginSceneReplacement();
+                bool complete = false;
+                try
+                {
+                    _owner.ApplyProjectSettingsFromEditor(projectSettings);
+                    _owner.ApplyLayerEditorSources(sources);
+                    complete = EnumerateSources(_owner.BuildLayerEditorSources()).Count() == EnumerateSources(sources).Count();
+                    if (complete) RefreshFromSources();
+                }
+                finally { _owner.CompleteSceneReplacement(complete); }
             }
             else
             {

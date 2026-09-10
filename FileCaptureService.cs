@@ -3659,6 +3659,7 @@ internal sealed class FileCaptureService : IDisposable
             {
                 playbackUrl = _audioPlaybackUrl ?? _videoPlaybackUrl;
                 shouldBeEnabled = !_isDisposed &&
+                                  !BackgroundBakeWorker.IsWorker &&
                                   !_offlineRenderEnabled &&
                                   !_livePlaybackActivationPending &&
                                   _audioEnabled &&

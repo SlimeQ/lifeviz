@@ -25,6 +25,8 @@
             <ContextMenu x:Name="RootContextMenu"
                          Opened="RootContextMenu_OnOpened"
                          Closed="RootContextMenu_OnClosed">
+                <MenuItem x:Name="SceneSaveStatusMenuItem" Header="Autosave" IsEnabled="False" />
+                <Separator />
                 <MenuItem x:Name="PauseMenuItem"
                           Header="Pause Simulation"
                           Click="TogglePause_Click" />
@@ -36,6 +38,7 @@
                 <MenuItem x:Name="OfflineRenderMenuItem"
                           Header="Render Fixed Duration..."
                           Click="OfflineRenderMenuItem_Click" />
+                <MenuItem x:Name="BakeQueueMenuItem" Header="Bake Queue..." Click="BakeQueueMenuItem_Click" />
                 <MenuItem x:Name="RecordingOutputFolderMenuItem"
                           Header="Recording Output Folder..."
                           Click="RecordingOutputFolderMenuItem_Click" />

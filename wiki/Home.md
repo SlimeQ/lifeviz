@@ -7,7 +7,9 @@ Welcome to the documentation hub for LifeViz, a minimalist Windows 11 WPF experi
 - [AutoClip takeovers and playlists](AutoClip-Takeovers.md)
 
 - [Rendering Pipeline](Rendering-Pipeline.md)
+- [Background Baking](Background-Baking.md)
 - [Configuration & Controls](Configuration-and-Controls.md)
+- [Scene Saving & Recovery](Scene-Saving-and-Recovery.md)
 - [Build & Install](Build-and-Install.md)
 - [Optimizations](Optimizations.md)
 

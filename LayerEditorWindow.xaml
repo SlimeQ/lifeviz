@@ -455,7 +455,7 @@
                        FontWeight="Bold"
                        DockPanel.Dock="Left"
                        VerticalAlignment="Center" />
-            <StackPanel Orientation="Horizontal" DockPanel.Dock="Right">
+            <WrapPanel Orientation="Horizontal" DockPanel.Dock="Right">
                 <CheckBox Content="Master Audio"
                           IsChecked="{Binding SourceAudioMasterEnabled}"
                           Margin="0,0,8,0"
@@ -491,10 +491,13 @@
                 <Button x:Name="SaveLayersButton"
                         Content="Save..."
                         Click="SaveLayerConfig_Click" />
+                <Button x:Name="RecoverLayersButton" Content="Recover..."
+                        ToolTip="Load an earlier autosaved scene revision"
+                        Click="RecoverAutosave_Click" />
                 <Button x:Name="ApplyButton"
                         Content="Apply"
                         Click="ApplyButton_Click" />
-            </StackPanel>
+            </WrapPanel>
         </DockPanel>
 
         <Grid Grid.Row="1">

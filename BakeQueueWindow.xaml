@@ -1,0 +1,30 @@
+<Window x:Class="lifeviz.BakeQueueWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Bake Queue" Width="680" Height="440" MinWidth="540" MinHeight="300"
+        WindowStartupLocation="CenterOwner" Background="#171717" Foreground="#F2F2F2">
+    <DockPanel Margin="20">
+        <StackPanel DockPanel.Dock="Top" Margin="0,0,0,14">
+            <TextBlock FontSize="20" FontWeight="SemiBold" Text="Bake queue" />
+            <TextBlock Margin="0,8,0,0" TextWrapping="Wrap" Foreground="#BDBDBD"
+                       Text="Keep designing while videos bake one at a time. Each bake uses the scene and output settings captured when added. Closing this window keeps the queue running; exiting LifeViz cancels it and saves the active partial video." />
+        </StackPanel>
+        <ListBox x:Name="JobsList" Background="#222222" Foreground="#F2F2F2" BorderThickness="0"
+                 ScrollViewer.HorizontalScrollBarVisibility="Disabled" HorizontalContentAlignment="Stretch">
+            <ListBox.ItemTemplate>
+                <DataTemplate>
+                    <StackPanel Margin="8">
+                        <TextBlock Text="{Binding Summary}" FontWeight="SemiBold" />
+                        <ProgressBar Value="{Binding Percent, Mode=OneWay}" Maximum="100" Height="8" Margin="0,8,0,8" />
+                        <TextBlock Text="{Binding Detail}" TextWrapping="Wrap" />
+                        <TextBlock Text="{Binding OutputPath}" Foreground="#BDBDBD" TextWrapping="Wrap" Margin="0,4,0,0" />
+                        <StackPanel Orientation="Horizontal" Margin="0,8,0,0">
+                            <Button Content="Cancel bake" IsEnabled="{Binding CanCancel}" Click="Cancel_Click" Padding="10,3" />
+                            <Button Content="Open output folder" Click="OpenFolder_Click" Padding="10,3" Margin="8,0,0,0" />
+                        </StackPanel>
+                    </StackPanel>
+                </DataTemplate>
+            </ListBox.ItemTemplate>
+        </ListBox>
+    </DockPanel>
+</Window>

@@ -1,10 +1,15 @@
 # Build & Install
 
+Background bakes ship in the ordinary application payload; no service or extra installation is required. `Program` reserves the internal `--background-bake <job-directory>` switch for queue workers. Users start work through **Render Fixed Duration...** and manage it in **Bake Queue...**. Wait for completed bakes before updating; closing LifeViz cancels the session queue and finalizes active partial output. See [Background Baking](Background-Baking.md).
+
+Run `dotnet bin\Debug\net9.0-windows\lifeviz.dll --smoke-test background-bake` after a Debug build. This integration smoke runs real workers for captured red/blue scenes and verifies decoded output colors, dimensions, FPS, frame counts, separate destinations, editor dispatcher activity, queued removal, active cancellation, failure continuation, and scratch cleanup. It also verifies a Pixel Sort simulation group, closes and reopens the queue window during work, and checks graceful app-exit cancellation. Fixtures use a private temporary directory; failures retain their output for diagnosis.
+
 ## Prerequisites
 
 - .NET SDK 9 (for local dev & running)
 - Visual Studio Build Tools 2022 or Visual Studio with MSBuild & ClickOnce components (for publishing)
 - GitHub CLI (`gh`) authenticated to your repo account (required only for pushing GitHub releases)
+
 - `ffmpeg` on PATH (required for file-video/audio decode, probes, recording, and audio muxing)
 
 LifeViz resolves `ffmpeg.exe` once and launches it through a centralized child-process manager. Standard direct installs continue to use the executable discovered beside the app or on `PATH`. If that executable is a Chocolatey shim under `C:\ProgramData\chocolatey\bin`, LifeViz safely resolves the real package binary under Chocolatey's `lib` directory and launches it directly, avoiding an extra shim process for every decode/probe/mux operation. No transcode or frame cache is written by this resolution step.
@@ -283,3 +288,14 @@ dotnet bin/Release/net9.0-windows/lifeviz.dll --smoke-test render-failure-cleanu
 ```
 
 `render-failure-cleanup` checks fatal HRESULT classification (including wrapped exceptions) and idempotent cleanup of initialized rendering resources. It does not induce a real driver/standby fault or exercise the native Retry dialog. For a running old version stuck in rendering-error popups, use the latest standalone `lifeviz_installer.exe` from GitHub Releases rather than relying on that process's updater UI. Keep `%APPDATA%\lifeviz\logs\render-failure-last.log` when reporting a repeat after installing the recovery update.
+
+## Validate scene persistence
+
+```powershell
+dotnet build lifeviz.csproj -c Release
+dotnet bin/Release/net9.0-windows/lifeviz.dll --smoke-test scene-persistence
+dotnet bin/Release/net9.0-windows/lifeviz.dll --smoke-test config-save-coalescing
+dotnet bin/Release/net9.0-windows/lifeviz.dll --smoke-test render-failure-cleanup
+```
+
+The persistence smoke uses a unique temporary directory and leaves failed fixtures for diagnosis. It also writes `smoke-scene-recovery-editor.png` beside the test executable for layout inspection. It verifies real locked-file retry, backups/corruption/conflict behavior, and an in-flight save during shutdown without overwriting the user's scene. See [Scene Saving & Recovery](Scene-Saving-and-Recovery.md). Changes take effect in builds/installers containing this code; existing installed releases retain their previous behavior.
