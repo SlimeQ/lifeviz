@@ -502,6 +502,9 @@ internal static class Logger
 
     private static void SafeWriteConsole(string record)
     {
+        // Background-worker stdout is reserved for structured queue status.
+        // Keep diagnostics in worker.log so noisy media cannot clog that pipe.
+        if (BackgroundBakeWorker.IsWorker) return;
         try
         {
             Console.WriteLine(record);

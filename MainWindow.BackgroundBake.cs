@@ -76,20 +76,26 @@ public partial class MainWindow
         while (!_bakeQueueClosing && _bakeJobs.FirstOrDefault(j => j.Status.State == "Queued") is { } job)
         {
             job.Update(new BakeStatus("Starting", "Preparing a separate renderer..."));
+            Task? statusReader = null;
             try
             {
                 var process = Process.Start(BackgroundBakeWorker.CreateStartInfo(job.DirectoryPath))
                     ?? throw new InvalidOperationException("Could not start the bake worker.");
                 _bakeProcess = process;
+                var statusReceiver = new BakeStatusTransport.Receiver();
+                statusReader = Task.Run(() => statusReceiver.DrainAsync(process.StandardOutput));
                 _bakeProcessOwner ??= FfmpegProcessManager.KillOnCloseJob.TryCreate(out _);
                 if (_bakeProcessOwner != null && !_bakeProcessOwner.TryAssign(process, out string? ownershipError))
                     Logger.Warn($"Bake worker job containment unavailable: {ownershipError}");
                 while (!process.HasExited)
                 {
-                    ReadBakeStatus(job);
+                    ApplyBakeStatus(job, statusReceiver.Latest);
                     await Task.Delay(500);
                 }
-                ReadBakeStatus(job);
+                // Consume the terminal record before deciding whether exit was
+                // successful. Completion never depends on a writable sidecar.
+                await statusReader.WaitAsync(TimeSpan.FromSeconds(5));
+                ApplyBakeStatus(job, statusReceiver.Latest);
                 if (!job.IsFinished)
                     job.Update(job.Status with { State = "Failed", Message = $"Bake worker exited unexpectedly (code {process.ExitCode}). Check partial output before using it." });
             }
@@ -117,34 +123,33 @@ public partial class MainWindow
             {
                 _bakeProcess?.Dispose();
                 _bakeProcess = null;
+                if (statusReader != null)
+                {
+                    try { await statusReader.WaitAsync(TimeSpan.FromSeconds(5)); }
+                    catch (Exception ex) { Logger.Warn($"Bake status reader stopped: {ex.Message}"); }
+                }
                 CleanupBakeFiles(job);
             }
         }
     }
 
-    private static void ReadBakeStatus(BakeJob job)
+    private static void ApplyBakeStatus(BakeJob job, BakeStatus? status)
     {
-        try
+        if (status != null)
         {
-            string path = Path.Combine(job.DirectoryPath, "status.json");
-            if (!File.Exists(path)) return;
-            // Let the worker atomically replace this path while we read the old handle.
-            // File.ReadAllText's default sharing can deny replacement on Windows.
-            using var file = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
-            if (JsonSerializer.Deserialize<BakeStatus>(file) is { } status)
-            {
-                if (job.Status.State == "Cancelling" && status.State == "Rendering")
-                    status = status with { State = "Cancelling", Message = job.Status.Message };
-                job.Update(status);
-            }
+            if (job.Status.State == "Cancelling" && status.State == "Rendering")
+                status = status with { State = "Cancelling", Message = job.Status.Message };
+            job.Update(status);
         }
-        catch (IOException) { } // Atomic replacement can briefly share-lock the status file.
-        catch (UnauthorizedAccessException) { }
-        catch (JsonException) { }
     }
 
     private static void CleanupBakeFiles(BakeJob job)
     {
+        if (job.HasDiagnostics)
+        {
+            Logger.Warn($"Failed bake diagnostics retained at {job.DirectoryPath}");
+            return;
+        }
         try { Directory.Delete(job.DirectoryPath, recursive: true); }
         catch (Exception ex) { Logger.Warn($"Could not remove bake temporary files: {ex.Message}"); }
     }

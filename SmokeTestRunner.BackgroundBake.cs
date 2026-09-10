@@ -9,6 +9,7 @@ internal static partial class SmokeTestRunner
 {
     private static int RunBackgroundBakeSmokeTest()
     {
+        RunBakeStatusTransportChecks();
         Exception? failure = null;
         string directory = Path.Combine(Path.GetTempPath(), "lifeviz-bake-smoke-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(directory);
@@ -52,6 +53,55 @@ internal static partial class SmokeTestRunner
         Directory.Delete(directory, recursive: true);
         Logger.Info("Background bake smoke passed: actual worker videos have captured scene colors, dimensions, FPS, durations, and valid partial output.");
         return 0;
+    }
+
+    private static void RunBakeStatusTransportChecks()
+    {
+        using var writer = new BlockedBakeStatusWriter();
+        using (var publisher = new BakeStatusTransport.Publisher(writer))
+        {
+            publisher.Publish(new BakeStatus("Rendering", "first"));
+            if (!writer.Entered.Wait(TimeSpan.FromSeconds(5))) throw new TimeoutException("Status writer did not start.");
+            // Publishing thousands of updates cannot wait on I/O or accumulate
+            // thousands of snapshots. Completion must replace stale telemetry.
+            for (int i = 0; i < 10000; i++) publisher.Publish(new BakeStatus("Rendering", "progress", i, 10000));
+            publisher.Publish(new BakeStatus("Completed", "done", 10000, 10000));
+            writer.Release.TrySetResult();
+        }
+        var receiver = new BakeStatusTransport.Receiver();
+        receiver.DrainAsync(new StringReader("ordinary worker log\n" + writer.Output)).GetAwaiter().GetResult();
+        if (writer.WriteCount != 2 || receiver.Latest?.State != "Completed" || receiver.Latest.CompletedFrames != 10000)
+            throw new InvalidOperationException("Bounded status transport lost its terminal state.");
+
+        using var deniedWriter = new DeniedBakeStatusWriter();
+        using var deniedPublisher = new BakeStatusTransport.Publisher(deniedWriter);
+        deniedPublisher.Publish(new BakeStatus("Rendering", "access denied injection"));
+        deniedPublisher.Dispose();
+        if (deniedPublisher.WriteError is not UnauthorizedAccessException)
+            throw new InvalidOperationException("Telemetry write failure did not stay isolated.");
+        deniedPublisher.Publish(new BakeStatus("Completed", "rendering can finish even after telemetry fails"));
+    }
+
+    private sealed class BlockedBakeStatusWriter : StringWriter
+    {
+        public readonly ManualResetEventSlim Entered = new();
+        public readonly TaskCompletionSource Release = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public int WriteCount;
+        public string Output => ToString();
+        public override async Task WriteLineAsync(string? value)
+        {
+            if (Interlocked.Increment(ref WriteCount) == 1)
+            {
+                Entered.Set();
+                await Release.Task.ConfigureAwait(false);
+            }
+            await base.WriteLineAsync(value).ConfigureAwait(false);
+        }
+    }
+
+    private sealed class DeniedBakeStatusWriter : StringWriter
+    {
+        public override Task WriteLineAsync(string? value) => throw new UnauthorizedAccessException("Injected status-pipe failure");
     }
 
     private static void WriteBakeSmokeImage(string path, byte red, byte blue)

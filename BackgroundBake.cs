@@ -29,6 +29,8 @@ internal sealed class BakeJob : INotifyPropertyChanged
         ? $"{Status.CompletedFrames:N0} / {Status.TotalFrames:N0} frames • {Status.Message}"
         : Status.Message;
     public string OutputPath => Status.OutputPath ?? "";
+    public bool HasDiagnostics => Status.State == "Failed";
+    public string DiagnosticsPath => HasDiagnostics ? DirectoryPath : "";
     public double Percent => Status.TotalFrames > 0 ? 100.0 * Status.CompletedFrames / Status.TotalFrames : 0;
     public bool CanCancel => Status.State is "Queued" or "Starting" or "Rendering";
     public bool IsFinished => Status.State is "Completed" or "Cancelled" or "Failed";
@@ -66,6 +68,7 @@ internal static class BackgroundBakeWorker
         var start = new ProcessStartInfo(executable)
         {
             UseShellExecute = false, CreateNoWindow = true,
+            RedirectStandardOutput = true,
             WindowStyle = ProcessWindowStyle.Hidden, WorkingDirectory = Path.GetTempPath()
         };
         if (Path.GetFileNameWithoutExtension(executable).Equals("dotnet", StringComparison.OrdinalIgnoreCase))
@@ -84,6 +87,8 @@ internal static class BackgroundBakeWorker
         DirectoryPath = Path.GetFullPath(args[1]);
         App.SuppressErrorDialogs = true;
         App.CapturePresentedFramesForValidation = false;
+        Logger.Initialize();
+        using var progress = new WorkerProgress();
         try
         {
             var request = JsonSerializer.Deserialize<BakeRequest>(File.ReadAllText(Path.Combine(DirectoryPath, "request.json")))
@@ -91,7 +96,6 @@ internal static class BackgroundBakeWorker
             if (request.DurationSeconds is < 1 or > 86400 || !double.IsFinite(request.DurationSeconds) || request.OutputFps is < 1 or > 144)
                 throw new InvalidDataException("Invalid bake duration or FPS.");
             File.WriteAllText(ConfigPath!, request.SceneJson);
-            var progress = new WorkerProgress();
             var app = new App { ShutdownMode = ShutdownMode.OnExplicitShutdown };
             app.DispatcherUnhandledException += (_, e) =>
             {
@@ -108,7 +112,11 @@ internal static class BackgroundBakeWorker
                 window.Loaded += async (_, _) =>
                 {
                     try { await window.RunBackgroundBakeAsync(progress, request); }
-                    catch (Exception ex) { progress.Complete($"Render failed: {ex.Message}", false); }
+                    catch (Exception ex)
+                    {
+                        Logger.Error("Bake worker failed.", ex);
+                        progress.Complete($"Render failed: {ex.Message}", false);
+                    }
                     finally { window.Close(); app.Shutdown(); }
                 };
                 window.Show();
@@ -118,14 +126,17 @@ internal static class BackgroundBakeWorker
         }
         catch (Exception ex)
         {
-            WriteJson(Path.Combine(DirectoryPath, "status.json"), new BakeStatus("Failed", ex.Message));
+            Logger.Error("Bake worker startup failed.", ex);
+            progress.Complete($"Render failed: {ex.Message}", false);
         }
+        finally { Logger.Shutdown(); }
         return true;
     }
 
-    internal sealed class WorkerProgress : IOfflineRenderProgress
+    internal sealed class WorkerProgress : IOfflineRenderProgress, IDisposable
     {
         private BakeStatus _status = new("Starting", "Preparing scene...");
+        private readonly BakeStatusTransport.Publisher _publisher = new(Console.Out);
         public bool Succeeded { get; private set; }
         public bool IsActive => false;
         public bool IsCancellationRequested => CancellationRequested;
@@ -146,6 +157,7 @@ internal static class BackgroundBakeWorker
             _status = _status with { State = state, Message = message, OutputPath = OutputPath };
             Publish();
         }
-        private void Publish() => WriteJson(Path.Combine(DirectoryPath!, "status.json"), _status);
+        private void Publish() => _publisher.Publish(_status);
+        public void Dispose() => _publisher.Dispose();
     }
 }

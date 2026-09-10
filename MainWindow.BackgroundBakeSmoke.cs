@@ -28,6 +28,17 @@ public partial class MainWindow
         _recordingOutputFolder = Path.Combine(directory, "first");
         _recordingQuality = RecordingQuality.LosslessCompatible;
         var first = EnqueueBake(TimeSpan.FromSeconds(2), 30);
+        // Reproduce the old access-denied failure, then leave both old status
+        // paths permanently unwritable for the real worker's entire render.
+        string oldStatusPath = Path.Combine(first.DirectoryPath, "status.json");
+        Directory.CreateDirectory(oldStatusPath);
+        bool reproducedStatusFailure = false;
+        try { BackgroundBakeWorker.WriteJson(oldStatusPath, new BakeStatus("Rendering", "repro")); }
+        catch (UnauthorizedAccessException) { reproducedStatusFailure = true; }
+        catch (IOException) { reproducedStatusFailure = true; }
+        if (!reproducedStatusFailure) throw new InvalidOperationException("Old progress-file failure was not reproduced.");
+        File.Delete(oldStatusPath + ".tmp");
+        Directory.CreateDirectory(oldStatusPath + ".tmp");
 
         ConfigureProfilingSmokeScene(144, smokeVideoPath: secondImage);
         _recordingOutputFolder = Path.Combine(directory, "second");
@@ -89,11 +100,15 @@ public partial class MainWindow
             if (first.Status.State != "Completed" || second.Status.State != "Completed" || last.Status.State != "Completed" || simulation.Status.State != "Completed" ||
                 failure.Status.State != "Failed" || removed.Status.State != "Cancelled" || cancelled.Status.State != "Cancelled")
                 throw new InvalidOperationException(string.Join("\n", _bakeJobs.Select(j => j.Summary + ": " + j.Detail)));
-            if (_bakeJobs.Any(j => Directory.Exists(j.DirectoryPath)))
+            if (_bakeJobs.Any(j => !j.HasDiagnostics && Directory.Exists(j.DirectoryPath)))
                 throw new InvalidOperationException("Finished bake scratch directories were not released.");
+            if (!failure.HasDiagnostics || !File.Exists(Path.Combine(failure.DiagnosticsPath, "request.json")) ||
+                !File.ReadAllText(Path.Combine(failure.DiagnosticsPath, "worker.log")).Contains("not-a-folder", StringComparison.Ordinal))
+                throw new InvalidOperationException("Failed bake diagnostics did not retain the request and actual error.");
+            Directory.Delete(failure.DiagnosticsPath, recursive: true); // Isolated test fixture only.
             if (_recordingOutputFolder != Path.Combine(directory, "after-cancel"))
                 throw new InvalidOperationException("Bake worker changed live output preferences.");
-            Logger.Info($"Background bake queue: {heartbeats} editor heartbeats, {ticksDuringRender} during active rendering; snapshot/FIFO/failure/cancel passed.");
+            Logger.Info($"Background bake queue: {heartbeats} editor heartbeats, {ticksDuringRender} during active rendering; snapshot/FIFO/failure/cancel passed, including permanently blocked legacy status paths and retained failure diagnostics.");
             return new[] { first, second, cancelled, last, simulation };
         }
         finally

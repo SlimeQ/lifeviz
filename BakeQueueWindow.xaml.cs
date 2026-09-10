@@ -29,4 +29,14 @@ public partial class BakeQueueWindow : Window
         }
         catch (Exception ex) { MessageBox.Show(this, ex.Message, "Open output folder"); }
     }
+
+    private void OpenDiagnostics_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is not FrameworkElement { DataContext: BakeJob job } || !job.HasDiagnostics) return;
+        try
+        {
+            Process.Start(new ProcessStartInfo(job.DiagnosticsPath) { UseShellExecute = true });
+        }
+        catch (Exception ex) { MessageBox.Show(this, ex.Message, "Open bake diagnostics"); }
+    }
 }
