@@ -2855,7 +2855,7 @@ public partial class LayerEditorWindow : Window
         }
         else
         {
-            source.FilePath = path;
+            source.ReplaceFile(path);
         }
     }
 

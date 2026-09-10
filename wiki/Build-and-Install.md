@@ -1,6 +1,6 @@
 # Build & Install
 
-After `dotnet build`, run `dotnet bin\Debug\net9.0-windows\lifeviz.dll --smoke-test file-replacement` to check replacing media without recreating a layer. It verifies nested layer identity/order, settings and animations, new image pixels/dimensions, same-file selection, missing/corrupt-file rejection, draft isolation/Apply, app-config persistence, and scene export/import. Fixtures are isolated from the user's saved scene.
+After `dotnet build`, run `dotnet bin\Debug\net9.0-windows\lifeviz.dll --smoke-test file-replacement` to check replacing media without recreating a layer. It verifies nested layer identity/order, settings and animations, new image pixels/dimensions, filename/label updates (including same-file selection), missing/corrupt-file rejection, draft isolation/Apply, app-config persistence, and scene export/import. Fixtures are isolated from the user's saved scene.
 
 Background bakes ship in the ordinary application payload; no service or extra installation is required. `Program` reserves the internal `--background-bake <job-directory>` switch for queue workers. Users start work through **Render Fixed Duration...** and manage it in **Bake Queue...**. Wait for completed bakes before updating; closing LifeViz cancels the session queue and finalizes active partial output. See [Background Baking](Background-Baking.md).
 

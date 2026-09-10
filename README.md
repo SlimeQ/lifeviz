@@ -1,6 +1,6 @@
 # LifeViz
 
-To change the media on an existing file layer, select it in the Layer Editor and click **Replace File...** below the current path. The layer keeps its name, position, settings, and animations. Live mode updates immediately; draft mode waits for **Apply**. Validate with `dotnet bin\Debug\net9.0-windows\lifeviz.dll --smoke-test file-replacement` after a Debug build. See [Configuration & Controls](wiki/Configuration-and-Controls.md).
+To change the media on an existing file layer, select it in the Layer Editor and click **Replace File...** below the current path. The layer name updates to the selected filename while its position, settings, and animations stay intact. Live mode updates immediately; draft mode waits for **Apply**. Validate with `dotnet bin\Debug\net9.0-windows\lifeviz.dll --smoke-test file-replacement` after a Debug build. See [Configuration & Controls](wiki/Configuration-and-Controls.md).
 
 Bake fixed-duration videos in the background and queue the next scene while editing. Validate the workflow with `dotnet bin\Debug\net9.0-windows\lifeviz.dll --smoke-test background-bake` after a Debug build. The test runs real queued workers and checks scene isolation, output timing, cancellation, failure continuation, and editor responsiveness. The regular installer includes this feature without additional setup; see [Background Baking](wiki/Background-Baking.md).
 

@@ -20496,6 +20496,10 @@ public partial class MainWindow : Window
                 ? (source.Type == CaptureSource.SourceType.SimGroup ? "Sim Group" : "Layer Group")
                 : model.DisplayName);
         }
+        else if (model.IsFile && source.Type == CaptureSource.SourceType.File && !string.IsNullOrWhiteSpace(model.DisplayName))
+        {
+            source.SetDisplayName(model.DisplayName);
+        }
 
         if (source.Type == CaptureSource.SourceType.SimGroup)
         {
@@ -21275,6 +21279,7 @@ public partial class MainWindow : Window
         public void ReplaceFile(FileCaptureService.FileSourceInfo info)
         {
             FilePath = info.Path;
+            SetDisplayName(info.DisplayName);
             FileWidth = info.Width > 0 ? info.Width : null;
             FileHeight = info.Height > 0 ? info.Height : null;
             LastFrame = null;

@@ -595,6 +595,12 @@ internal sealed class LayerEditorSource : LayerEditorNotify
         }
     }
 
+    public void ReplaceFile(string path)
+    {
+        FilePath = path;
+        DisplayName = Path.GetFileName(path);
+    }
+
     public List<string> FilePaths { get; } = new();
     public ObservableCollection<string> AutoClipVideoPaths { get; } = new();
     public ObservableCollection<LayerEditorAutoClipVideoOverride> AutoClipVideoOverrides { get; } = new();

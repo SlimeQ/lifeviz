@@ -51,6 +51,7 @@ public partial class MainWindow
 
         if (string.Equals(source.FilePath, fullPath, StringComparison.OrdinalIgnoreCase))
         {
+            source.SetDisplayName(Path.GetFileName(fullPath));
             return true;
         }
 
