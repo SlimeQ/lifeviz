@@ -25,6 +25,16 @@ If you still publish via Rider's generated config, the project automatically dis
 
 ## Runtime Smoke Tests
 
+For fixed-duration export changes, run the Release checks (requires Windows Media Foundation and FFmpeg with `libx264` and `ffv1`):
+
+```powershell
+dotnet build -c Release
+dotnet bin\Release\net9.0-windows\lifeviz.dll --smoke-test offline-recording
+dotnet bin\Release\net9.0-windows\lifeviz.dll --smoke-test offline-render
+```
+
+`offline-recording` verifies exact BGRA scaling against an independent coordinate reference, checks oversized pooled buffers and queue sizing, and reports legacy/new scaler timings. It encodes and decodes 90 changing frames through High, Crisp, and Lossless with live/offline session settings, checking dimensions, count, timestamps, and unique frame hashes. Timings include encoder finalization and are informational; run repeatedly under comparable load for performance comparisons. `offline-render` exercises the actual fixed-duration loop with a synthetic scene, checks 90 frames at 30 FPS, and cancels at the first UI yield to verify a valid one-frame partial video and released state. It holds the editor interaction throttle during export to catch virtual-frame skipping. Both targets use temporary files and remove them afterward; they do not change saved scenes or the recording folder preference.
+
 After building the sandbox output, you can validate the GPU sim path and startup path directly:
 
 ```powershell

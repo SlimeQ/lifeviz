@@ -3772,7 +3772,7 @@ public partial class MainWindow : Window
         double now = _isOfflineRendering
             ? _offlineAnimationTimeSeconds
             : _lifetimeStopwatch.Elapsed.TotalSeconds;
-        bool interactionThrottled = IsUiInteractionThrottled();
+        bool interactionThrottled = !_isOfflineRendering && IsUiInteractionThrottled();
         if (frameStartStamp != 0)
         {
             _frameProfiler.RecordSample("ui_interaction_throttled", interactionThrottled ? 1.0 : 0.0);
@@ -4623,6 +4623,17 @@ public partial class MainWindow : Window
             return;
         }
 
+        if (_isOfflineRendering)
+        {
+            // Offline output submits exactly one frame per tick and never pads
+            // to wall time. Avoid retaining/copying a full-size padding frame.
+            if (_recordingSession.TryEnqueue(frame, waitForCapacity: true, failOnSaturation: true))
+            {
+                _recordingFramesSubmitted++;
+            }
+            return;
+        }
+
         StoreLastRecordingFrame(frame, frameSize);
 
         List<byte[]> framesToEnqueue = new(dueFrameCount) { frame };
@@ -4778,45 +4789,8 @@ public partial class MainWindow : Window
     }
 
     private void ScaleRecordingFrame(byte[] source, byte[] destination)
-    {
-        if (_recordingScale <= 1)
-        {
-            Buffer.BlockCopy(source, 0, destination, 0, source.Length);
-            return;
-        }
-
-        int srcWidth = _recordingSourceWidth;
-        int srcHeight = _recordingSourceHeight;
-        int scale = _recordingScale;
-        int destWidth = _recordingWidth;
-
-        for (int y = 0; y < srcHeight; y++)
-        {
-            int srcRowOffset = y * srcWidth * 4;
-            int destRowBase = y * scale * destWidth * 4;
-            for (int x = 0; x < srcWidth; x++)
-            {
-                int srcIndex = srcRowOffset + (x * 4);
-                byte b = source[srcIndex];
-                byte g = source[srcIndex + 1];
-                byte r = source[srcIndex + 2];
-                byte a = source[srcIndex + 3];
-                int destPixelBase = destRowBase + (x * scale * 4);
-                for (int dy = 0; dy < scale; dy++)
-                {
-                    int destRowOffset = destPixelBase + (dy * destWidth * 4);
-                    for (int dx = 0; dx < scale; dx++)
-                    {
-                        int destIndex = destRowOffset + (dx * 4);
-                        destination[destIndex] = b;
-                        destination[destIndex + 1] = g;
-                        destination[destIndex + 2] = r;
-                        destination[destIndex + 3] = a;
-                    }
-                }
-            }
-        }
-    }
+        => RecordingFrameScaler.Scale(source, destination,
+            _recordingSourceWidth, _recordingSourceHeight, _recordingScale);
 
     private static int GetRecordingTargetHeight(int baseHeight)
     {
@@ -5190,6 +5164,7 @@ public partial class MainWindow : Window
         bool completed = false;
         bool started = false;
         bool offlineAudioInputStarted = false;
+        string? finalizeError = null;
         ProcessPriorityClass? previousProcessPriority = null;
         ThreadPriority? previousUiThreadPriority = null;
 
@@ -5324,9 +5299,14 @@ public partial class MainWindow : Window
             _offlineAudioMixBuffer = null;
             if (started && _isRecording)
             {
+                RecordingSession? finishingSession = _recordingSession;
+                long submittedFrames = _recordingFramesSubmitted;
                 bool abortEncoder = _isShuttingDown ||
                                     _recordingSession?.TryGetError(out _) == true;
                 StopRecording(showMessage: false, abortEncoder: abortEncoder);
+                finishingSession?.TryGetError(out finalizeError);
+                Logger.Info($"Offline export: {submittedFrames} frames in {exportStopwatch.Elapsed.TotalSeconds:0.00}s " +
+                            $"({submittedFrames / Math.Max(0.001, exportStopwatch.Elapsed.TotalSeconds):0.0} fps), including encoder drain.");
             }
 
             _isOfflineRendering = false;
@@ -5377,6 +5357,11 @@ public partial class MainWindow : Window
         }
 
         string fileName = string.IsNullOrWhiteSpace(outputPath) ? "video" : Path.GetFileName(outputPath);
+        if (finalizeError != null)
+        {
+            dialog.Complete($"Render failed during finalization: {finalizeError}", succeeded: false);
+            return;
+        }
         dialog.Complete(
             completed ? $"Render complete: {fileName}" : $"Render cancelled. Partial video saved as {fileName}",
             succeeded: completed);
@@ -5610,7 +5595,8 @@ public partial class MainWindow : Window
                 targetHeight,
                 fps,
                 settings,
-                recordingAudioDeviceId);
+                recordingAudioDeviceId,
+                offlineRender: offlineRender);
         }
         catch (Exception ex)
         {

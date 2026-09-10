@@ -1,5 +1,7 @@
 # Configuration & Controls
 
+Fixed-duration exports preserve the selected quality, FPS, and pixel-perfect output size while using a faster scaler and a smaller memory-budgeted encoder queue. Editor interactions do not throttle the export clock. A failure while draining/finalizing the encoder is reported as a render failure rather than a completed export. No additional controls are required; see [Optimizations](Optimizations.md#fixed-duration-export).
+
 The UI stays invisible until you right-click anywhere on the canvas, revealing the context menu.
 
 Configuration is per Windows user at `%APPDATA%\lifeviz\config.json`. If a user launches LifeViz without a usable config, startup creates and saves a visible starter scene with one `Sim Group` containing one `Life Sim` layer. An unversioned empty config left by the earlier black-screen startup path is migrated to the same starter scene once. Once the current config-version marker has been written, a scene deliberately cleared by the user is respected as empty.

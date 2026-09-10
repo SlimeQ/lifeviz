@@ -14,7 +14,7 @@ using System.Windows.Threading;
 
 namespace lifeviz;
 
-internal static class SmokeTestRunner
+internal static partial class SmokeTestRunner
 {
     private static readonly int[] CurrentScenePresetRows = { 144, 240, 480, 720, 1080, 1440, 2160 };
     private static readonly int[] DefaultRealtimePacingRows = { 144, 240, 480 };
@@ -109,6 +109,8 @@ internal static class SmokeTestRunner
 
             exitCode = target.ToLowerInvariant() switch
             {
+                "offline-recording" => RunOfflineRecordingSmokeTest(),
+                "offline-render" => RunOfflineRenderSmokeTest(),
                 "profile-240" => RunFrameProfileSmokeTest(240, "smoke-mainloop-240p"),
                 "profile-480" => RunFrameProfileSmokeTest(480, "smoke-mainloop-480p"),
                 "profile-rgb-240" => RunFrameProfileSmokeTest(240, "smoke-mainloop-rgb-240p", rgbMode: true),

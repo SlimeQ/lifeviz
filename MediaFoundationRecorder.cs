@@ -120,6 +120,10 @@ internal sealed class RecordingSession : IDisposable
     private readonly int _height;
     private readonly int _fps;
     private readonly RecordingSettings _settings;
+    private readonly bool _offlineRender;
+    private long _framesWritten;
+    private long _writeTicks;
+    private long _queueWaitTicks;
     private AudioRecordingCapture? _audioCapture;
     private readonly object _errorLock = new();
     private readonly object _writerLock = new();
@@ -129,7 +133,7 @@ internal sealed class RecordingSession : IDisposable
     private int _abortRequested;
     private int _resourcesReleased;
 
-    public RecordingSession(string path, int width, int height, int fps, RecordingSettings settings, string? audioDeviceId = null)
+    public RecordingSession(string path, int width, int height, int fps, RecordingSettings settings, string? audioDeviceId = null, bool offlineRender = false)
     {
         _frameSize = width * height * 4;
         _path = path;
@@ -138,6 +142,7 @@ internal sealed class RecordingSession : IDisposable
         _height = height;
         _fps = fps;
         _settings = settings;
+        _offlineRender = offlineRender;
 
         if (!string.IsNullOrWhiteSpace(audioDeviceId))
         {
@@ -161,8 +166,21 @@ internal sealed class RecordingSession : IDisposable
             }
         }
 
-        _frames = new BlockingCollection<byte[]>(boundedCapacity: 120);
+        // Export only needs enough overlap to keep the writer busy. Account for
+        // ArrayPool's bucket rounding so 4K exports cannot queue gigabytes.
+        int capacity = offlineRender ? GetOfflineQueueCapacity(_frameSize) : 120;
+        _frames = new BlockingCollection<byte[]>(boundedCapacity: capacity);
         _writerTask = Task.Run(ProcessFrames);
+    }
+
+    internal static int GetOfflineQueueCapacity(int frameSize)
+    {
+        long pooledSize = 16;
+        while (pooledSize < frameSize)
+        {
+            pooledSize *= 2;
+        }
+        return (int)Math.Clamp((64L * 1024 * 1024) / pooledSize, 1, 8);
     }
 
     public bool TryEnqueue(
@@ -184,9 +202,14 @@ internal sealed class RecordingSession : IDisposable
 
         try
         {
+            long enqueueStamp = _offlineRender ? Stopwatch.GetTimestamp() : 0;
             bool added = waitForCapacity
                 ? _frames.TryAdd(buffer, TimeSpan.FromSeconds(5))
                 : _frames.TryAdd(buffer);
+            if (_offlineRender)
+            {
+                _queueWaitTicks += Stopwatch.GetTimestamp() - enqueueStamp;
+            }
             if (!added)
             {
                 ArrayPool<byte>.Shared.Return(buffer);
@@ -219,7 +242,7 @@ internal sealed class RecordingSession : IDisposable
 
             recorder = _settings.UseFfmpeg
                 ? new FfmpegRecorder(_videoPath, _width, _height, _fps, _settings)
-                : new MediaFoundationRecorder(_videoPath, _width, _height, _fps, _settings);
+                : new MediaFoundationRecorder(_videoPath, _width, _height, _fps, _settings, _offlineRender);
             lock (_writerLock)
             {
                 _activeWriter = recorder;
@@ -234,7 +257,13 @@ internal sealed class RecordingSession : IDisposable
                 {
                     if (Volatile.Read(ref _abortRequested) == 0)
                     {
+                        long writeStamp = _offlineRender ? Stopwatch.GetTimestamp() : 0;
                         recorder.WriteFrame(buffer, _frameSize);
+                        if (_offlineRender)
+                        {
+                            _writeTicks += Stopwatch.GetTimestamp() - writeStamp;
+                            _framesWritten++;
+                        }
                     }
                 }
                 finally
@@ -312,6 +341,14 @@ internal sealed class RecordingSession : IDisposable
             StopAudioCaptureWithoutMux();
         }
         _completed = true;
+
+        if (_offlineRender && writerCompleted)
+        {
+            Logger.Info($"Offline encoder: {_framesWritten} frames, " +
+                        $"write={_writeTicks * 1000.0 / Stopwatch.Frequency:0.0} ms, " +
+                        $"queue wait={_queueWaitTicks * 1000.0 / Stopwatch.Frequency:0.0} ms, " +
+                        $"capacity={_frames.BoundedCapacity} frames.");
+        }
 
         if (writerCompleted)
         {
@@ -564,7 +601,7 @@ internal sealed class MediaFoundationRecorder : IRecordingWriter
     private int _streamIndex;
     private volatile bool _finalized;
 
-    public MediaFoundationRecorder(string path, int width, int height, int fps, RecordingSettings settings)
+    public MediaFoundationRecorder(string path, int width, int height, int fps, RecordingSettings settings, bool offlineRender = false)
     {
         _width = width;
         _height = height;
@@ -582,8 +619,12 @@ internal sealed class MediaFoundationRecorder : IRecordingWriter
             IntPtr writerPtr = IntPtr.Zero;
             try
             {
-                MfInterop.Check(MfInterop.MFCreateAttributes(out writerAttributes, 1));
+                MfInterop.Check(MfInterop.MFCreateAttributes(out writerAttributes, 2));
                 MfInterop.Check(writerAttributes.SetUINT32(MfInterop.MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS, 0));
+                if (offlineRender)
+                {
+                    MfInterop.Check(writerAttributes.SetUINT32(MfInterop.MF_SINK_WRITER_DISABLE_THROTTLING, 1));
+                }
 
                 writerAttributesPtr = Marshal.GetIUnknownForObject(writerAttributes);
                 int hr = MfInterop.MFCreateSinkWriterFromURL(path, IntPtr.Zero, writerAttributesPtr, out writerPtr);
@@ -967,7 +1008,8 @@ internal static class MfInterop
     public static readonly Guid MF_MT_FIXED_SIZE_SAMPLES = new("b8ebefaf-b718-4e04-b0a9-116775e3321b");
     public static readonly Guid MF_MT_ALL_SAMPLES_INDEPENDENT = new("c9173739-5e56-461c-b713-46f0e25e595c");
     public static readonly Guid MF_MT_SAMPLE_SIZE = new("dad3ab78-1990-408b-bce2-1e2ebc0a76e5");
-    public static readonly Guid MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS = new("a634a91c-822b-41d1-9db1-41a7f2ed9921");
+    public static readonly Guid MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS = new("a634a91c-822b-41b9-a494-4de4643612b0");
+    public static readonly Guid MF_SINK_WRITER_DISABLE_THROTTLING = new("08b845d8-2b74-4afe-9d53-be16d2d5ae4f");
     public static readonly Guid CODECAPI_AVEncCommonRateControlMode = new("1c0608e9-370c-4710-8a58-cb6181c42423");
     public static readonly Guid CODECAPI_AVEncCommonQuality = new("fcbf57a3-7ea5-4b0c-9644-69b40c39c391");
     public static readonly Guid CODECAPI_AVEncCommonQualityVsSpeed = new("98332df8-03cd-476b-89fa-3f9e442dec9f");

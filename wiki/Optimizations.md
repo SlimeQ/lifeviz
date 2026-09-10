@@ -1,5 +1,18 @@
 # Optimizations
 
+## Fixed-duration export
+
+The September 2026 export pass removes repeated CPU work while preserving recording quality, integer nearest-neighbor pixels, output FPS, and duration:
+
+- Upscaling expands packed BGRA pixels into one destination row, then copies that row vertically. Release component measurements on the development machine were 4.06 → 0.71 ms for 256×144 at 5×, 10.01 → 3.07 ms for 640×360 at 3×, and 54.95 → 16.81 ms for 1920×1080 at 2×. These are scaler timings, not end-to-end export gains; media decode, simulation/readback, encoding, and disk throughput still matter.
+- Offline submission bypasses the live padding-frame copy and duplicate-frame list. Live recording retains its wall-clock padding behavior.
+- The offline encoder queue budgets 64 MiB of pooled frame storage, rounded for pool buckets and clamped to 1–8 frames. At 4K this is two queued frames instead of 120 (64 MiB instead of approximately 3.75 GiB). One exceptionally large frame can exceed the budget; the producer's frame, active writer, encoder internals, and pool-retained arrays are outside this queue budget. Live recording keeps its existing queue.
+- Media Foundation exports set `MF_SINK_WRITER_DISABLE_THROTTLING` so the sink writer does not impose its default input-rate limit. Software encoding and existing quality settings remain selected; FFmpeg presets are unchanged. The hardware-transform attribute GUID now matches the Windows SDK.
+- Editor interaction throttling no longer skips offline virtual-clock frames. Export completion checks encoder drain errors before reporting success.
+- Session logs report encoder write time, producer queue-wait time, queue capacity, and total export FPS including drain. Write and wait timings overlap and must not be added together. Large queue-wait time points toward the encoder/storage side; low wait with slow total FPS points toward frame production.
+
+Run `offline-recording` for pixel parity and encoder component measurements, and `offline-render` for the actual export/cancellation loop; see [Build & Install](Build-and-Install.md). Timing figures are informational rather than pass/fail thresholds.
+
 ## Runtime contention and disk-I/O pass
 
 The July 2026 performance pass targeted work that continued even when it could not improve the visible frame, as well as synchronous disk activity on the UI thread.

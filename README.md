@@ -1,5 +1,9 @@
 # LifeViz
 
+Fixed-duration export now uses faster row-based pixel-perfect upscaling, skips live-recording padding copies, budgets its frame queue by memory, and disables Media Foundation's input throttling for offline work. Scaler component benchmarks measured about 3.3–5.7× improvement for representative HD/4K upscales; overall export speed still depends on the scene and encoder. Export logs report total FPS, encoder write time, and queue wait. Details and limitations are in [Optimizations](wiki/Optimizations.md#fixed-duration-export).
+
+Validate export changes with `dotnet build -c Release`, then `dotnet bin\Release\net9.0-windows\lifeviz.dll --smoke-test offline-recording` and `dotnet bin\Release\net9.0-windows\lifeviz.dll --smoke-test offline-render`. These check pixel parity, finished-file frames/timing, and cancellation; see [Build & Install](wiki/Build-and-Install.md#runtime-smoke-tests).
+
 Windows 11-ready WPF visualization of a 3D-stacked Game of Life grid. The UI stays minimalist-16:9 canvas, no chrome, with controls centered in the right-click context menu plus a dedicated Scene Editor for source stack workflows-and it supports open desktop windows, webcams, media files, and procedural solid-color planes as live depth sources.
 
 Each Windows user keeps an independent scene in `%APPDATA%\lifeviz\config.json`. On a first launch—or when that configuration cannot be read—LifeViz creates and persists a visible starter scene containing a `Sim Group` with one `Life Sim` layer. Unversioned empty configs left behind by the earlier black-screen startup bug are migrated to that starter scene once; after the current config-version marker is saved, a source list deliberately cleared by the user remains empty.
