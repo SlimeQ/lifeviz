@@ -7,6 +7,8 @@ param(
     [int]$ApplicationRevision
 )
 
+$ErrorActionPreference = 'Stop'
+
 function Resolve-MsBuild {
     # Try to find MSBuild using vswhere
     $vswherePath = $null
@@ -129,3 +131,21 @@ if ($PSBoundParameters.ContainsKey('ApplicationRevision')) {
 if ($LASTEXITCODE -ne 0) {
     throw "MSBuild publish failed with exit code $LASTEXITCODE"
 }
+
+# Both standalone installer builders consume this directory. Never allow a
+# successful publish to silently produce an installer that needs system FFmpeg.
+$applicationRoot = Join-Path $publishDirectory 'Application Files'
+$publishedApps = @(Get-ChildItem -LiteralPath $applicationRoot -Recurse -Filter 'lifeviz.exe')
+if ($publishedApps.Count -ne 1) {
+    throw "Expected one published LifeViz executable under '$applicationRoot'."
+}
+foreach ($name in @('ffmpeg.exe', 'LICENSE', 'README.txt')) {
+    $bundledFile = Join-Path $publishedApps[0].DirectoryName "ffmpeg\$name"
+    $sourceFile = Join-Path $root "artifacts\ffmpeg\runtime\$name"
+    if (-not (Test-Path -LiteralPath $bundledFile) -or
+        (Get-FileHash -LiteralPath $bundledFile -Algorithm SHA256).Hash -ne
+        (Get-FileHash -LiteralPath $sourceFile -Algorithm SHA256).Hash) {
+        throw "Published FFmpeg payload is missing or differs from the verified bundle: $bundledFile"
+    }
+}
+Write-Host 'Published FFmpeg executable and notices verified.' -ForegroundColor Green

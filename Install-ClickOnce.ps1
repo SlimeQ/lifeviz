@@ -474,6 +474,38 @@ function Resolve-StagedApplicationExe {
     throw "Could not resolve staged lifeviz.exe from $ManifestPath"
 }
 
+function Assert-StagedFfmpeg {
+    param([string]$ApplicationExe)
+
+    $appRoot = Split-Path -Parent $ApplicationExe
+    $appManifestPath = Join-Path $appRoot 'lifeviz.dll.manifest'
+    if (-not (Test-Path -LiteralPath $appManifestPath)) {
+        $appManifestPath = Join-Path $appRoot 'lifeviz.exe.manifest'
+    }
+    [xml]$appManifest = Get-Content -LiteralPath $appManifestPath
+    foreach ($name in @('ffmpeg.exe', 'LICENSE', 'README.txt')) {
+        $relativePath = "ffmpeg\$name"
+        $filePath = Join-Path $appRoot $relativePath
+        $entry = $appManifest.SelectSingleNode("//*[local-name()='file' and @name='$relativePath']")
+        if (-not $entry -or -not (Test-Path -LiteralPath $filePath -PathType Leaf)) {
+            throw "Bundled FFmpeg payload is incomplete: $filePath"
+        }
+        $digest = $entry.SelectSingleNode("*[local-name()='hash']/*[local-name()='DigestValue']")
+        $method = $entry.SelectSingleNode("*[local-name()='hash']/*[local-name()='DigestMethod']")
+        if (-not $digest -or -not $method -or
+            $method.GetAttribute('Algorithm') -ne 'http://www.w3.org/2000/09/xmldsig#sha256') {
+            throw "Bundled FFmpeg payload has no SHA-256 digest: $filePath"
+        }
+        $stream = [IO.File]::OpenRead($filePath)
+        $sha = [Security.Cryptography.SHA256]::Create()
+        try { $actual = [Convert]::ToBase64String($sha.ComputeHash($stream)) }
+        finally { $sha.Dispose(); $stream.Dispose() }
+        if ($actual -cne $digest.InnerText.Trim()) {
+            throw "Bundled FFmpeg payload failed SHA-256 verification: $filePath"
+        }
+    }
+}
+
 function Remove-ClickOnceShortcuts {
     $roots = @(
         (Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs'),
@@ -767,7 +799,7 @@ function Promote-ValidatedPayload {
         if (-not (Test-Path -LiteralPath $promotedManifest)) {
             throw "Promoted payload is missing its manifest at $promotedManifest"
         }
-        $null = Resolve-StagedApplicationExe -ManifestPath $promotedManifest
+        Assert-StagedFfmpeg -ApplicationExe (Resolve-StagedApplicationExe -ManifestPath $promotedManifest)
     } catch {
         $promotionError = $_
         if ($backupCreated) {
@@ -825,7 +857,7 @@ try {
     if (-not (Test-Path -LiteralPath $candidateManifest)) {
         throw "Copied payload is missing its manifest at $candidateManifest"
     }
-    $null = Resolve-StagedApplicationExe -ManifestPath $candidateManifest
+    Assert-StagedFfmpeg -ApplicationExe (Resolve-StagedApplicationExe -ManifestPath $candidateManifest)
 
     Wait-ForStagedLifeVizProcesses -StagedRoot $InstallRoot -ExplicitProcessId $WaitForProcessId
     Initialize-ProcessCurrentDirectoryReader

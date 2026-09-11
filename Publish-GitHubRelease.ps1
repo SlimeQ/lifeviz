@@ -227,18 +227,18 @@ internal static class Program
     $projPath = Join-Path $workDir 'InstallerBootstrapper.csproj'
     Set-Content -Path $programPath -Value $programCs -NoNewline
     Set-Content -Path $projPath -Value $csproj -NoNewline
-    dotnet publish $projPath -c Release -r win-x64 --self-contained true | Out-Null
+    $bootstrapPublishDir = Join-Path $workDir 'published'
+    dotnet publish $projPath -c Release -r win-x64 --self-contained true -o $bootstrapPublishDir | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        throw "Installer bootstrapper publish failed with exit code $LASTEXITCODE"
+    }
 
-    $publishedExe = Get-ChildItem -Path $workDir -Recurse -Filter '*.exe' |
-        Where-Object { $_.Name -notmatch 'vshost' } |
-        Sort-Object Length -Descending |
-        Select-Object -First 1
-
-    if (-not $publishedExe) {
+    $publishedExe = Join-Path $bootstrapPublishDir 'InstallerBootstrapper.exe'
+    if (-not (Test-Path -LiteralPath $publishedExe -PathType Leaf)) {
         throw "Failed to locate built installer executable."
     }
 
-    Copy-Item -Path $publishedExe.FullName -Destination $OutputExe -Force
+    Copy-Item -LiteralPath $publishedExe -Destination $OutputExe -Force
     try { Remove-Item -Recurse -Force $workDir } catch {}
     return $OutputExe
 }

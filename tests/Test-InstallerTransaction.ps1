@@ -2,7 +2,8 @@
 param(
     [ValidateRange(5, 120)]
     [int]$TimeoutSeconds = 45,
-    [switch]$KeepArtifacts
+    [switch]$KeepArtifacts,
+    [string]$PublishedPayloadPath
 )
 
 $ErrorActionPreference = 'Stop'
@@ -247,6 +248,19 @@ function New-MinimalPayload {
         (Join-Path $versionRoot 'new-version.txt'),
         'new',
         [Text.UTF8Encoding]::new($false))
+
+    $bundleRoot = Join-Path $versionRoot 'ffmpeg'
+    New-Item -ItemType Directory -Force -Path $bundleRoot | Out-Null
+    $fileEntries = foreach ($name in @('ffmpeg.exe', 'LICENSE', 'README.txt')) {
+        $bytes = [Text.Encoding]::UTF8.GetBytes("fixture-$name")
+        [IO.File]::WriteAllBytes((Join-Path $bundleRoot $name), $bytes)
+        $sha = [Security.Cryptography.SHA256]::Create()
+        try { $digest = [Convert]::ToBase64String($sha.ComputeHash($bytes)) }
+        finally { $sha.Dispose() }
+        '<file name="ffmpeg\{0}"><hash><DigestMethod Algorithm="http://www.w3.org/2000/09/xmldsig#sha256"/><DigestValue>{1}</DigestValue></hash></file>' -f $name, $digest
+    }
+    [IO.File]::WriteAllText((Join-Path $versionRoot 'lifeviz.exe.manifest'),
+        '<assembly xmlns="urn:schemas-microsoft-com:asm.v1">' + ($fileEntries -join '') + '</assembly>')
 }
 
 function New-TestableInstallerHelperCopy {
@@ -457,6 +471,68 @@ function Invoke-NonFfmpegHolderFailureTransaction {
     Write-Host '[pass] Non-FFmpeg CWD holder is reported and preserved; atomic failure leaves the old install intact.'
 }
 
+function Invoke-FfmpegUpgradeTransaction {
+    $caseRoot = Join-Path $auditRoot 'ffmpeg-upgrade'
+    $payloadRoot = Join-Path $caseRoot 'payload'
+    $installRoot = Join-Path $caseRoot 'lifeviz-clickonce'
+    $oldVersionRoot = Join-Path $installRoot 'Application Files\lifeviz_4_8_8_0'
+    $helperCopy = Join-Path $caseRoot 'Install-ClickOnce.ps1'
+    New-Item -ItemType Directory -Force -Path $payloadRoot, $oldVersionRoot | Out-Null
+    Copy-Item -Path (Join-Path (Resolve-Path $PublishedPayloadPath).Path '*') -Destination $payloadRoot -Recurse
+    New-TestableInstallerHelperCopy -Destination $helperCopy
+    # The previous payload can be incomplete too. Repair must not require its
+    # executable, manifest, or an FFmpeg installed by another Windows account.
+    $oldMarker = Join-Path $oldVersionRoot 'broken-old-install.txt'
+    [IO.File]::WriteAllText($oldMarker, 'old install without FFmpeg')
+    $incomingExe = @(Get-ChildItem -LiteralPath $payloadRoot -Recurse -Filter lifeviz.exe)
+    Assert-True ($incomingExe.Count -eq 1) 'Expected one app in the published test payload.'
+    $relativeApp = $incomingExe[0].FullName.Substring($payloadRoot.Length + 1)
+    $incomingFfmpeg = Join-Path $incomingExe[0].DirectoryName 'ffmpeg\ffmpeg.exe'
+    $savedFfmpeg = Join-Path $caseRoot 'verified-ffmpeg.exe'
+    Copy-Item -LiteralPath $incomingFfmpeg -Destination $savedFfmpeg
+
+    $parameters = @{
+        HelperPath = $helperCopy
+        PayloadRoot = $payloadRoot
+        InstallRoot = $installRoot
+        WorkingDirectory = $oldVersionRoot
+    }
+    foreach ($damage in @('missing', 'corrupt')) {
+        if ($damage -eq 'missing') { Remove-Item -LiteralPath $incomingFfmpeg }
+        else { [IO.File]::WriteAllText($incomingFfmpeg, 'corrupt FFmpeg') }
+        $result = Invoke-TestHelperProcess @parameters
+        Assert-True ($result.ExitCode -ne 0) "Installer accepted $damage FFmpeg."
+        Assert-True (($result.Stdout + $result.Stderr) -match 'Bundled FFmpeg payload') 'Failure did not identify FFmpeg validation.'
+        Assert-True (Test-Path -LiteralPath $oldMarker) 'Rejected payload changed the old install.'
+        Write-Host "[pass] $damage incoming FFmpeg is rejected before changing the old install."
+    }
+
+    Copy-Item -LiteralPath $savedFfmpeg -Destination $incomingFfmpeg -Force
+    $result = Invoke-TestHelperProcess @parameters
+    Assert-True ($result.ExitCode -eq 0) "Upgrade from missing-FFmpeg install failed: $($result.Stderr)"
+    Assert-True (-not (Test-Path -LiteralPath $oldMarker)) 'Upgrade retained the old version.'
+    $installedApp = Join-Path $installRoot $relativeApp
+    $installedFfmpeg = Join-Path (Split-Path -Parent $installedApp) 'ffmpeg\ffmpeg.exe'
+    Assert-True ((Get-FileHash $installedFfmpeg).Hash -eq (Get-FileHash $savedFfmpeg).Hash) 'Upgrade did not install the verified FFmpeg.'
+
+    # Reinstalling the same version also repairs missing files; there is no
+    # version-only short circuit in the automatic update/install path.
+    Remove-Item -LiteralPath $installedFfmpeg
+    $parameters.WorkingDirectory = Split-Path -Parent $installedApp
+    $result = Invoke-TestHelperProcess @parameters
+    Assert-True ($result.ExitCode -eq 0) "Same-version repair failed: $($result.Stderr)"
+    Assert-True ((Get-FileHash $installedFfmpeg).Hash -eq (Get-FileHash $savedFfmpeg).Hash) 'Same-version repair did not restore FFmpeg.'
+    $debris = @(Get-ChildItem -LiteralPath $caseRoot -Directory | Where-Object {
+        $_.Name -like 'lifeviz-clickonce.installing-*' -or $_.Name -like 'lifeviz-clickonce.backup-*'
+    })
+    Assert-True ($debris.Count -eq 0) 'Upgrade/repair left transaction directories behind.'
+
+    $dotnet = (Get-Command dotnet -ErrorAction Stop).Source
+    & $dotnet (Join-Path (Split-Path -Parent $installedApp) 'lifeviz.dll') --smoke-test ffmpeg-bundle
+    Assert-True ($LASTEXITCODE -eq 0) 'Installed app failed media/cleanup checks with PATH cleared.'
+    Write-Host '[pass] Old-install upgrade and same-version repair restore working bundled FFmpeg.'
+}
+
 New-Item -ItemType Directory -Force -Path $auditRoot | Out-Null
 try {
     Assert-DirectoryMoveIsBlocked -Name 'child-current-directory' -StartHolder {
@@ -476,6 +552,7 @@ try {
     Assert-SourceHandoffHardening
     Invoke-ScopedFfmpegCleanupTransaction
     Invoke-NonFfmpegHolderFailureTransaction
+    if ($PublishedPayloadPath) { Invoke-FfmpegUpgradeTransaction }
     Write-Host '[pass] Installer transaction regression suite completed.' -ForegroundColor Green
 } finally {
     foreach ($process in $startedProcesses) {

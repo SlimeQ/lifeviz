@@ -59,6 +59,20 @@
     <Resource Include="Assets\GpuSimulationRenderCS.cso" />
   </ItemGroup>
 
+  <!-- Explicit items also work on the first build, before the download exists.
+       Content is captured by ClickOnce manifests as well as ordinary publish. -->
+  <ItemGroup>
+    <Content Include="artifacts\ffmpeg\runtime\ffmpeg.exe;artifacts\ffmpeg\runtime\LICENSE;artifacts\ffmpeg\runtime\README.txt">
+      <Link>ffmpeg\%(Filename)%(Extension)</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+      <ExcludeFromSingleFile>true</ExcludeFromSingleFile>
+    </Content>
+  </ItemGroup>
+  <Target Name="PrepareBundledFfmpeg" BeforeTargets="PrepareForBuild" Condition="'$(DesignTimeBuild)' != 'true'">
+    <Exec Command="powershell.exe -NoProfile -ExecutionPolicy Bypass -File &quot;$(MSBuildProjectDirectory)\Prepare-Ffmpeg.ps1&quot;" />
+  </Target>
+
   <Target Name="CompileShader" BeforeTargets="PrepareForBuild">
     <Message Text="Compiling shader Assets\Blend.fx -&gt; Assets\Blend.ps..." Importance="high" />
     <Exec Command="&quot;$(FxcExePath)&quot; /T ps_3_0 /E main /nologo /Fo &quot;Assets\Blend.ps&quot; &quot;Assets\Blend.fx&quot;" Condition="Exists('$(FxcExePath)')" />

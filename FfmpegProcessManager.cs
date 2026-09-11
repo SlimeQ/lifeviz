@@ -445,7 +445,11 @@ internal sealed class FfmpegProcessManager : IDisposable
         string executableName = Path.HasExtension(requestedExecutable)
             ? requestedExecutable
             : requestedExecutable + ".exe";
-        IEnumerable<string> searchDirectories = new[] { AppContext.BaseDirectory }
+        IEnumerable<string> searchDirectories = new[]
+            {
+                Path.Combine(AppContext.BaseDirectory, "ffmpeg"),
+                AppContext.BaseDirectory
+            }
             .Concat((Environment.GetEnvironmentVariable("PATH") ?? string.Empty)
                 .Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries)
                 .Select(static path => path.Trim().Trim('"')));

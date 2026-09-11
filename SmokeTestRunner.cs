@@ -172,6 +172,7 @@ internal static partial class SmokeTestRunner
                 "autoclip-takeover" => RunAutoClipTakeoverSmokeTest(smokeVideoPath),
                 "render-failure-cleanup" => RunRenderFailureCleanupSmokeTest(),
                 "ffmpeg-lifecycle" => RunFfmpegLifecycleSmokeTest(),
+                "ffmpeg-bundle" => RunFfmpegBundleSmokeTest(),
                 "gif-source-recovery" => RunGifSourceRecoverySmokeTest(smokeGifPath),
                 "layer-transform-controls" => RunLayerTransformControlsSmokeTest(),
                 "color-plane" => RunColorPlaneSmokeTest(),
@@ -3128,6 +3129,32 @@ internal static partial class SmokeTestRunner
                         $"ordinaryLiveFilter={ordinaryLiveFilter}, unpacedLiveFilter={unpacedLiveFilter}, " +
                         $"overrides={overrideResolutionOk}, alphaDecoder={alphaDecoderOk}, ok={ok}.");
             return ok ? 0 : 1;
+        }
+    }
+
+    private static int RunFfmpegBundleSmokeTest()
+    {
+        string? originalPath = Environment.GetEnvironmentVariable("PATH");
+        try
+        {
+            // Reproduce an account with no discoverable system FFmpeg, before
+            // the process manager's lazy executable resolution runs.
+            Environment.SetEnvironmentVariable("PATH", string.Empty);
+            string expected = Path.Combine(AppContext.BaseDirectory, "ffmpeg", "ffmpeg.exe");
+            string resolved = FfmpegProcessManager.ResolveFfmpegExecutable();
+            if (!File.Exists(expected) ||
+                !string.Equals(expected, resolved, StringComparison.OrdinalIgnoreCase))
+            {
+                throw new InvalidOperationException($"Expected bundled FFmpeg at {expected}; resolved {resolved}.");
+            }
+
+            Logger.Info($"Testing bundled FFmpeg with PATH cleared: {resolved}");
+            // Real encode/decode round trips plus process cleanup, not just -version.
+            return RunOfflineRecordingSmokeTest() == 0 && RunFfmpegLifecycleSmokeTest() == 0 ? 0 : 1;
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("PATH", originalPath);
         }
     }
 
