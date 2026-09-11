@@ -250,7 +250,7 @@ public partial class MainWindow
                 _device = sharedDevice.Device;
                 _context = sharedDevice.Context;
                 _vertexShader = _device.CreateVertexShader(LoadShaderBytecode("Assets/GpuCompositeVS.cso"));
-                _pixelShader = _device.CreatePixelShader(LoadShaderBytecode("Assets/GpuFinalCompositePS.cso"));
+                _pixelShader = _device.CreatePixelShader(LoadShaderBytecode("Assets/GpuGroupCompositePS.cso"));
                 _parametersBuffer = _device.CreateBuffer(
                     (uint)Marshal.SizeOf<FinalCompositeShaderParameters>(),
                     BindFlags.ConstantBuffer,

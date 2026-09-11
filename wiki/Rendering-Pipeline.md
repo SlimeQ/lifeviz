@@ -1,5 +1,13 @@
 # Rendering Pipeline
 
+Normal source composites retain alpha instead of flattening every intermediate pixel onto opaque black. Their RGB stays premultiplied, preserving the existing display/recording result over black. When Layer Group or Sim Group output becomes a Normal source, the CPU and GPU compositors account for that premultiplication before applying opacity/keying; soft edges therefore receive alpha once. Unmapped first-layer Normal pixels (including DVD Bounce's moving margins) remain transparent. Pixel Sort carries this alpha through its work textures, and the final simulation compositor now samples all four channels and resolves Normal layers with premultiplied source-over alpha on both GPU and CPU. Existing non-Normal blend identities are retained.
+
+The `group-transparency` smoke covers fully transparent, partial-alpha, opaque colored, and opaque black pixels; source/group opacity; CPU/GPU Pixel Sort output; first-layer and over-background Normal group composition; and grouped-versus-direct DVD Bounce at several animation times.
+
+The shared final-composite shader has two compiled entry points: `PSGroupMain` retains intermediate alpha, while `PSMain` makes the final display surface opaque. CPU presentation similarly marks only the copied display buffer opaque; it never modifies the reusable group buffer.
+
+Pixel Sort's BGRA readback is converted to the simulation blender's RGBA channel order before CPU blending/hue rotation. Hue rotation preserves the existing alpha channel, including for recording fallbacks.
+
 File-layer replacement opens the new capture session before changing the existing `CaptureSource` path. The source object/ID and rendering configuration remain in place, including animations and its parent/order. A successful replacement updates the display name from the selected file; the editor draft updates both path and name together, and Apply carries that name into the runtime source even when reselecting the current path. Only file dimensions, cached frames, and capture initialization/error tracking reset. The old path's session is released when no other direct file source references it; audio and effective decode activation are reapplied, and automatic aspect selection is recalculated unless locked. Both live editor replacement and draft Apply use this path. Direct layers cannot replace their media with another active direct layer's file because sessions are keyed by path. GIF/video decoding retains the existing nonblocking preparation and failure handling; no extra decode cache is introduced.
 
 ## Layout

@@ -75,14 +75,14 @@ float4 SampleLayer(int index, float2 uv)
         clamp((int)(uv.y * SurfaceHeight), 0, (int)SurfaceHeight - 1));
     float4 color = float4(0.0, 0.0, 0.0, 1.0);
 
-    if (index == 0) color = float4(LayerTexture0.Load(int3(coord, 0)).rgb / 255.0, 1.0);
-    else if (index == 1) color = float4(LayerTexture1.Load(int3(coord, 0)).rgb / 255.0, 1.0);
-    else if (index == 2) color = float4(LayerTexture2.Load(int3(coord, 0)).rgb / 255.0, 1.0);
-    else if (index == 3) color = float4(LayerTexture3.Load(int3(coord, 0)).rgb / 255.0, 1.0);
-    else if (index == 4) color = float4(LayerTexture4.Load(int3(coord, 0)).rgb / 255.0, 1.0);
-    else if (index == 5) color = float4(LayerTexture5.Load(int3(coord, 0)).rgb / 255.0, 1.0);
-    else if (index == 6) color = float4(LayerTexture6.Load(int3(coord, 0)).rgb / 255.0, 1.0);
-    else if (index == 7) color = float4(LayerTexture7.Load(int3(coord, 0)).rgb / 255.0, 1.0);
+    if (index == 0) color = float4(LayerTexture0.Load(int3(coord, 0))) / 255.0;
+    else if (index == 1) color = float4(LayerTexture1.Load(int3(coord, 0))) / 255.0;
+    else if (index == 2) color = float4(LayerTexture2.Load(int3(coord, 0))) / 255.0;
+    else if (index == 3) color = float4(LayerTexture3.Load(int3(coord, 0))) / 255.0;
+    else if (index == 4) color = float4(LayerTexture4.Load(int3(coord, 0))) / 255.0;
+    else if (index == 5) color = float4(LayerTexture5.Load(int3(coord, 0))) / 255.0;
+    else if (index == 6) color = float4(LayerTexture6.Load(int3(coord, 0))) / 255.0;
+    else if (index == 7) color = float4(LayerTexture7.Load(int3(coord, 0))) / 255.0;
 
     return color;
 }
@@ -205,16 +205,20 @@ float3 BlendSimulation(float3 dst, float3 src, int mode, float opacity)
     return dst + ((blended - dst) * opacity);
 }
 
-float4 PSMain(VSOut input) : SV_Target
+float4 ResolveComposite(VSOut input)
 {
     float3 baseline = float3(SimulationBaseline, SimulationBaseline, SimulationBaseline);
     float3 underlay = baseline;
+    float underlayAlpha = 0.0;
     if (UseUnderlay != 0)
     {
-        underlay = UnderlayTexture.Sample(PointSampler, input.TexCoord).rgb;
+        float4 underlaySample = UnderlayTexture.Sample(PointSampler, input.TexCoord);
+        underlay = underlaySample.rgb;
+        underlayAlpha = underlaySample.a;
     }
 
     float3 outputColor;
+    float outputAlpha = 1.0;
 
     if (UseSignedAddSubPassthrough != 0)
     {
@@ -261,6 +265,7 @@ float4 PSMain(VSOut input) : SV_Target
     else
     {
         float3 simulation = baseline;
+        float simulationAlpha = 0.0;
 
         [unroll]
         for (int i = 0; i < 8; i++)
@@ -276,10 +281,22 @@ float4 PSMain(VSOut input) : SV_Target
                 continue;
             }
 
-            float3 layerColor = ApplyHueShift(i, SampleLayer(i, input.TexCoord).rgb);
-            simulation = BlendSimulation(simulation, layerColor, GetBlendMode(i), opacity);
+            float4 layerSample = SampleLayer(i, input.TexCoord);
+            float3 layerColor = ApplyHueShift(i, layerSample.rgb);
+            if (GetBlendMode(i) == 1) // Normal, premultiplied source-over
+            {
+                float alpha = layerSample.a * opacity;
+                simulation = simulation * (1.0 - alpha) + layerColor * opacity;
+                simulationAlpha = alpha + simulationAlpha * (1.0 - alpha);
+            }
+            else
+            {
+                simulation = BlendSimulation(simulation, layerColor, GetBlendMode(i), opacity);
+                simulationAlpha = 1.0;
+            }
         }
 
+        outputAlpha = simulationAlpha + underlayAlpha * (1.0 - simulationAlpha);
         if (UseUnderlay != 0)
         {
             outputColor = underlay + (simulation - baseline);
@@ -296,5 +313,16 @@ float4 PSMain(VSOut input) : SV_Target
         outputColor = 1.0 - outputColor;
     }
 
-    return float4(outputColor, 1.0);
+    return float4(outputColor, outputAlpha);
+}
+
+float4 PSMain(VSOut input) : SV_Target
+{
+    // Only the final display target is flattened onto black.
+    return float4(ResolveComposite(input).rgb, 1.0);
+}
+
+float4 PSGroupMain(VSOut input) : SV_Target
+{
+    return ResolveComposite(input);
 }

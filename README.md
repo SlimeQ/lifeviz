@@ -1,5 +1,9 @@
 # LifeViz
 
+Normal-blended groups now preserve image transparency, including the empty space around DVD Bounce animations. Layer Groups and Pixel Sort Sim Groups retain alpha through intermediate CPU/GPU composites, so transparent backgrounds reveal the scene underneath without darkening soft edges. Validate with `dotnet bin\Release\net9.0-windows\lifeviz.dll --smoke-test group-transparency` after a Release build.
+
+Builds compile shaders before embedding WPF resources, so an ordinary build or release publish includes the current shader changes in one pass.
+
 The bake queue now accepts the worker's explicit Completed/Cancelled/Failed message without waiting for its status pipe to close. A delayed pipe close can no longer turn a successfully finalized video into a timeout failure. The queue still waits for the worker process to exit before starting the next job.
 
 Background bakes again use the earlier exporter's above-normal process and render-thread priority, preventing CPU starvation while the editor remains available in its own process. To investigate throughput, build Release and run `./tests/Measure-BackgroundBake.ps1 -RequestPath <job-folder>/request.json -ExecutablePath bin/Release/net9.0-windows/lifeviz.exe`. It bakes short copies into private artifact folders and compares scheduling priorities; see [Build & Install](wiki/Build-and-Install.md#measure-background-bake-throughput).

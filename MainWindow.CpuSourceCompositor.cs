@@ -239,13 +239,14 @@ public partial class MainWindow
                         byte sr = source[srcIndex + 2];
                         byte sa = source[srcIndex + 3];
 
+                        UnpremultiplyGroupColor(ref sb, ref sg, ref sr, sa, keyingLocal);
                         double keyAlpha = ComputeKeyAlpha(sb, sg, sr, keyingLocal);
                         double alpha = keyingLocal.UseAlpha ? (sa / 255.0) : 1.0;
                         double effectiveOpacity = opacity * keyAlpha * alpha;
                         destination[destIndex] = ClampToByte((int)(sb * effectiveOpacity));
                         destination[destIndex + 1] = ClampToByte((int)(sg * effectiveOpacity));
                         destination[destIndex + 2] = ClampToByte((int)(sr * effectiveOpacity));
-                        destination[destIndex + 3] = 255;
+                        destination[destIndex + 3] = keyingLocal.UseAlpha ? ClampToByte((int)Math.Round(effectiveOpacity * 255)) : (byte)255;
                     }
                 });
                 return;
@@ -277,6 +278,7 @@ public partial class MainWindow
                             col + 0.5, row + 0.5, mirror, out sb, out sg, out sr, out sa);
                     }
 
+                    UnpremultiplyGroupColor(ref sb, ref sg, ref sr, sa, keyingLocal);
                     double keyAlpha = ComputeKeyAlpha(sb, sg, sr, keyingLocal);
                     double alpha = keyingLocal.UseAlpha ? (sa / 255.0) : 1.0;
                     double effectiveOpacity = opacity * keyAlpha * alpha;
@@ -288,7 +290,7 @@ public partial class MainWindow
                     destination[destIndex] = ClampToByte((int)(sb * effectiveOpacity));
                     destination[destIndex + 1] = ClampToByte((int)(sg * effectiveOpacity));
                     destination[destIndex + 2] = ClampToByte((int)(sr * effectiveOpacity));
-                    destination[destIndex + 3] = 255;
+                    destination[destIndex + 3] = keyingLocal.UseAlpha ? ClampToByte((int)Math.Round(effectiveOpacity * 255)) : (byte)255;
                 }
             });
         }
@@ -328,6 +330,7 @@ public partial class MainWindow
                         byte sg = source[srcIndex + 1];
                         byte sr = source[srcIndex + 2];
                         byte sa = source[srcIndex + 3];
+                        UnpremultiplyGroupColor(ref sb, ref sg, ref sr, sa, keyingLocal);
                         if (applyKeying)
                         {
                             double keyAlpha = ComputeKeyAlpha(sb, sg, sr, keyingLocal);
@@ -369,6 +372,7 @@ public partial class MainWindow
                         continue;
                     }
 
+                    UnpremultiplyGroupColor(ref sb, ref sg, ref sr, sa, keyingLocal);
                     if (applyKeying)
                     {
                         double keyAlpha = ComputeKeyAlpha(sb, sg, sr, keyingLocal);
@@ -377,6 +381,16 @@ public partial class MainWindow
                     BlendInto(destination, destIndex, sb, sg, sr, sa, mode, opacity);
                 }
             });
+        }
+
+        // Composite buffers retain premultiplied RGB so display/recording over black
+        // stays unchanged. Decode group samples before the ordinary Normal path.
+        private static void UnpremultiplyGroupColor(ref byte b, ref byte g, ref byte r, byte a, in KeyingSettings keying)
+        {
+            if (!keying.UseAlpha || !keying.Premultiplied || a == 255) return;
+            b = a == 0 ? (byte)0 : ClampToByte((int)Math.Round(b * 255.0 / a));
+            g = a == 0 ? (byte)0 : ClampToByte((int)Math.Round(g * 255.0 / a));
+            r = a == 0 ? (byte)0 : ClampToByte((int)Math.Round(r * 255.0 / a));
         }
 
         private static void BlendInto(byte[] destination, int destIndex, byte sb, byte sg, byte sr, byte sa, BlendMode mode, double opacity)
@@ -403,7 +417,7 @@ public partial class MainWindow
                     destination[destIndex] = ClampToByte((int)(db + (sb - db) * alpha));
                     destination[destIndex + 1] = ClampToByte((int)(dg + (sg - dg) * alpha));
                     destination[destIndex + 2] = ClampToByte((int)(dr + (sr - dr) * alpha));
-                    destination[destIndex + 3] = 255;
+                    destination[destIndex + 3] = ClampToByte((int)Math.Round(sa * opacity + destination[destIndex + 3] * (1 - alpha)));
                     return;
                 }
                 case BlendMode.Multiply:

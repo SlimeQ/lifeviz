@@ -55,6 +55,7 @@ public partial class MainWindow
         private const uint FlagUseAlpha = 1u << 1;
         private const uint FlagKeyEnabled = 1u << 2;
         private const uint FlagFirstLayer = 1u << 3;
+        private const uint FlagPremultiplied = 1u << 4;
         private const int MaxCachedSourceResources = 8;
         private const long MaxCachedSourceResourceBytes = 64L * 1024 * 1024;
 
@@ -930,6 +931,10 @@ public partial class MainWindow
 
             var mapping = ImageFit.GetMapping(fitMode, sourceWidth, sourceHeight, destWidth, destHeight);
             uint flags = 0;
+            if (keying.Premultiplied)
+            {
+                flags |= FlagPremultiplied;
+            }
             if (mirror)
             {
                 flags |= FlagMirror;

@@ -162,6 +162,7 @@ internal static partial class SmokeTestRunner
                 "gpu-bitwise" => RunGpuBitwiseSmokeTest(),
                 "gpu-pixel-sort" => RunGpuPixelSortSmokeTest(),
                 "sim-group-pixel-sort-color" => RunSimGroupPixelSortColorSmokeTest(),
+                "group-transparency" => RunGroupTransparencySmokeTest(),
                 "gpu-injection-mode" => RunGpuInjectionModeSmokeTest(),
                 "gpu-file-injection-mode" => RunGpuFileInjectionModeSmokeTest(smokeVideoPath),
                 "webm-alpha" => RunWebmAlphaSmokeTest(smokeVideoPath),
@@ -395,6 +396,13 @@ internal static partial class SmokeTestRunner
         {
             window.Close();
         }
+    }
+
+    private static int RunGroupTransparencySmokeTest()
+    {
+        var window = new MainWindow();
+        try { return window.RunGroupTransparencySmoke() ? 0 : 1; }
+        finally { window.Close(); }
     }
 
     private static int RunSimGroupPixelSortColorSmokeTest()

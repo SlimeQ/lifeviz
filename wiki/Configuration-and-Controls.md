@@ -1,5 +1,7 @@
 # Configuration & Controls
 
+Use **Normal** on both a transparent image and its containing **Layer Group** to reveal the background beneath the group. This also preserves the empty area around **DVD Bounce** and partially transparent image edges. Pixel Sort Sim Groups retain the transparency of their Normal input/output. Opaque black image pixels remain opaque; transparency is taken from alpha or the configured keying mask.
+
 ### Replace a file layer's media
 
 Select an existing **File** layer in the Layer Editor, then click **Replace File...** beneath its current path to choose another image, GIF, or video. Its name updates to the selected filename, including the extension. Its parent, stack position, enabled state, blend/fit, opacity, scale, mirror, keying, visibility group, audio settings, and animations are preserved. The path display updates; hover it to see the full path. Video controls follow the replacement's media type. Live mode switches immediately; with Live mode off, the replacement is saved in the draft and takes effect on **Apply**. The draft label updates as soon as you choose a file; the live layer changes on Apply. Scene saves and recovery retain the new path and name. Reselecting the current file also refreshes the name, which repairs stale names from earlier releases.

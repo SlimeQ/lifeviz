@@ -4232,6 +4232,7 @@ public partial class MainWindow : Window
             {
                 _inlinePresentCpuCount++;
                 Buffer.BlockCopy(composite.Downscaled, 0, _pixelBuffer, 0, requiredLength);
+                FlattenPresentationAlpha(_pixelBuffer, requiredLength);
                 if (_invertComposite)
                 {
                     InvertBuffer(_pixelBuffer);
@@ -4305,6 +4306,7 @@ public partial class MainWindow : Window
             composite.Downscaled.Length >= requiredLength)
         {
             Buffer.BlockCopy(composite.Downscaled, 0, _pixelBuffer, 0, requiredLength);
+            FlattenPresentationAlpha(_pixelBuffer, requiredLength);
             if (_invertComposite)
             {
                 InvertBuffer(_pixelBuffer);
@@ -13668,10 +13670,11 @@ public partial class MainWindow : Window
 
     private readonly struct KeyingSettings
     {
-        public KeyingSettings(bool enabled, bool useAlpha, byte r, byte g, byte b, double tolerance)
+        public KeyingSettings(bool enabled, bool useAlpha, byte r, byte g, byte b, double tolerance, bool premultiplied = false)
         {
             Enabled = enabled;
             UseAlpha = useAlpha;
+            Premultiplied = premultiplied;
             R = r;
             G = g;
             B = b;
@@ -13680,6 +13683,7 @@ public partial class MainWindow : Window
 
         public bool Enabled { get; }
         public bool UseAlpha { get; }
+        public bool Premultiplied { get; }
         public byte R { get; }
         public byte G { get; }
         public byte B { get; }
@@ -13721,7 +13725,8 @@ public partial class MainWindow : Window
         }
 
         bool normal = blendMode == BlendMode.Normal;
-        return (blendMode, new KeyingSettings(keyEnabled && normal, normal, keyR, keyG, keyB, keyTolerance));
+        return (blendMode, new KeyingSettings(keyEnabled && normal, normal, keyR, keyG, keyB, keyTolerance,
+            source.Type is CaptureSource.SourceType.Group or CaptureSource.SourceType.SimGroup));
     }
 
     internal static bool RunAutoClipVideoOverrideResolutionSmoke(FileCaptureService.AutoClipSession session, string path)
@@ -14609,13 +14614,26 @@ public partial class MainWindow : Window
                     continue;
                 }
 
+                double simAlpha = 0;
                 int simB = simulationBaseline;
                 int simG = simulationBaseline;
                 int simR = simulationBaseline;
                 foreach (var blendLayer in blendLayers)
                 {
                     SampleInlineSimulationLayerColor(blendLayer, sourceIndex, out byte sampleR, out byte sampleG, out byte sampleB);
-                    BlendSimulationLayerInto(ref simB, ref simG, ref simR, sampleR, sampleG, sampleB, blendLayer.BlendMode, blendLayer.Opacity);
+                    if (blendLayer.BlendMode == BlendMode.Normal)
+                    {
+                        double alpha = blendLayer.ColorBuffer[sourceIndex + 3] / 255.0 * blendLayer.Opacity;
+                        simB = (int)Math.Round(simB * (1 - alpha) + sampleB * blendLayer.Opacity);
+                        simG = (int)Math.Round(simG * (1 - alpha) + sampleG * blendLayer.Opacity);
+                        simR = (int)Math.Round(simR * (1 - alpha) + sampleR * blendLayer.Opacity);
+                        simAlpha = alpha + simAlpha * (1 - alpha);
+                    }
+                    else
+                    {
+                        BlendSimulationLayerInto(ref simB, ref simG, ref simR, sampleR, sampleG, sampleB, blendLayer.BlendMode, blendLayer.Opacity);
+                        simAlpha = 1;
+                    }
                 }
 
                 int deltaB = simB - simulationBaseline;
@@ -14624,7 +14642,9 @@ public partial class MainWindow : Window
                 targetBuffer[index] = ClampToByte(underlayB + deltaB);
                 targetBuffer[index + 1] = ClampToByte(underlayG + deltaG);
                 targetBuffer[index + 2] = ClampToByte(underlayR + deltaR);
-                targetBuffer[index + 3] = 255;
+                double underlayAlpha = includeUnderlayInFinalComposite && inputComposite != null && inputComposite.Downscaled.Length >= requiredLength
+                    ? inputComposite.Downscaled[index + 3] / 255.0 : 0;
+                targetBuffer[index + 3] = ClampToByte((int)Math.Round((simAlpha + underlayAlpha * (1 - simAlpha)) * 255));
             }
         });
 
@@ -17482,6 +17502,13 @@ public partial class MainWindow : Window
         }
         byte[] targetBuffer = layer.ColorBuffer;
         engine.FillColorBuffer(targetBuffer);
+        if (layer.LayerType == SimulationLayerType.PixelSort)
+        {
+            // Pixel Sort reads back its BGRA scene texture; simulation blending
+            // and hue rotation consume RGBA buffers like the Life engines.
+            for (int index = 0; index < size; index += 4)
+                (targetBuffer[index], targetBuffer[index + 2]) = (targetBuffer[index + 2], targetBuffer[index]);
+        }
         if (!_renderBackend.SupportsGpuSimulationComposition || _isRecording)
         {
             double hueShiftDegrees = CurrentRgbHueShiftDegrees(layer);
@@ -17515,7 +17542,6 @@ public partial class MainWindow : Window
                 targetBuffer[index] = ClampToByte((int)Math.Round((rr * r) + (rg * g) + (rb * b)));
                 targetBuffer[index + 1] = ClampToByte((int)Math.Round((gr * r) + (gg * g) + (gb * b)));
                 targetBuffer[index + 2] = ClampToByte((int)Math.Round((br * r) + (bg * g) + (bb * b)));
-                targetBuffer[index + 3] = 255;
             }
         });
     }
@@ -17618,6 +17644,12 @@ public partial class MainWindow : Window
         sampleR = ClampToByte((int)Math.Round((layer.HueRr * originalR) + (layer.HueRg * originalG) + (layer.HueRb * originalB)));
         sampleG = ClampToByte((int)Math.Round((layer.HueGr * originalR) + (layer.HueGg * originalG) + (layer.HueGb * originalB)));
         sampleB = ClampToByte((int)Math.Round((layer.HueBr * originalR) + (layer.HueBg * originalG) + (layer.HueBb * originalB)));
+    }
+
+    private static void FlattenPresentationAlpha(byte[] buffer, int length)
+    {
+        // RGB is already premultiplied over black. Only intermediate groups retain alpha.
+        for (int index = 3; index < length; index += 4) buffer[index] = 255;
     }
 
     private void UpdateUnderlayBitmap(int requiredLength)
