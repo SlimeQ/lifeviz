@@ -8,16 +8,35 @@ public partial class MainWindow
 {
     internal async Task VerifyBackgroundBakeShutdownAsync()
     {
+        int confirmations = 0;
+        _confirmBakeExitForSmoke = () => { confirmations++; return false; };
+        if (!ConfirmBakeExit() || confirmations != 0)
+            throw new InvalidOperationException("An idle/completed queue prompted for exit.");
         var active = EnqueueBake(TimeSpan.FromHours(1), 30);
         var waiting = EnqueueBake(TimeSpan.FromSeconds(1), 30);
+        // Closing before the worker launches must also protect queued work.
+        Close();
+        if (confirmations != 1 || _bakeQueueClosing || _isShuttingDown || waiting.Status.State != "Queued")
+            throw new InvalidOperationException("Declining exit did not preserve queued bakes.");
         var timeout = Stopwatch.StartNew();
         while (active.Status.CompletedFrames == 0 && !active.IsFinished && timeout.Elapsed < TimeSpan.FromSeconds(45))
             await Task.Delay(50);
         if (active.Status.CompletedFrames == 0) throw new InvalidOperationException("Shutdown fixture did not start rendering.");
+        long framesBeforeClose = active.Status.CompletedFrames;
+        Close();
+        if (confirmations != 2 || _bakeQueueClosing || _isShuttingDown ||
+            File.Exists(Path.Combine(active.DirectoryPath, "cancel")) || waiting.Status.State != "Queued")
+            throw new InvalidOperationException("Declining exit cancelled an active bake or its queue.");
+        timeout.Restart();
+        while (active.Status.CompletedFrames <= framesBeforeClose && !active.IsFinished && timeout.Elapsed < TimeSpan.FromSeconds(15))
+            await Task.Delay(50);
+        if (active.Status.CompletedFrames <= framesBeforeClose)
+            throw new InvalidOperationException("The bake stopped progressing after declining exit.");
+        _confirmBakeExitForSmoke = () => { confirmations++; return true; };
         Close();
         await _bakeQueueTask!.WaitAsync(TimeSpan.FromSeconds(45));
         await Task.Yield();
-        if (!_isShuttingDown || _bakeProcess != null || active.Status.State != "Cancelled" ||
+        if (confirmations != 3 || !_isShuttingDown || _bakeProcess != null || active.Status.State != "Cancelled" ||
             waiting.Status.State != "Cancelled" || !File.Exists(active.OutputPath))
             throw new InvalidOperationException("Closing the app did not cancel the queue and finalize active partial output.");
     }

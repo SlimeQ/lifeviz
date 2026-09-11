@@ -1,5 +1,7 @@
 # Background Baking
 
+Closing the main window (including its close button or Alt+F4) while bakes are active or queued shows **Bake in progress** and asks whether to quit. **No** is the default and keeps the app, active bake, and queue running. **Yes** cancels waiting jobs and waits for the active partial video to be saved before exiting. An idle queue or completed history does not prompt. Closing the Bake Queue window itself continues to leave work running.
+
 Use **Render Fixed Duration...** to bake a fixed-length silent video while designing another scene. Apply any pending Scene Editor changes so the preview contains the scene you want, choose a duration and FPS, and press **Add to Queue**. The setup window is nonmodal. Repeat for each scene; jobs run in submission order, with one active bake.
 
 Each submission captures the preview's authored layers, source configuration, simulation/animation settings, resolution and aspect ratio, quality, and output folder. Changing the scene, quality, or folder afterward affects new submissions only. Output names include a unique suffix to prevent collisions with another bake or live recording.
