@@ -62,6 +62,11 @@
   <!-- Explicit items also work on the first build, before the download exists.
        Content is captured by ClickOnce manifests as well as ordinary publish. -->
   <ItemGroup>
+    <Content Include="Assets\Starter\lifeviz-loop.mp4">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+      <ExcludeFromSingleFile>true</ExcludeFromSingleFile>
+    </Content>
     <Content Include="artifacts\ffmpeg\runtime\ffmpeg.exe;artifacts\ffmpeg\runtime\LICENSE;artifacts\ffmpeg\runtime\README.txt">
       <Link>ffmpeg\%(Filename)%(Extension)</Link>
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>

@@ -19,6 +19,8 @@ If no revision loads, or some saved inputs cannot be restored, autosave pauses a
 
 ## Recovering a previous scene
 
+**New Project** checkpoints the current applied scene before replacing it with the bundled logo demo and one Life Sim. With Live Mode off it also preserves the editor draft at `editor-draft-<session>.json`. It resets immediately in either mode and does not overwrite named project exports or reset recording-device/folder preferences. Demo media references are portable across install versions and Windows accounts.
+
 1. Open the **Scene Editor** and choose **Recover...**. This opens the autosave history directory. **Load...** can also open an autosave JSON or an exported `.lifevizlayers.json` project; choose the JSON/all-files filter to browse `.bak` files.
 2. Choose a revision by its timestamp. With **Live Mode** off, inspect it in the editor before pressing **Apply**. With Live Mode on it applies immediately. The current complete scene is checkpointed before replacement.
 3. If all sources apply successfully, autosave resumes (unless a separate session conflict still needs resolution). Export a named project with **Save...** for a lasting checkpoint.

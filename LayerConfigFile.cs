@@ -176,7 +176,7 @@ internal sealed class LayerConfigFile
             Enabled = source.Enabled,
             WindowTitle = source.WindowTitle,
             WebcamId = source.WebcamId,
-            FilePath = source.FilePath,
+            FilePath = DefaultScene.PortableMediaPath(source.FilePath),
             Color = source.IsColorPlane ? source.ColorHex : null,
             DisplayName = source.DisplayName,
             BlendMode = source.BlendMode,
@@ -310,7 +310,7 @@ internal sealed class LayerConfigFile
             DisplayName = config.DisplayName ?? string.Empty,
             WindowTitle = config.WindowTitle,
             WebcamId = config.WebcamId,
-            FilePath = config.FilePath,
+            FilePath = DefaultScene.ResolveMediaPath(config.FilePath),
             ColorHex = string.IsNullOrWhiteSpace(config.Color) ? "#000000" : config.Color,
             BlendMode = string.IsNullOrWhiteSpace(config.BlendMode)
                 ? (kind == LayerEditorSourceKind.ColorPlane ? "Normal" : "Additive")

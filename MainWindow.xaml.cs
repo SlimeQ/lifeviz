@@ -3265,8 +3265,7 @@ public partial class MainWindow : Window
 
     internal (bool ok, string detail) RunFirstRunDefaultSceneSmoke()
     {
-        _sources.Clear();
-        ClearSimulationLayers();
+        ClearSources(persist: false);
 
         bool preservedCurrentEmptyScene = !EnsureDefaultSceneForStartup(
                                                configLoaded: true,
@@ -3292,24 +3291,31 @@ public partial class MainWindow : Window
                                        }
                                    });
 
-        _sources.Clear();
-        ClearSimulationLayers();
+        ClearSources(persist: false);
         bool createdMissingConfigScene = EnsureDefaultSceneForStartup(
             configLoaded: false,
             migrateLegacyEmptyScene: false,
             persist: false);
-        CaptureSource? defaultSource = _sources.SingleOrDefault();
-        int configuredSimulationLayers = defaultSource?.SimulationLayers.Count ?? 0;
+        CaptureSource? defaultSource = _sources.FirstOrDefault(source => source.Type == CaptureSource.SourceType.File);
+        int configuredSimulationLayers = _sources.LastOrDefault()?.SimulationLayers.Count ?? 0;
         int runtimeSimulationLayers = EnumerateSimulationLeafLayers(_simulationLayers).Count();
 
         if (!_renderLoopAttached)
         {
             InitializeVisualizer();
         }
-        InjectCaptureFrames(injectLayers: true);
-        RenderFrame();
-        bool visibleOutput = BufferHasNonBlackPixel(_lastCompositeFrame?.Downscaled) ||
-                             BufferHasNonBlackPixel(_pixelBuffer);
+        bool visibleOutput = false;
+        var firstFrameDeadline = Stopwatch.StartNew();
+        while (!visibleOutput && firstFrameDeadline.Elapsed < TimeSpan.FromSeconds(15))
+        {
+            InjectCaptureFrames(injectLayers: true);
+            RenderFrame();
+            var engine = GetReferenceSimulationEngine();
+            var frame = _fileCapture.CaptureFrame(DefaultScene.VideoPath, engine.Columns, engine.Rows, FitMode.Fit, includeSource: false);
+            visibleOutput = frame.HasValue && BufferHasNonBlackPixel(frame.Value.OverlayDownscaled);
+            Dispatcher.Invoke(() => { }, DispatcherPriority.Background);
+            if (!visibleOutput) Thread.Sleep(10);
+        }
 
         using JsonDocument serializedConfig = JsonDocument.Parse(SerializeCurrentConfig());
         int serializedConfigVersion = serializedConfig.RootElement.TryGetProperty(
@@ -3323,10 +3329,11 @@ public partial class MainWindow : Window
                   migratedLegacyStructure &&
                   migrationDecisionOk &&
                   createdMissingConfigScene &&
-                  defaultSource?.Type == CaptureSource.SourceType.SimGroup &&
-                  configuredSimulationLayers > 0 &&
-                  runtimeSimulationLayers > 0 &&
+                  HasUsableDefaultScene() &&
+                  configuredSimulationLayers == 1 &&
+                  runtimeSimulationLayers == 1 &&
                   visibleOutput &&
+                  serializedConfig.RootElement.GetProperty("Sources")[0].GetProperty("FilePath").GetString() == DefaultScene.VideoReference &&
                   serializedConfigVersion == CurrentConfigVersion;
         string detail =
             $"preservedCurrentEmpty={preservedCurrentEmptyScene}, migratedLegacyEmpty={migratedLegacyEmptyScene}, " +
@@ -3340,10 +3347,12 @@ public partial class MainWindow : Window
 
     private bool HasUsableDefaultScene()
     {
-        CaptureSource? source = _sources.SingleOrDefault();
-        return source?.Type == CaptureSource.SourceType.SimGroup &&
-               source.SimulationLayers.Count > 0 &&
-               EnumerateSimulationLeafLayers(_simulationLayers).Any();
+        return _sources.Count == 2 &&
+               _sources[0].Type == CaptureSource.SourceType.File &&
+               _sources[0].FilePath == DefaultScene.VideoPath &&
+               _sources[1].Type == CaptureSource.SourceType.SimGroup &&
+               _sources[1].SimulationLayers.Count == 1 &&
+               EnumerateSimulationLeafLayers(_simulationLayers).Count() == 1;
     }
 
     private bool WaitForPresentationDrawForSmoke(int priorDrawCount, int maxIdlePasses = 8)
@@ -19399,6 +19408,7 @@ public partial class MainWindow : Window
             return false;
         }
 
+        var starter = DefaultScene.Create();
         foreach (var source in _sources.ToList())
         {
             CleanupSource(source);
@@ -19408,13 +19418,20 @@ public partial class MainWindow : Window
         ClearSimulationLayers();
         _lastCompositeFrame = null;
 
-        var simulationGroup = CaptureSource.CreateSimulationGroup("Simulation");
-        foreach (var simulationLayer in BuildDefaultSimulationLayerSpecs())
-        {
-            simulationGroup.SimulationLayers.Add(simulationLayer);
-        }
-
-        _sources.Add(simulationGroup);
+        var settings = starter.ToEditorProjectSettings();
+        _configuredRows = settings.Height;
+        _configuredDepth = settings.Depth;
+        _currentFpsFromConfig = _currentFps = _currentSimulationTargetFps = settings.Framerate;
+        _lifeOpacity = _effectiveLifeOpacity = settings.LifeOpacity;
+        _rgbHueShiftDegrees = settings.RgbHueShiftDegrees;
+        _rgbHueShiftSpeedDegreesPerSecond = settings.RgbHueShiftSpeedDegreesPerSecond;
+        _passthroughEnabled = settings.Passthrough;
+        _invertComposite = false;
+        _blendMode = BlendMode.Additive;
+        ApplyPerformancePreferences();
+        _sources.AddRange(BuildSourcesFromEditor(starter.ToEditorSources(),
+            new Dictionary<Guid, CaptureSource>(), new HashSet<Guid>(),
+            Array.Empty<WindowHandleInfo>(), Array.Empty<WebcamCaptureService.CameraInfo>()));
         ApplySimulationLayersFromSourceStack(fallbackToDefault: false);
         Logger.Info(migrateLegacyEmptyScene
             ? "Migrated an unversioned empty user configuration to the default starter scene."
@@ -19938,7 +19955,7 @@ public partial class MainWindow : Window
                 Enabled = source.Enabled,
                 WindowTitle = source.Window?.Title,
                 WebcamId = source.WebcamId,
-                FilePath = source.FilePath,
+                FilePath = DefaultScene.PortableMediaPath(source.FilePath),
                 Color = source.Type == CaptureSource.SourceType.ColorPlane
                     ? FormatHexColor(source.ColorPlaneR, source.ColorPlaneG, source.ColorPlaneB)
                     : null,

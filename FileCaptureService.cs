@@ -688,6 +688,7 @@ internal sealed class FileCaptureService : IDisposable
 
     public bool TryGetOrAdd(string path, out FileSourceInfo info, out string? error)
     {
+        path = DefaultScene.ResolveMediaPath(path);
         info = default;
         error = null;
 

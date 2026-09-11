@@ -187,6 +187,7 @@ internal static partial class SmokeTestRunner
                 "dimensions" => RunDimensionChangeSmokeTest(),
                 "shutdown" => RunShutdownSmokeTest(),
                 "startup" => RunStartupSmokeTest(),
+                "starter-project" => RunStartupSmokeTest(testNewProject: true),
                 "startup-recovery" => RunStartupRecoverySmokeTest(),
                 "config-save-coalescing" => RunConfigSaveCoalescingSmokeTest(),
                 "scene-persistence" => RunScenePersistenceSmokeTest(),
@@ -4805,7 +4806,7 @@ internal static partial class SmokeTestRunner
         return exitCode;
     }
 
-    private static int RunStartupSmokeTest()
+    private static int RunStartupSmokeTest(bool testNewProject = false)
     {
         Logger.Info("Running startup smoke test.");
         if (AppVersionInfo.FormatDisplayVersion("4.4.0+6b71767e65c7559a", "1.0.0.0") != "v4.4.0" ||
@@ -4870,6 +4871,8 @@ internal static partial class SmokeTestRunner
                         throw new InvalidOperationException(
                             $"First-run startup did not create a usable default scene. {firstRunDetail}.");
                     }
+
+                    if (testNewProject) window.RunNewProjectSmoke();
 
                     window.Close();
                     app.Shutdown(0);

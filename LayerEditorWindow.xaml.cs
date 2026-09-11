@@ -82,7 +82,8 @@ public partial class LayerEditorWindow : Window
 
     internal void SetLiveModeForSmoke(bool enabled)
     {
-        LiveModeCheckBox.IsChecked = enabled;
+        LiveModeCheckBox.SetCurrentValue(System.Windows.Controls.Primitives.ToggleButton.IsCheckedProperty, enabled);
+        LiveModeCheckBox.GetBindingExpression(System.Windows.Controls.Primitives.ToggleButton.IsCheckedProperty)?.UpdateSource();
     }
 
     internal void ApplySimulationHeightForSmoke(int height, bool applyImmediately)
@@ -795,6 +796,36 @@ public partial class LayerEditorWindow : Window
 
         Point anchor = AppControlsButton.PointToScreen(new Point(0, AppControlsButton.ActualHeight + 2));
         _owner.OpenRootContextMenuAtScreenPoint(anchor.X, anchor.Y);
+    }
+
+    private void NewProject_Click(object sender, RoutedEventArgs e)
+    {
+        if (_ownerIsShuttingDown) return;
+        if (MessageBox.Show(this,
+                "Start a new project with the LifeViz demo? The current scene will be kept in Recover.",
+                "New Project", MessageBoxButton.YesNo, MessageBoxImage.Question, MessageBoxResult.No) != MessageBoxResult.Yes)
+            return;
+        try { CreateNewProject(); }
+        catch (Exception ex)
+        {
+            MessageBox.Show(this, $"Failed to create a new project:\n{ex.Message}", "New Project Failed",
+                MessageBoxButton.OK, MessageBoxImage.Error);
+        }
+    }
+
+    internal void CreateNewProject()
+    {
+        DefaultScene.Create(); // Fail before touching an unapplied draft if the asset is absent.
+        if (!_viewModel.LiveMode)
+        {
+            var draft = LayerConfigFile.FromEditorSources(_viewModel.Sources,
+                Array.Empty<LayerEditorSimulationLayer>(), _pendingProjectSettings ?? _owner.GetProjectSettingsForEditor());
+            SceneFileStore.Write(_owner.EditorDraftRecoveryPath, JsonSerializer.Serialize(draft, LayerConfigJsonOptions));
+        }
+        _owner.ResetToDefaultProject();
+        _pendingProjectSettings = null;
+        RefreshFromSources();
+        RefreshProjectSettingsState();
     }
 
     private void SaveLayerConfig_Click(object sender, RoutedEventArgs e)

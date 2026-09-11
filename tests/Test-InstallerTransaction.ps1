@@ -513,15 +513,20 @@ function Invoke-FfmpegUpgradeTransaction {
     Assert-True (-not (Test-Path -LiteralPath $oldMarker)) 'Upgrade retained the old version.'
     $installedApp = Join-Path $installRoot $relativeApp
     $installedFfmpeg = Join-Path (Split-Path -Parent $installedApp) 'ffmpeg\ffmpeg.exe'
+    $installedDemo = Join-Path (Split-Path -Parent $installedApp) 'Assets\Starter\lifeviz-loop.mp4'
+    $sourceDemo = Join-Path $repoRoot 'Assets\Starter\lifeviz-loop.mp4'
     Assert-True ((Get-FileHash $installedFfmpeg).Hash -eq (Get-FileHash $savedFfmpeg).Hash) 'Upgrade did not install the verified FFmpeg.'
+    Assert-True ((Get-FileHash $installedDemo).Hash -eq (Get-FileHash $sourceDemo).Hash) 'Upgrade did not install the starter video.'
 
     # Reinstalling the same version also repairs missing files; there is no
     # version-only short circuit in the automatic update/install path.
     Remove-Item -LiteralPath $installedFfmpeg
+    Remove-Item -LiteralPath $installedDemo
     $parameters.WorkingDirectory = Split-Path -Parent $installedApp
     $result = Invoke-TestHelperProcess @parameters
     Assert-True ($result.ExitCode -eq 0) "Same-version repair failed: $($result.Stderr)"
     Assert-True ((Get-FileHash $installedFfmpeg).Hash -eq (Get-FileHash $savedFfmpeg).Hash) 'Same-version repair did not restore FFmpeg.'
+    Assert-True ((Get-FileHash $installedDemo).Hash -eq (Get-FileHash $sourceDemo).Hash) 'Same-version repair did not restore the starter video.'
     $debris = @(Get-ChildItem -LiteralPath $caseRoot -Directory | Where-Object {
         $_.Name -like 'lifeviz-clickonce.installing-*' -or $_.Name -like 'lifeviz-clickonce.backup-*'
     })
@@ -530,7 +535,14 @@ function Invoke-FfmpegUpgradeTransaction {
     $dotnet = (Get-Command dotnet -ErrorAction Stop).Source
     & $dotnet (Join-Path (Split-Path -Parent $installedApp) 'lifeviz.dll') --smoke-test ffmpeg-bundle
     Assert-True ($LASTEXITCODE -eq 0) 'Installed app failed media/cleanup checks with PATH cleared.'
-    Write-Host '[pass] Old-install upgrade and same-version repair restore working bundled FFmpeg.'
+    $savedPath = $env:PATH
+    try {
+        $env:PATH = ''
+        & $dotnet (Join-Path (Split-Path -Parent $installedApp) 'lifeviz.dll') --smoke-test starter-project
+        Assert-True ($LASTEXITCODE -eq 0) 'Repaired app failed starter playback/New Project checks with PATH cleared.'
+    }
+    finally { $env:PATH = $savedPath }
+    Write-Host '[pass] Old-install upgrade and same-version repair restore bundled FFmpeg and the starter scene.'
 }
 
 New-Item -ItemType Directory -Force -Path $auditRoot | Out-Null

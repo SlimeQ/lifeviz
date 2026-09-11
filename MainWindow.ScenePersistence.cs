@@ -44,6 +44,27 @@ public partial class MainWindow
         else ReportScenePersistenceIssue("The scene could not be fully applied. Autosave is paused to protect the previous scene. Reconnect missing inputs or load another scene.");
     }
 
+    internal void ResetToDefaultProject()
+    {
+        var starter = DefaultScene.Create(); // Validate the asset before replacing anything.
+        BeginSceneReplacement();
+        bool complete = false;
+        try
+        {
+            // A fresh project must restart the demo, even if the previous scene
+            // also used it. Retire the old session before creating the new one.
+            ClearSources(persist: false);
+            ApplyProjectSettingsFromEditor(starter.ToEditorProjectSettings());
+            ApplyLayerEditorSources(starter.ToEditorSources());
+            complete = _sources.Count == 2 &&
+                _sources[0].Type == CaptureSource.SourceType.File &&
+                _sources[1].Type == CaptureSource.SourceType.SimGroup &&
+                _sources[1].SimulationLayers.Count == 1;
+            if (!complete) throw new InvalidOperationException("The starter scene could not be fully applied.");
+        }
+        finally { CompleteSceneReplacement(complete); }
+    }
+
     private static void ValidateAppConfigJson(string json)
     {
         SceneFileStore.ValidateSceneJson(json);

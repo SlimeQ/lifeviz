@@ -485,6 +485,10 @@
                 <Button x:Name="AppControlsButton"
                         Content="App Controls..."
                         Click="OpenAppControls_Click" />
+                <Button x:Name="NewProjectButton"
+                        Content="New Project"
+                        ToolTip="Start over with the LifeViz demo and one Life Sim"
+                        Click="NewProject_Click" />
                 <Button x:Name="LoadLayersButton"
                         Content="Load..."
                         Click="LoadLayerConfig_Click" />

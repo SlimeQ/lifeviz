@@ -149,3 +149,11 @@ foreach ($name in @('ffmpeg.exe', 'LICENSE', 'README.txt')) {
     }
 }
 Write-Host 'Published FFmpeg executable and notices verified.' -ForegroundColor Green
+$starterVideo = Join-Path $publishedApps[0].DirectoryName 'Assets\Starter\lifeviz-loop.mp4'
+$sourceVideo = Join-Path $root 'Assets\Starter\lifeviz-loop.mp4'
+if (-not (Test-Path -LiteralPath $starterVideo) -or
+    (Get-FileHash -LiteralPath $starterVideo -Algorithm SHA256).Hash -ne
+    (Get-FileHash -LiteralPath $sourceVideo -Algorithm SHA256).Hash) {
+    throw "Published starter video is missing or differs from the checked-in asset: $starterVideo"
+}
+Write-Host 'Published starter video verified.' -ForegroundColor Green
