@@ -1,5 +1,7 @@
 # LifeViz
 
+The bake queue now accepts the worker's explicit Completed/Cancelled/Failed message without waiting for its status pipe to close. A delayed pipe close can no longer turn a successfully finalized video into a timeout failure. The queue still waits for the worker process to exit before starting the next job.
+
 Background bakes again use the earlier exporter's above-normal process and render-thread priority, preventing CPU starvation while the editor remains available in its own process. To investigate throughput, build Release and run `./tests/Measure-BackgroundBake.ps1 -RequestPath <job-folder>/request.json -ExecutablePath bin/Release/net9.0-windows/lifeviz.exe`. It bakes short copies into private artifact folders and compares scheduling priorities; see [Build & Install](wiki/Build-and-Install.md#measure-background-bake-throughput).
 
 Background-bake progress now travels over a bounded process pipe, so a locked progress file cannot abort a video. Failed jobs retain their scene/request and worker log, accessible through **Open diagnostics** in the bake queue.

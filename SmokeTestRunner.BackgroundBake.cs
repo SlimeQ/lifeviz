@@ -1,4 +1,6 @@
 using System.IO;
+using System.IO.Pipes;
+using System.Text.Json;
 using System.Windows;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
@@ -57,6 +59,9 @@ internal static partial class SmokeTestRunner
 
     private static void RunBakeStatusTransportChecks()
     {
+        foreach (string state in new[] { "Completed", "Cancelled", "Failed", "Rendering" })
+            VerifyHeldOpenBakeStatusPipeAsync(state).GetAwaiter().GetResult();
+
         using var writer = new BlockedBakeStatusWriter();
         using (var publisher = new BakeStatusTransport.Publisher(writer))
         {
@@ -80,6 +85,49 @@ internal static partial class SmokeTestRunner
         if (deniedPublisher.WriteError is not UnauthorizedAccessException)
             throw new InvalidOperationException("Telemetry write failure did not stay isolated.");
         deniedPublisher.Publish(new BakeStatus("Completed", "rendering can finish even after telemetry fails"));
+    }
+
+    private static async Task VerifyHeldOpenBakeStatusPipeAsync(string state)
+    {
+        string name = "lifeviz-status-smoke-" + Guid.NewGuid().ToString("N");
+        using var server = new NamedPipeServerStream(name, PipeDirection.Out, 1,
+            PipeTransmissionMode.Byte, PipeOptions.Asynchronous);
+        using var client = new NamedPipeClientStream(".", name, PipeDirection.In, PipeOptions.Asynchronous);
+        using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        Task connected = server.WaitForConnectionAsync(cancellation.Token);
+        await client.ConnectAsync(cancellation.Token);
+        await connected;
+        using var output = new StreamWriter(server) { AutoFlush = true };
+        using var input = new StreamReader(client);
+        var receiver = new BakeStatusTransport.Receiver();
+        Task reading = receiver.DrainAsync(input, cancellation.Token);
+        try
+        {
+            await output.WriteLineAsync("ordinary diagnostic output");
+            await output.WriteLineAsync("LIFEVIZ_BAKE_STATUS_V1 invalid-json");
+            await output.WriteLineAsync("LIFEVIZ_BAKE_STATUS_V1 " +
+                JsonSerializer.Serialize(new BakeStatus(state, "pipe remains open", 144000, 144000)));
+            if (state != "Rendering")
+            {
+                // Do not close the writer: terminal delivery must finish even
+                // when another process could still hold the pipe open.
+                await reading.WaitAsync(TimeSpan.FromSeconds(3));
+                if (receiver.Latest?.State != state)
+                    throw new InvalidOperationException("An open status pipe lost the terminal bake result.");
+            }
+            else
+            {
+                while (receiver.Latest == null) await Task.Delay(10, cancellation.Token);
+                if (reading.IsCompleted)
+                    throw new InvalidOperationException("A full frame count was mistaken for encoder completion.");
+            }
+        }
+        finally
+        {
+            cancellation.Cancel();
+            try { await reading.WaitAsync(TimeSpan.FromSeconds(3)); }
+            catch (OperationCanceledException) when (cancellation.IsCancellationRequested) { }
+        }
     }
 
     private sealed class BlockedBakeStatusWriter : StringWriter

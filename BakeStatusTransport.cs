@@ -52,9 +52,9 @@ internal static class BakeStatusTransport
         private BakeStatus? _latest;
         public BakeStatus? Latest => Volatile.Read(ref _latest);
 
-        public async Task DrainAsync(TextReader input)
+        public async Task DrainAsync(TextReader input, CancellationToken cancellationToken = default)
         {
-            while (await input.ReadLineAsync().ConfigureAwait(false) is { } line)
+            while (await input.ReadLineAsync(cancellationToken).ConfigureAwait(false) is { } line)
             {
                 // Only protocol records update the queue. Ignore unexpected
                 // output; diagnostics belong in the worker's private log file.
@@ -62,7 +62,13 @@ internal static class BakeStatusTransport
                 try
                 {
                     if (JsonSerializer.Deserialize<BakeStatus>(line.AsSpan(Prefix.Length)) is { } status)
+                    {
                         Volatile.Write(ref _latest, status);
+                        // The terminal record carries the final bake result. EOF
+                        // can arrive later (for example, an inherited pipe handle
+                        // may remain open in a child); it is not a bake result.
+                        if (status.State is "Completed" or "Cancelled" or "Failed") return;
+                    }
                 }
                 catch (JsonException) { }
             }

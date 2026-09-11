@@ -14,4 +14,6 @@ One worker has its own GPU compositor, simulation engines, media decoders, encod
 
 See [Rendering Pipeline](Rendering-Pipeline.md) for frame-clock and encoder details and [Build & Install](Build-and-Install.md) for the `background-bake` integration smoke.
 
+The worker reports completion after encoder finalization. The queue accepts that explicit terminal message immediately, without requiring the status pipe to close; a delayed pipe close previously caused some complete videos to show a timeout failure. It still waits for worker exit before starting the next bake. Reaching 100% of frames alone does not mark a job complete, because the encoder may still be saving the file. A worker exit without a terminal message remains a failure requiring output inspection.
+
 Bakes use above-normal process and render-thread priority, matching the earlier foreground exporter. Background operation comes from the separate worker process; the renderer is no longer scheduled below other normal-priority work. This avoids a throughput regression under CPU load. Preview and bake still share hardware, so simultaneous editing can affect export speed. Updates apply to newly launched workers after restarting the app; let the current queue finish before updating.

@@ -77,13 +77,14 @@ public partial class MainWindow
         {
             job.Update(new BakeStatus("Starting", "Preparing a separate renderer..."));
             Task? statusReader = null;
+            using var statusCancellation = new CancellationTokenSource();
             try
             {
                 var process = Process.Start(BackgroundBakeWorker.CreateStartInfo(job.DirectoryPath))
                     ?? throw new InvalidOperationException("Could not start the bake worker.");
                 _bakeProcess = process;
                 var statusReceiver = new BakeStatusTransport.Receiver();
-                statusReader = Task.Run(() => statusReceiver.DrainAsync(process.StandardOutput));
+                statusReader = Task.Run(() => statusReceiver.DrainAsync(process.StandardOutput, statusCancellation.Token));
                 _bakeProcessOwner ??= FfmpegProcessManager.KillOnCloseJob.TryCreate(out _);
                 if (_bakeProcessOwner != null && !_bakeProcessOwner.TryAssign(process, out string? ownershipError))
                     Logger.Warn($"Bake worker job containment unavailable: {ownershipError}");
@@ -94,7 +95,13 @@ public partial class MainWindow
                 }
                 // Consume the terminal record before deciding whether exit was
                 // successful. Completion never depends on a writable sidecar.
-                await statusReader.WaitAsync(TimeSpan.FromSeconds(5));
+                try { await statusReader.WaitAsync(TimeSpan.FromSeconds(5)); }
+                catch (TimeoutException)
+                {
+                    // Keep any terminal record received at the timeout boundary.
+                    // A full frame count alone is not proof of finalization.
+                    Logger.Warn("Bake worker exited before its status connection finished; checking the last received result.");
+                }
                 ApplyBakeStatus(job, statusReceiver.Latest);
                 if (!job.IsFinished)
                     job.Update(job.Status with { State = "Failed", Message = $"Bake worker exited unexpectedly (code {process.ExitCode}). Check partial output before using it." });
@@ -121,13 +128,15 @@ public partial class MainWindow
             }
             finally
             {
-                _bakeProcess?.Dispose();
-                _bakeProcess = null;
+                statusCancellation.Cancel();
                 if (statusReader != null)
                 {
                     try { await statusReader.WaitAsync(TimeSpan.FromSeconds(5)); }
+                    catch (OperationCanceledException) when (statusCancellation.IsCancellationRequested) { }
                     catch (Exception ex) { Logger.Warn($"Bake status reader stopped: {ex.Message}"); }
                 }
+                _bakeProcess?.Dispose();
+                _bakeProcess = null;
                 CleanupBakeFiles(job);
             }
         }
