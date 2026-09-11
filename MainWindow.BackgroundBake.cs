@@ -16,6 +16,8 @@ public partial class MainWindow
     private Process? _bakeProcess;
     private FfmpegProcessManager.KillOnCloseJob? _bakeProcessOwner;
     private bool _bakeQueueClosing;
+    private bool _bakeExitPromptOpen;
+    private Func<bool>? _confirmBakeExitForSmoke;
 
     private void ShowBakeQueue()
     {
@@ -168,10 +170,33 @@ public partial class MainWindow
         if (_bakeQueueTask == null || _bakeQueueTask.IsCompleted) return;
         e.Cancel = true;
         if (_bakeQueueClosing) return;
+        if (!ConfirmBakeExit()) return;
         _bakeQueueClosing = true;
         foreach (var job in _bakeJobs.Where(j => j.CanCancel).ToArray()) CancelBake(job);
         await _bakeQueueTask;
+        // The worker can finish while the modal confirmation is open. Defer
+        // the second Close even when the queue task is already complete.
+        await Task.Yield();
         Close();
+    }
+
+    private bool ConfirmBakeExit()
+    {
+        if (_bakeExitPromptOpen) return false;
+        if (!_bakeJobs.Any(job => !job.IsFinished)) return true;
+        _bakeExitPromptOpen = true;
+        try
+        {
+            if (App.IsSmokeTestMode && _confirmBakeExitForSmoke != null)
+                return _confirmBakeExitForSmoke();
+            return MessageBox.Show(this,
+                "A video bake is in progress or queued.\n\n" +
+                "Quitting will cancel active and queued bakes and save any active partial video.\n\n" +
+                "Are you sure you want to quit LifeViz?",
+                "Bake in progress", MessageBoxButton.YesNo, MessageBoxImage.Warning,
+                MessageBoxResult.No) == MessageBoxResult.Yes;
+        }
+        finally { _bakeExitPromptOpen = false; }
     }
 
     private void AbortBackgroundBakes()

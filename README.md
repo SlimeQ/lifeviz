@@ -1,5 +1,7 @@
 # LifeViz
 
+Closing the main LifeViz window while a bake is active or queued now asks for confirmation, with **No** selected by default. Declining keeps the bake and queue running; confirming cancels queued work and saves the active partial video before exiting. Closing only the Bake Queue window still leaves bakes running.
+
 Normal-blended groups now preserve image transparency, including the empty space around DVD Bounce animations. Layer Groups and Pixel Sort Sim Groups retain alpha through intermediate CPU/GPU composites, so transparent backgrounds reveal the scene underneath without darkening soft edges. Validate with `dotnet bin\Release\net9.0-windows\lifeviz.dll --smoke-test group-transparency` after a Release build.
 
 Builds compile shaders before embedding WPF resources, so an ordinary build or release publish includes the current shader changes in one pass.

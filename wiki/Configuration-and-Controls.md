@@ -1,5 +1,7 @@
 # Configuration & Controls
 
+Closing the main window with an active or queued bake shows a **Bake in progress** warning. **No** (the default) keeps LifeViz and its bakes running; **Yes** cancels the queue and saves active partial output before exiting. Closing the Bake Queue window alone does not prompt or stop rendering.
+
 Use **Normal** on both a transparent image and its containing **Layer Group** to reveal the background beneath the group. This also preserves the empty area around **DVD Bounce** and partially transparent image edges. Pixel Sort Sim Groups retain the transparency of their Normal input/output. Opaque black image pixels remain opaque; transparency is taken from alpha or the configured keying mask.
 
 ### Replace a file layer's media
