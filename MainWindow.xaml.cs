@@ -8901,31 +8901,22 @@ public partial class MainWindow : Window
                 return;
             }
 
-            if (!_fileCapture.TryCreateAutoClip(
-                    paths,
-                    minClipSeconds,
-                    maxClipSeconds,
-                    minDelaySeconds,
-                    maxDelaySeconds,
-                    out var replacement,
-                    out var error))
+            if (!FileCaptureService.TryNormalizeAutoClipPaths(paths, out var normalizedPaths, out var error))
             {
                 MessageBox.Show(this, error ?? "Could not update AutoClip.", "AutoClip Error", MessageBoxButton.OK, MessageBoxImage.Warning);
                 return;
             }
 
-            source.DisposeAutoClip();
             source.AutoClipMinClipSeconds = Math.Min(minClipSeconds, maxClipSeconds);
             source.AutoClipMaxClipSeconds = Math.Max(minClipSeconds, maxClipSeconds);
             source.AutoClipMinDelaySeconds = Math.Min(minDelaySeconds, maxDelaySeconds);
             source.AutoClipMaxDelaySeconds = Math.Max(minDelaySeconds, maxDelaySeconds);
-            replacement!.SetLoopSelectedFile(source.AutoClipLoopSelectedFile);
-            source.SetAutoClip(replacement!);
+            source.AutoClip!.UpdateSettings(normalizedPaths, minClipSeconds, maxClipSeconds, minDelaySeconds, maxDelaySeconds);
+            source.FilePaths.Clear();
+            source.FilePaths.AddRange(normalizedPaths);
+            source.SetDisplayName(source.AutoClip.DisplayName);
             ApplyAutoClipPlaybackOptions(source);
             SyncAutoClipVideoOverrides(source, videoOverrides);
-            source.LastFrame = null;
-            source.FirstFrameReceived = false;
-            source.MissedFrames = 0;
             ApplySourceVideoAudioState(source);
             UpdatePrimaryAspectIfNeeded();
             RenderFrame();
@@ -8962,7 +8953,6 @@ public partial class MainWindow : Window
 
             source.AutoClipLoopSelectedFile = enabled;
             source.AutoClip?.SetLoopSelectedFile(enabled);
-            source.LastFrame = null;
             RenderFrame();
             SaveConfig();
         });

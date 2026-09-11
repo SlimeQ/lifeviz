@@ -61,7 +61,6 @@ public partial class MainWindow
             source.AutoClipPlayInOrder = inOrder;
             source.AutoClipPlayWholeFile = wholeFile;
             ApplyAutoClipPlaybackOptions(source);
-            source.LastFrame = null;
             RenderFrame();
             SaveConfig();
         });
@@ -69,6 +68,20 @@ public partial class MainWindow
 
     private static void ApplyAutoClipPlaybackOptions(CaptureSource source) =>
         source.AutoClip?.SetPlaybackOptions(source.AutoClipStartWithDelay, source.AutoClipPlayInOrder, source.AutoClipPlayWholeFile);
+
+    internal void ResetAutoClipSequenceFromEditor(Guid sourceId)
+    {
+        RunWithoutLayerEditorRefresh(() =>
+        {
+            var source = FindSourceById(sourceId);
+            if (source?.AutoClip == null) return;
+            source.AutoClip.ResetSequence();
+            source.LastFrame = null;
+            source.HasError = false;
+            source.MissedFrames = 0;
+            RenderFrame();
+        });
+    }
 
     private void AddVisibilityGroupMenu(MenuItem menu, CaptureSource source)
     {
@@ -113,5 +126,8 @@ public partial class MainWindow
         AddOption("Start with Delay", () => source.AutoClipStartWithDelay, value => source.AutoClipStartWithDelay = value);
         AddOption("Play Files in List Order", () => source.AutoClipPlayInOrder, value => source.AutoClipPlayInOrder = value);
         AddOption("Play Whole File", () => source.AutoClipPlayWholeFile, value => source.AutoClipPlayWholeFile = value);
+        var reset = new MenuItem { Header = "Reset AutoClip Sequence" };
+        reset.Click += (_, _) => ResetAutoClipSequenceFromEditor(source.Id);
+        menu.Items.Add(reset);
     }
 }

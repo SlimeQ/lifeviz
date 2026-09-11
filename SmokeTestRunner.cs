@@ -2799,6 +2799,7 @@ internal static partial class SmokeTestRunner
 
             session.SetOfflineRenderMode(false, 0);
             session.UpdateSettings(new[] { smokeVideoPath }, 1.2, 1.2, 0, 0);
+            session.ResetSequence();
             session.SetPlaybackPaused(false);
 
             // The first tick queues the already-cached probe and the second promotes
@@ -2960,6 +2961,7 @@ internal static partial class SmokeTestRunner
                 decoderThreadLimit: 2,
                 videoDecodeFpsLimit: 30);
             session.UpdateSettings(new[] { smokeVideoPath }, 2.0, 2.0, 0, 0);
+            session.ResetSequence();
             bool preHandoffDisposalDrained = MediaDisposalQueue.Drain(TimeSpan.FromSeconds(5));
             int[] trackedProcessBaseline = FfmpegProcessManager.Shared.GetTrackedProcessIdsForSmokeTest();
             int CountNewTrackedProcesses() => FfmpegProcessManager.Shared
@@ -3009,6 +3011,17 @@ internal static partial class SmokeTestRunner
 
                 if (session.IsHandoffActiveForSmoke())
                 {
+                    if (!sawBoundedHandoff)
+                    {
+                        int ownedBeforeEdit = session.GetOwnedVideoSessionCountForSmoke();
+                        string? visibleBeforeEdit = session.CurrentFramePath;
+                        session.UpdateSettings(new[] { smokeVideoPath }, 2.1, 2.1, 0, 0);
+                        session.SetPlaybackOptions(true, true, false);
+                        session.SetPlaybackOptions(false, false, false);
+                        if (!session.IsHandoffActiveForSmoke() || session.GetOwnedVideoSessionCountForSmoke() != ownedBeforeEdit ||
+                            session.CurrentFramePath != visibleBeforeEdit)
+                            throw new InvalidOperationException("AutoClip edit interrupted the live decoder handoff.");
+                    }
                     sawBoundedHandoff = true;
                     handoffStayedVisible &= candidate.HasValue && session.GetVisualOpacity(0) > 0.99;
                     if (candidate.HasValue &&

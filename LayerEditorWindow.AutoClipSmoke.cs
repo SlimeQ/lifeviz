@@ -31,6 +31,12 @@ public partial class LayerEditorWindow
         root.Arrange(new Rect(0, 0, 1240, 820));
         root.UpdateLayout();
 
+        var reset = Descendants(root).OfType<Button>().Single(item => Equals(item.Content, "Reset AutoClip Sequence"));
+        if (reset.IsEnabled) throw new InvalidOperationException("Draft mode exposed live AutoClip reset.");
+        _draggedSource = model;
+        SceneTree_ClearDragCandidate(SceneTree, new System.Windows.Input.MouseEventArgs(System.Windows.Input.Mouse.PrimaryDevice, 0));
+        if (_draggedSource != null) throw new InvalidOperationException("Scene tree retained a stale layer drag candidate.");
+
         foreach (string label in new[] { "Take over this visibility group while playing", "Start with delay", "Play files in list order (unchecked = random)", "Play whole file from beginning to end" })
         {
             var checkbox = Descendants(root).OfType<CheckBox>().SingleOrDefault(item => Equals(item.Content, label))

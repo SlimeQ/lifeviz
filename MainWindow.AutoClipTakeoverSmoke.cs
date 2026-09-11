@@ -20,6 +20,7 @@ public partial class MainWindow
         File.Copy(videoPath, secondPath);
         try
         {
+            ValidateAutoClipEditingForSmoke(videoPath, secondPath);
             using var session = new FileCaptureService.AutoClipSession(new[] { videoPath, secondPath }, 0.2, 0.2, 0.2, 0.2);
             session.SetLoopSelectedFile(true); // Whole-file mode must override timed looping.
             session.SetPlaybackOptions(startWithDelay: true, playInOrder: true, playWholeFile: true);

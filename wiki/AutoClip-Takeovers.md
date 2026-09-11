@@ -51,6 +51,12 @@ AutoClip now includes the useful sequential playback workflow from Video Sequenc
 - Select exactly one file to edit its blend/keying overrides. Multiple selection hides those controls to avoid accidentally applying a change to just one file.
 - **Play whole file:** plays each source once from its beginning to its actual duration. With list order enabled and delay/fade set to zero, this is a repeating ordered playlist.
 
-Changing playback options, timing, or the file list restarts that AutoClip's schedule. Changing its visibility group, takeover checkbox, or fade does not restart its decoder. A fixed-duration render starts its ordered playlist at the first file and uses the export frame clock; live playback position and the next ordered file are restored afterward.
+Changing playback options, timing, or the file list preserves the active clip or gap, including its decoder, elapsed time, and fade progress. A clip already selected or preparing finishes with its selected timing/options; later selections use the new settings. Visibility group, takeover, fade, and per-file appearance edits remain live. These edits preserve the layer's scene-tree position.
+
+In ordered mode, the next selection follows the most recently selected file in the edited list. Appending after the last file therefore includes the new entries before wrapping. If that file is removed, its current clip may finish and selection resumes at its next surviving successor from the old list. A successor already preparing may also finish. Emptying the list stops playback and clears the output immediately; adding files to an empty list starts it again.
+
+Use **Reset AutoClip Sequence** in the AutoClip settings or its right-click Sources menu to discard the active/prepared clips and restart. Ordered playback begins at the first file; random playback chooses a fresh clip. **Start with delay** applies again if enabled. Reset changes playback state only, retaining files, layer order, appearance, and other settings. The editor button is available in Live Mode; apply a draft and switch to Live Mode before resetting it. Simply enabling Start with delay does not interrupt playback; it takes effect on reset or a new sequence.
+
+A fixed-duration render starts its ordered playlist at the first file and uses the export frame clock; live playback position and the next ordered file are restored afterward.
 
 Existing Video Sequence layers remain supported. Existing scenes retain their previous AutoClip defaults: random timed clips, no initial delay, and no visibility group or takeover. Whole-file playback has no reserved trailing excerpt; at a zero-delay live seam the final source frame can be held briefly if the next decoder is not ready.

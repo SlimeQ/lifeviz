@@ -908,8 +908,18 @@ internal sealed class FileCaptureService : IDisposable
         out string? error)
     {
         session = null;
+        if (!TryNormalizeAutoClipPaths(paths, out var normalized, out error)) return false;
+        session = new AutoClipSession(normalized, minClipSeconds, maxClipSeconds, minDelaySeconds, maxDelaySeconds);
+        ApplyMasterAudioSettingsToSession(session);
+        ApplyLiveAudioAnalysisSettingsToSession(session);
+        ApplyPerformanceSettingsToSession(session);
+        return true;
+    }
+
+    internal static bool TryNormalizeAutoClipPaths(IReadOnlyList<string>? paths, out List<string> normalized, out string? error)
+    {
         error = null;
-        var normalized = new List<string>();
+        normalized = new List<string>();
 
         foreach (string path in paths ?? Array.Empty<string>())
         {
@@ -942,10 +952,6 @@ internal sealed class FileCaptureService : IDisposable
             }
         }
 
-        session = new AutoClipSession(normalized, minClipSeconds, maxClipSeconds, minDelaySeconds, maxDelaySeconds);
-        ApplyMasterAudioSettingsToSession(session);
-        ApplyLiveAudioAnalysisSettingsToSession(session);
-        ApplyPerformanceSettingsToSession(session);
         return true;
     }
 
@@ -4838,6 +4844,7 @@ internal sealed class FileCaptureService : IDisposable
                 double requestedClipSeconds,
                 double randomUnit,
                 bool loopSelectedFile,
+                bool playWholeFile = false,
                 double? explicitStartSeconds = null,
                 double elapsedSeconds = 0)
             {
@@ -4846,6 +4853,7 @@ internal sealed class FileCaptureService : IDisposable
                 RequestedClipSeconds = requestedClipSeconds;
                 RandomUnit = randomUnit;
                 LoopSelectedFile = loopSelectedFile;
+                PlayWholeFile = playWholeFile;
                 ExplicitStartSeconds = explicitStartSeconds;
                 ElapsedSeconds = elapsedSeconds;
             }
@@ -4855,6 +4863,7 @@ internal sealed class FileCaptureService : IDisposable
             public double RequestedClipSeconds { get; }
             public double RandomUnit { get; }
             public bool LoopSelectedFile { get; }
+            public bool PlayWholeFile { get; }
             public double? ExplicitStartSeconds { get; }
             public double ElapsedSeconds { get; }
         }
@@ -5013,14 +5022,34 @@ internal sealed class FileCaptureService : IDisposable
             double minDelaySeconds,
             double maxDelaySeconds)
         {
-            if (_disposed)
+            lock (_stateLock)
             {
-                return;
-            }
+                if (_disposed) return;
+                var previousPaths = _paths.ToArray();
+                int previousNextIndex = _nextFileIndex;
+                if (!ApplySettings(paths, minClipSeconds, maxClipSeconds, minDelaySeconds, maxDelaySeconds)) return;
 
-            if (ApplySettings(paths, minClipSeconds, maxClipSeconds, minDelaySeconds, maxDelaySeconds))
-            {
-                ResetSchedule();
+                if (_paths.Count == 0)
+                {
+                    ResetSchedule();
+                    return;
+                }
+
+                // Keep the active/prepared clip and its clock. Follow that file in
+                // the edited order; if removed, find its next surviving successor.
+                int anchor = _paths.FindIndex(path => string.Equals(path, _currentPath, StringComparison.OrdinalIgnoreCase));
+                _nextFileIndex = anchor >= 0 ? (anchor + 1) % _paths.Count : 0;
+                if (anchor < 0 && previousPaths.Length > 0)
+                {
+                    for (int offset = 0; offset < previousPaths.Length; offset++)
+                    {
+                        string candidate = previousPaths[(previousNextIndex + offset) % previousPaths.Length];
+                        int index = _paths.FindIndex(path => string.Equals(path, candidate, StringComparison.OrdinalIgnoreCase));
+                        if (index < 0) continue;
+                        _nextFileIndex = index;
+                        break;
+                    }
+                }
             }
         }
 
@@ -5032,19 +5061,23 @@ internal sealed class FileCaptureService : IDisposable
                 _startWithDelay = startWithDelay;
                 _playInOrder = playInOrder;
                 _playWholeFile = playWholeFile;
-                ResetSchedule();
             }
         }
 
         public void SetLoopSelectedFile(bool enabled)
         {
-            if (_loopSelectedFile == enabled)
+            lock (_stateLock)
             {
-                return;
+                _loopSelectedFile = enabled;
             }
+        }
 
-            _loopSelectedFile = enabled;
-            ResetSchedule();
+        public void ResetSequence()
+        {
+            lock (_stateLock)
+            {
+                if (!_disposed) ResetSchedule();
+            }
         }
 
         public FileCaptureFrame? CaptureFrame(int targetWidth, int targetHeight, FitMode fitMode, bool includeSource)
@@ -5721,7 +5754,8 @@ internal sealed class FileCaptureService : IDisposable
                     GetVideoProbeAsync(path),
                     requestedClipSeconds,
                     randomUnit,
-                    _loopSelectedFile && !_playWholeFile));
+                    _loopSelectedFile && !_playWholeFile,
+                    playWholeFile: _playWholeFile));
         }
 
         internal static (double StartSeconds, double ClipSeconds) SelectClipWindow(
@@ -5821,7 +5855,7 @@ internal sealed class FileCaptureService : IDisposable
                     randomUnit: 0,
                     loopSelectedFile: _loopSelectedFile && !_playWholeFile,
                     explicitStartSeconds: startSeconds,
-                    elapsedSeconds));
+                    elapsedSeconds: elapsedSeconds));
         }
 
         private void QueueClipPreparation(PendingClipRequest request)
@@ -5871,7 +5905,7 @@ internal sealed class FileCaptureService : IDisposable
             }
 
             _pendingClip = null;
-            if (!probe.HasValue || (_playWholeFile && !pending.ExplicitStartSeconds.HasValue &&
+            if (!probe.HasValue || (pending.PlayWholeFile && !pending.ExplicitStartSeconds.HasValue &&
                 (!double.IsFinite(probe.Value.DurationSeconds) || probe.Value.DurationSeconds <= 0)))
             {
                 if (_paths.Count == 0)
@@ -5896,7 +5930,7 @@ internal sealed class FileCaptureService : IDisposable
                 startSeconds = Math.Max(0, pending.ExplicitStartSeconds.Value);
                 clipSeconds = Math.Max(0.05, pending.RequestedClipSeconds);
             }
-            else if (_playWholeFile && double.IsFinite(probe.Value.DurationSeconds) && probe.Value.DurationSeconds > 0)
+            else if (pending.PlayWholeFile && double.IsFinite(probe.Value.DurationSeconds) && probe.Value.DurationSeconds > 0)
             {
                 // Whole-file mode preserves the actual end rather than reserving
                 // an excerpt tail. Natural EOF may retain its final frame at a live seam.

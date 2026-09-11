@@ -301,6 +301,8 @@ The `autoclip-takeover` fixture must be one second long. The smoke checks repeat
 
 `autoclip-takeover` also checks nonadjacent multi-selection, group moves and boundary no-ops, top/bottom ordering, selection retention, bulk removal, remove-all, override identity, and synchronization of persisted playback paths.
 
+The same smoke checks AutoClip edits during preparation, clips and gaps, decoder/clock continuity, appended and reordered playback, removal of the active file, draft-model Apply, sibling order, explicit reset with initial delay, and empty/repopulated playlists. It verifies the reset button is disabled in draft mode and stale scene-tree drag state is cleared. The `autoclip` smoke uses explicit resets when setting up independent startup/handoff scenarios and verifies that edits preserve a live handoff. Pass an absolute video path to `autoclip`, since its direct session setup is also used by child decoder processes.
+
 ```powershell
 dotnet bin/Release/net9.0-windows/lifeviz.dll --smoke-test render-failure-cleanup
 ```

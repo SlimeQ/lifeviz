@@ -1,5 +1,7 @@
 # LifeViz
 
+AutoClip playlists can be edited during playback without restarting the active clip or gap or changing layer order. Timing and playback options apply to future selections; **Reset AutoClip Sequence** in Live Mode or the Sources menu explicitly restarts with the optional initial delay. See [AutoClip takeovers and playlists](wiki/AutoClip-Takeovers.md). After a Debug build, run `dotnet bin/Debug/net9.0-windows/lifeviz.dll --smoke-test autoclip-takeover <one-second-video.mp4>` for editing/reset regression checks.
+
 Normal-blended groups now preserve image transparency, including the empty space around DVD Bounce animations. Layer Groups and Pixel Sort Sim Groups retain alpha through intermediate CPU/GPU composites, so transparent backgrounds reveal the scene underneath without darkening soft edges. Validate with `dotnet bin\Release\net9.0-windows\lifeviz.dll --smoke-test group-transparency` after a Release build.
 
 Builds compile shaders before embedding WPF resources, so an ordinary build or release publish includes the current shader changes in one pass.

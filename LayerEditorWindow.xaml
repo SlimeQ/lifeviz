@@ -568,6 +568,8 @@
                                   BorderThickness="0"
                                   SelectedItemChanged="SceneTree_SelectedItemChanged"
                                   PreviewMouseLeftButtonDown="SceneTree_PreviewMouseLeftButtonDown"
+                                  PreviewMouseLeftButtonUp="SceneTree_ClearDragCandidate"
+                                  MouseLeave="SceneTree_ClearDragCandidate"
                                   PreviewMouseMove="SceneTree_PreviewMouseMove"
                                   AllowDrop="True" />
                     </Border>
@@ -1050,6 +1052,11 @@
                                                                VerticalAlignment="Center"
                                                                Margin="0,0,0,6" />
                                                 </StackPanel>
+                                                <Button Content="Reset AutoClip Sequence"
+                                                        HorizontalAlignment="Left"
+                                                        IsEnabled="{Binding DataContext.LiveMode, RelativeSource={RelativeSource AncestorType=Window}}"
+                                                        ToolTip="Restart with the current settings and optional initial delay. Available in Live mode."
+                                                        Click="AutoClipResetSequence_Click" />
                                                 <CheckBox Content="Play files in list order (unchecked = random)" Margin="0,4,0,4"
                                                           IsChecked="{Binding AutoClipPlayInOrder}"
                                                           Checked="AutoClipPlaybackOptions_Changed" Unchecked="AutoClipPlaybackOptions_Changed" />

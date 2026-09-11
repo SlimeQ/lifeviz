@@ -2030,6 +2030,12 @@ public partial class LayerEditorWindow : Window
         }
     }
 
+    private void AutoClipResetSequence_Click(object sender, RoutedEventArgs e)
+    {
+        if (ResolveSourceContext(sender) is { IsAutoClip: true } source && ShouldApplyLive())
+            _owner.ResetAutoClipSequenceFromEditor(source.Id);
+    }
+
     private void AutoClipMoveUp_Click(object sender, RoutedEventArgs e) => MoveAutoClipVideo(-1);
     private void AutoClipMoveDown_Click(object sender, RoutedEventArgs e) => MoveAutoClipVideo(1);
     private void AutoClipMoveTop_Click(object sender, RoutedEventArgs e) => MoveAutoClipVideo(-2);
@@ -2615,7 +2621,12 @@ public partial class LayerEditorWindow : Window
 
     private void SceneTree_PreviewMouseMove(object sender, MouseEventArgs e)
     {
-        if (e.LeftButton != MouseButtonState.Pressed || _draggedSource == null)
+        if (e.LeftButton != MouseButtonState.Pressed)
+        {
+            _draggedSource = null;
+            return;
+        }
+        if (_draggedSource == null)
         {
             return;
         }
@@ -2627,9 +2638,12 @@ public partial class LayerEditorWindow : Window
             return;
         }
 
-        DragDrop.DoDragDrop(SceneTree, _draggedSource, DragDropEffects.Move);
+        var draggedSource = _draggedSource;
         _draggedSource = null;
+        DragDrop.DoDragDrop(SceneTree, draggedSource, DragDropEffects.Move);
     }
+
+    private void SceneTree_ClearDragCandidate(object sender, MouseEventArgs e) => _draggedSource = null;
 
     private void SceneTree_DragOver(object sender, DragEventArgs e)
     {
