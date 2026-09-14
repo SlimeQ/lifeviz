@@ -215,6 +215,16 @@ public partial class MainWindow
         _pendingFullscreen = false;
         InitializeVisualizer();
         DetachRenderLoop();
+        // Initialization can present a live source frame before offline decoders start.
+        // Chemical seeds and temporal history must begin on the bake's first frame.
+        foreach (var layer in EnumerateSimulationLeafLayers(_simulationLayers))
+        {
+            if (layer.Engine is GpuPixelSortBackend { IsFieldEffect: true } effect)
+            {
+                effect.Randomize();
+                layer.TimeSinceLastStep = 0;
+            }
+        }
         if (request.Profile) _frameProfiler.Start("background-bake");
         try { await RunOfflineRenderAsync(progress, TimeSpan.FromSeconds(request.DurationSeconds), request.OutputFps); }
         finally

@@ -510,7 +510,8 @@ public partial class LayerEditorWindow : Window
             PixelSortCellHeight = source.PixelSortCellHeight,
             DatamoshFeedback = source.DatamoshFeedback,
             DatamoshDisplacement = source.DatamoshDisplacement,
-            DatamoshBlockSize = source.DatamoshBlockSize
+            DatamoshBlockSize = source.DatamoshBlockSize,
+            Effects = source.Effects?.Clone() ?? new()
         };
 
         foreach (var child in source.Children)
@@ -1123,6 +1124,10 @@ public partial class LayerEditorWindow : Window
 
     private void AddSimulationLayerDirect_Click(object sender, RoutedEventArgs e) => AddSimulationLayer(LayerEditorSimulationLayerType.Life);
 
+    private void AddSimulationFluidInk_Click(object sender, RoutedEventArgs e) => AddSimulationLayer(LayerEditorSimulationLayerType.FluidInk);
+    private void AddSimulationTimeDisplacement_Click(object sender, RoutedEventArgs e) => AddSimulationLayer(LayerEditorSimulationLayerType.TimeDisplacement);
+    private void AddSimulationReactionDiffusion_Click(object sender, RoutedEventArgs e) => AddSimulationLayer(LayerEditorSimulationLayerType.ReactionDiffusion);
+
     private void AddSimulationDatamosh_Click(object sender, RoutedEventArgs e) => AddSimulationLayer(LayerEditorSimulationLayerType.Datamosh);
 
     private void AddSimulationPixelSort_Click(object sender, RoutedEventArgs e) => AddSimulationLayer(LayerEditorSimulationLayerType.PixelSort);
@@ -1138,9 +1143,7 @@ public partial class LayerEditorWindow : Window
             return;
         }
 
-        string baseName = layerType == LayerEditorSimulationLayerType.Datamosh ? "Datamosh" : layerType == LayerEditorSimulationLayerType.PixelSort
-            ? "Pixel Sort"
-            : "Life Sim";
+        string baseName = SimulationEffectSettings.DisplayName(layerType.ToString());
         int suffix = 1;
         string nextName = baseName;
         while (EnumerateSimulationLayers(simulationLayers).Any(layer => string.Equals(layer.Name, nextName, StringComparison.OrdinalIgnoreCase)))
@@ -1182,6 +1185,13 @@ public partial class LayerEditorWindow : Window
             { Id = Guid.NewGuid(), Input = "Bass", Output = "DatamoshFeedback", Amount = 0.8 });
             newLayer.ReactiveMappings.Add(new LayerEditorSimulationReactiveMapping
             { Id = Guid.NewGuid(), Input = "Mid", Output = "DatamoshDisplacement", Amount = 0.6 });
+        }
+        if (layerType is LayerEditorSimulationLayerType.FluidInk or LayerEditorSimulationLayerType.TimeDisplacement or LayerEditorSimulationLayerType.ReactionDiffusion)
+        {
+            newLayer.BlendMode = "Normal";
+            newLayer.LifeOpacity = 1;
+            string output = layerType switch { LayerEditorSimulationLayerType.FluidInk => "FluidFlow", LayerEditorSimulationLayerType.TimeDisplacement => "TimeSpread", _ => "ReactionSeed" };
+            newLayer.ReactiveMappings.Add(new() { Input = "Bass", Output = output, Amount = 0.3 });
         }
         AttachReactiveMappingHandlers(newLayer);
 

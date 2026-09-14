@@ -1,5 +1,18 @@
 # Build & Install
 
+## Validate field simulations
+
+```powershell
+dotnet build -c Release
+dotnet bin/Release/net9.0-windows/lifeviz.dll --smoke-test field-effects
+dotnet bin/Release/net9.0-windows/lifeviz.dll --smoke-test field-effects-editor
+./tests/Test-FieldEffects.ps1
+```
+
+The GPU smoke checks all three effects for evolving output, deterministic reset/replay, audio-to-control propagation and reset, autosave clones, transparent and partial-alpha input, GPU publication, recording channel order, dimension resets, and the 4K time-history budget. It saves representative frames under `bin/Release/net9.0-windows/field-effects-smoke`. The editor smoke checks add/default controls, live updates, project/draft roundtrips and settings isolation, and saves editor PNGs beside the executable. Existing `datamosh`, `gpu-pixel-sort`, `simulation-blending`, and `group-transparency` checks cover the shared infrastructure.
+
+`tests/Test-FieldEffects.ps1` generates a video/audio fixture and runs each effect through two three-second lossless background bakes. It checks completion, exactly 90 decoded frames, animation, and identical decoded frames across repeated bakes, including consistent audio from frame zero while video metadata initializes. Use `-ExecutablePath <lifeviz.exe>` to validate a published payload. Videos, previews, requests and logs remain in isolated `artifacts/field-effects-bake-*` folders; it does not load or change the user's scene. The regular build compiles and embeds all three new shader entry points; the installer requires no additional dependencies for these layers.
+
 ## Bundled projectM
 
 The `projectm` smoke also exercises the preset picker's native animated preview: library/playlist/import selection, debounce, pause, audio input, invalid-file recovery, draft isolation, and cleanup on close. Its `projectm-smoke/playlist-controls.png` includes the rendered preview pane for layout inspection.

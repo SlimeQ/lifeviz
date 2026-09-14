@@ -8785,6 +8785,7 @@ public partial class MainWindow : Window
             DatamoshFeedback = layer.DatamoshFeedback,
             DatamoshDisplacement = layer.DatamoshDisplacement,
             DatamoshBlockSize = layer.DatamoshBlockSize,
+            Effects = layer.Effects?.Clone() ?? new(),
             Children = layer.Children.Select(CloneSimulationLayerSpec).ToList()
         };
     }
@@ -10823,6 +10824,7 @@ public partial class MainWindow : Window
     {
         foreach (var layer in EnumerateSimulationLeafLayers(_simulationLayers))
         {
+            layer.EffectiveEffects.CopyFrom(layer.Effects);
             layer.EffectiveDatamoshFeedback = Math.Clamp(layer.DatamoshFeedback, 0, 0.98);
             layer.EffectiveDatamoshDisplacement = Math.Clamp(layer.DatamoshDisplacement, 0, 1);
             layer.EffectiveLifeOpacity = Math.Clamp(layer.LifeOpacity, 0, 1);
@@ -10879,6 +10881,15 @@ public partial class MainWindow : Window
                             layer.EffectiveRgbHueShiftSpeedDegreesPerSecond + (inputValue * Math.Clamp(mapping.Amount, 0, 180)),
                             -MaxRgbHueShiftSpeedDegreesPerSecond,
                             MaxRgbHueShiftSpeedDegreesPerSecond);
+                        break;
+                    case SimulationReactiveOutput.FluidFlow:
+                        layer.EffectiveEffects.FluidFlow += inputValue * Math.Clamp(mapping.Amount, 0, 1);
+                        break;
+                    case SimulationReactiveOutput.TimeSpread:
+                        layer.EffectiveEffects.TimeSpread += inputValue * Math.Clamp(mapping.Amount, 0, 1);
+                        break;
+                    case SimulationReactiveOutput.ReactionSeed:
+                        layer.EffectiveEffects.ReactionSeed += inputValue * Math.Clamp(mapping.Amount, 0, 1);
                         break;
                     case SimulationReactiveOutput.DatamoshFeedback:
                         layer.EffectiveDatamoshFeedback = Math.Clamp(layer.EffectiveDatamoshFeedback + inputValue * Math.Clamp(mapping.Amount, 0, 1), 0, 0.98);
@@ -12041,7 +12052,10 @@ public partial class MainWindow : Window
     {
         Life,
         PixelSort,
-        Datamosh
+        Datamosh,
+        FluidInk,
+        TimeDisplacement,
+        ReactionDiffusion
     }
 
     private enum AudioReactiveSeedPattern
@@ -12077,6 +12091,7 @@ public partial class MainWindow : Window
         public double DatamoshFeedback { get; set; } = 0.15;
         public double DatamoshDisplacement { get; set; }
         public int DatamoshBlockSize { get; set; } = 16;
+        public SimulationEffectSettings Effects { get; set; } = new();
         public double EffectiveLifeOpacity { get; set; } = 1.0;
         public double EffectiveSimulationTargetFps { get; set; } = DefaultFps;
         public double ReactiveHueShiftDegrees { get; set; }
@@ -12086,6 +12101,7 @@ public partial class MainWindow : Window
         public double EffectiveThresholdMax { get; set; } = 0.75;
         public int EffectivePixelSortCellWidth { get; set; } = 12;
         public int EffectivePixelSortCellHeight { get; set; } = 8;
+        public SimulationEffectSettings EffectiveEffects { get; } = new();
         public double EffectiveDatamoshFeedback { get; set; } = 0.15;
         public double EffectiveDatamoshDisplacement { get; set; }
         public double TimeSinceLastStep { get; set; }
@@ -12126,6 +12142,7 @@ public partial class MainWindow : Window
         public double DatamoshFeedback { get; init; } = 0.15;
         public double DatamoshDisplacement { get; init; }
         public int DatamoshBlockSize { get; init; } = 16;
+        public SimulationEffectSettings Effects { get; init; } = new();
         public List<SimulationLayerSpec> Children { get; init; } = new();
     }
 
@@ -12358,7 +12375,8 @@ public partial class MainWindow : Window
             PixelSortCellHeight = layer.PixelSortCellHeight,
             DatamoshFeedback = layer.DatamoshFeedback,
             DatamoshDisplacement = layer.DatamoshDisplacement,
-            DatamoshBlockSize = layer.DatamoshBlockSize
+            DatamoshBlockSize = layer.DatamoshBlockSize,
+            Effects = layer.Effects?.Clone() ?? new()
         };
 
         foreach (var child in layer.Children)
@@ -12407,7 +12425,8 @@ public partial class MainWindow : Window
             PixelSortCellHeight = layer.PixelSortCellHeight,
             DatamoshFeedback = layer.DatamoshFeedback,
             DatamoshDisplacement = layer.DatamoshDisplacement,
-            DatamoshBlockSize = layer.DatamoshBlockSize
+            DatamoshBlockSize = layer.DatamoshBlockSize,
+            Effects = layer.Effects?.Clone() ?? new()
         };
 
         foreach (var child in layer.Children)
@@ -12464,7 +12483,7 @@ public partial class MainWindow : Window
     private ISimulationBackend CreateConfiguredSimulationEngine(SimulationLayerType layerType, bool randomize)
     {
         ISimulationBackend engine = layerType != SimulationLayerType.Life
-            ? new GpuPixelSortBackend(datamosh: layerType == SimulationLayerType.Datamosh)
+            ? new GpuPixelSortBackend(effect: Enum.Parse<ImageSimulationEffect>(layerType.ToString()))
             : new GpuSimulationBackend();
         ConfigureSimulationEngine(engine, _configuredRows, _configuredDepth, _currentAspectRatio, randomize);
         return engine;
@@ -12484,6 +12503,12 @@ public partial class MainWindow : Window
     {
         if (layer.IsGroup || layer.Engine == null)
         {
+            return;
+        }
+
+        if (layer.Engine is GpuPixelSortBackend fieldBackend && fieldBackend.IsFieldEffect)
+        {
+            fieldBackend.SetEffectSettings(layer.EffectiveEffects);
             return;
         }
 
@@ -12879,11 +12904,7 @@ public partial class MainWindow : Window
 
         return kind == LayerEditorSimulationItemKind.Group
             ? $"Sim Group {index + 1}"
-            : layerType == SimulationLayerType.Datamosh
-                ? $"Datamosh {index + 1}"
-                : layerType == SimulationLayerType.PixelSort
-                ? $"Pixel Sort {index + 1}"
-                : $"Life Sim {index + 1}";
+            : $"{SimulationEffectSettings.DisplayName(layerType.ToString())} {index + 1}";
     }
 
     private List<SimulationLayerSpec> NormalizeSimulationLayerSpecs(IReadOnlyList<LayerEditorSimulationLayer>? simulationLayers, bool fallbackToDefault = true)
@@ -12964,7 +12985,8 @@ public partial class MainWindow : Window
             PixelSortCellHeight = spec.PixelSortCellHeight,
             DatamoshFeedback = spec.DatamoshFeedback,
             DatamoshDisplacement = spec.DatamoshDisplacement,
-            DatamoshBlockSize = spec.DatamoshBlockSize
+            DatamoshBlockSize = spec.DatamoshBlockSize,
+            Effects = spec.Effects?.Clone() ?? new()
         });
     }
 
@@ -13046,7 +13068,8 @@ public partial class MainWindow : Window
             PixelSortCellHeight = Math.Clamp(layer.PixelSortCellHeight, 1, 4096),
             DatamoshFeedback = layer.DatamoshFeedback,
             DatamoshDisplacement = layer.DatamoshDisplacement,
-            DatamoshBlockSize = layer.DatamoshBlockSize
+            DatamoshBlockSize = layer.DatamoshBlockSize,
+            Effects = layer.Effects?.Clone() ?? new()
         };
     }
 
@@ -13110,7 +13133,8 @@ public partial class MainWindow : Window
             PixelSortCellHeight = pixelSortCellHeight,
             DatamoshFeedback = layer.DatamoshFeedback,
             DatamoshDisplacement = layer.DatamoshDisplacement,
-            DatamoshBlockSize = layer.DatamoshBlockSize
+            DatamoshBlockSize = layer.DatamoshBlockSize,
+            Effects = layer.Effects?.Clone() ?? new()
         };
     }
 
@@ -13301,7 +13325,7 @@ public partial class MainWindow : Window
         bool needsEngineReplacement =
             layer.Engine == null ||
             (spec.LayerType != SimulationLayerType.Life &&
-             (layer.Engine is not GpuPixelSortBackend effect || effect.IsDatamosh != (spec.LayerType == SimulationLayerType.Datamosh))) ||
+             (layer.Engine is not GpuPixelSortBackend effect || effect.Effect.ToString() != spec.LayerType.ToString())) ||
             (spec.LayerType == SimulationLayerType.Life && layer.Engine is not GpuSimulationBackend);
 
         if (needsEngineReplacement && layer.Engine != null)
@@ -13348,6 +13372,8 @@ public partial class MainWindow : Window
         layer.DatamoshFeedback = Math.Clamp(spec.DatamoshFeedback, 0, 0.98);
         layer.DatamoshDisplacement = Math.Clamp(spec.DatamoshDisplacement, 0, 1);
         layer.DatamoshBlockSize = Math.Clamp(spec.DatamoshBlockSize, 1, 512);
+        layer.Effects = spec.Effects?.Clone() ?? new();
+        layer.EffectiveEffects.CopyFrom(layer.Effects);
         layer.EffectiveDatamoshFeedback = layer.DatamoshFeedback;
         layer.EffectiveDatamoshDisplacement = layer.DatamoshDisplacement;
         layer.EffectiveLifeOpacity = layer.LifeOpacity;
@@ -17571,7 +17597,7 @@ public partial class MainWindow : Window
     }
 
     private static bool LayerPublishesStandaloneOutput(SimulationLayerState layer)
-        => layer.LayerType is SimulationLayerType.PixelSort or SimulationLayerType.Datamosh;
+        => layer.LayerType != SimulationLayerType.Life;
 
     private static void SampleInlineSimulationLayerColor(
         InlineSimulationBlendLayerData layer,
@@ -19774,7 +19800,8 @@ public partial class MainWindow : Window
             PixelSortCellHeight = layer.PixelSortCellHeight,
             DatamoshFeedback = layer.DatamoshFeedback,
             DatamoshDisplacement = layer.DatamoshDisplacement,
-            DatamoshBlockSize = layer.DatamoshBlockSize
+            DatamoshBlockSize = layer.DatamoshBlockSize,
+            Effects = layer.Effects?.Clone() ?? new()
         };
 
         foreach (var child in layer.Children)
@@ -19820,7 +19847,8 @@ public partial class MainWindow : Window
             PixelSortCellHeight = layer.PixelSortCellHeight,
             DatamoshFeedback = layer.DatamoshFeedback,
             DatamoshDisplacement = layer.DatamoshDisplacement,
-            DatamoshBlockSize = layer.DatamoshBlockSize
+            DatamoshBlockSize = layer.DatamoshBlockSize,
+            Effects = layer.Effects?.Clone() ?? new()
         };
 
         foreach (var child in layer.Children)
@@ -21021,6 +21049,7 @@ public partial class MainWindow : Window
             public double DatamoshFeedback { get; set; } = 0.15;
             public double DatamoshDisplacement { get; set; }
             public int DatamoshBlockSize { get; set; } = 16;
+            public SimulationEffectSettings Effects { get; set; } = new();
             public int PixelSortGridColumns { get; set; }
             public int PixelSortGridRows { get; set; }
             public List<SimulationLayerConfig> Children { get; set; } = new();

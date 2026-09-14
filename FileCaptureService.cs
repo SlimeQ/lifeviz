@@ -2631,6 +2631,22 @@ internal sealed class FileCaptureService : IDisposable
                 return false;
             }
 
+            // Audio is requested before the first video CaptureFrame. A pending probe
+            // must not turn frame zero into silence and shift all subsequent PCM.
+            // Use the same bounded initialization wait as offline video capture.
+            if (!_initializationTask.IsCompleted)
+            {
+                try
+                {
+                    if (!_initializationTask.Wait(VideoProbeTimeoutMilliseconds + VideoProbeWaitGraceMilliseconds))
+                        throw new TimeoutException($"Offline audio initialization timed out: {DisplayName}");
+                }
+                catch (AggregateException ex)
+                {
+                    throw new InvalidOperationException($"Offline audio initialization failed: {DisplayName}", ex);
+                }
+            }
+
             double volume;
             bool shouldDecode;
             lock (_audioLock)

@@ -1,5 +1,9 @@
 # LifeViz
 
+**Three new simulation layers:** Fluid Ink carries scene colors through an evolving flow field, Time Displacement samples different moments across the image, and Reaction–Diffusion grows chemical patterns seeded by the scene. Add them from a Sim Group in the Scene Editor, adjust their controls and Low audio mappings, and save them in version 13 scene projects. [Controls, timing, and memory limits](wiki/Field-Simulations.md).
+
+Validate with `dotnet build -c Release`, `dotnet bin/Release/net9.0-windows/lifeviz.dll --smoke-test field-effects`, `dotnet bin/Release/net9.0-windows/lifeviz.dll --smoke-test field-effects-editor`, and `./tests/Test-FieldEffects.ps1`. The script runs each effect through two real background bakes and compares all 90 decoded frames for repeatability. Use `-ExecutablePath <lifeviz.exe>` for a published build; fixtures and previews stay under `artifacts/field-effects-bake-*`. See [Build & Install](wiki/Build-and-Install.md#validate-field-simulations).
+
 The MilkDrop preset picker includes an animated preview for library and playlist selections, with a silent demo beat or the current audio input. Audition presets before adding them, pause or restart the preview, and browse without changing the playing layer.
 
 **MilkDrop / projectM layers** add the bundled Cream of the Crop preset collection and textures to the source stack. Build a per-layer playlist, play in order or shuffle without repeats, choose timed or beat-triggered changes, and use smooth transitions or cuts. Live playback follows the selected audio source; background bakes use decoded video audio and a fixed frame clock. See [MilkDrop / projectM](wiki/MilkDrop-projectM.md) for controls and asset-license details.

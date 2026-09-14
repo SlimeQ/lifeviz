@@ -25,12 +25,12 @@ internal sealed class LayerConfigFile
             if (document.RootElement.TryGetProperty("BlendMode", out var blendMode))
                 file.ProjectSettings.CompositeBlendMode = blendMode.GetString() ?? "Additive";
         }
-        else if (!document.RootElement.TryGetProperty("Version", out _) || file.Version > 12)
+        else if (!document.RootElement.TryGetProperty("Version", out _) || file.Version > 13)
             throw new InvalidDataException("This is not a supported LifeViz scene project.");
         return file;
     }
 
-    public int Version { get; set; } = 12;
+    public int Version { get; set; } = 13;
     public DateTime SavedUtc { get; set; } = DateTime.UtcNow;
     public LayerConfigProjectSettings ProjectSettings { get; set; } = new();
     public List<LayerConfigSimulationLayer> SimulationLayers { get; set; } = new();
@@ -292,7 +292,8 @@ internal sealed class LayerConfigFile
             PixelSortCellHeight = Math.Clamp(layer.PixelSortCellHeight, 1, 4096),
             DatamoshFeedback = layer.DatamoshFeedback,
             DatamoshDisplacement = layer.DatamoshDisplacement,
-            DatamoshBlockSize = layer.DatamoshBlockSize
+            DatamoshBlockSize = layer.DatamoshBlockSize,
+            Effects = layer.Effects?.Clone() ?? new()
         };
 
         foreach (var child in layer.Children)
@@ -468,6 +469,7 @@ internal sealed class LayerConfigFile
             DatamoshFeedback = layer.DatamoshFeedback,
             DatamoshDisplacement = layer.DatamoshDisplacement,
             DatamoshBlockSize = layer.DatamoshBlockSize,
+            Effects = layer.Effects?.Clone() ?? new(),
             Parent = parent
         };
 
@@ -548,7 +550,8 @@ internal sealed class LayerConfigFile
             PixelSortCellHeight = layer.PixelSortCellHeight,
             DatamoshFeedback = layer.DatamoshFeedback,
             DatamoshDisplacement = layer.DatamoshDisplacement,
-            DatamoshBlockSize = layer.DatamoshBlockSize
+            DatamoshBlockSize = layer.DatamoshBlockSize,
+            Effects = layer.Effects?.Clone() ?? new()
         };
         target.Add(flattened);
     }
@@ -683,8 +686,7 @@ internal sealed class LayerConfigFile
 
     private static string ResolveDefaultSimulationLayerName(LayerEditorSimulationLayerType layerType)
     {
-        return layerType == LayerEditorSimulationLayerType.Datamosh ? "Datamosh"
-            : layerType == LayerEditorSimulationLayerType.PixelSort ? "Pixel Sort" : "Life Sim";
+        return SimulationEffectSettings.DisplayName(layerType.ToString());
     }
 }
 
@@ -778,6 +780,7 @@ internal sealed class LayerConfigSimulationLayer
     public double DatamoshFeedback { get; set; } = 0.15;
     public double DatamoshDisplacement { get; set; }
     public int DatamoshBlockSize { get; set; } = 16;
+    public SimulationEffectSettings Effects { get; set; } = new();
     public int PixelSortGridColumns { get; set; }
     public int PixelSortGridRows { get; set; }
     public List<LayerConfigSimulationLayer> Children { get; set; } = new();

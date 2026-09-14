@@ -41,6 +41,11 @@
     <None Include="Assets\GpuFinalComposite.hlsl" />
     <None Include="Assets\GpuPixelSort.hlsl" />
     <None Include="Assets\GpuDatamosh.hlsl" />
+    <None Include="Assets\GpuFieldEffects.hlsl" />
+    <Resource Include="Assets\GpuAdvanceFieldCS.cso" />
+    <Resource Include="Assets\GpuCaptureHistoryCS.cso" />
+    <Resource Include="Assets\GpuEffectOutputCS.cso" />
+
     <Resource Include="Assets\GpuDatamoshCS.cso" />
     <None Include="Assets\GpuSourceComposite.hlsl" />
     <None Include="Assets\GpuSimulation.hlsl" />
@@ -103,6 +108,10 @@
   </Target>
 
   <Target Name="CompileGpuShaders" BeforeTargets="PrepareForBuild">
+    <Exec Command="&quot;$(FxcExePath)&quot; /T cs_5_0 /E AdvanceFieldCS /nologo /Fo &quot;Assets\GpuAdvanceFieldCS.cso&quot; &quot;Assets\GpuFieldEffects.hlsl&quot;" Condition="Exists('$(FxcExePath)')" />
+    <Exec Command="&quot;$(FxcExePath)&quot; /T cs_5_0 /E CaptureHistoryCS /nologo /Fo &quot;Assets\GpuCaptureHistoryCS.cso&quot; &quot;Assets\GpuFieldEffects.hlsl&quot;" Condition="Exists('$(FxcExePath)')" />
+    <Exec Command="&quot;$(FxcExePath)&quot; /T cs_5_0 /E EffectOutputCS /nologo /Fo &quot;Assets\GpuEffectOutputCS.cso&quot; &quot;Assets\GpuFieldEffects.hlsl&quot;" Condition="Exists('$(FxcExePath)')" />
+
     <Exec Command="&quot;$(FxcExePath)&quot; /T cs_5_0 /E DatamoshCS /nologo /Fo &quot;Assets\GpuDatamoshCS.cso&quot; &quot;Assets\GpuDatamosh.hlsl&quot;" Condition="Exists('$(FxcExePath)')" />
     <Message Text="Compiling GPU shaders Assets\GpuComposite.hlsl..." Importance="high" />
     <Exec Command="&quot;$(FxcExePath)&quot; /T vs_4_0 /E VSMain /nologo /Fo &quot;Assets\GpuCompositeVS.cso&quot; &quot;Assets\GpuComposite.hlsl&quot;" Condition="Exists('$(FxcExePath)')" />

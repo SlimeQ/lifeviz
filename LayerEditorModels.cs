@@ -32,7 +32,10 @@ internal enum LayerEditorSimulationLayerType
 {
     Life,
     PixelSort,
-    Datamosh
+    Datamosh,
+    FluidInk,
+    TimeDisplacement,
+    ReactionDiffusion
 }
 
 internal sealed class LayerEditorOption
@@ -227,7 +230,10 @@ internal static class LayerEditorOptions
         new LayerEditorOption(nameof(SimulationReactiveOutput.PixelSortCellWidth), "Cell Width"),
         new LayerEditorOption(nameof(SimulationReactiveOutput.PixelSortCellHeight), "Cell Height"),
         new LayerEditorOption(nameof(SimulationReactiveOutput.DatamoshFeedback), "Datamosh Feedback"),
-        new LayerEditorOption(nameof(SimulationReactiveOutput.DatamoshDisplacement), "Datamosh Displacement")
+        new LayerEditorOption(nameof(SimulationReactiveOutput.DatamoshDisplacement), "Datamosh Displacement"),
+        new LayerEditorOption(nameof(SimulationReactiveOutput.FluidFlow), "Fluid Flow"),
+        new LayerEditorOption(nameof(SimulationReactiveOutput.TimeSpread), "Time Spread"),
+        new LayerEditorOption(nameof(SimulationReactiveOutput.ReactionSeed), "Reaction Seeding")
     };
 }
 
@@ -1311,6 +1317,9 @@ internal sealed class LayerEditorSimulationLayer : LayerEditorNotify
                 OnPropertyChanged(nameof(IsLifeLayer));
                 OnPropertyChanged(nameof(IsPixelSortLayer));
                 OnPropertyChanged(nameof(IsDatamoshLayer));
+                OnPropertyChanged(nameof(IsFluidInkLayer));
+                OnPropertyChanged(nameof(IsTimeDisplacementLayer));
+                OnPropertyChanged(nameof(IsReactionDiffusionLayer));
                 OnPropertyChanged(nameof(KindLabel));
                 OnPropertyChanged(nameof(TreeLabel));
                 OnPropertyChanged(nameof(Details));
@@ -1487,6 +1496,8 @@ internal sealed class LayerEditorSimulationLayer : LayerEditorNotify
         }
     }
 
+    public SimulationEffectSettings Effects { get; set; } = new();
+
     private double _datamoshFeedback = 0.15;
     public double DatamoshFeedback
     {
@@ -1600,7 +1611,10 @@ internal sealed class LayerEditorSimulationLayer : LayerEditorNotify
 
     public bool IsDatamoshLayer => !IsGroup && LayerType == LayerEditorSimulationLayerType.Datamosh;
 
-    public string TypeLabel => IsDatamoshLayer ? "Datamosh" : LayerType == LayerEditorSimulationLayerType.PixelSort ? "Pixel Sort" : "Life Sim";
+    public bool IsFluidInkLayer => !IsGroup && LayerType == LayerEditorSimulationLayerType.FluidInk;
+    public bool IsTimeDisplacementLayer => !IsGroup && LayerType == LayerEditorSimulationLayerType.TimeDisplacement;
+    public bool IsReactionDiffusionLayer => !IsGroup && LayerType == LayerEditorSimulationLayerType.ReactionDiffusion;
+    public string TypeLabel => SimulationEffectSettings.DisplayName(LayerType.ToString());
 
     public string KindLabel => IsGroup ? "Sim Group" : TypeLabel;
 
@@ -1610,6 +1624,8 @@ internal sealed class LayerEditorSimulationLayer : LayerEditorNotify
 
     public string Details => IsGroup
         ? $"{(Enabled ? "Enabled" : "Disabled")} | {Children.Count} item{(Children.Count == 1 ? string.Empty : "s")}"
+        : IsFluidInkLayer || IsTimeDisplacementLayer || IsReactionDiffusionLayer
+            ? $"{(Enabled ? "Enabled" : "Disabled")} | {TypeLabel} | {BlendMode} | Opacity {LifeOpacity:P0} | Reactive {ReactiveMappings.Count}"
         : IsDatamoshLayer
             ? $"{(Enabled ? "Enabled" : "Disabled")} | Datamosh | {BlendMode} | Feedback {DatamoshFeedback:P0} | Displacement {DatamoshDisplacement:P0} | Block {DatamoshBlockSize}px | Reactive {ReactiveMappings.Count}"
             : LayerType == LayerEditorSimulationLayerType.PixelSort

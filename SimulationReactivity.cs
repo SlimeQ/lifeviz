@@ -27,7 +27,10 @@ internal enum SimulationReactiveOutput
     PixelSortCellWidth,
     PixelSortCellHeight,
     DatamoshFeedback,
-    DatamoshDisplacement
+    DatamoshDisplacement,
+    FluidFlow,
+    TimeSpread,
+    ReactionSeed
 }
 
 internal sealed class SimulationReactiveMapping

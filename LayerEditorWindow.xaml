@@ -1237,6 +1237,10 @@
                                             <Button Content="Add Pixel Sort Layer"
                                                     Click="AddSimulationPixelSort_Click" />
                                             <Button Content="Add Datamosh Layer" Click="AddSimulationDatamosh_Click" />
+                                            <Button Content="Add Fluid Ink" Click="AddSimulationFluidInk_Click" />
+                                            <Button Content="Add Time Displacement" Click="AddSimulationTimeDisplacement_Click" />
+                                            <Button Content="Add Reaction–Diffusion" Click="AddSimulationReactionDiffusion_Click" />
+
                                             <Button Content="Move Up"
                                                     Click="MoveSimulationLayerUp_Click" />
                                             <Button Content="Move Down"
@@ -1521,7 +1525,98 @@
                                                             </WrapPanel>
                                                         </StackPanel>
 
-                                                        <GroupBox x:Name="SelectedSimulationReactiveMappingsGroupBox"
+                                                        <StackPanel Margin="0,4,0,8">
+                                                              <StackPanel.Style>
+                                                                  <Style TargetType="StackPanel">
+                                                                      <Setter Property="Visibility" Value="Collapsed"/>
+                                                                      <Style.Triggers>
+                                                                          <DataTrigger Binding="{Binding IsFluidInkLayer}" Value="True">
+                                                                              <Setter Property="Visibility" Value="Visible"/>
+                                                                          </DataTrigger>
+                                                                      </Style.Triggers>
+                                                                  </Style>
+                                                              </StackPanel.Style>
+                                                              <TextBlock Text="Advect scene colors through an evolving flow field." TextWrapping="Wrap" Foreground="#A0A0A0" Margin="0,0,0,8"/>
+                                                              <WrapPanel>
+                                                                  <StackPanel Orientation="Horizontal" Margin="0,0,12,6">
+                                                                      <TextBlock Text="Flow" VerticalAlignment="Center"/>
+                                                                      <Slider Minimum="0" Maximum="1" TickFrequency="0.01" IsSnapToTickEnabled="True" Value="{Binding Effects.FluidFlow, UpdateSourceTrigger=PropertyChanged}" Width="140" Margin="8,0,0,0" ValueChanged="SimulationLayerDatamosh_Changed"/>
+                                                                      <TextBlock Text="{Binding Effects.FluidFlow, StringFormat={}{0:P0}}" Margin="8,0,0,0" VerticalAlignment="Center"/>
+                                                                  </StackPanel>
+                                                                  <StackPanel Orientation="Horizontal" Margin="0,0,12,6">
+                                                                      <TextBlock Text="Persistence" VerticalAlignment="Center"/>
+                                                                      <Slider Minimum="0" Maximum="0.995" TickFrequency="0.005" IsSnapToTickEnabled="True" Value="{Binding Effects.FluidPersistence, UpdateSourceTrigger=PropertyChanged}" Width="140" Margin="8,0,0,0" ValueChanged="SimulationLayerDatamosh_Changed"/>
+                                                                      <TextBlock Text="{Binding Effects.FluidPersistence, StringFormat={}{0:P1}}" Margin="8,0,0,0" VerticalAlignment="Center"/>
+                                                                  </StackPanel>
+                                                                  <StackPanel Orientation="Horizontal" Margin="0,0,12,6">
+                                                                      <TextBlock Text="Swirl" VerticalAlignment="Center"/>
+                                                                      <Slider Minimum="0" Maximum="1" TickFrequency="0.01" IsSnapToTickEnabled="True" Value="{Binding Effects.FluidSwirl, UpdateSourceTrigger=PropertyChanged}" Width="140" Margin="8,0,0,0" ValueChanged="SimulationLayerDatamosh_Changed"/>
+                                                                      <TextBlock Text="{Binding Effects.FluidSwirl, StringFormat={}{0:P0}}" Margin="8,0,0,0" VerticalAlignment="Center"/>
+                                                                  </StackPanel>
+                                                              </WrapPanel>
+                                                          </StackPanel>
+                                                          <StackPanel Margin="0,4,0,8">
+                                                              <StackPanel.Style>
+                                                                  <Style TargetType="StackPanel">
+                                                                      <Setter Property="Visibility" Value="Collapsed"/>
+                                                                      <Style.Triggers>
+                                                                          <DataTrigger Binding="{Binding IsTimeDisplacementLayer}" Value="True">
+                                                                              <Setter Property="Visibility" Value="Visible"/>
+                                                                          </DataTrigger>
+                                                                      </Style.Triggers>
+                                                                  </Style>
+                                                              </StackPanel.Style>
+                                                              <TextBlock Text="Sample different moments across the image. History fills over 64 simulation steps; 0 spread returns clean input." TextWrapping="Wrap" Foreground="#A0A0A0" Margin="0,0,0,8"/>
+                                                              <WrapPanel>
+                                                                  <StackPanel Orientation="Horizontal" Margin="0,0,12,6">
+                                                                      <TextBlock Text="Time Spread" VerticalAlignment="Center"/>
+                                                                      <Slider Minimum="0" Maximum="1" TickFrequency="0.01" IsSnapToTickEnabled="True" Value="{Binding Effects.TimeSpread, UpdateSourceTrigger=PropertyChanged}" Width="140" Margin="8,0,0,0" ValueChanged="SimulationLayerDatamosh_Changed"/>
+                                                                      <TextBlock Text="{Binding Effects.TimeSpread, StringFormat={}{0:P0}}" Margin="8,0,0,0" VerticalAlignment="Center"/>
+                                                                  </StackPanel>
+                                                                  <StackPanel Orientation="Horizontal" Margin="0,0,12,6">
+                                                                      <TextBlock Text="Pattern Scale" VerticalAlignment="Center"/>
+                                                                      <Slider Minimum="0.5" Maximum="12" TickFrequency="0.1" IsSnapToTickEnabled="True" Value="{Binding Effects.TimeScale, UpdateSourceTrigger=PropertyChanged}" Width="140" Margin="8,0,0,0" ValueChanged="SimulationLayerDatamosh_Changed"/>
+                                                                      <TextBlock Text="{Binding Effects.TimeScale, StringFormat={}{0:0.0}}" Margin="8,0,0,0" VerticalAlignment="Center"/>
+                                                                  </StackPanel>
+                                                                  <StackPanel Orientation="Horizontal" Margin="0,0,12,6">
+                                                                      <TextBlock Text="Pattern Motion" VerticalAlignment="Center"/>
+                                                                      <Slider Minimum="0" Maximum="1" TickFrequency="0.01" IsSnapToTickEnabled="True" Value="{Binding Effects.TimeMotion, UpdateSourceTrigger=PropertyChanged}" Width="140" Margin="8,0,0,0" ValueChanged="SimulationLayerDatamosh_Changed"/>
+                                                                      <TextBlock Text="{Binding Effects.TimeMotion, StringFormat={}{0:P0}}" Margin="8,0,0,0" VerticalAlignment="Center"/>
+                                                                  </StackPanel>
+                                                              </WrapPanel>
+                                                          </StackPanel>
+                                                          <StackPanel Margin="0,4,0,8">
+                                                              <StackPanel.Style>
+                                                                  <Style TargetType="StackPanel">
+                                                                      <Setter Property="Visibility" Value="Collapsed"/>
+                                                                      <Style.Triggers>
+                                                                          <DataTrigger Binding="{Binding IsReactionDiffusionLayer}" Value="True">
+                                                                              <Setter Property="Visibility" Value="Visible"/>
+                                                                          </DataTrigger>
+                                                                      </Style.Triggers>
+                                                                  </Style>
+                                                              </StackPanel.Style>
+                                                              <TextBlock Text="Grow chemical patterns seeded by the scene. Feed and Kill change the growth; some combinations settle or fade." TextWrapping="Wrap" Foreground="#A0A0A0" Margin="0,0,0,8"/>
+                                                              <WrapPanel>
+                                                                  <StackPanel Orientation="Horizontal" Margin="0,0,12,6">
+                                                                      <TextBlock Text="Feed" VerticalAlignment="Center"/>
+                                                                      <Slider Minimum="0.01" Maximum="0.08" TickFrequency="0.0001" IsSnapToTickEnabled="True" Value="{Binding Effects.ReactionFeed, UpdateSourceTrigger=PropertyChanged}" Width="140" Margin="8,0,0,0" ValueChanged="SimulationLayerDatamosh_Changed"/>
+                                                                      <TextBlock Text="{Binding Effects.ReactionFeed, StringFormat={}{0:0.0000}}" Margin="8,0,0,0" VerticalAlignment="Center"/>
+                                                                  </StackPanel>
+                                                                  <StackPanel Orientation="Horizontal" Margin="0,0,12,6">
+                                                                      <TextBlock Text="Kill" VerticalAlignment="Center"/>
+                                                                      <Slider Minimum="0.03" Maximum="0.075" TickFrequency="0.0001" IsSnapToTickEnabled="True" Value="{Binding Effects.ReactionKill, UpdateSourceTrigger=PropertyChanged}" Width="140" Margin="8,0,0,0" ValueChanged="SimulationLayerDatamosh_Changed"/>
+                                                                      <TextBlock Text="{Binding Effects.ReactionKill, StringFormat={}{0:0.0000}}" Margin="8,0,0,0" VerticalAlignment="Center"/>
+                                                                  </StackPanel>
+                                                                  <StackPanel Orientation="Horizontal" Margin="0,0,12,6">
+                                                                      <TextBlock Text="Scene Seeding" VerticalAlignment="Center"/>
+                                                                      <Slider Minimum="0" Maximum="1" TickFrequency="0.01" IsSnapToTickEnabled="True" Value="{Binding Effects.ReactionSeed, UpdateSourceTrigger=PropertyChanged}" Width="140" Margin="8,0,0,0" ValueChanged="SimulationLayerDatamosh_Changed"/>
+                                                                      <TextBlock Text="{Binding Effects.ReactionSeed, StringFormat={}{0:P0}}" Margin="8,0,0,0" VerticalAlignment="Center"/>
+                                                                  </StackPanel>
+                                                              </WrapPanel>
+                                                          </StackPanel>
+
+                                                          <GroupBox x:Name="SelectedSimulationReactiveMappingsGroupBox"
                                                                   Header="Reactive Mappings"
                                                                   Margin="0,10,0,10">
                                                             <StackPanel Margin="8">
@@ -1732,6 +1827,10 @@
                                                 <Button Content="Add Pixel Sort Layer"
                                                         Click="AddSimulationPixelSort_Click" />
                                             <Button Content="Add Datamosh Layer" Click="AddSimulationDatamosh_Click" />
+                                            <Button Content="Add Fluid Ink" Click="AddSimulationFluidInk_Click" />
+                                            <Button Content="Add Time Displacement" Click="AddSimulationTimeDisplacement_Click" />
+                                            <Button Content="Add Reaction–Diffusion" Click="AddSimulationReactionDiffusion_Click" />
+
                                                 <Button Content="Add Sim Group"
                                                         Click="AddSimulationGroup_Click" />
                                             </WrapPanel>

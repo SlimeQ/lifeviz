@@ -1,5 +1,11 @@
 # Configuration & Controls
 
+## Fluid Ink, Time Displacement, and Reaction–Diffusion
+
+Select a Sim Group in the Scene Editor and choose **Add Fluid Ink**, **Add Time Displacement**, or **Add Reaction–Diffusion**. Fluid Ink exposes Flow, Persistence, and Swirl; Time Displacement exposes Time Spread, Pattern Scale, and Pattern Motion; Reaction–Diffusion exposes Feed, Kill, and Scene Seeding. Each uses shared simulation blend/opacity/hue controls and adds one Low audio mapping at 30% amount. New mapping outputs are **Fluid Flow**, **Time Spread**, and **Reaction Seeding**, each adding normalized input × amount to the base control and clamping at 100%. Choose Audio Source in the context menu; no audio leaves base settings active.
+
+Live Mode applies these controls immediately; draft mode waits for Apply. Set the group's Layer Blend to Normal to audition a processed image directly. Randomize resets history/fields; disable holds state. Scene projects use version 13. See [Field Simulations](Field-Simulations.md) for ranges, defaults, example setups, and history/performance limits.
+
 ## MilkDrop / projectM
 
 The preset picker previews selections from either the bundled library or the layer's playlist, including imported files. **Use demo audio** auditions visuals with a silent beat; turn it off to use the selected Audio Source. **Pause preview** and **Restart preview** control only the audition. Previewing also works in draft mode and does not modify the playing layer or playlist.

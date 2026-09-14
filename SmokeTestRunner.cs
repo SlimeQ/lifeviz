@@ -162,6 +162,8 @@ internal static partial class SmokeTestRunner
                 "gpu-bitwise" => RunGpuBitwiseSmokeTest(),
                 "gpu-pixel-sort" => RunGpuPixelSortSmokeTest(),
                 "datamosh" => RunDatamoshSmokeTest(),
+                "field-effects" => RunDatamoshSmokeTest(fields: true),
+                "field-effects-editor" => RunPixelSortEditorRoundTripSmokeTest(fields: true),
                 "datamosh-editor" => RunPixelSortEditorRoundTripSmokeTest(datamosh: true),
                 "datamosh-transparency" => RunGroupTransparencySmokeTest(datamosh: true),
                 "sim-group-pixel-sort-color" => RunSimGroupPixelSortColorSmokeTest(),
@@ -377,10 +379,10 @@ internal static partial class SmokeTestRunner
         return 0;
     }
 
-    private static int RunDatamoshSmokeTest()
+    private static int RunDatamoshSmokeTest(bool fields = false)
     {
         var window = new MainWindow();
-        try { return window.RunDatamoshSmoke() ? 0 : 1; }
+        try { return (fields ? window.RunFieldEffectsSmoke() : window.RunDatamoshSmoke()) ? 0 : 1; }
         finally { window.Close(); }
     }
 
@@ -1694,7 +1696,7 @@ internal static partial class SmokeTestRunner
         return exitCode;
     }
 
-    private static int RunPixelSortEditorRoundTripSmokeTest(bool datamosh = false)
+    private static int RunPixelSortEditorRoundTripSmokeTest(bool datamosh = false, bool fields = false)
     {
         int exitCode = 0;
         var thread = new Thread(() =>
@@ -1707,7 +1709,7 @@ internal static partial class SmokeTestRunner
                 window.Show();
                 window.Hide();
                 var editor = new LayerEditorWindow(window);
-                bool ok = datamosh ? editor.RunDatamoshEditorSmoke() : editor.RunPixelSortEditorRoundTripSmoke();
+                bool ok = fields ? editor.RunFieldEffectsEditorSmoke() : datamosh ? editor.RunDatamoshEditorSmoke() : editor.RunPixelSortEditorRoundTripSmoke();
                 editor.Close();
                 window.Close();
                 app.Shutdown();

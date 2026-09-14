@@ -7,7 +7,7 @@ using Vortice.DXGI;
 
 namespace lifeviz;
 
-internal sealed class GpuPixelSortBackend : IGpuSimulationSurfaceBackend
+internal sealed partial class GpuPixelSortBackend : IGpuSimulationSurfaceBackend
 {
     [DllImport("kernel32.dll", SetLastError = true)]
     private static extern bool CloseHandle(IntPtr hObject);
@@ -71,16 +71,16 @@ internal sealed class GpuPixelSortBackend : IGpuSimulationSurfaceBackend
     private uint _frameIndex;
     private float _feedback;
     private float _displacement;
-    public bool IsDatamosh { get; }
+    public bool IsDatamosh => Effect == ImageSimulationEffect.Datamosh;
     private bool _publishedTextureDirty = true;
     private GameOfLifeEngine.LifeMode _mode = GameOfLifeEngine.LifeMode.NaiveGrayscale;
     private GameOfLifeEngine.BinningMode _binningMode = GameOfLifeEngine.BinningMode.Fill;
     private GameOfLifeEngine.InjectionMode _injectionMode = GameOfLifeEngine.InjectionMode.Threshold;
 
-    // Both full-color effects share texture ownership, readback and presentation.
-    public GpuPixelSortBackend(bool datamosh = false)
+    // Full-color effects share texture ownership, readback and presentation.
+    public GpuPixelSortBackend(bool datamosh = false, ImageSimulationEffect? effect = null)
     {
-        IsDatamosh = datamosh;
+        Effect = effect ?? (datamosh ? ImageSimulationEffect.Datamosh : ImageSimulationEffect.PixelSort);
         InitializeGpu();
     }
 
@@ -167,12 +167,13 @@ internal sealed class GpuPixelSortBackend : IGpuSimulationSurfaceBackend
                 return;
             }
 
-            if (!IsDatamosh)
+            if (Effect == ImageSimulationEffect.PixelSort)
             {
                 _context.CopyResource(_workTextureA, _snapshotTexture);
                 _workAIsSource = true;
             }
-            DispatchSortPass(passParity: 0, sortAxis: 0);
+            if (IsFieldEffect) StepFields();
+            else DispatchSortPass(passParity: 0, sortAxis: 0);
             SwapWorkTextures();
             _hasHistory = true;
             _frameIndex++;
@@ -253,7 +254,7 @@ internal sealed class GpuPixelSortBackend : IGpuSimulationSurfaceBackend
             _context.CSSetShaderResources(0, new ID3D11ShaderResourceView[] { null! });
             _context.CSSetShader(null);
 
-            if (_workTextureA != null && (!IsDatamosh || !_hasSnapshot))
+            if (_workTextureA != null && (Effect == ImageSimulationEffect.PixelSort || !_hasSnapshot))
             {
                 _context.CopyResource(_workTextureA, _snapshotTexture!);
                 _workAIsSource = true;
@@ -340,8 +341,9 @@ internal sealed class GpuPixelSortBackend : IGpuSimulationSurfaceBackend
         _sync = _sharedDevice.SyncRoot;
 
         _injectCompositeShader = _device.CreateComputeShader(LoadShaderBytecode("Assets/GpuPixelSortInjectCompositeCS.cso"));
-        _sortPassShader = _device.CreateComputeShader(LoadShaderBytecode(IsDatamosh
+        _sortPassShader = _device.CreateComputeShader(LoadShaderBytecode(IsFieldEffect ? "Assets/GpuEffectOutputCS.cso" : IsDatamosh
             ? "Assets/GpuDatamoshCS.cso" : "Assets/GpuPixelSortSortPassCS.cso"));
+        InitializeFieldShaders();
         _publishOutputShader = _device.CreateComputeShader(LoadShaderBytecode("Assets/GpuPixelSortPublishOutputCS.cso"));
         _publishPresentationShader = _device.CreateComputeShader(LoadShaderBytecode("Assets/GpuPixelSortPublishPresentationOutputCS.cso"));
         _parameterBuffer = _device.CreateBuffer(
@@ -460,6 +462,7 @@ internal sealed class GpuPixelSortBackend : IGpuSimulationSurfaceBackend
             0,
             ResourceOptionFlags.None);
         _stagingTexture = _device.CreateTexture2D(stagingDescription);
+        EnsureFieldTextures();
         ClearWorkingTextures();
     }
 
@@ -475,7 +478,7 @@ internal sealed class GpuPixelSortBackend : IGpuSimulationSurfaceBackend
         _context.CSSetShaderResources(0, new[] { CurrentWorkSrv, _snapshotSrv! });
         _context.CSSetUnorderedAccessViews(0, new[] { DestinationWorkUav });
         _context.CSSetConstantBuffers(0, new[] { _parameterBuffer });
-        if (IsDatamosh)
+        if (Effect != ImageSimulationEffect.PixelSort)
             DispatchGrid(_context, _columns, _rows);
         else
             DispatchSortGrid(_context);
@@ -577,6 +580,7 @@ internal sealed class GpuPixelSortBackend : IGpuSimulationSurfaceBackend
         _hasSnapshot = false;
         _hasHistory = false;
         _frameIndex = 0;
+        ResetFields();
         _publishedTextureDirty = true;
     }
 
@@ -636,6 +640,9 @@ internal sealed class GpuPixelSortBackend : IGpuSimulationSurfaceBackend
     private void DisposeResources()
     {
         DisposeTextures();
+        _advanceFieldShader?.Dispose(); _advanceFieldShader = null;
+        _captureHistoryShader?.Dispose(); _captureHistoryShader = null;
+        _effectBuffer?.Dispose(); _effectBuffer = null;
         _parameterBuffer?.Dispose();
         _parameterBuffer = null;
         _injectCompositeShader?.Dispose();
@@ -653,6 +660,7 @@ internal sealed class GpuPixelSortBackend : IGpuSimulationSurfaceBackend
 
     private void DisposeTextures()
     {
+        DisposeFieldTextures();
         _snapshotSrv?.Dispose();
         _snapshotSrv = null;
         _snapshotUav?.Dispose();
