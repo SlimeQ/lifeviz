@@ -696,6 +696,22 @@
                                         <WrapPanel Margin="0,0,0,4"
                                                    Visibility="{Binding IsSimulationGroup, Converter={StaticResource BoolToVisibility}}">
                                             <StackPanel Orientation="Horizontal" Margin="0,0,12,6">
+                                                <TextBlock Text="Layer Blend" VerticalAlignment="Center" />
+                                                <ComboBox x:Name="SimulationGroupBlendComboBox" ItemsSource="{Binding BlendModeOptions}"
+                                                          DisplayMemberPath="Label" SelectedValuePath="Value"
+                                                          SelectedValue="{Binding BlendMode}" Width="160" Margin="6,0,0,0"
+                                                          ToolTip="Blend the resolved simulation outputs into the layers below."
+                                                          SelectionChanged="BlendMode_Changed" />
+                                            </StackPanel>
+                                            <StackPanel Orientation="Horizontal" Margin="0,0,12,6">
+                                                <TextBlock Text="Layer Opacity" VerticalAlignment="Center" />
+                                                <Slider x:Name="SimulationGroupOpacitySlider" Minimum="0" Maximum="1" Value="{Binding Opacity}"
+                                                        Width="150" SmallChange="0.05" LargeChange="0.1" Margin="6,0,0,0"
+                                                        ValueChanged="Opacity_Changed" />
+                                                <TextBlock Text="{Binding Opacity, StringFormat={}{0:P0}}"
+                                                           Margin="6,0,0,0" VerticalAlignment="Center" />
+                                            </StackPanel>
+                                            <StackPanel Orientation="Horizontal" Margin="0,0,12,6">
                                                 <TextBlock Text="Scale"
                                                            VerticalAlignment="Center" />
                                                 <Slider Minimum="-1"
@@ -1212,7 +1228,7 @@
                                         </Style>
                                     </GroupBox.Style>
                                     <StackPanel Margin="8">
-                                        <TextBlock Text="Edit the simulation stack owned by this scene layer."
+                                        <TextBlock TextWrapping="Wrap" Text="All simulations read the same layers below. Outputs blend in list order (first to last), then Layer Blend and Layer Opacity apply to the result."
                                                    Foreground="#A0A0A0"
                                                    Margin="0,0,0,8" />
                                         <WrapPanel Margin="0,0,0,8">
@@ -1220,6 +1236,7 @@
                                                     Click="AddSimulationLayerDirect_Click" />
                                             <Button Content="Add Pixel Sort Layer"
                                                     Click="AddSimulationPixelSort_Click" />
+                                            <Button Content="Add Datamosh Layer" Click="AddSimulationDatamosh_Click" />
                                             <Button Content="Move Up"
                                                     Click="MoveSimulationLayerUp_Click" />
                                             <Button Content="Move Down"
@@ -1466,6 +1483,44 @@
                                                             </WrapPanel>
                                                         </StackPanel>
 
+                                                        <StackPanel Margin="0,4,0,8">
+                                                            <StackPanel.Style>
+                                                                <Style TargetType="StackPanel">
+                                                                    <Setter Property="Visibility" Value="Collapsed" />
+                                                                    <Style.Triggers>
+                                                                        <DataTrigger Binding="{Binding IsDatamoshLayer}" Value="True">
+                                                                            <Setter Property="Visibility" Value="Visible" />
+                                                                        </DataTrigger>
+                                                                    </Style.Triggers>
+                                                                </Style>
+                                                            </StackPanel.Style>
+                                                            <TextBlock Text="Retain and displace previous frames in blocks. Choose Audio Source in the right-click menu; edit the mappings below to control the response."
+                                                                       TextWrapping="Wrap" Foreground="#A0A0A0" Margin="0,0,0,8" />
+                                                            <WrapPanel>
+                                                                <StackPanel Orientation="Horizontal" Margin="0,0,12,6">
+                                                                    <TextBlock Text="Feedback" VerticalAlignment="Center" />
+                                                                    <Slider Minimum="0" Maximum="0.98" TickFrequency="0.01" IsSnapToTickEnabled="True"
+                                                                            Value="{Binding DatamoshFeedback}" Width="140" Margin="8,0,0,0"
+                                                                            ValueChanged="SimulationLayerDatamosh_Changed" />
+                                                                    <TextBlock Text="{Binding DatamoshFeedback, StringFormat={}{0:P0}}" Margin="8,0,0,0" VerticalAlignment="Center" />
+                                                                </StackPanel>
+                                                                <StackPanel Orientation="Horizontal" Margin="0,0,12,6">
+                                                                    <TextBlock Text="Displacement" VerticalAlignment="Center" />
+                                                                    <Slider Minimum="0" Maximum="1" TickFrequency="0.01" IsSnapToTickEnabled="True"
+                                                                            Value="{Binding DatamoshDisplacement}" Width="140" Margin="8,0,0,0"
+                                                                            ValueChanged="SimulationLayerDatamosh_Changed" />
+                                                                    <TextBlock Text="{Binding DatamoshDisplacement, StringFormat={}{0:P0}}" Margin="8,0,0,0" VerticalAlignment="Center" />
+                                                                </StackPanel>
+                                                                <StackPanel Orientation="Horizontal" Margin="0,0,12,6">
+                                                                    <TextBlock Text="Block Size (px)" VerticalAlignment="Center" />
+                                                                    <Slider Minimum="1" Maximum="512" TickFrequency="1" IsSnapToTickEnabled="True"
+                                                                            Value="{Binding DatamoshBlockSize}" Width="140" Margin="8,0,0,0"
+                                                                            ValueChanged="SimulationLayerDatamosh_Changed" />
+                                                                    <TextBlock Text="{Binding DatamoshBlockSize, StringFormat={}{0:0}}" Margin="8,0,0,0" VerticalAlignment="Center" />
+                                                                </StackPanel>
+                                                            </WrapPanel>
+                                                        </StackPanel>
+
                                                         <GroupBox x:Name="SelectedSimulationReactiveMappingsGroupBox"
                                                                   Header="Reactive Mappings"
                                                                   Margin="0,10,0,10">
@@ -1676,6 +1731,7 @@
                                                         Click="AddSimulationLayerDirect_Click" />
                                                 <Button Content="Add Pixel Sort Layer"
                                                         Click="AddSimulationPixelSort_Click" />
+                                            <Button Content="Add Datamosh Layer" Click="AddSimulationDatamosh_Click" />
                                                 <Button Content="Add Sim Group"
                                                         Click="AddSimulationGroup_Click" />
                                             </WrapPanel>

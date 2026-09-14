@@ -507,7 +507,10 @@ public partial class LayerEditorWindow : Window
             ThresholdMax = source.ThresholdMax,
             InvertThreshold = source.InvertThreshold,
             PixelSortCellWidth = source.PixelSortCellWidth,
-            PixelSortCellHeight = source.PixelSortCellHeight
+            PixelSortCellHeight = source.PixelSortCellHeight,
+            DatamoshFeedback = source.DatamoshFeedback,
+            DatamoshDisplacement = source.DatamoshDisplacement,
+            DatamoshBlockSize = source.DatamoshBlockSize
         };
 
         foreach (var child in source.Children)
@@ -1120,6 +1123,8 @@ public partial class LayerEditorWindow : Window
 
     private void AddSimulationLayerDirect_Click(object sender, RoutedEventArgs e) => AddSimulationLayer(LayerEditorSimulationLayerType.Life);
 
+    private void AddSimulationDatamosh_Click(object sender, RoutedEventArgs e) => AddSimulationLayer(LayerEditorSimulationLayerType.Datamosh);
+
     private void AddSimulationPixelSort_Click(object sender, RoutedEventArgs e) => AddSimulationLayer(LayerEditorSimulationLayerType.PixelSort);
 
     private void AddSimulationGroup_Click(object sender, RoutedEventArgs e) => AddSimulationGroup();
@@ -1133,7 +1138,7 @@ public partial class LayerEditorWindow : Window
             return;
         }
 
-        string baseName = layerType == LayerEditorSimulationLayerType.PixelSort
+        string baseName = layerType == LayerEditorSimulationLayerType.Datamosh ? "Datamosh" : layerType == LayerEditorSimulationLayerType.PixelSort
             ? "Pixel Sort"
             : "Life Sim";
         int suffix = 1;
@@ -1154,7 +1159,7 @@ public partial class LayerEditorWindow : Window
             Enabled = true,
             InputFunction = "Direct",
             BlendMode = selectedSimulationLayer?.BlendMode
-                ?? (layerType == LayerEditorSimulationLayerType.PixelSort ? "Normal" : "Additive"),
+                ?? (layerType != LayerEditorSimulationLayerType.Life ? "Normal" : "Additive"),
             InjectionMode = selectedSimulationLayer?.InjectionMode ?? "Threshold",
             LifeMode = selectedSimulationLayer?.LifeMode ?? "NaiveGrayscale",
             BinningMode = selectedSimulationLayer?.BinningMode ?? "Fill",
@@ -1170,6 +1175,14 @@ public partial class LayerEditorWindow : Window
             PixelSortCellWidth = selectedSimulationLayer?.PixelSortCellWidth ?? 12,
             PixelSortCellHeight = selectedSimulationLayer?.PixelSortCellHeight ?? 8
         };
+        if (layerType == LayerEditorSimulationLayerType.Datamosh)
+        {
+            newLayer.BlendMode = "Normal";
+            newLayer.ReactiveMappings.Add(new LayerEditorSimulationReactiveMapping
+            { Id = Guid.NewGuid(), Input = "Bass", Output = "DatamoshFeedback", Amount = 0.8 });
+            newLayer.ReactiveMappings.Add(new LayerEditorSimulationReactiveMapping
+            { Id = Guid.NewGuid(), Input = "Mid", Output = "DatamoshDisplacement", Amount = 0.6 });
+        }
         AttachReactiveMappingHandlers(newLayer);
 
         var (targetCollection, insertIndex, parent) = ResolveSimulationInsertLocation(selectedSimulationLayer, simulationLayers);
@@ -1470,6 +1483,11 @@ public partial class LayerEditorWindow : Window
         {
             ApplySimulationLayerSettingsLive();
         }
+    }
+
+    private void SimulationLayerDatamosh_Changed(object sender, RoutedPropertyChangedEventArgs<double> e)
+    {
+        if (ShouldApplyLive()) ApplySimulationLayerSettingsLive();
     }
 
     private void SimulationLayerPixelSortGrid_Changed(object sender, RoutedPropertyChangedEventArgs<double> e)
@@ -2830,7 +2848,7 @@ public partial class LayerEditorWindow : Window
             Name = name,
             Enabled = true,
             InputFunction = "Direct",
-            BlendMode = layerType == LayerEditorSimulationLayerType.PixelSort ? "Normal" : "Additive",
+            BlendMode = layerType != LayerEditorSimulationLayerType.Life ? "Normal" : "Additive",
             InjectionMode = "Threshold",
             LifeMode = "NaiveGrayscale",
             BinningMode = "Fill",

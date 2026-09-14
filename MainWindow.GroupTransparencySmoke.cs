@@ -6,7 +6,7 @@ namespace lifeviz;
 
 public partial class MainWindow
 {
-    internal bool RunGroupTransparencySmoke()
+    internal bool RunGroupTransparencySmoke(bool datamosh = false)
     {
         if (!_renderLoopAttached) InitializeVisualizer();
         _sources.Clear();
@@ -37,7 +37,8 @@ public partial class MainWindow
         sim.SimulationLayers.Add(new SimulationLayerSpec
         {
             Id = Guid.NewGuid(), Kind = LayerEditorSimulationItemKind.Layer,
-            LayerType = SimulationLayerType.PixelSort, Name = "Pixel Sort", Enabled = true,
+            LayerType = datamosh ? SimulationLayerType.Datamosh : SimulationLayerType.PixelSort,
+            Name = datamosh ? "Datamosh" : "Pixel Sort", Enabled = true,
             BlendMode = BlendMode.Normal, LifeOpacity = 1,
             PixelSortCellWidth = 1, PixelSortCellHeight = 1
         });
@@ -73,8 +74,22 @@ public partial class MainWindow
             }
         }
 
-        Check(gpuPixels, 1, false, "GPU sim alpha");
-        Check(cpu.Downscaled, 1, false, "CPU sim alpha");
+        // Normal blends the resolved group over its input. Overlapping
+        // translucent pixels accumulate alpha, just like ordinary scene layers.
+        byte[] resolvedGroup = sim.LastFrame!.Downscaled.ToArray();
+        Check(resolvedGroup, 1, false, "Resolved sim alpha");
+        for (int i = 0; i < pixels.Length; i += 4)
+        {
+            double alpha = resolvedGroup[i + 3] / 255.0;
+            for (int c = 0; c < 4; c++)
+            {
+                double expected = resolvedGroup[i + c] * (2 - alpha);
+                if (Math.Abs(gpuPixels[i + c] - expected) > 3 ||
+                    Math.Abs(cpu.Downscaled[i + c] - expected) > 3)
+                    throw new InvalidOperationException($"Inline Normal group alpha mismatch at {i + c}.");
+            }
+        }
+        gpuPixels = resolvedGroup;
         var background = CaptureSource.CreateFile("alpha-blue", "Blue", width, height);
         background.BlendMode = BlendMode.Normal;
         background.LastFrame = new SourceFrame(BuildSmokeSolidBgra(width, height, 255, 0, 0), width, height, null, width, height);

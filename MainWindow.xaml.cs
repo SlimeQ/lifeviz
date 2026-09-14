@@ -8782,6 +8782,9 @@ public partial class MainWindow : Window
             InvertThreshold = layer.InvertThreshold,
             PixelSortCellWidth = layer.PixelSortCellWidth,
             PixelSortCellHeight = layer.PixelSortCellHeight,
+            DatamoshFeedback = layer.DatamoshFeedback,
+            DatamoshDisplacement = layer.DatamoshDisplacement,
+            DatamoshBlockSize = layer.DatamoshBlockSize,
             Children = layer.Children.Select(CloneSimulationLayerSpec).ToList()
         };
     }
@@ -10580,6 +10583,20 @@ public partial class MainWindow : Window
             return false;
         }
 
+        if (composite?.GpuSurface != null)
+        {
+            // Read this stack position, not a rebuild of the complete scene.
+            byte[]? readback = null;
+            var exactComposite = _inlineGpuSourceCompositor.CreateCompositeFrameFromSurface(
+                composite.GpuSurface, ref readback, includeCpuReadback: true);
+            if (exactComposite != null)
+            {
+                composite = exactComposite;
+                compositeHasCpuReadback = true;
+                return true;
+            }
+        }
+
         attemptedCpuCompositeFallback = true;
         long fallbackCompositeStamp = BeginProfileStamp();
         var cpuComposite = BuildCompositeFrame(
@@ -10806,6 +10823,8 @@ public partial class MainWindow : Window
     {
         foreach (var layer in EnumerateSimulationLeafLayers(_simulationLayers))
         {
+            layer.EffectiveDatamoshFeedback = Math.Clamp(layer.DatamoshFeedback, 0, 0.98);
+            layer.EffectiveDatamoshDisplacement = Math.Clamp(layer.DatamoshDisplacement, 0, 1);
             layer.EffectiveLifeOpacity = Math.Clamp(layer.LifeOpacity, 0, 1);
             layer.EffectiveSimulationTargetFps = Math.Max(_currentSimulationTargetFps, 0);
             layer.ReactiveHueShiftDegrees = 0;
@@ -10860,6 +10879,12 @@ public partial class MainWindow : Window
                             layer.EffectiveRgbHueShiftSpeedDegreesPerSecond + (inputValue * Math.Clamp(mapping.Amount, 0, 180)),
                             -MaxRgbHueShiftSpeedDegreesPerSecond,
                             MaxRgbHueShiftSpeedDegreesPerSecond);
+                        break;
+                    case SimulationReactiveOutput.DatamoshFeedback:
+                        layer.EffectiveDatamoshFeedback = Math.Clamp(layer.EffectiveDatamoshFeedback + inputValue * Math.Clamp(mapping.Amount, 0, 1), 0, 0.98);
+                        break;
+                    case SimulationReactiveOutput.DatamoshDisplacement:
+                        layer.EffectiveDatamoshDisplacement = Math.Clamp(layer.EffectiveDatamoshDisplacement + inputValue * Math.Clamp(mapping.Amount, 0, 1), 0, 1);
                         break;
                     case SimulationReactiveOutput.InjectionNoise:
                         layer.EffectiveInjectionNoise = Math.Clamp(layer.EffectiveInjectionNoise + (inputValue * Math.Clamp(mapping.Amount, 0, 1)), 0, 1);
@@ -12015,7 +12040,8 @@ public partial class MainWindow : Window
     private enum SimulationLayerType
     {
         Life,
-        PixelSort
+        PixelSort,
+        Datamosh
     }
 
     private enum AudioReactiveSeedPattern
@@ -12048,6 +12074,9 @@ public partial class MainWindow : Window
         public bool InvertThreshold { get; set; }
         public int PixelSortCellWidth { get; set; } = 12;
         public int PixelSortCellHeight { get; set; } = 8;
+        public double DatamoshFeedback { get; set; } = 0.15;
+        public double DatamoshDisplacement { get; set; }
+        public int DatamoshBlockSize { get; set; } = 16;
         public double EffectiveLifeOpacity { get; set; } = 1.0;
         public double EffectiveSimulationTargetFps { get; set; } = DefaultFps;
         public double ReactiveHueShiftDegrees { get; set; }
@@ -12057,6 +12086,8 @@ public partial class MainWindow : Window
         public double EffectiveThresholdMax { get; set; } = 0.75;
         public int EffectivePixelSortCellWidth { get; set; } = 12;
         public int EffectivePixelSortCellHeight { get; set; } = 8;
+        public double EffectiveDatamoshFeedback { get; set; } = 0.15;
+        public double EffectiveDatamoshDisplacement { get; set; }
         public double TimeSinceLastStep { get; set; }
         public SimulationLayerState? Parent { get; set; }
         public List<SimulationLayerState> Children { get; } = new();
@@ -12092,6 +12123,9 @@ public partial class MainWindow : Window
         public bool InvertThreshold { get; init; }
         public int PixelSortCellWidth { get; init; } = 12;
         public int PixelSortCellHeight { get; init; } = 8;
+        public double DatamoshFeedback { get; init; } = 0.15;
+        public double DatamoshDisplacement { get; init; }
+        public int DatamoshBlockSize { get; init; } = 16;
         public List<SimulationLayerSpec> Children { get; init; } = new();
     }
 
@@ -12294,9 +12328,7 @@ public partial class MainWindow : Window
         {
             Id = layer.Id,
             Kind = layer.Kind,
-            LayerType = layer.LayerType == SimulationLayerType.PixelSort
-                ? LayerEditorSimulationLayerType.PixelSort
-                : LayerEditorSimulationLayerType.Life,
+            LayerType = (LayerEditorSimulationLayerType)layer.LayerType,
             Name = layer.Name,
             Enabled = layer.Enabled,
             InputFunction = layer.InputFunction.ToString(),
@@ -12323,7 +12355,10 @@ public partial class MainWindow : Window
             ThresholdMax = layer.ThresholdMax,
             InvertThreshold = layer.InvertThreshold,
             PixelSortCellWidth = layer.PixelSortCellWidth,
-            PixelSortCellHeight = layer.PixelSortCellHeight
+            PixelSortCellHeight = layer.PixelSortCellHeight,
+            DatamoshFeedback = layer.DatamoshFeedback,
+            DatamoshDisplacement = layer.DatamoshDisplacement,
+            DatamoshBlockSize = layer.DatamoshBlockSize
         };
 
         foreach (var child in layer.Children)
@@ -12342,9 +12377,7 @@ public partial class MainWindow : Window
         {
             Id = layer.Id,
             Kind = layer.Kind,
-            LayerType = layer.LayerType == SimulationLayerType.PixelSort
-                ? LayerEditorSimulationLayerType.PixelSort
-                : LayerEditorSimulationLayerType.Life,
+            LayerType = (LayerEditorSimulationLayerType)layer.LayerType,
             Name = layer.Name,
             Enabled = layer.Enabled,
             InputFunction = layer.InputFunction.ToString(),
@@ -12371,7 +12404,10 @@ public partial class MainWindow : Window
             ThresholdMax = layer.ThresholdMax,
             InvertThreshold = layer.InvertThreshold,
             PixelSortCellWidth = layer.PixelSortCellWidth,
-            PixelSortCellHeight = layer.PixelSortCellHeight
+            PixelSortCellHeight = layer.PixelSortCellHeight,
+            DatamoshFeedback = layer.DatamoshFeedback,
+            DatamoshDisplacement = layer.DatamoshDisplacement,
+            DatamoshBlockSize = layer.DatamoshBlockSize
         };
 
         foreach (var child in layer.Children)
@@ -12427,8 +12463,8 @@ public partial class MainWindow : Window
 
     private ISimulationBackend CreateConfiguredSimulationEngine(SimulationLayerType layerType, bool randomize)
     {
-        ISimulationBackend engine = layerType == SimulationLayerType.PixelSort
-            ? new GpuPixelSortBackend()
+        ISimulationBackend engine = layerType != SimulationLayerType.Life
+            ? new GpuPixelSortBackend(datamosh: layerType == SimulationLayerType.Datamosh)
             : new GpuSimulationBackend();
         ConfigureSimulationEngine(engine, _configuredRows, _configuredDepth, _currentAspectRatio, randomize);
         return engine;
@@ -12448,6 +12484,12 @@ public partial class MainWindow : Window
     {
         if (layer.IsGroup || layer.Engine == null)
         {
+            return;
+        }
+
+        if (layer.LayerType == SimulationLayerType.Datamosh && layer.Engine is GpuPixelSortBackend datamoshBackend)
+        {
+            datamoshBackend.SetDatamoshSettings(layer.EffectiveDatamoshFeedback, layer.EffectiveDatamoshDisplacement, layer.DatamoshBlockSize);
             return;
         }
 
@@ -12507,6 +12549,16 @@ public partial class MainWindow : Window
             {
                 yield return child;
             }
+        }
+    }
+
+    private static IEnumerable<SimulationLayerState> EnumerateEnabledSimulationLeaves(IEnumerable<SimulationLayerState> roots)
+    {
+        foreach (var layer in roots)
+        {
+            if (!layer.Enabled) continue;
+            if (!layer.IsGroup) yield return layer;
+            foreach (var child in EnumerateEnabledSimulationLeaves(layer.Children)) yield return child;
         }
     }
 
@@ -12827,7 +12879,9 @@ public partial class MainWindow : Window
 
         return kind == LayerEditorSimulationItemKind.Group
             ? $"Sim Group {index + 1}"
-            : layerType == SimulationLayerType.PixelSort
+            : layerType == SimulationLayerType.Datamosh
+                ? $"Datamosh {index + 1}"
+                : layerType == SimulationLayerType.PixelSort
                 ? $"Pixel Sort {index + 1}"
                 : $"Life Sim {index + 1}";
     }
@@ -12907,7 +12961,10 @@ public partial class MainWindow : Window
             ThresholdMax = spec.ThresholdMax,
             InvertThreshold = spec.InvertThreshold,
             PixelSortCellWidth = spec.PixelSortCellWidth,
-            PixelSortCellHeight = spec.PixelSortCellHeight
+            PixelSortCellHeight = spec.PixelSortCellHeight,
+            DatamoshFeedback = spec.DatamoshFeedback,
+            DatamoshDisplacement = spec.DatamoshDisplacement,
+            DatamoshBlockSize = spec.DatamoshBlockSize
         });
     }
 
@@ -12955,9 +13012,7 @@ public partial class MainWindow : Window
             };
         }
 
-        var layerType = layer.LayerType == LayerEditorSimulationLayerType.PixelSort
-            ? SimulationLayerType.PixelSort
-            : SimulationLayerType.Life;
+        var layerType = (SimulationLayerType)layer.LayerType;
         var inputFunction = ParseSimulationInputFunctionOrDefault(layer.InputFunction, SimulationInputFunction.Direct);
         var defaultBlend = inputFunction == SimulationInputFunction.Inverse ? BlendMode.Subtractive : BlendMode.Additive;
         var blendMode = ParseBlendModeOrDefault(layer.BlendMode, defaultBlend);
@@ -12988,7 +13043,10 @@ public partial class MainWindow : Window
             ThresholdMax = thresholdMax,
             InvertThreshold = invertThreshold,
             PixelSortCellWidth = Math.Clamp(layer.PixelSortCellWidth, 1, 4096),
-            PixelSortCellHeight = Math.Clamp(layer.PixelSortCellHeight, 1, 4096)
+            PixelSortCellHeight = Math.Clamp(layer.PixelSortCellHeight, 1, 4096),
+            DatamoshFeedback = layer.DatamoshFeedback,
+            DatamoshDisplacement = layer.DatamoshDisplacement,
+            DatamoshBlockSize = layer.DatamoshBlockSize
         };
     }
 
@@ -13049,7 +13107,10 @@ public partial class MainWindow : Window
             ThresholdMax = thresholdMax,
             InvertThreshold = invertThreshold,
             PixelSortCellWidth = pixelSortCellWidth,
-            PixelSortCellHeight = pixelSortCellHeight
+            PixelSortCellHeight = pixelSortCellHeight,
+            DatamoshFeedback = layer.DatamoshFeedback,
+            DatamoshDisplacement = layer.DatamoshDisplacement,
+            DatamoshBlockSize = layer.DatamoshBlockSize
         };
     }
 
@@ -13239,7 +13300,8 @@ public partial class MainWindow : Window
 
         bool needsEngineReplacement =
             layer.Engine == null ||
-            (spec.LayerType == SimulationLayerType.PixelSort && layer.Engine is not GpuPixelSortBackend) ||
+            (spec.LayerType != SimulationLayerType.Life &&
+             (layer.Engine is not GpuPixelSortBackend effect || effect.IsDatamosh != (spec.LayerType == SimulationLayerType.Datamosh))) ||
             (spec.LayerType == SimulationLayerType.Life && layer.Engine is not GpuSimulationBackend);
 
         if (needsEngineReplacement && layer.Engine != null)
@@ -13283,6 +13345,11 @@ public partial class MainWindow : Window
         layer.InvertThreshold = spec.InvertThreshold;
         layer.PixelSortCellWidth = spec.PixelSortCellWidth;
         layer.PixelSortCellHeight = spec.PixelSortCellHeight;
+        layer.DatamoshFeedback = Math.Clamp(spec.DatamoshFeedback, 0, 0.98);
+        layer.DatamoshDisplacement = Math.Clamp(spec.DatamoshDisplacement, 0, 1);
+        layer.DatamoshBlockSize = Math.Clamp(spec.DatamoshBlockSize, 1, 512);
+        layer.EffectiveDatamoshFeedback = layer.DatamoshFeedback;
+        layer.EffectiveDatamoshDisplacement = layer.DatamoshDisplacement;
         layer.EffectiveLifeOpacity = layer.LifeOpacity;
         layer.EffectiveSimulationTargetFps = _currentSimulationTargetFps;
         layer.ReactiveHueShiftDegrees = 0;
@@ -13904,30 +13971,35 @@ public partial class MainWindow : Window
                     ref steppedPassCount);
                 if (simulationComposite == null)
                 {
-                    if (!source.SimulationLayers.Any(layer => layer.Enabled))
+                    if (!EnumerateEnabledSimulationLeaves(FindSimulationNode(source.Id)?.Children
+                            ?? new List<SimulationLayerState>()).Any())
                     {
+                        sourceIndex++;
                         continue;
                     }
 
                     return null;
                 }
 
-                if (Math.Abs(source.Scale - LayerEditorOptions.DefaultLayerScale) > 0.000001)
+                if (ReferenceEquals(simulationComposite, currentComposite))
                 {
-                    simulationComposite = _inlineGpuSourceCompositor.ComposeCompositeFrameOntoSurface(
-                        currentSurface: null,
-                        simulationComposite,
-                        source,
-                        downscaledWidth,
-                        downscaledHeight,
-                        animationTime,
-                        firstLayer: true,
-                        ref scratchBuffer,
-                        includeCpuReadback: false);
-                    if (simulationComposite == null)
-                    {
-                        return null;
-                    }
+                    sourceIndex++;
+                    continue;
+                }
+
+                simulationComposite = _inlineGpuSourceCompositor.ComposeCompositeFrameOntoSurface(
+                    currentComposite?.GpuSurface,
+                    simulationComposite,
+                    source,
+                    downscaledWidth,
+                    downscaledHeight,
+                    animationTime,
+                    firstLayer: !wroteAny,
+                    ref scratchBuffer,
+                    includeCpuReadback: false);
+                if (simulationComposite == null)
+                {
+                    return null;
                 }
 
                 currentComposite = simulationComposite;
@@ -14129,28 +14201,26 @@ public partial class MainWindow : Window
                     continue;
                 }
 
-                if (Math.Abs(source.Scale - LayerEditorOptions.DefaultLayerScale) > 0.000001)
+                if (ReferenceEquals(simulationComposite, currentComposite))
                 {
-                    var simulationFrame = new SourceFrame(
-                        simulationComposite.Downscaled,
-                        simulationComposite.DownscaledWidth,
-                        simulationComposite.DownscaledHeight,
-                        source: null,
-                        sourceWidth: simulationComposite.DownscaledWidth,
-                        sourceHeight: simulationComposite.DownscaledHeight);
-                    _inlineSourceCompositor.CompositeSourceFrameIntoBuffer(
-                        downscaledBuffer,
-                        downscaledWidth,
-                        downscaledHeight,
-                        simulationFrame,
-                        source,
-                        animationTime,
-                        firstLayer: true);
+                    continue;
                 }
-                else
-                {
-                    Buffer.BlockCopy(simulationComposite.Downscaled, 0, downscaledBuffer, 0, requiredLength);
-                }
+
+                var simulationFrame = new SourceFrame(
+                    simulationComposite.Downscaled,
+                    simulationComposite.DownscaledWidth,
+                    simulationComposite.DownscaledHeight,
+                    source: null,
+                    sourceWidth: simulationComposite.DownscaledWidth,
+                    sourceHeight: simulationComposite.DownscaledHeight);
+                _inlineSourceCompositor.CompositeSourceFrameIntoBuffer(
+                    downscaledBuffer,
+                    downscaledWidth,
+                    downscaledHeight,
+                    simulationFrame,
+                    source,
+                    animationTime,
+                    firstLayer: !wroteAny);
                 currentComposite = new CompositeFrame(downscaledBuffer, downscaledWidth, downscaledHeight);
                 wroteAny = true;
                 continue;
@@ -14210,6 +14280,25 @@ public partial class MainWindow : Window
             : null;
     }
 
+    private CompositeFrame PrepareInlineSimulationGroupInput(CompositeFrame? input)
+    {
+        if (input == null)
+        {
+            var engine = GetReferenceSimulationEngine();
+            input = new CompositeFrame(new byte[engine.Columns * engine.Rows * 4], engine.Columns, engine.Rows);
+        }
+        // Pixel Sort/Bitwise still need GPU input when the scene was composed
+        // on CPU. Upload the exact lower stack, including its alpha.
+        if (input.GpuSurface == null && input.Downscaled.Length >= input.DownscaledWidth * input.DownscaledHeight * 4)
+        {
+            var surface = _gpuSimulationGroupCompositor.UploadInputSurface(
+                input.Downscaled, input.DownscaledWidth, input.DownscaledHeight);
+            if (surface != null)
+                input = new CompositeFrame(input.Downscaled, input.DownscaledWidth, input.DownscaledHeight, surface);
+        }
+        return input;
+    }
+
     private CompositeFrame? BuildInlineSimulationGroupCompositeFrameGpu(
         CaptureSource source,
         CompositeFrame? inputComposite,
@@ -14231,7 +14320,7 @@ public partial class MainWindow : Window
         int groupSteppedPassCount = 0;
         if (!_isPaused && simulationStepsThisFrame > 0 && runtimeGroup.Enabled)
         {
-            CompositeFrame? groupInputComposite = inputComposite;
+            CompositeFrame? groupInputComposite = PrepareInlineSimulationGroupInput(inputComposite);
             bool compositeHasCpuReadback = groupInputComposite != null &&
                                            groupInputComposite.DownscaledWidth > 0 &&
                                            groupInputComposite.DownscaledHeight > 0 &&
@@ -14239,18 +14328,14 @@ public partial class MainWindow : Window
             bool attemptedCpuCompositeFallback = false;
             bool injectedInGroup = false;
             bool steppedInPass = false;
-            GpuCompositeSurface? published = groupInputComposite?.GpuSurface;
-
-            foreach (var child in runtimeGroup.Children)
+            foreach (var child in EnumerateEnabledSimulationLeaves(runtimeGroup.Children))
             {
-                published = ExecuteSimulationGroupChildInjectionAndStep(
+                steppedInPass |= TryInjectAndStepLayerFromSceneComposite(
                     child,
                     ref groupInputComposite,
                     ref compositeHasCpuReadback,
                     ref attemptedCpuCompositeFallback,
-                    published,
-                    ref injectedInGroup,
-                    ref steppedInPass);
+                    ref injectedInGroup);
             }
 
             if (injectedInGroup)
@@ -14263,7 +14348,7 @@ public partial class MainWindow : Window
                 groupSteppedPassCount = 1;
             }
 
-            var groupLeaves = EnumerateSimulationLeafLayers(runtimeGroup.Children).ToArray();
+            var groupLeaves = EnumerateEnabledSimulationLeaves(runtimeGroup.Children).ToArray();
             for (int pass = 1; pass < simulationStepsThisFrame; pass++)
             {
                 if (RunSimulationStepOnlyPass(groupLeaves))
@@ -14275,7 +14360,7 @@ public partial class MainWindow : Window
 
         steppedPassCount = Math.Max(steppedPassCount, groupSteppedPassCount);
 
-        var enabledLayers = EnumerateSimulationLeafLayers(runtimeGroup.Children)
+        var enabledLayers = EnumerateEnabledSimulationLeaves(runtimeGroup.Children)
             .Where(layer => layer.Enabled)
             .ToArray();
         if (enabledLayers.Length == 0)
@@ -14297,13 +14382,11 @@ public partial class MainWindow : Window
             height = referenceEngine.Rows;
         }
 
-        var visibleLayers = new List<SimulationLayerState>(enabledLayers.Length);
         var activeLayerEntries = new List<SimulationPresentationLayerData>(enabledLayers.Length);
         foreach (var layer in enabledLayers)
         {
             if (TryBuildSimulationPresentationLayer(layer, Math.Clamp(_effectiveLifeOpacity * layer.EffectiveLifeOpacity, 0, 1), out var presentationLayer))
             {
-                visibleLayers.Add(layer);
                 activeLayerEntries.Add(presentationLayer);
             }
         }
@@ -14315,61 +14398,22 @@ public partial class MainWindow : Window
 
         if (activeLayerEntries.Count > 8)
         {
-            return null;
-        }
-
-        bool hasEnabledSubtractiveSimulationLayer = visibleLayers.Any(layer => layer.BlendMode == BlendMode.Subtractive);
-        bool hasEnabledNonSubtractiveSimulationLayer = visibleLayers.Any(layer => layer.BlendMode != BlendMode.Subtractive);
-        bool hasEnabledAdditiveSimulationLayer = visibleLayers.Any(layer => layer.BlendMode == BlendMode.Additive);
-        int additiveLayerCount = visibleLayers.Count(layer => layer.BlendMode == BlendMode.Additive);
-        int subtractiveLayerCount = visibleLayers.Count(layer => layer.BlendMode == BlendMode.Subtractive);
-        bool hasStandaloneOutputLayer = activeLayerEntries.Any(layer => layer.PublishesStandaloneOutput);
-        bool hasEnabledNonAddSubSimulationLayer = visibleLayers.Any(layer =>
-            layer.BlendMode != BlendMode.Additive &&
-            layer.BlendMode != BlendMode.Subtractive);
-
-        int simulationBaseline;
-        if (hasEnabledSubtractiveSimulationLayer && !hasEnabledNonSubtractiveSimulationLayer)
-        {
-            simulationBaseline = 255;
-        }
-        else if (hasEnabledAdditiveSimulationLayer &&
-                 hasEnabledSubtractiveSimulationLayer &&
-                 !hasEnabledNonAddSubSimulationLayer)
-        {
-            simulationBaseline = 128;
-        }
-        else
-        {
-            simulationBaseline = 0;
-        }
-
-        bool includeUnderlayInFinalComposite = inputComposite != null && !hasStandaloneOutputLayer;
-        bool useSignedAddSubPassthrough = includeUnderlayInFinalComposite && !hasEnabledNonAddSubSimulationLayer;
-        bool useMixedAddSubPassthroughModel = useSignedAddSubPassthrough &&
-                                              additiveLayerCount > 0 &&
-                                              subtractiveLayerCount > 0;
-
-        byte[]? underlayBuffer = null;
-        int underlayWidth = 0;
-        int underlayHeight = 0;
-        if (includeUnderlayInFinalComposite && inputComposite != null && inputComposite.GpuSurface == null)
-        {
-            underlayBuffer = inputComposite.Downscaled;
-            underlayWidth = inputComposite.DownscaledWidth;
-            underlayHeight = inputComposite.DownscaledHeight;
+            // Resolve already-stepped outputs on CPU, then upload/blend the group.
+            // Never restart injection for the whole stack on this fallback.
+            return BuildInlineSimulationGroupCompositeFrameCpu(
+                source, inputComposite, 0, ref injectedAnyLayer, ref steppedPassCount);
         }
 
         byte[]? groupBuffer = source.CompositeDownscaledBuffer;
         var composite = _gpuSimulationGroupCompositor.Compose(
             activeLayerEntries,
-            includeUnderlayInFinalComposite ? inputComposite?.GpuSurface : null,
-            underlayBuffer,
-            underlayWidth,
-            underlayHeight,
-            simulationBaseline,
-            useSignedAddSubPassthrough,
-            useMixedAddSubPassthroughModel,
+            underlaySurface: null,
+            underlayBuffer: null,
+            underlayWidth: 0,
+            underlayHeight: 0,
+            simulationBaseline: 0,
+            useSignedAddSubPassthrough: false,
+            useMixedAddSubPassthroughModel: false,
             invertComposite: false,
             width,
             height,
@@ -14421,7 +14465,7 @@ public partial class MainWindow : Window
         int groupSteppedPassCount = 0;
         if (!_isPaused && simulationStepsThisFrame > 0 && runtimeGroup.Enabled)
         {
-            CompositeFrame? groupInputComposite = inputComposite;
+            CompositeFrame? groupInputComposite = PrepareInlineSimulationGroupInput(inputComposite);
             bool compositeHasCpuReadback = groupInputComposite != null &&
                                            groupInputComposite.DownscaledWidth > 0 &&
                                            groupInputComposite.DownscaledHeight > 0 &&
@@ -14429,18 +14473,14 @@ public partial class MainWindow : Window
             bool attemptedCpuCompositeFallback = false;
             bool injectedInGroup = false;
             bool steppedInPass = false;
-            GpuCompositeSurface? published = groupInputComposite?.GpuSurface;
-
-            foreach (var child in runtimeGroup.Children)
+            foreach (var child in EnumerateEnabledSimulationLeaves(runtimeGroup.Children))
             {
-                published = ExecuteSimulationGroupChildInjectionAndStep(
+                steppedInPass |= TryInjectAndStepLayerFromSceneComposite(
                     child,
                     ref groupInputComposite,
                     ref compositeHasCpuReadback,
                     ref attemptedCpuCompositeFallback,
-                    published,
-                    ref injectedInGroup,
-                    ref steppedInPass);
+                    ref injectedInGroup);
             }
 
             if (injectedInGroup)
@@ -14453,7 +14493,7 @@ public partial class MainWindow : Window
                 groupSteppedPassCount = 1;
             }
 
-            var groupLeaves = EnumerateSimulationLeafLayers(runtimeGroup.Children).ToArray();
+            var groupLeaves = EnumerateEnabledSimulationLeaves(runtimeGroup.Children).ToArray();
             for (int pass = 1; pass < simulationStepsThisFrame; pass++)
             {
                 if (RunSimulationStepOnlyPass(groupLeaves))
@@ -14465,7 +14505,7 @@ public partial class MainWindow : Window
 
         steppedPassCount = Math.Max(steppedPassCount, groupSteppedPassCount);
 
-        var enabledLayers = EnumerateSimulationLeafLayers(runtimeGroup.Children)
+        var enabledLayers = EnumerateEnabledSimulationLeaves(runtimeGroup.Children)
             .Where(layer => layer.Enabled)
             .ToArray();
         if (enabledLayers.Length == 0)
@@ -14494,15 +14534,6 @@ public partial class MainWindow : Window
             targetBuffer = new byte[requiredLength];
         }
 
-        if (inputComposite != null && inputComposite.Downscaled.Length >= requiredLength)
-        {
-            Buffer.BlockCopy(inputComposite.Downscaled, 0, targetBuffer, 0, requiredLength);
-        }
-        else
-        {
-            Array.Clear(targetBuffer, 0, requiredLength);
-        }
-
         var referenceSimulationEngine = GetReferenceSimulationEngine();
         int engineCols = referenceSimulationEngine.Columns;
         int engineRows = referenceSimulationEngine.Rows;
@@ -14524,38 +14555,6 @@ public partial class MainWindow : Window
             return inputComposite;
         }
 
-        bool hasEnabledSubtractiveSimulationLayer = blendLayers.Any(layer => layer.BlendMode == BlendMode.Subtractive);
-        bool hasEnabledNonSubtractiveSimulationLayer = blendLayers.Any(layer => layer.BlendMode != BlendMode.Subtractive);
-        bool hasEnabledAdditiveSimulationLayer = blendLayers.Any(layer => layer.BlendMode == BlendMode.Additive);
-        int additiveLayerCount = blendLayers.Count(layer => layer.BlendMode == BlendMode.Additive);
-        int subtractiveLayerCount = blendLayers.Count(layer => layer.BlendMode == BlendMode.Subtractive);
-        bool hasStandaloneOutputLayer = blendLayers.Any(layer => layer.PublishesStandaloneOutput);
-        bool hasEnabledNonAddSubSimulationLayer = blendLayers.Any(layer =>
-            layer.BlendMode != BlendMode.Additive &&
-            layer.BlendMode != BlendMode.Subtractive);
-
-        int simulationBaseline;
-        if (hasEnabledSubtractiveSimulationLayer && !hasEnabledNonSubtractiveSimulationLayer)
-        {
-            simulationBaseline = 255;
-        }
-        else if (hasEnabledAdditiveSimulationLayer &&
-                 hasEnabledSubtractiveSimulationLayer &&
-                 !hasEnabledNonAddSubSimulationLayer)
-        {
-            simulationBaseline = 128;
-        }
-        else
-        {
-            simulationBaseline = 0;
-        }
-
-        bool includeUnderlayInFinalComposite = inputComposite != null && !hasStandaloneOutputLayer;
-        bool useSignedAddSubPassthrough = includeUnderlayInFinalComposite && !hasEnabledNonAddSubSimulationLayer;
-        bool useMixedAddSubPassthroughModel = useSignedAddSubPassthrough &&
-                                              additiveLayerCount > 0 &&
-                                              subtractiveLayerCount > 0;
-
         Parallel.For(0, height, row =>
         {
             int sourceRow = _rowMap[row];
@@ -14565,78 +14564,15 @@ public partial class MainWindow : Window
                 int sourceIndex = (sourceRow * engineCols + sourceCol) * 4;
                 int index = (row * width + col) * 4;
 
-                int underlayB = simulationBaseline;
-                int underlayG = simulationBaseline;
-                int underlayR = simulationBaseline;
-                if (includeUnderlayInFinalComposite && inputComposite != null && inputComposite.Downscaled.Length >= requiredLength)
-                {
-                    underlayB = targetBuffer[index];
-                    underlayG = targetBuffer[index + 1];
-                    underlayR = targetBuffer[index + 2];
-                }
-
-                if (useSignedAddSubPassthrough)
-                {
-                    int addB = 0;
-                    int addG = 0;
-                    int addR = 0;
-                    int subB = 0;
-                    int subG = 0;
-                    int subR = 0;
-                    foreach (var blendLayer in blendLayers)
-                    {
-                        SampleInlineSimulationLayerColor(blendLayer, sourceIndex, out byte sampleR, out byte sampleG, out byte sampleB);
-                        if (blendLayer.BlendMode == BlendMode.Subtractive)
-                        {
-                            subR += (int)Math.Round((255 - sampleR) * blendLayer.Opacity);
-                            subG += (int)Math.Round((255 - sampleG) * blendLayer.Opacity);
-                            subB += (int)Math.Round((255 - sampleB) * blendLayer.Opacity);
-                        }
-                        else
-                        {
-                            addR += (int)Math.Round(sampleR * blendLayer.Opacity);
-                            addG += (int)Math.Round(sampleG * blendLayer.Opacity);
-                            addB += (int)Math.Round(sampleB * blendLayer.Opacity);
-                        }
-                    }
-
-                    if (useMixedAddSubPassthroughModel)
-                    {
-                        double underlayB01 = underlayB / 255.0;
-                        double underlayG01 = underlayG / 255.0;
-                        double underlayR01 = underlayR / 255.0;
-
-                        double scaledSubB = Math.Clamp(subB * underlayB01, 0, 255);
-                        double scaledSubG = Math.Clamp(subG * underlayG01, 0, 255);
-                        double scaledSubR = Math.Clamp(subR * underlayR01, 0, 255);
-
-                        double scaledAddB = addB * (1.0 - underlayB01);
-                        double scaledAddG = addG * (1.0 - underlayG01);
-                        double scaledAddR = addR * (1.0 - underlayR01);
-
-                        targetBuffer[index] = (byte)ClampToByte((int)Math.Round(underlayB + scaledAddB - scaledSubB));
-                        targetBuffer[index + 1] = (byte)ClampToByte((int)Math.Round(underlayG + scaledAddG - scaledSubG));
-                        targetBuffer[index + 2] = (byte)ClampToByte((int)Math.Round(underlayR + scaledAddR - scaledSubR));
-                    }
-                    else
-                    {
-                        targetBuffer[index] = ClampToByte(underlayB + addB - subB);
-                        targetBuffer[index + 1] = ClampToByte(underlayG + addG - subG);
-                        targetBuffer[index + 2] = ClampToByte(underlayR + addR - subR);
-                    }
-
-                    targetBuffer[index + 3] = 255;
-                    continue;
-                }
-
                 double simAlpha = 0;
-                int simB = simulationBaseline;
-                int simG = simulationBaseline;
-                int simR = simulationBaseline;
+                int simB = 0;
+                int simG = 0;
+                int simR = 0;
+                bool firstOutput = true;
                 foreach (var blendLayer in blendLayers)
                 {
                     SampleInlineSimulationLayerColor(blendLayer, sourceIndex, out byte sampleR, out byte sampleG, out byte sampleB);
-                    if (blendLayer.BlendMode == BlendMode.Normal)
+                    if (firstOutput || blendLayer.BlendMode == BlendMode.Normal)
                     {
                         double alpha = blendLayer.ColorBuffer[sourceIndex + 3] / 255.0 * blendLayer.Opacity;
                         simB = (int)Math.Round(simB * (1 - alpha) + sampleB * blendLayer.Opacity);
@@ -14649,17 +14585,16 @@ public partial class MainWindow : Window
                         BlendSimulationLayerInto(ref simB, ref simG, ref simR, sampleR, sampleG, sampleB, blendLayer.BlendMode, blendLayer.Opacity);
                         simAlpha = 1;
                     }
+                    simB = ClampToByte(simB);
+                    simG = ClampToByte(simG);
+                    simR = ClampToByte(simR);
+                    firstOutput = false;
                 }
 
-                int deltaB = simB - simulationBaseline;
-                int deltaG = simG - simulationBaseline;
-                int deltaR = simR - simulationBaseline;
-                targetBuffer[index] = ClampToByte(underlayB + deltaB);
-                targetBuffer[index + 1] = ClampToByte(underlayG + deltaG);
-                targetBuffer[index + 2] = ClampToByte(underlayR + deltaR);
-                double underlayAlpha = includeUnderlayInFinalComposite && inputComposite != null && inputComposite.Downscaled.Length >= requiredLength
-                    ? inputComposite.Downscaled[index + 3] / 255.0 : 0;
-                targetBuffer[index + 3] = ClampToByte((int)Math.Round((simAlpha + underlayAlpha * (1 - simAlpha)) * 255));
+                targetBuffer[index] = ClampToByte(simB);
+                targetBuffer[index + 1] = ClampToByte(simG);
+                targetBuffer[index + 2] = ClampToByte(simR);
+                targetBuffer[index + 3] = ClampToByte((int)Math.Round(simAlpha * 255));
             }
         });
 
@@ -16815,7 +16750,7 @@ public partial class MainWindow : Window
         var roundTrip = config.ToEditorSources()
             .First(candidate => candidate.Kind == LayerEditorSourceKind.Group &&
                                 string.Equals(candidate.DisplayName, "Transform Smoke", StringComparison.Ordinal));
-        bool persistenceOk = config.Version == 11 &&
+        bool persistenceOk = config.Version == 12 &&
                              Math.Abs(roundTrip.Scale - 1.75) < 0.0001 &&
                              roundTrip.Animations.Count == 1 &&
                              Math.Abs(roundTrip.Animations[0].StartAngleDegrees - 123) < 0.0001;
@@ -17434,7 +17369,7 @@ public partial class MainWindow : Window
             return false;
         }
 
-        if (layer.LayerType == SimulationLayerType.PixelSort &&
+        if (LayerPublishesStandaloneOutput(layer) &&
             engine is GpuPixelSortBackend pixelSortBackend &&
             pixelSortBackend.TryGetPresentationSurface(out var pixelSortSurface) &&
             pixelSortSurface != null)
@@ -17517,9 +17452,9 @@ public partial class MainWindow : Window
         }
         byte[] targetBuffer = layer.ColorBuffer;
         engine.FillColorBuffer(targetBuffer);
-        if (layer.LayerType == SimulationLayerType.PixelSort)
+        if (LayerPublishesStandaloneOutput(layer))
         {
-            // Pixel Sort reads back its BGRA scene texture; simulation blending
+            // Image effects read back BGRA scene textures; simulation blending
             // and hue rotation consume RGBA buffers like the Life engines.
             for (int index = 0; index < size; index += 4)
                 (targetBuffer[index], targetBuffer[index + 2]) = (targetBuffer[index + 2], targetBuffer[index]);
@@ -17529,7 +17464,7 @@ public partial class MainWindow : Window
             double hueShiftDegrees = CurrentRgbHueShiftDegrees(layer);
             bool applyHueShift =
                 Math.Abs(hueShiftDegrees) > 0.001 &&
-                (layer.LayerType == SimulationLayerType.PixelSort ||
+                (LayerPublishesStandaloneOutput(layer) ||
                  layer.LifeMode == GameOfLifeEngine.LifeMode.RgbChannels ||
                  layer.LifeMode == GameOfLifeEngine.LifeMode.Bitwise);
             if (applyHueShift)
@@ -17594,7 +17529,8 @@ public partial class MainWindow : Window
 
             if (_renderBackend.SupportsGpuSimulationComposition &&
                 !_isRecording &&
-                (layer.LifeMode == GameOfLifeEngine.LifeMode.RgbChannels || layer.LifeMode == GameOfLifeEngine.LifeMode.Bitwise))
+                (LayerPublishesStandaloneOutput(layer) ||
+                 layer.LifeMode == GameOfLifeEngine.LifeMode.RgbChannels || layer.LifeMode == GameOfLifeEngine.LifeMode.Bitwise))
             {
                 double hueShiftDegrees = CurrentRgbHueShiftDegrees(layer);
                 if (Math.Abs(hueShiftDegrees) > 0.001)
@@ -17635,7 +17571,7 @@ public partial class MainWindow : Window
     }
 
     private static bool LayerPublishesStandaloneOutput(SimulationLayerState layer)
-        => layer.LayerType == SimulationLayerType.PixelSort;
+        => layer.LayerType is SimulationLayerType.PixelSort or SimulationLayerType.Datamosh;
 
     private static void SampleInlineSimulationLayerColor(
         InlineSimulationBlendLayerData layer,
@@ -19835,7 +19771,10 @@ public partial class MainWindow : Window
             ThresholdMax = layer.ThresholdMax,
             InvertThreshold = layer.InvertThreshold,
             PixelSortCellWidth = layer.PixelSortCellWidth,
-            PixelSortCellHeight = layer.PixelSortCellHeight
+            PixelSortCellHeight = layer.PixelSortCellHeight,
+            DatamoshFeedback = layer.DatamoshFeedback,
+            DatamoshDisplacement = layer.DatamoshDisplacement,
+            DatamoshBlockSize = layer.DatamoshBlockSize
         };
 
         foreach (var child in layer.Children)
@@ -19878,7 +19817,10 @@ public partial class MainWindow : Window
             ThresholdMax = layer.ThresholdMax,
             InvertThreshold = layer.InvertThreshold,
             PixelSortCellWidth = layer.PixelSortCellWidth,
-            PixelSortCellHeight = layer.PixelSortCellHeight
+            PixelSortCellHeight = layer.PixelSortCellHeight,
+            DatamoshFeedback = layer.DatamoshFeedback,
+            DatamoshDisplacement = layer.DatamoshDisplacement,
+            DatamoshBlockSize = layer.DatamoshBlockSize
         };
 
         foreach (var child in layer.Children)
@@ -21076,6 +21018,9 @@ public partial class MainWindow : Window
             public bool InvertThreshold { get; set; }
             public int PixelSortCellWidth { get; set; } = 12;
             public int PixelSortCellHeight { get; set; } = 8;
+            public double DatamoshFeedback { get; set; } = 0.15;
+            public double DatamoshDisplacement { get; set; }
+            public int DatamoshBlockSize { get; set; } = 16;
             public int PixelSortGridColumns { get; set; }
             public int PixelSortGridRows { get; set; }
             public List<SimulationLayerConfig> Children { get; set; } = new();

@@ -198,6 +198,17 @@ public partial class MainWindow
             }
         }
 
+        public GpuCompositeSurface? UploadInputSurface(byte[] buffer, int width, int height)
+        {
+            if (!_gpuAvailable) return null;
+            lock (_sync)
+            {
+                var view = ResolveUploadedResource(MaxSimulationLayers, buffer, width, height);
+                return view == null ? null : new GpuCompositeSurface(
+                    _uploadTextures[MaxSimulationLayers]!, view, IntPtr.Zero, width, height);
+            }
+        }
+
         public void Dispose()
         {
             for (int i = 0; i < _uploadTextures.Length; i++)
@@ -397,7 +408,7 @@ public partial class MainWindow
                 _uploadTextures[index] = null;
 
                 var description = new Texture2DDescription(
-                    Format.B8G8R8A8_UNorm,
+                    index == MaxSimulationLayers ? Format.B8G8R8A8_UNorm : Format.R8G8B8A8_UInt,
                     (uint)width,
                     (uint)height,
                     1,

@@ -31,7 +31,8 @@ internal enum LayerEditorSimulationItemKind
 internal enum LayerEditorSimulationLayerType
 {
     Life,
-    PixelSort
+    PixelSort,
+    Datamosh
 }
 
 internal sealed class LayerEditorOption
@@ -224,7 +225,9 @@ internal static class LayerEditorOptions
         new LayerEditorOption(nameof(SimulationReactiveOutput.ThresholdMin), "Threshold Min"),
         new LayerEditorOption(nameof(SimulationReactiveOutput.ThresholdMax), "Threshold Max"),
         new LayerEditorOption(nameof(SimulationReactiveOutput.PixelSortCellWidth), "Cell Width"),
-        new LayerEditorOption(nameof(SimulationReactiveOutput.PixelSortCellHeight), "Cell Height")
+        new LayerEditorOption(nameof(SimulationReactiveOutput.PixelSortCellHeight), "Cell Height"),
+        new LayerEditorOption(nameof(SimulationReactiveOutput.DatamoshFeedback), "Datamosh Feedback"),
+        new LayerEditorOption(nameof(SimulationReactiveOutput.DatamoshDisplacement), "Datamosh Displacement")
     };
 }
 
@@ -1307,6 +1310,7 @@ internal sealed class LayerEditorSimulationLayer : LayerEditorNotify
                 OnPropertyChanged(nameof(TypeLabel));
                 OnPropertyChanged(nameof(IsLifeLayer));
                 OnPropertyChanged(nameof(IsPixelSortLayer));
+                OnPropertyChanged(nameof(IsDatamoshLayer));
                 OnPropertyChanged(nameof(KindLabel));
                 OnPropertyChanged(nameof(TreeLabel));
                 OnPropertyChanged(nameof(Details));
@@ -1483,6 +1487,39 @@ internal sealed class LayerEditorSimulationLayer : LayerEditorNotify
         }
     }
 
+    private double _datamoshFeedback = 0.15;
+    public double DatamoshFeedback
+    {
+        get => _datamoshFeedback;
+        set
+        {
+            if (SetField(ref _datamoshFeedback, Math.Clamp(double.IsFinite(value) ? value : 0, 0, 0.98)))
+                OnPropertyChanged(nameof(Details));
+        }
+    }
+
+    private double _datamoshDisplacement = 0;
+    public double DatamoshDisplacement
+    {
+        get => _datamoshDisplacement;
+        set
+        {
+            if (SetField(ref _datamoshDisplacement, Math.Clamp(double.IsFinite(value) ? value : 0, 0, 1)))
+                OnPropertyChanged(nameof(Details));
+        }
+    }
+
+    private int _datamoshBlockSize = 16;
+    public int DatamoshBlockSize
+    {
+        get => _datamoshBlockSize;
+        set
+        {
+            if (SetField(ref _datamoshBlockSize, Math.Clamp(value, 1, 512)))
+                OnPropertyChanged(nameof(Details));
+        }
+    }
+
     public int PixelSortCellWidth
     {
         get => _pixelSortCellWidth;
@@ -1561,7 +1598,9 @@ internal sealed class LayerEditorSimulationLayer : LayerEditorNotify
 
     public bool IsPixelSortLayer => !IsGroup && LayerType == LayerEditorSimulationLayerType.PixelSort;
 
-    public string TypeLabel => LayerType == LayerEditorSimulationLayerType.PixelSort ? "Pixel Sort" : "Life Sim";
+    public bool IsDatamoshLayer => !IsGroup && LayerType == LayerEditorSimulationLayerType.Datamosh;
+
+    public string TypeLabel => IsDatamoshLayer ? "Datamosh" : LayerType == LayerEditorSimulationLayerType.PixelSort ? "Pixel Sort" : "Life Sim";
 
     public string KindLabel => IsGroup ? "Sim Group" : TypeLabel;
 
@@ -1571,7 +1610,9 @@ internal sealed class LayerEditorSimulationLayer : LayerEditorNotify
 
     public string Details => IsGroup
         ? $"{(Enabled ? "Enabled" : "Disabled")} | {Children.Count} item{(Children.Count == 1 ? string.Empty : "s")}"
-        : LayerType == LayerEditorSimulationLayerType.PixelSort
+        : IsDatamoshLayer
+            ? $"{(Enabled ? "Enabled" : "Disabled")} | Datamosh | {BlendMode} | Feedback {DatamoshFeedback:P0} | Displacement {DatamoshDisplacement:P0} | Block {DatamoshBlockSize}px | Reactive {ReactiveMappings.Count}"
+            : LayerType == LayerEditorSimulationLayerType.PixelSort
             ? $"{(Enabled ? "Enabled" : "Disabled")} | Pixel Sort | {BlendMode} | Cell {PixelSortCellWidth}x{PixelSortCellHeight} | Opacity {LifeOpacity:P0} | Hue {RgbHueShiftDegrees:0.#}deg {RgbHueShiftSpeedDegreesPerSecond:+0.#;-0.#;0}deg/s | Reactive {ReactiveMappings.Count}"
             : $"{(Enabled ? "Enabled" : "Disabled")} | {InputFunction} | {BlendMode} | {LifeMode} | {BinningMode} | Noise {InjectionNoise:P0} | Opacity {LifeOpacity:P0} | Hue {RgbHueShiftDegrees:0.#}deg {RgbHueShiftSpeedDegreesPerSecond:+0.#;-0.#;0}deg/s | Reactive {ReactiveMappings.Count} | {InjectionMode} | Th {ThresholdMin:P0}-{ThresholdMax:P0}{(InvertThreshold ? " inv" : string.Empty)}";
 

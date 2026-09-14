@@ -25,12 +25,12 @@ internal sealed class LayerConfigFile
             if (document.RootElement.TryGetProperty("BlendMode", out var blendMode))
                 file.ProjectSettings.CompositeBlendMode = blendMode.GetString() ?? "Additive";
         }
-        else if (!document.RootElement.TryGetProperty("Version", out _) || file.Version > 11)
+        else if (!document.RootElement.TryGetProperty("Version", out _) || file.Version > 12)
             throw new InvalidDataException("This is not a supported LifeViz scene project.");
         return file;
     }
 
-    public int Version { get; set; } = 11;
+    public int Version { get; set; } = 12;
     public DateTime SavedUtc { get; set; } = DateTime.UtcNow;
     public LayerConfigProjectSettings ProjectSettings { get; set; } = new();
     public List<LayerConfigSimulationLayer> SimulationLayers { get; set; } = new();
@@ -289,7 +289,10 @@ internal sealed class LayerConfigFile
             ThresholdMax = Math.Clamp(layer.ThresholdMax, 0, 1),
             InvertThreshold = layer.InvertThreshold,
             PixelSortCellWidth = Math.Clamp(layer.PixelSortCellWidth, 1, 4096),
-            PixelSortCellHeight = Math.Clamp(layer.PixelSortCellHeight, 1, 4096)
+            PixelSortCellHeight = Math.Clamp(layer.PixelSortCellHeight, 1, 4096),
+            DatamoshFeedback = layer.DatamoshFeedback,
+            DatamoshDisplacement = layer.DatamoshDisplacement,
+            DatamoshBlockSize = layer.DatamoshBlockSize
         };
 
         foreach (var child in layer.Children)
@@ -462,6 +465,9 @@ internal sealed class LayerConfigFile
             InvertThreshold = layer.InvertThreshold,
             PixelSortCellWidth = Math.Clamp(layer.PixelSortCellWidth > 0 ? layer.PixelSortCellWidth : layer.PixelSortGridColumns, 1, 4096),
             PixelSortCellHeight = Math.Clamp(layer.PixelSortCellHeight > 0 ? layer.PixelSortCellHeight : layer.PixelSortGridRows, 1, 4096),
+            DatamoshFeedback = layer.DatamoshFeedback,
+            DatamoshDisplacement = layer.DatamoshDisplacement,
+            DatamoshBlockSize = layer.DatamoshBlockSize,
             Parent = parent
         };
 
@@ -539,7 +545,10 @@ internal sealed class LayerConfigFile
             ThresholdMax = layer.ThresholdMax,
             InvertThreshold = layer.InvertThreshold,
             PixelSortCellWidth = layer.PixelSortCellWidth,
-            PixelSortCellHeight = layer.PixelSortCellHeight
+            PixelSortCellHeight = layer.PixelSortCellHeight,
+            DatamoshFeedback = layer.DatamoshFeedback,
+            DatamoshDisplacement = layer.DatamoshDisplacement,
+            DatamoshBlockSize = layer.DatamoshBlockSize
         };
         target.Add(flattened);
     }
@@ -674,7 +683,8 @@ internal sealed class LayerConfigFile
 
     private static string ResolveDefaultSimulationLayerName(LayerEditorSimulationLayerType layerType)
     {
-        return layerType == LayerEditorSimulationLayerType.PixelSort ? "Pixel Sort" : "Life Sim";
+        return layerType == LayerEditorSimulationLayerType.Datamosh ? "Datamosh"
+            : layerType == LayerEditorSimulationLayerType.PixelSort ? "Pixel Sort" : "Life Sim";
     }
 }
 
@@ -765,6 +775,9 @@ internal sealed class LayerConfigSimulationLayer
     public bool InvertThreshold { get; set; }
     public int PixelSortCellWidth { get; set; } = 12;
     public int PixelSortCellHeight { get; set; } = 8;
+    public double DatamoshFeedback { get; set; } = 0.15;
+    public double DatamoshDisplacement { get; set; }
+    public int DatamoshBlockSize { get; set; } = 16;
     public int PixelSortGridColumns { get; set; }
     public int PixelSortGridRows { get; set; }
     public List<LayerConfigSimulationLayer> Children { get; set; } = new();

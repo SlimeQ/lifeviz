@@ -20,6 +20,19 @@ dotnet bin/Release/net9.0-windows/lifeviz.dll --smoke-test projectm
 
 The native smoke checks ordered/shuffle/beat scheduling, scene round trips, PCM, actual OpenGL frames, resizing, transitions, group compositing and failure recovery; it writes QA PNGs to the build's `projectm-smoke` folder. `Test-ProjectM.ps1` creates its own audio/video fixture, runs a real two-second background worker, and checks that all 60 frames decode and animate. It keeps its video and diagnostics under a unique `artifacts/projectm-bake-*` directory. Use `-ExecutablePath <published-lifeviz.exe>` to run the export check against an installed/published layout.
 
+## Validate Datamosh
+
+Ordinary builds compile and embed `Assets/GpuDatamosh.hlsl` with the existing Windows SDK shader compiler; no additional install dependency is needed. Scene project exports now use version 12, while earlier versions still load. To validate the feature without changing the saved user scene:
+
+```powershell
+dotnet build -c Debug
+dotnet bin/Debug/net9.0-windows/lifeviz.dll --smoke-test datamosh
+dotnet bin/Debug/net9.0-windows/lifeviz.dll --smoke-test datamosh-editor
+dotnet bin/Debug/net9.0-windows/lifeviz.dll --smoke-test datamosh-transparency
+```
+
+`datamosh` checks actual GPU history, displacement, deterministic reset/replay, zero-feedback passthrough, premultiplied alpha decay, recording channel order, presentation surfaces, band mappings/no-input fallback, autosave conversion, and bake-spec cloning. `datamosh-editor` checks adding the layer, default mappings, live editor/runtime refresh, draft cloning, and scene-project save/load. `datamosh-transparency` runs the existing CPU/GPU group-alpha and grouped DVD Bounce fixture with a Datamosh layer. The shared backend's regression checks remain `gpu-pixel-sort`, `pixel-sort-editor-roundtrip`, and `group-transparency`.
+
 The `background-bake` smoke also verifies exit confirmation: an idle queue does not prompt; declining exit before worker startup or during rendering preserves queued jobs and ongoing frame progress; confirming exit prompts once and finalizes partial output before closing. It supplies confirmation responses through a smoke-only callback while exercising the real main-window close handler.
 
 After `dotnet build -c Release`, run `dotnet bin\Release\net9.0-windows\lifeviz.dll --smoke-test group-transparency` for changes to group alpha. It checks real GPU and CPU composites, Pixel Sort alpha, transparent/partial/opaque black pixels, source/group opacity, and a transparent DVD Bounce image grouped over a colored background at several animation times. Fixtures are synthetic and isolated from the saved scene.
@@ -368,3 +381,13 @@ dotnet bin/Release/net9.0-windows/lifeviz.dll --smoke-test render-failure-cleanu
 ```
 
 The persistence smoke uses a unique temporary directory and leaves failed fixtures for diagnosis. It also writes `smoke-scene-recovery-editor.png` beside the test executable for layout inspection. It verifies real locked-file retry, backups/corruption/conflict behavior, and an in-flight save during shutdown without overwriting the user's scene. See [Scene Saving & Recovery](Scene-Saving-and-Recovery.md). Changes take effect in builds/installers containing this code; existing installed releases retain their previous behavior.
+
+## Validate simulation group blending
+
+```powershell
+dotnet build -c Release
+dotnet bin/Release/net9.0-windows/lifeviz.dll --smoke-test simulation-blending
+dotnet bin/Release/net9.0-windows/lifeviz.dll --smoke-test group-transparency
+```
+
+The isolated blending smoke exercises both compositors, all 64 simulation/group blend combinations, shared inputs, ordered clipping, stacked groups over successive frames, more than eight outputs, empty/disabled groups, editor live/draft controls, and scene roundtrips. It writes `smoke-simulation-blending-editor.png` beside the executable for visual inspection. No saved user scene is loaded or modified. The group-transparency smoke checks the resolved group alpha and its subsequent Normal blend over the input stack separately.

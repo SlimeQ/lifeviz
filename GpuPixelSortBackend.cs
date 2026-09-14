@@ -23,6 +23,10 @@ internal sealed class GpuPixelSortBackend : IGpuSimulationSurfaceBackend
         public uint SortAxis;
         public uint Padding0;
         public uint Padding1;
+        public float Feedback;
+        public float Displacement;
+        public uint FrameIndex;
+        public uint HasHistory;
     }
 
     private object _sync = new();
@@ -63,14 +67,28 @@ internal sealed class GpuPixelSortBackend : IGpuSimulationSurfaceBackend
     private double _aspectRatio = 16d / 9d;
     private bool _workAIsSource = true;
     private bool _hasSnapshot;
+    private bool _hasHistory;
+    private uint _frameIndex;
+    private float _feedback;
+    private float _displacement;
+    public bool IsDatamosh { get; }
     private bool _publishedTextureDirty = true;
     private GameOfLifeEngine.LifeMode _mode = GameOfLifeEngine.LifeMode.NaiveGrayscale;
     private GameOfLifeEngine.BinningMode _binningMode = GameOfLifeEngine.BinningMode.Fill;
     private GameOfLifeEngine.InjectionMode _injectionMode = GameOfLifeEngine.InjectionMode.Threshold;
 
-    public GpuPixelSortBackend()
+    // Both full-color effects share texture ownership, readback and presentation.
+    public GpuPixelSortBackend(bool datamosh = false)
     {
+        IsDatamosh = datamosh;
         InitializeGpu();
+    }
+
+    public void SetDatamoshSettings(double feedback, double displacement, int blockSize)
+    {
+        _feedback = (float)Math.Clamp(double.IsFinite(feedback) ? feedback : 0, 0, 0.98);
+        _displacement = (float)Math.Clamp(double.IsFinite(displacement) ? displacement : 0, 0, 1);
+        SetCellSize(blockSize, blockSize);
     }
 
     public int Columns => _columns;
@@ -149,10 +167,15 @@ internal sealed class GpuPixelSortBackend : IGpuSimulationSurfaceBackend
                 return;
             }
 
-            _context.CopyResource(_workTextureA, _snapshotTexture);
-            _workAIsSource = true;
+            if (!IsDatamosh)
+            {
+                _context.CopyResource(_workTextureA, _snapshotTexture);
+                _workAIsSource = true;
+            }
             DispatchSortPass(passParity: 0, sortAxis: 0);
             SwapWorkTextures();
+            _hasHistory = true;
+            _frameIndex++;
 
             _publishedTextureDirty = true;
         }
@@ -230,7 +253,7 @@ internal sealed class GpuPixelSortBackend : IGpuSimulationSurfaceBackend
             _context.CSSetShaderResources(0, new ID3D11ShaderResourceView[] { null! });
             _context.CSSetShader(null);
 
-            if (_workTextureA != null)
+            if (_workTextureA != null && (!IsDatamosh || !_hasSnapshot))
             {
                 _context.CopyResource(_workTextureA, _snapshotTexture!);
                 _workAIsSource = true;
@@ -317,7 +340,8 @@ internal sealed class GpuPixelSortBackend : IGpuSimulationSurfaceBackend
         _sync = _sharedDevice.SyncRoot;
 
         _injectCompositeShader = _device.CreateComputeShader(LoadShaderBytecode("Assets/GpuPixelSortInjectCompositeCS.cso"));
-        _sortPassShader = _device.CreateComputeShader(LoadShaderBytecode("Assets/GpuPixelSortSortPassCS.cso"));
+        _sortPassShader = _device.CreateComputeShader(LoadShaderBytecode(IsDatamosh
+            ? "Assets/GpuDatamoshCS.cso" : "Assets/GpuPixelSortSortPassCS.cso"));
         _publishOutputShader = _device.CreateComputeShader(LoadShaderBytecode("Assets/GpuPixelSortPublishOutputCS.cso"));
         _publishPresentationShader = _device.CreateComputeShader(LoadShaderBytecode("Assets/GpuPixelSortPublishPresentationOutputCS.cso"));
         _parameterBuffer = _device.CreateBuffer(
@@ -448,12 +472,15 @@ internal sealed class GpuPixelSortBackend : IGpuSimulationSurfaceBackend
 
         UploadParameters(passParity, sortAxis);
         _context.CSSetShader(_sortPassShader);
-        _context.CSSetShaderResources(0, new[] { CurrentWorkSrv });
+        _context.CSSetShaderResources(0, new[] { CurrentWorkSrv, _snapshotSrv! });
         _context.CSSetUnorderedAccessViews(0, new[] { DestinationWorkUav });
         _context.CSSetConstantBuffers(0, new[] { _parameterBuffer });
-        DispatchSortGrid(_context);
+        if (IsDatamosh)
+            DispatchGrid(_context, _columns, _rows);
+        else
+            DispatchSortGrid(_context);
         _context.CSSetUnorderedAccessViews(0, new ID3D11UnorderedAccessView[] { null! });
-        _context.CSSetShaderResources(0, new ID3D11ShaderResourceView[] { null! });
+        _context.CSSetShaderResources(0, new ID3D11ShaderResourceView[] { null!, null! });
         _context.CSSetShader(null);
     }
 
@@ -515,7 +542,11 @@ internal sealed class GpuPixelSortBackend : IGpuSimulationSurfaceBackend
             CellWidth = (uint)Math.Max(1, _cellWidth),
             CellHeight = (uint)Math.Max(1, _cellHeight),
             PassParity = (uint)Math.Max(0, passParity),
-            SortAxis = (uint)Math.Max(0, sortAxis)
+            SortAxis = (uint)Math.Max(0, sortAxis),
+            Feedback = _feedback,
+            Displacement = _displacement,
+            FrameIndex = _frameIndex,
+            HasHistory = _hasHistory ? 1u : 0u
         };
 
         int size = Marshal.SizeOf<PixelSortParameters>();
@@ -543,6 +574,9 @@ internal sealed class GpuPixelSortBackend : IGpuSimulationSurfaceBackend
         _context.ClearUnorderedAccessView(_workUavA!, clearValue);
         _context.ClearUnorderedAccessView(_workUavB!, clearValue);
         _workAIsSource = true;
+        _hasSnapshot = false;
+        _hasHistory = false;
+        _frameIndex = 0;
         _publishedTextureDirty = true;
     }
 
