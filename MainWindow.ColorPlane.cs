@@ -232,7 +232,7 @@ public partial class MainWindow
                 ? source.Children.AsEnumerable()
                 : Enumerable.Repeat(source, 1))
             .FirstOrDefault(source => source.IsColorPlane);
-        bool layerConfigOk = layerConfig.Version == 11 &&
+        bool layerConfigOk = layerConfig.Version == 12 &&
                              roundTripPlane?.ColorHex == "#A1B2C3" &&
                              roundTripPlane.BlendMode == "Normal" &&
                              roundTripPlane.FitMode == "Stretch";

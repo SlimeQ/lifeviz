@@ -161,6 +161,9 @@ internal static partial class SmokeTestRunner
                 "pixel-sort-editor-roundtrip" => RunPixelSortEditorRoundTripSmokeTest(),
                 "gpu-bitwise" => RunGpuBitwiseSmokeTest(),
                 "gpu-pixel-sort" => RunGpuPixelSortSmokeTest(),
+                "datamosh" => RunDatamoshSmokeTest(),
+                "datamosh-editor" => RunPixelSortEditorRoundTripSmokeTest(datamosh: true),
+                "datamosh-transparency" => RunGroupTransparencySmokeTest(datamosh: true),
                 "sim-group-pixel-sort-color" => RunSimGroupPixelSortColorSmokeTest(),
                 "group-transparency" => RunGroupTransparencySmokeTest(),
                 "simulation-blending" => RunSimulationBlendingSmokeTest(),
@@ -373,6 +376,13 @@ internal static partial class SmokeTestRunner
         return 0;
     }
 
+    private static int RunDatamoshSmokeTest()
+    {
+        var window = new MainWindow();
+        try { return window.RunDatamoshSmoke() ? 0 : 1; }
+        finally { window.Close(); }
+    }
+
     private static int RunGpuPixelSortSmokeTest()
     {
         Logger.Info("Running GPU pixel sort smoke test.");
@@ -408,10 +418,10 @@ internal static partial class SmokeTestRunner
         finally { window.Close(); }
     }
 
-    private static int RunGroupTransparencySmokeTest()
+    private static int RunGroupTransparencySmokeTest(bool datamosh = false)
     {
         var window = new MainWindow();
-        try { return window.RunGroupTransparencySmoke() ? 0 : 1; }
+        try { return window.RunGroupTransparencySmoke(datamosh) ? 0 : 1; }
         finally { window.Close(); }
     }
 
@@ -1683,7 +1693,7 @@ internal static partial class SmokeTestRunner
         return exitCode;
     }
 
-    private static int RunPixelSortEditorRoundTripSmokeTest()
+    private static int RunPixelSortEditorRoundTripSmokeTest(bool datamosh = false)
     {
         int exitCode = 0;
         var thread = new Thread(() =>
@@ -1696,7 +1706,7 @@ internal static partial class SmokeTestRunner
                 window.Show();
                 window.Hide();
                 var editor = new LayerEditorWindow(window);
-                bool ok = editor.RunPixelSortEditorRoundTripSmoke();
+                bool ok = datamosh ? editor.RunDatamoshEditorSmoke() : editor.RunPixelSortEditorRoundTripSmoke();
                 editor.Close();
                 window.Close();
                 app.Shutdown();

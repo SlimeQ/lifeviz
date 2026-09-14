@@ -6,7 +6,7 @@ namespace lifeviz;
 
 public partial class MainWindow
 {
-    internal bool RunGroupTransparencySmoke()
+    internal bool RunGroupTransparencySmoke(bool datamosh = false)
     {
         if (!_renderLoopAttached) InitializeVisualizer();
         _sources.Clear();
@@ -37,7 +37,8 @@ public partial class MainWindow
         sim.SimulationLayers.Add(new SimulationLayerSpec
         {
             Id = Guid.NewGuid(), Kind = LayerEditorSimulationItemKind.Layer,
-            LayerType = SimulationLayerType.PixelSort, Name = "Pixel Sort", Enabled = true,
+            LayerType = datamosh ? SimulationLayerType.Datamosh : SimulationLayerType.PixelSort,
+            Name = datamosh ? "Datamosh" : "Pixel Sort", Enabled = true,
             BlendMode = BlendMode.Normal, LifeOpacity = 1,
             PixelSortCellWidth = 1, PixelSortCellHeight = 1
         });

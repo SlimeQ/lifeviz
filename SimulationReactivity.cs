@@ -25,7 +25,9 @@ internal enum SimulationReactiveOutput
     ThresholdMin,
     ThresholdMax,
     PixelSortCellWidth,
-    PixelSortCellHeight
+    PixelSortCellHeight,
+    DatamoshFeedback,
+    DatamoshDisplacement
 }
 
 internal sealed class SimulationReactiveMapping
