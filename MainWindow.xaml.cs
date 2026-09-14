@@ -10571,6 +10571,20 @@ public partial class MainWindow : Window
             return false;
         }
 
+        if (composite?.GpuSurface != null)
+        {
+            // Read this stack position, not a rebuild of the complete scene.
+            byte[]? readback = null;
+            var exactComposite = _inlineGpuSourceCompositor.CreateCompositeFrameFromSurface(
+                composite.GpuSurface, ref readback, includeCpuReadback: true);
+            if (exactComposite != null)
+            {
+                composite = exactComposite;
+                compositeHasCpuReadback = true;
+                return true;
+            }
+        }
+
         attemptedCpuCompositeFallback = true;
         long fallbackCompositeStamp = BeginProfileStamp();
         var cpuComposite = BuildCompositeFrame(
@@ -12494,6 +12508,16 @@ public partial class MainWindow : Window
         }
     }
 
+    private static IEnumerable<SimulationLayerState> EnumerateEnabledSimulationLeaves(IEnumerable<SimulationLayerState> roots)
+    {
+        foreach (var layer in roots)
+        {
+            if (!layer.Enabled) continue;
+            if (!layer.IsGroup) yield return layer;
+            foreach (var child in EnumerateEnabledSimulationLeaves(layer.Children)) yield return child;
+        }
+    }
+
     private static List<SimulationLayerSpec> BuildDefaultSimulationLayerSpecs()
     {
         return new List<SimulationLayerSpec>
@@ -13888,30 +13912,35 @@ public partial class MainWindow : Window
                     ref steppedPassCount);
                 if (simulationComposite == null)
                 {
-                    if (!source.SimulationLayers.Any(layer => layer.Enabled))
+                    if (!EnumerateEnabledSimulationLeaves(FindSimulationNode(source.Id)?.Children
+                            ?? new List<SimulationLayerState>()).Any())
                     {
+                        sourceIndex++;
                         continue;
                     }
 
                     return null;
                 }
 
-                if (Math.Abs(source.Scale - LayerEditorOptions.DefaultLayerScale) > 0.000001)
+                if (ReferenceEquals(simulationComposite, currentComposite))
                 {
-                    simulationComposite = _inlineGpuSourceCompositor.ComposeCompositeFrameOntoSurface(
-                        currentSurface: null,
-                        simulationComposite,
-                        source,
-                        downscaledWidth,
-                        downscaledHeight,
-                        animationTime,
-                        firstLayer: true,
-                        ref scratchBuffer,
-                        includeCpuReadback: false);
-                    if (simulationComposite == null)
-                    {
-                        return null;
-                    }
+                    sourceIndex++;
+                    continue;
+                }
+
+                simulationComposite = _inlineGpuSourceCompositor.ComposeCompositeFrameOntoSurface(
+                    currentComposite?.GpuSurface,
+                    simulationComposite,
+                    source,
+                    downscaledWidth,
+                    downscaledHeight,
+                    animationTime,
+                    firstLayer: !wroteAny,
+                    ref scratchBuffer,
+                    includeCpuReadback: false);
+                if (simulationComposite == null)
+                {
+                    return null;
                 }
 
                 currentComposite = simulationComposite;
@@ -14113,28 +14142,26 @@ public partial class MainWindow : Window
                     continue;
                 }
 
-                if (Math.Abs(source.Scale - LayerEditorOptions.DefaultLayerScale) > 0.000001)
+                if (ReferenceEquals(simulationComposite, currentComposite))
                 {
-                    var simulationFrame = new SourceFrame(
-                        simulationComposite.Downscaled,
-                        simulationComposite.DownscaledWidth,
-                        simulationComposite.DownscaledHeight,
-                        source: null,
-                        sourceWidth: simulationComposite.DownscaledWidth,
-                        sourceHeight: simulationComposite.DownscaledHeight);
-                    _inlineSourceCompositor.CompositeSourceFrameIntoBuffer(
-                        downscaledBuffer,
-                        downscaledWidth,
-                        downscaledHeight,
-                        simulationFrame,
-                        source,
-                        animationTime,
-                        firstLayer: true);
+                    continue;
                 }
-                else
-                {
-                    Buffer.BlockCopy(simulationComposite.Downscaled, 0, downscaledBuffer, 0, requiredLength);
-                }
+
+                var simulationFrame = new SourceFrame(
+                    simulationComposite.Downscaled,
+                    simulationComposite.DownscaledWidth,
+                    simulationComposite.DownscaledHeight,
+                    source: null,
+                    sourceWidth: simulationComposite.DownscaledWidth,
+                    sourceHeight: simulationComposite.DownscaledHeight);
+                _inlineSourceCompositor.CompositeSourceFrameIntoBuffer(
+                    downscaledBuffer,
+                    downscaledWidth,
+                    downscaledHeight,
+                    simulationFrame,
+                    source,
+                    animationTime,
+                    firstLayer: !wroteAny);
                 currentComposite = new CompositeFrame(downscaledBuffer, downscaledWidth, downscaledHeight);
                 wroteAny = true;
                 continue;
@@ -14194,6 +14221,25 @@ public partial class MainWindow : Window
             : null;
     }
 
+    private CompositeFrame PrepareInlineSimulationGroupInput(CompositeFrame? input)
+    {
+        if (input == null)
+        {
+            var engine = GetReferenceSimulationEngine();
+            input = new CompositeFrame(new byte[engine.Columns * engine.Rows * 4], engine.Columns, engine.Rows);
+        }
+        // Pixel Sort/Bitwise still need GPU input when the scene was composed
+        // on CPU. Upload the exact lower stack, including its alpha.
+        if (input.GpuSurface == null && input.Downscaled.Length >= input.DownscaledWidth * input.DownscaledHeight * 4)
+        {
+            var surface = _gpuSimulationGroupCompositor.UploadInputSurface(
+                input.Downscaled, input.DownscaledWidth, input.DownscaledHeight);
+            if (surface != null)
+                input = new CompositeFrame(input.Downscaled, input.DownscaledWidth, input.DownscaledHeight, surface);
+        }
+        return input;
+    }
+
     private CompositeFrame? BuildInlineSimulationGroupCompositeFrameGpu(
         CaptureSource source,
         CompositeFrame? inputComposite,
@@ -14215,7 +14261,7 @@ public partial class MainWindow : Window
         int groupSteppedPassCount = 0;
         if (!_isPaused && simulationStepsThisFrame > 0 && runtimeGroup.Enabled)
         {
-            CompositeFrame? groupInputComposite = inputComposite;
+            CompositeFrame? groupInputComposite = PrepareInlineSimulationGroupInput(inputComposite);
             bool compositeHasCpuReadback = groupInputComposite != null &&
                                            groupInputComposite.DownscaledWidth > 0 &&
                                            groupInputComposite.DownscaledHeight > 0 &&
@@ -14223,18 +14269,14 @@ public partial class MainWindow : Window
             bool attemptedCpuCompositeFallback = false;
             bool injectedInGroup = false;
             bool steppedInPass = false;
-            GpuCompositeSurface? published = groupInputComposite?.GpuSurface;
-
-            foreach (var child in runtimeGroup.Children)
+            foreach (var child in EnumerateEnabledSimulationLeaves(runtimeGroup.Children))
             {
-                published = ExecuteSimulationGroupChildInjectionAndStep(
+                steppedInPass |= TryInjectAndStepLayerFromSceneComposite(
                     child,
                     ref groupInputComposite,
                     ref compositeHasCpuReadback,
                     ref attemptedCpuCompositeFallback,
-                    published,
-                    ref injectedInGroup,
-                    ref steppedInPass);
+                    ref injectedInGroup);
             }
 
             if (injectedInGroup)
@@ -14247,7 +14289,7 @@ public partial class MainWindow : Window
                 groupSteppedPassCount = 1;
             }
 
-            var groupLeaves = EnumerateSimulationLeafLayers(runtimeGroup.Children).ToArray();
+            var groupLeaves = EnumerateEnabledSimulationLeaves(runtimeGroup.Children).ToArray();
             for (int pass = 1; pass < simulationStepsThisFrame; pass++)
             {
                 if (RunSimulationStepOnlyPass(groupLeaves))
@@ -14259,7 +14301,7 @@ public partial class MainWindow : Window
 
         steppedPassCount = Math.Max(steppedPassCount, groupSteppedPassCount);
 
-        var enabledLayers = EnumerateSimulationLeafLayers(runtimeGroup.Children)
+        var enabledLayers = EnumerateEnabledSimulationLeaves(runtimeGroup.Children)
             .Where(layer => layer.Enabled)
             .ToArray();
         if (enabledLayers.Length == 0)
@@ -14281,13 +14323,11 @@ public partial class MainWindow : Window
             height = referenceEngine.Rows;
         }
 
-        var visibleLayers = new List<SimulationLayerState>(enabledLayers.Length);
         var activeLayerEntries = new List<SimulationPresentationLayerData>(enabledLayers.Length);
         foreach (var layer in enabledLayers)
         {
             if (TryBuildSimulationPresentationLayer(layer, Math.Clamp(_effectiveLifeOpacity * layer.EffectiveLifeOpacity, 0, 1), out var presentationLayer))
             {
-                visibleLayers.Add(layer);
                 activeLayerEntries.Add(presentationLayer);
             }
         }
@@ -14299,61 +14339,22 @@ public partial class MainWindow : Window
 
         if (activeLayerEntries.Count > 8)
         {
-            return null;
-        }
-
-        bool hasEnabledSubtractiveSimulationLayer = visibleLayers.Any(layer => layer.BlendMode == BlendMode.Subtractive);
-        bool hasEnabledNonSubtractiveSimulationLayer = visibleLayers.Any(layer => layer.BlendMode != BlendMode.Subtractive);
-        bool hasEnabledAdditiveSimulationLayer = visibleLayers.Any(layer => layer.BlendMode == BlendMode.Additive);
-        int additiveLayerCount = visibleLayers.Count(layer => layer.BlendMode == BlendMode.Additive);
-        int subtractiveLayerCount = visibleLayers.Count(layer => layer.BlendMode == BlendMode.Subtractive);
-        bool hasStandaloneOutputLayer = activeLayerEntries.Any(layer => layer.PublishesStandaloneOutput);
-        bool hasEnabledNonAddSubSimulationLayer = visibleLayers.Any(layer =>
-            layer.BlendMode != BlendMode.Additive &&
-            layer.BlendMode != BlendMode.Subtractive);
-
-        int simulationBaseline;
-        if (hasEnabledSubtractiveSimulationLayer && !hasEnabledNonSubtractiveSimulationLayer)
-        {
-            simulationBaseline = 255;
-        }
-        else if (hasEnabledAdditiveSimulationLayer &&
-                 hasEnabledSubtractiveSimulationLayer &&
-                 !hasEnabledNonAddSubSimulationLayer)
-        {
-            simulationBaseline = 128;
-        }
-        else
-        {
-            simulationBaseline = 0;
-        }
-
-        bool includeUnderlayInFinalComposite = inputComposite != null && !hasStandaloneOutputLayer;
-        bool useSignedAddSubPassthrough = includeUnderlayInFinalComposite && !hasEnabledNonAddSubSimulationLayer;
-        bool useMixedAddSubPassthroughModel = useSignedAddSubPassthrough &&
-                                              additiveLayerCount > 0 &&
-                                              subtractiveLayerCount > 0;
-
-        byte[]? underlayBuffer = null;
-        int underlayWidth = 0;
-        int underlayHeight = 0;
-        if (includeUnderlayInFinalComposite && inputComposite != null && inputComposite.GpuSurface == null)
-        {
-            underlayBuffer = inputComposite.Downscaled;
-            underlayWidth = inputComposite.DownscaledWidth;
-            underlayHeight = inputComposite.DownscaledHeight;
+            // Resolve already-stepped outputs on CPU, then upload/blend the group.
+            // Never restart injection for the whole stack on this fallback.
+            return BuildInlineSimulationGroupCompositeFrameCpu(
+                source, inputComposite, 0, ref injectedAnyLayer, ref steppedPassCount);
         }
 
         byte[]? groupBuffer = source.CompositeDownscaledBuffer;
         var composite = _gpuSimulationGroupCompositor.Compose(
             activeLayerEntries,
-            includeUnderlayInFinalComposite ? inputComposite?.GpuSurface : null,
-            underlayBuffer,
-            underlayWidth,
-            underlayHeight,
-            simulationBaseline,
-            useSignedAddSubPassthrough,
-            useMixedAddSubPassthroughModel,
+            underlaySurface: null,
+            underlayBuffer: null,
+            underlayWidth: 0,
+            underlayHeight: 0,
+            simulationBaseline: 0,
+            useSignedAddSubPassthrough: false,
+            useMixedAddSubPassthroughModel: false,
             invertComposite: false,
             width,
             height,
@@ -14405,7 +14406,7 @@ public partial class MainWindow : Window
         int groupSteppedPassCount = 0;
         if (!_isPaused && simulationStepsThisFrame > 0 && runtimeGroup.Enabled)
         {
-            CompositeFrame? groupInputComposite = inputComposite;
+            CompositeFrame? groupInputComposite = PrepareInlineSimulationGroupInput(inputComposite);
             bool compositeHasCpuReadback = groupInputComposite != null &&
                                            groupInputComposite.DownscaledWidth > 0 &&
                                            groupInputComposite.DownscaledHeight > 0 &&
@@ -14413,18 +14414,14 @@ public partial class MainWindow : Window
             bool attemptedCpuCompositeFallback = false;
             bool injectedInGroup = false;
             bool steppedInPass = false;
-            GpuCompositeSurface? published = groupInputComposite?.GpuSurface;
-
-            foreach (var child in runtimeGroup.Children)
+            foreach (var child in EnumerateEnabledSimulationLeaves(runtimeGroup.Children))
             {
-                published = ExecuteSimulationGroupChildInjectionAndStep(
+                steppedInPass |= TryInjectAndStepLayerFromSceneComposite(
                     child,
                     ref groupInputComposite,
                     ref compositeHasCpuReadback,
                     ref attemptedCpuCompositeFallback,
-                    published,
-                    ref injectedInGroup,
-                    ref steppedInPass);
+                    ref injectedInGroup);
             }
 
             if (injectedInGroup)
@@ -14437,7 +14434,7 @@ public partial class MainWindow : Window
                 groupSteppedPassCount = 1;
             }
 
-            var groupLeaves = EnumerateSimulationLeafLayers(runtimeGroup.Children).ToArray();
+            var groupLeaves = EnumerateEnabledSimulationLeaves(runtimeGroup.Children).ToArray();
             for (int pass = 1; pass < simulationStepsThisFrame; pass++)
             {
                 if (RunSimulationStepOnlyPass(groupLeaves))
@@ -14449,7 +14446,7 @@ public partial class MainWindow : Window
 
         steppedPassCount = Math.Max(steppedPassCount, groupSteppedPassCount);
 
-        var enabledLayers = EnumerateSimulationLeafLayers(runtimeGroup.Children)
+        var enabledLayers = EnumerateEnabledSimulationLeaves(runtimeGroup.Children)
             .Where(layer => layer.Enabled)
             .ToArray();
         if (enabledLayers.Length == 0)
@@ -14478,15 +14475,6 @@ public partial class MainWindow : Window
             targetBuffer = new byte[requiredLength];
         }
 
-        if (inputComposite != null && inputComposite.Downscaled.Length >= requiredLength)
-        {
-            Buffer.BlockCopy(inputComposite.Downscaled, 0, targetBuffer, 0, requiredLength);
-        }
-        else
-        {
-            Array.Clear(targetBuffer, 0, requiredLength);
-        }
-
         var referenceSimulationEngine = GetReferenceSimulationEngine();
         int engineCols = referenceSimulationEngine.Columns;
         int engineRows = referenceSimulationEngine.Rows;
@@ -14508,38 +14496,6 @@ public partial class MainWindow : Window
             return inputComposite;
         }
 
-        bool hasEnabledSubtractiveSimulationLayer = blendLayers.Any(layer => layer.BlendMode == BlendMode.Subtractive);
-        bool hasEnabledNonSubtractiveSimulationLayer = blendLayers.Any(layer => layer.BlendMode != BlendMode.Subtractive);
-        bool hasEnabledAdditiveSimulationLayer = blendLayers.Any(layer => layer.BlendMode == BlendMode.Additive);
-        int additiveLayerCount = blendLayers.Count(layer => layer.BlendMode == BlendMode.Additive);
-        int subtractiveLayerCount = blendLayers.Count(layer => layer.BlendMode == BlendMode.Subtractive);
-        bool hasStandaloneOutputLayer = blendLayers.Any(layer => layer.PublishesStandaloneOutput);
-        bool hasEnabledNonAddSubSimulationLayer = blendLayers.Any(layer =>
-            layer.BlendMode != BlendMode.Additive &&
-            layer.BlendMode != BlendMode.Subtractive);
-
-        int simulationBaseline;
-        if (hasEnabledSubtractiveSimulationLayer && !hasEnabledNonSubtractiveSimulationLayer)
-        {
-            simulationBaseline = 255;
-        }
-        else if (hasEnabledAdditiveSimulationLayer &&
-                 hasEnabledSubtractiveSimulationLayer &&
-                 !hasEnabledNonAddSubSimulationLayer)
-        {
-            simulationBaseline = 128;
-        }
-        else
-        {
-            simulationBaseline = 0;
-        }
-
-        bool includeUnderlayInFinalComposite = inputComposite != null && !hasStandaloneOutputLayer;
-        bool useSignedAddSubPassthrough = includeUnderlayInFinalComposite && !hasEnabledNonAddSubSimulationLayer;
-        bool useMixedAddSubPassthroughModel = useSignedAddSubPassthrough &&
-                                              additiveLayerCount > 0 &&
-                                              subtractiveLayerCount > 0;
-
         Parallel.For(0, height, row =>
         {
             int sourceRow = _rowMap[row];
@@ -14549,78 +14505,15 @@ public partial class MainWindow : Window
                 int sourceIndex = (sourceRow * engineCols + sourceCol) * 4;
                 int index = (row * width + col) * 4;
 
-                int underlayB = simulationBaseline;
-                int underlayG = simulationBaseline;
-                int underlayR = simulationBaseline;
-                if (includeUnderlayInFinalComposite && inputComposite != null && inputComposite.Downscaled.Length >= requiredLength)
-                {
-                    underlayB = targetBuffer[index];
-                    underlayG = targetBuffer[index + 1];
-                    underlayR = targetBuffer[index + 2];
-                }
-
-                if (useSignedAddSubPassthrough)
-                {
-                    int addB = 0;
-                    int addG = 0;
-                    int addR = 0;
-                    int subB = 0;
-                    int subG = 0;
-                    int subR = 0;
-                    foreach (var blendLayer in blendLayers)
-                    {
-                        SampleInlineSimulationLayerColor(blendLayer, sourceIndex, out byte sampleR, out byte sampleG, out byte sampleB);
-                        if (blendLayer.BlendMode == BlendMode.Subtractive)
-                        {
-                            subR += (int)Math.Round((255 - sampleR) * blendLayer.Opacity);
-                            subG += (int)Math.Round((255 - sampleG) * blendLayer.Opacity);
-                            subB += (int)Math.Round((255 - sampleB) * blendLayer.Opacity);
-                        }
-                        else
-                        {
-                            addR += (int)Math.Round(sampleR * blendLayer.Opacity);
-                            addG += (int)Math.Round(sampleG * blendLayer.Opacity);
-                            addB += (int)Math.Round(sampleB * blendLayer.Opacity);
-                        }
-                    }
-
-                    if (useMixedAddSubPassthroughModel)
-                    {
-                        double underlayB01 = underlayB / 255.0;
-                        double underlayG01 = underlayG / 255.0;
-                        double underlayR01 = underlayR / 255.0;
-
-                        double scaledSubB = Math.Clamp(subB * underlayB01, 0, 255);
-                        double scaledSubG = Math.Clamp(subG * underlayG01, 0, 255);
-                        double scaledSubR = Math.Clamp(subR * underlayR01, 0, 255);
-
-                        double scaledAddB = addB * (1.0 - underlayB01);
-                        double scaledAddG = addG * (1.0 - underlayG01);
-                        double scaledAddR = addR * (1.0 - underlayR01);
-
-                        targetBuffer[index] = (byte)ClampToByte((int)Math.Round(underlayB + scaledAddB - scaledSubB));
-                        targetBuffer[index + 1] = (byte)ClampToByte((int)Math.Round(underlayG + scaledAddG - scaledSubG));
-                        targetBuffer[index + 2] = (byte)ClampToByte((int)Math.Round(underlayR + scaledAddR - scaledSubR));
-                    }
-                    else
-                    {
-                        targetBuffer[index] = ClampToByte(underlayB + addB - subB);
-                        targetBuffer[index + 1] = ClampToByte(underlayG + addG - subG);
-                        targetBuffer[index + 2] = ClampToByte(underlayR + addR - subR);
-                    }
-
-                    targetBuffer[index + 3] = 255;
-                    continue;
-                }
-
                 double simAlpha = 0;
-                int simB = simulationBaseline;
-                int simG = simulationBaseline;
-                int simR = simulationBaseline;
+                int simB = 0;
+                int simG = 0;
+                int simR = 0;
+                bool firstOutput = true;
                 foreach (var blendLayer in blendLayers)
                 {
                     SampleInlineSimulationLayerColor(blendLayer, sourceIndex, out byte sampleR, out byte sampleG, out byte sampleB);
-                    if (blendLayer.BlendMode == BlendMode.Normal)
+                    if (firstOutput || blendLayer.BlendMode == BlendMode.Normal)
                     {
                         double alpha = blendLayer.ColorBuffer[sourceIndex + 3] / 255.0 * blendLayer.Opacity;
                         simB = (int)Math.Round(simB * (1 - alpha) + sampleB * blendLayer.Opacity);
@@ -14633,17 +14526,16 @@ public partial class MainWindow : Window
                         BlendSimulationLayerInto(ref simB, ref simG, ref simR, sampleR, sampleG, sampleB, blendLayer.BlendMode, blendLayer.Opacity);
                         simAlpha = 1;
                     }
+                    simB = ClampToByte(simB);
+                    simG = ClampToByte(simG);
+                    simR = ClampToByte(simR);
+                    firstOutput = false;
                 }
 
-                int deltaB = simB - simulationBaseline;
-                int deltaG = simG - simulationBaseline;
-                int deltaR = simR - simulationBaseline;
-                targetBuffer[index] = ClampToByte(underlayB + deltaB);
-                targetBuffer[index + 1] = ClampToByte(underlayG + deltaG);
-                targetBuffer[index + 2] = ClampToByte(underlayR + deltaR);
-                double underlayAlpha = includeUnderlayInFinalComposite && inputComposite != null && inputComposite.Downscaled.Length >= requiredLength
-                    ? inputComposite.Downscaled[index + 3] / 255.0 : 0;
-                targetBuffer[index + 3] = ClampToByte((int)Math.Round((simAlpha + underlayAlpha * (1 - simAlpha)) * 255));
+                targetBuffer[index] = ClampToByte(simB);
+                targetBuffer[index + 1] = ClampToByte(simG);
+                targetBuffer[index + 2] = ClampToByte(simR);
+                targetBuffer[index + 3] = ClampToByte((int)Math.Round(simAlpha * 255));
             }
         });
 
@@ -17578,7 +17470,8 @@ public partial class MainWindow : Window
 
             if (_renderBackend.SupportsGpuSimulationComposition &&
                 !_isRecording &&
-                (layer.LifeMode == GameOfLifeEngine.LifeMode.RgbChannels || layer.LifeMode == GameOfLifeEngine.LifeMode.Bitwise))
+                (layer.LayerType == SimulationLayerType.PixelSort ||
+                 layer.LifeMode == GameOfLifeEngine.LifeMode.RgbChannels || layer.LifeMode == GameOfLifeEngine.LifeMode.Bitwise))
             {
                 double hueShiftDegrees = CurrentRgbHueShiftDegrees(layer);
                 if (Math.Abs(hueShiftDegrees) > 0.001)

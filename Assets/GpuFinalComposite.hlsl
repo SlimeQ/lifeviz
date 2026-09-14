@@ -324,5 +324,31 @@ float4 PSMain(VSOut input) : SV_Target
 
 float4 PSGroupMain(VSOut input) : SV_Target
 {
-    return ResolveComposite(input);
+    // A Sim Group resolves its own ordered outputs. The scene compositor applies
+    // the group's blend and opacity to the lower stack exactly once afterwards.
+    float4 result = 0.0;
+    bool firstOutput = true;
+    [unroll]
+    for (int i = 0; i < 8; i++)
+    {
+        if (i >= LayerCount) break;
+        float opacity = GetOpacity(i);
+        if (opacity <= 0.0001) continue;
+        float4 sample = SampleLayer(i, input.TexCoord);
+        float3 color = ApplyHueShift(i, sample.rgb);
+        if (firstOutput || GetBlendMode(i) == 1)
+        {
+            float alpha = sample.a * opacity;
+            result.rgb = result.rgb * (1.0 - alpha) + color * opacity;
+            result.a = alpha + result.a * (1.0 - alpha);
+        }
+        else
+        {
+            result.rgb = BlendSimulation(result.rgb, color, GetBlendMode(i), opacity);
+            result.a = 1.0;
+        }
+        result = saturate(result);
+        firstOutput = false;
+    }
+    return result;
 }

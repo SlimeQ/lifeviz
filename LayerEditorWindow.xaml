@@ -694,6 +694,22 @@
                                         <WrapPanel Margin="0,0,0,4"
                                                    Visibility="{Binding IsSimulationGroup, Converter={StaticResource BoolToVisibility}}">
                                             <StackPanel Orientation="Horizontal" Margin="0,0,12,6">
+                                                <TextBlock Text="Layer Blend" VerticalAlignment="Center" />
+                                                <ComboBox x:Name="SimulationGroupBlendComboBox" ItemsSource="{Binding BlendModeOptions}"
+                                                          DisplayMemberPath="Label" SelectedValuePath="Value"
+                                                          SelectedValue="{Binding BlendMode}" Width="160" Margin="6,0,0,0"
+                                                          ToolTip="Blend the resolved simulation outputs into the layers below."
+                                                          SelectionChanged="BlendMode_Changed" />
+                                            </StackPanel>
+                                            <StackPanel Orientation="Horizontal" Margin="0,0,12,6">
+                                                <TextBlock Text="Layer Opacity" VerticalAlignment="Center" />
+                                                <Slider x:Name="SimulationGroupOpacitySlider" Minimum="0" Maximum="1" Value="{Binding Opacity}"
+                                                        Width="150" SmallChange="0.05" LargeChange="0.1" Margin="6,0,0,0"
+                                                        ValueChanged="Opacity_Changed" />
+                                                <TextBlock Text="{Binding Opacity, StringFormat={}{0:P0}}"
+                                                           Margin="6,0,0,0" VerticalAlignment="Center" />
+                                            </StackPanel>
+                                            <StackPanel Orientation="Horizontal" Margin="0,0,12,6">
                                                 <TextBlock Text="Scale"
                                                            VerticalAlignment="Center" />
                                                 <Slider Minimum="-1"
@@ -1198,7 +1214,7 @@
                                         </Style>
                                     </GroupBox.Style>
                                     <StackPanel Margin="8">
-                                        <TextBlock Text="Edit the simulation stack owned by this scene layer."
+                                        <TextBlock TextWrapping="Wrap" Text="All simulations read the same layers below. Outputs blend in list order (first to last), then Layer Blend and Layer Opacity apply to the result."
                                                    Foreground="#A0A0A0"
                                                    Margin="0,0,0,8" />
                                         <WrapPanel Margin="0,0,0,8">
