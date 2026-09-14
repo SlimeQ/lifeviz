@@ -8778,6 +8778,9 @@ public partial class MainWindow : Window
             InvertThreshold = layer.InvertThreshold,
             PixelSortCellWidth = layer.PixelSortCellWidth,
             PixelSortCellHeight = layer.PixelSortCellHeight,
+            DatamoshFeedback = layer.DatamoshFeedback,
+            DatamoshDisplacement = layer.DatamoshDisplacement,
+            DatamoshBlockSize = layer.DatamoshBlockSize,
             Children = layer.Children.Select(CloneSimulationLayerSpec).ToList()
         };
     }
@@ -10797,6 +10800,8 @@ public partial class MainWindow : Window
     {
         foreach (var layer in EnumerateSimulationLeafLayers(_simulationLayers))
         {
+            layer.EffectiveDatamoshFeedback = Math.Clamp(layer.DatamoshFeedback, 0, 0.98);
+            layer.EffectiveDatamoshDisplacement = Math.Clamp(layer.DatamoshDisplacement, 0, 1);
             layer.EffectiveLifeOpacity = Math.Clamp(layer.LifeOpacity, 0, 1);
             layer.EffectiveSimulationTargetFps = Math.Max(_currentSimulationTargetFps, 0);
             layer.ReactiveHueShiftDegrees = 0;
@@ -10851,6 +10856,12 @@ public partial class MainWindow : Window
                             layer.EffectiveRgbHueShiftSpeedDegreesPerSecond + (inputValue * Math.Clamp(mapping.Amount, 0, 180)),
                             -MaxRgbHueShiftSpeedDegreesPerSecond,
                             MaxRgbHueShiftSpeedDegreesPerSecond);
+                        break;
+                    case SimulationReactiveOutput.DatamoshFeedback:
+                        layer.EffectiveDatamoshFeedback = Math.Clamp(layer.EffectiveDatamoshFeedback + inputValue * Math.Clamp(mapping.Amount, 0, 1), 0, 0.98);
+                        break;
+                    case SimulationReactiveOutput.DatamoshDisplacement:
+                        layer.EffectiveDatamoshDisplacement = Math.Clamp(layer.EffectiveDatamoshDisplacement + inputValue * Math.Clamp(mapping.Amount, 0, 1), 0, 1);
                         break;
                     case SimulationReactiveOutput.InjectionNoise:
                         layer.EffectiveInjectionNoise = Math.Clamp(layer.EffectiveInjectionNoise + (inputValue * Math.Clamp(mapping.Amount, 0, 1)), 0, 1);
@@ -11999,7 +12010,8 @@ public partial class MainWindow : Window
     private enum SimulationLayerType
     {
         Life,
-        PixelSort
+        PixelSort,
+        Datamosh
     }
 
     private enum AudioReactiveSeedPattern
@@ -12032,6 +12044,9 @@ public partial class MainWindow : Window
         public bool InvertThreshold { get; set; }
         public int PixelSortCellWidth { get; set; } = 12;
         public int PixelSortCellHeight { get; set; } = 8;
+        public double DatamoshFeedback { get; set; } = 0.15;
+        public double DatamoshDisplacement { get; set; }
+        public int DatamoshBlockSize { get; set; } = 16;
         public double EffectiveLifeOpacity { get; set; } = 1.0;
         public double EffectiveSimulationTargetFps { get; set; } = DefaultFps;
         public double ReactiveHueShiftDegrees { get; set; }
@@ -12041,6 +12056,8 @@ public partial class MainWindow : Window
         public double EffectiveThresholdMax { get; set; } = 0.75;
         public int EffectivePixelSortCellWidth { get; set; } = 12;
         public int EffectivePixelSortCellHeight { get; set; } = 8;
+        public double EffectiveDatamoshFeedback { get; set; } = 0.15;
+        public double EffectiveDatamoshDisplacement { get; set; }
         public double TimeSinceLastStep { get; set; }
         public SimulationLayerState? Parent { get; set; }
         public List<SimulationLayerState> Children { get; } = new();
@@ -12076,6 +12093,9 @@ public partial class MainWindow : Window
         public bool InvertThreshold { get; init; }
         public int PixelSortCellWidth { get; init; } = 12;
         public int PixelSortCellHeight { get; init; } = 8;
+        public double DatamoshFeedback { get; init; } = 0.15;
+        public double DatamoshDisplacement { get; init; }
+        public int DatamoshBlockSize { get; init; } = 16;
         public List<SimulationLayerSpec> Children { get; init; } = new();
     }
 
@@ -12278,9 +12298,7 @@ public partial class MainWindow : Window
         {
             Id = layer.Id,
             Kind = layer.Kind,
-            LayerType = layer.LayerType == SimulationLayerType.PixelSort
-                ? LayerEditorSimulationLayerType.PixelSort
-                : LayerEditorSimulationLayerType.Life,
+            LayerType = (LayerEditorSimulationLayerType)layer.LayerType,
             Name = layer.Name,
             Enabled = layer.Enabled,
             InputFunction = layer.InputFunction.ToString(),
@@ -12307,7 +12325,10 @@ public partial class MainWindow : Window
             ThresholdMax = layer.ThresholdMax,
             InvertThreshold = layer.InvertThreshold,
             PixelSortCellWidth = layer.PixelSortCellWidth,
-            PixelSortCellHeight = layer.PixelSortCellHeight
+            PixelSortCellHeight = layer.PixelSortCellHeight,
+            DatamoshFeedback = layer.DatamoshFeedback,
+            DatamoshDisplacement = layer.DatamoshDisplacement,
+            DatamoshBlockSize = layer.DatamoshBlockSize
         };
 
         foreach (var child in layer.Children)
@@ -12326,9 +12347,7 @@ public partial class MainWindow : Window
         {
             Id = layer.Id,
             Kind = layer.Kind,
-            LayerType = layer.LayerType == SimulationLayerType.PixelSort
-                ? LayerEditorSimulationLayerType.PixelSort
-                : LayerEditorSimulationLayerType.Life,
+            LayerType = (LayerEditorSimulationLayerType)layer.LayerType,
             Name = layer.Name,
             Enabled = layer.Enabled,
             InputFunction = layer.InputFunction.ToString(),
@@ -12355,7 +12374,10 @@ public partial class MainWindow : Window
             ThresholdMax = layer.ThresholdMax,
             InvertThreshold = layer.InvertThreshold,
             PixelSortCellWidth = layer.PixelSortCellWidth,
-            PixelSortCellHeight = layer.PixelSortCellHeight
+            PixelSortCellHeight = layer.PixelSortCellHeight,
+            DatamoshFeedback = layer.DatamoshFeedback,
+            DatamoshDisplacement = layer.DatamoshDisplacement,
+            DatamoshBlockSize = layer.DatamoshBlockSize
         };
 
         foreach (var child in layer.Children)
@@ -12411,8 +12433,8 @@ public partial class MainWindow : Window
 
     private ISimulationBackend CreateConfiguredSimulationEngine(SimulationLayerType layerType, bool randomize)
     {
-        ISimulationBackend engine = layerType == SimulationLayerType.PixelSort
-            ? new GpuPixelSortBackend()
+        ISimulationBackend engine = layerType != SimulationLayerType.Life
+            ? new GpuPixelSortBackend(datamosh: layerType == SimulationLayerType.Datamosh)
             : new GpuSimulationBackend();
         ConfigureSimulationEngine(engine, _configuredRows, _configuredDepth, _currentAspectRatio, randomize);
         return engine;
@@ -12432,6 +12454,12 @@ public partial class MainWindow : Window
     {
         if (layer.IsGroup || layer.Engine == null)
         {
+            return;
+        }
+
+        if (layer.LayerType == SimulationLayerType.Datamosh && layer.Engine is GpuPixelSortBackend datamoshBackend)
+        {
+            datamoshBackend.SetDatamoshSettings(layer.EffectiveDatamoshFeedback, layer.EffectiveDatamoshDisplacement, layer.DatamoshBlockSize);
             return;
         }
 
@@ -12811,7 +12839,9 @@ public partial class MainWindow : Window
 
         return kind == LayerEditorSimulationItemKind.Group
             ? $"Sim Group {index + 1}"
-            : layerType == SimulationLayerType.PixelSort
+            : layerType == SimulationLayerType.Datamosh
+                ? $"Datamosh {index + 1}"
+                : layerType == SimulationLayerType.PixelSort
                 ? $"Pixel Sort {index + 1}"
                 : $"Life Sim {index + 1}";
     }
@@ -12891,7 +12921,10 @@ public partial class MainWindow : Window
             ThresholdMax = spec.ThresholdMax,
             InvertThreshold = spec.InvertThreshold,
             PixelSortCellWidth = spec.PixelSortCellWidth,
-            PixelSortCellHeight = spec.PixelSortCellHeight
+            PixelSortCellHeight = spec.PixelSortCellHeight,
+            DatamoshFeedback = spec.DatamoshFeedback,
+            DatamoshDisplacement = spec.DatamoshDisplacement,
+            DatamoshBlockSize = spec.DatamoshBlockSize
         });
     }
 
@@ -12939,9 +12972,7 @@ public partial class MainWindow : Window
             };
         }
 
-        var layerType = layer.LayerType == LayerEditorSimulationLayerType.PixelSort
-            ? SimulationLayerType.PixelSort
-            : SimulationLayerType.Life;
+        var layerType = (SimulationLayerType)layer.LayerType;
         var inputFunction = ParseSimulationInputFunctionOrDefault(layer.InputFunction, SimulationInputFunction.Direct);
         var defaultBlend = inputFunction == SimulationInputFunction.Inverse ? BlendMode.Subtractive : BlendMode.Additive;
         var blendMode = ParseBlendModeOrDefault(layer.BlendMode, defaultBlend);
@@ -12972,7 +13003,10 @@ public partial class MainWindow : Window
             ThresholdMax = thresholdMax,
             InvertThreshold = invertThreshold,
             PixelSortCellWidth = Math.Clamp(layer.PixelSortCellWidth, 1, 4096),
-            PixelSortCellHeight = Math.Clamp(layer.PixelSortCellHeight, 1, 4096)
+            PixelSortCellHeight = Math.Clamp(layer.PixelSortCellHeight, 1, 4096),
+            DatamoshFeedback = layer.DatamoshFeedback,
+            DatamoshDisplacement = layer.DatamoshDisplacement,
+            DatamoshBlockSize = layer.DatamoshBlockSize
         };
     }
 
@@ -13033,7 +13067,10 @@ public partial class MainWindow : Window
             ThresholdMax = thresholdMax,
             InvertThreshold = invertThreshold,
             PixelSortCellWidth = pixelSortCellWidth,
-            PixelSortCellHeight = pixelSortCellHeight
+            PixelSortCellHeight = pixelSortCellHeight,
+            DatamoshFeedback = layer.DatamoshFeedback,
+            DatamoshDisplacement = layer.DatamoshDisplacement,
+            DatamoshBlockSize = layer.DatamoshBlockSize
         };
     }
 
@@ -13223,7 +13260,8 @@ public partial class MainWindow : Window
 
         bool needsEngineReplacement =
             layer.Engine == null ||
-            (spec.LayerType == SimulationLayerType.PixelSort && layer.Engine is not GpuPixelSortBackend) ||
+            (spec.LayerType != SimulationLayerType.Life &&
+             (layer.Engine is not GpuPixelSortBackend effect || effect.IsDatamosh != (spec.LayerType == SimulationLayerType.Datamosh))) ||
             (spec.LayerType == SimulationLayerType.Life && layer.Engine is not GpuSimulationBackend);
 
         if (needsEngineReplacement && layer.Engine != null)
@@ -13267,6 +13305,11 @@ public partial class MainWindow : Window
         layer.InvertThreshold = spec.InvertThreshold;
         layer.PixelSortCellWidth = spec.PixelSortCellWidth;
         layer.PixelSortCellHeight = spec.PixelSortCellHeight;
+        layer.DatamoshFeedback = Math.Clamp(spec.DatamoshFeedback, 0, 0.98);
+        layer.DatamoshDisplacement = Math.Clamp(spec.DatamoshDisplacement, 0, 1);
+        layer.DatamoshBlockSize = Math.Clamp(spec.DatamoshBlockSize, 1, 512);
+        layer.EffectiveDatamoshFeedback = layer.DatamoshFeedback;
+        layer.EffectiveDatamoshDisplacement = layer.DatamoshDisplacement;
         layer.EffectiveLifeOpacity = layer.LifeOpacity;
         layer.EffectiveSimulationTargetFps = _currentSimulationTargetFps;
         layer.ReactiveHueShiftDegrees = 0;
@@ -16799,7 +16842,7 @@ public partial class MainWindow : Window
         var roundTrip = config.ToEditorSources()
             .First(candidate => candidate.Kind == LayerEditorSourceKind.Group &&
                                 string.Equals(candidate.DisplayName, "Transform Smoke", StringComparison.Ordinal));
-        bool persistenceOk = config.Version == 11 &&
+        bool persistenceOk = config.Version == 12 &&
                              Math.Abs(roundTrip.Scale - 1.75) < 0.0001 &&
                              roundTrip.Animations.Count == 1 &&
                              Math.Abs(roundTrip.Animations[0].StartAngleDegrees - 123) < 0.0001;
@@ -17418,7 +17461,7 @@ public partial class MainWindow : Window
             return false;
         }
 
-        if (layer.LayerType == SimulationLayerType.PixelSort &&
+        if (LayerPublishesStandaloneOutput(layer) &&
             engine is GpuPixelSortBackend pixelSortBackend &&
             pixelSortBackend.TryGetPresentationSurface(out var pixelSortSurface) &&
             pixelSortSurface != null)
@@ -17501,9 +17544,9 @@ public partial class MainWindow : Window
         }
         byte[] targetBuffer = layer.ColorBuffer;
         engine.FillColorBuffer(targetBuffer);
-        if (layer.LayerType == SimulationLayerType.PixelSort)
+        if (LayerPublishesStandaloneOutput(layer))
         {
-            // Pixel Sort reads back its BGRA scene texture; simulation blending
+            // Image effects read back BGRA scene textures; simulation blending
             // and hue rotation consume RGBA buffers like the Life engines.
             for (int index = 0; index < size; index += 4)
                 (targetBuffer[index], targetBuffer[index + 2]) = (targetBuffer[index + 2], targetBuffer[index]);
@@ -17513,7 +17556,7 @@ public partial class MainWindow : Window
             double hueShiftDegrees = CurrentRgbHueShiftDegrees(layer);
             bool applyHueShift =
                 Math.Abs(hueShiftDegrees) > 0.001 &&
-                (layer.LayerType == SimulationLayerType.PixelSort ||
+                (LayerPublishesStandaloneOutput(layer) ||
                  layer.LifeMode == GameOfLifeEngine.LifeMode.RgbChannels ||
                  layer.LifeMode == GameOfLifeEngine.LifeMode.Bitwise);
             if (applyHueShift)
@@ -17619,7 +17662,7 @@ public partial class MainWindow : Window
     }
 
     private static bool LayerPublishesStandaloneOutput(SimulationLayerState layer)
-        => layer.LayerType == SimulationLayerType.PixelSort;
+        => layer.LayerType is SimulationLayerType.PixelSort or SimulationLayerType.Datamosh;
 
     private static void SampleInlineSimulationLayerColor(
         InlineSimulationBlendLayerData layer,
@@ -19819,7 +19862,10 @@ public partial class MainWindow : Window
             ThresholdMax = layer.ThresholdMax,
             InvertThreshold = layer.InvertThreshold,
             PixelSortCellWidth = layer.PixelSortCellWidth,
-            PixelSortCellHeight = layer.PixelSortCellHeight
+            PixelSortCellHeight = layer.PixelSortCellHeight,
+            DatamoshFeedback = layer.DatamoshFeedback,
+            DatamoshDisplacement = layer.DatamoshDisplacement,
+            DatamoshBlockSize = layer.DatamoshBlockSize
         };
 
         foreach (var child in layer.Children)
@@ -19862,7 +19908,10 @@ public partial class MainWindow : Window
             ThresholdMax = layer.ThresholdMax,
             InvertThreshold = layer.InvertThreshold,
             PixelSortCellWidth = layer.PixelSortCellWidth,
-            PixelSortCellHeight = layer.PixelSortCellHeight
+            PixelSortCellHeight = layer.PixelSortCellHeight,
+            DatamoshFeedback = layer.DatamoshFeedback,
+            DatamoshDisplacement = layer.DatamoshDisplacement,
+            DatamoshBlockSize = layer.DatamoshBlockSize
         };
 
         foreach (var child in layer.Children)
@@ -21048,6 +21097,9 @@ public partial class MainWindow : Window
             public bool InvertThreshold { get; set; }
             public int PixelSortCellWidth { get; set; } = 12;
             public int PixelSortCellHeight { get; set; } = 8;
+            public double DatamoshFeedback { get; set; } = 0.15;
+            public double DatamoshDisplacement { get; set; }
+            public int DatamoshBlockSize { get; set; } = 16;
             public int PixelSortGridColumns { get; set; }
             public int PixelSortGridRows { get; set; }
             public List<SimulationLayerConfig> Children { get; set; } = new();
