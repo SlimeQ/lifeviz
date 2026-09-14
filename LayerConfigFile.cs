@@ -173,6 +173,7 @@ internal sealed class LayerConfigFile
         var config = new LayerConfigSource
         {
             Type = source.Kind.ToString(),
+            ProjectM = source.ProjectM.Clone(),
             Enabled = source.Enabled,
             WindowTitle = source.WindowTitle,
             WebcamId = source.WebcamId,
@@ -311,6 +312,7 @@ internal sealed class LayerConfigFile
             WindowTitle = config.WindowTitle,
             WebcamId = config.WebcamId,
             FilePath = DefaultScene.ResolveMediaPath(config.FilePath),
+            ProjectM = config.ProjectM?.Clone() ?? new ProjectMSettings(),
             ColorHex = string.IsNullOrWhiteSpace(config.Color) ? "#000000" : config.Color,
             BlendMode = string.IsNullOrWhiteSpace(config.BlendMode)
                 ? (kind == LayerEditorSourceKind.ColorPlane ? "Normal" : "Additive")
@@ -678,6 +680,7 @@ internal sealed class LayerConfigFile
 
 internal sealed class LayerConfigSource
 {
+    public ProjectMSettings ProjectM { get; set; } = new();
     public string? Type { get; set; }
     public bool Enabled { get; set; } = true;
     public string? WindowTitle { get; set; }

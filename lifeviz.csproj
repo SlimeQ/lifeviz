@@ -11,6 +11,7 @@
     <GenerateBootstrapper Condition="'$(MSBuildRuntimeType)' == 'Core'">false</GenerateBootstrapper>
     <StartupObject>lifeviz.Program</StartupObject>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <PlatformTarget>x64</PlatformTarget>
     <!-- Release scripts override this with the semantic release tag. Ordinary builds must identify as development builds. -->
     <Version>0.0.0-dev</Version>
   </PropertyGroup>
@@ -74,6 +75,21 @@
       <ExcludeFromSingleFile>true</ExcludeFromSingleFile>
     </Content>
   </ItemGroup>
+  <ItemGroup>
+    <Compile Remove="Native\**\*.cs" />
+    <None Remove="Native\**;artifacts\projectm\**" />
+  </ItemGroup>
+  <ItemGroup>
+      <Content Include="artifacts\projectm\bundle\assets.zip;artifacts\projectm\bundle\licenses.zip;artifacts\projectm\bundle\projectM-4.dll;artifacts\projectm\bundle\projectM-source.zip;artifacts\projectm\bundle\ProjectM-NOTICES.md;artifacts\projectm\bundle\COPYING-projectM.txt;artifacts\projectm\bundle\LICENSE-projectM.txt;artifacts\projectm\bundle\LICENSE-projectm-eval.md;artifacts\projectm\bundle\LICENSE-hlslparser.txt">
+        <Link>projectm\%(Filename)%(Extension)</Link>
+        <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+        <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+        <ExcludeFromSingleFile>true</ExcludeFromSingleFile>
+      </Content>
+  </ItemGroup>
+  <Target Name="PrepareBundledProjectM" BeforeTargets="PrepareForBuild" Condition="'$(DesignTimeBuild)' != 'true'">
+    <Exec Command="powershell.exe -NoProfile -ExecutionPolicy Bypass -File &quot;$(MSBuildProjectDirectory)\Prepare-ProjectM.ps1&quot;" />
+  </Target>
   <Target Name="PrepareBundledFfmpeg" BeforeTargets="PrepareForBuild" Condition="'$(DesignTimeBuild)' != 'true'">
     <Exec Command="powershell.exe -NoProfile -ExecutionPolicy Bypass -File &quot;$(MSBuildProjectDirectory)\Prepare-Ffmpeg.ps1&quot;" />
   </Target>

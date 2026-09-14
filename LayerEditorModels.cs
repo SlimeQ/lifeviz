@@ -18,7 +18,8 @@ internal enum LayerEditorSourceKind
     AutoClip,
     Group,
     SimGroup,
-    Youtube
+    Youtube,
+    ProjectM
 }
 
 internal enum LayerEditorSimulationItemKind
@@ -525,6 +526,7 @@ internal sealed class LayerEditorSource : LayerEditorNotify
                 OnPropertyChanged(nameof(IsWindow));
                 OnPropertyChanged(nameof(IsFile));
                 OnPropertyChanged(nameof(IsColorPlane));
+                OnPropertyChanged(nameof(IsProjectM));
                 OnPropertyChanged(nameof(CanDriveAspect));
                 OnPropertyChanged(nameof(SupportsKeying));
                 OnPropertyChanged(nameof(IsVideo));
@@ -874,8 +876,15 @@ internal sealed class LayerEditorSource : LayerEditorNotify
     public bool IsWebcam => Kind == LayerEditorSourceKind.Webcam;
     public bool IsWindow => Kind == LayerEditorSourceKind.Window;
     public bool IsFile => Kind == LayerEditorSourceKind.File;
+    private ProjectMSettings _projectM = new();
+    public ProjectMSettings ProjectM
+    {
+        get => _projectM;
+        set { if (SetField(ref _projectM, value)) OnPropertyChanged(nameof(Details)); }
+    }
+    public bool IsProjectM => Kind == LayerEditorSourceKind.ProjectM;
     public bool IsColorPlane => Kind == LayerEditorSourceKind.ColorPlane;
-    public bool CanDriveAspect => !IsColorPlane &&
+    public bool CanDriveAspect => !IsColorPlane && !IsProjectM &&
                                   (!IsGroup || Children.Count == 0 || Children.Any(child => child.CanDriveAspect));
     public bool IsAutoClip => Kind == LayerEditorSourceKind.AutoClip;
     public bool IsNormalBlend => string.Equals(BlendMode, "Normal", StringComparison.OrdinalIgnoreCase);
@@ -896,6 +905,7 @@ internal sealed class LayerEditorSource : LayerEditorNotify
         LayerEditorSourceKind.Webcam => "Camera",
         LayerEditorSourceKind.File => "File",
         LayerEditorSourceKind.ColorPlane => "Color Plane",
+        LayerEditorSourceKind.ProjectM => "MilkDrop / projectM",
         LayerEditorSourceKind.Youtube => "YouTube",
         LayerEditorSourceKind.VideoSequence => "Video Sequence",
         LayerEditorSourceKind.AutoClip => "AutoClip",
@@ -914,6 +924,7 @@ internal sealed class LayerEditorSource : LayerEditorNotify
         LayerEditorSourceKind.Window => string.IsNullOrWhiteSpace(WindowTitle) ? "Window source" : WindowTitle,
         LayerEditorSourceKind.Webcam => string.IsNullOrWhiteSpace(WebcamId) ? "Webcam source" : $"Id: {WebcamId}",
         LayerEditorSourceKind.File => string.IsNullOrWhiteSpace(FilePath) ? "File source" : FilePath,
+        LayerEditorSourceKind.ProjectM => $"{ProjectM.Presets.Count} presets | {ProjectM.Order} | {ProjectM.Advance}",
         LayerEditorSourceKind.ColorPlane => string.IsNullOrWhiteSpace(ColorHex) ? "Solid color" : ColorHex,
         LayerEditorSourceKind.Youtube => string.IsNullOrWhiteSpace(FilePath) ? "YouTube source" : FilePath,
         LayerEditorSourceKind.VideoSequence => FilePaths.Count > 0 ? $"{FilePaths.Count} files" : "Video sequence",

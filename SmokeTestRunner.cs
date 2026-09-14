@@ -176,6 +176,7 @@ internal static partial class SmokeTestRunner
                 "gif-source-recovery" => RunGifSourceRecoverySmokeTest(smokeGifPath),
                 "layer-transform-controls" => RunLayerTransformControlsSmokeTest(),
                 "color-plane" => RunColorPlaneSmokeTest(),
+                "projectm" => RunProjectMSmokeTest(),
                 "chroma-key" => RunChromaKeySmokeTest(),
                 "gpu-sim" => RunGpuSimulationSmokeTest(),
                 "gpu-source" => RunGpuSourceCompositeSmokeTest(),

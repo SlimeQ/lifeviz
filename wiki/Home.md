@@ -4,6 +4,8 @@ Welcome to the documentation hub for LifeViz, a minimalist Windows 11 WPF experi
 
 ## Pages
 
+- [MilkDrop / projectM Layers](MilkDrop-projectM.md)
+
 - [AutoClip takeovers and playlists](AutoClip-Takeovers.md)
 
 - [Rendering Pipeline](Rendering-Pipeline.md)

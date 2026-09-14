@@ -1,5 +1,25 @@
 # Build & Install
 
+## Bundled projectM
+
+Windows builds target x64 and require .NET 9 plus Visual Studio 2022 **Desktop development with C++**, including CMake and a Windows SDK. Runtime users need an OpenGL 3.3 graphics driver; they do not need build tools, projectM, or a separate preset download.
+
+Initialize the pinned engine and its evaluator with `git submodule update --init --recursive`. The `Native/projectm` gitlink and `Prepare-ProjectM.ps1` pin the same upstream revision. Keep those pins synchronized when updating the engine; commit any engine modifications in its repository and update the parent gitlink so builds never depend on untracked native edits.
+
+`Prepare-ProjectM.ps1` runs before an ordinary build/publish. It verifies the SHA-256 of the pinned upstream Windows distribution, builds an unmodified development 4.2.0 engine as a separate DLL, and creates `artifacts/projectm/bundle`. Run the script directly to prefetch dependencies; run `./Prepare-ProjectM.ps1 -Rebuild` to regenerate a damaged bundle. First preparation needs network access; complete caches and submodules allow subsequent offline builds. The script discovers CMake from PATH or Visual Studio, rejects mismatched/dirty native source, and serializes competing preparations. Build warnings from unmodified upstream C++ may be printed.
+
+The deployed `projectm` directory includes the engine, compressed presets/textures, complete corresponding source, license texts and notices. Explicit project content items make this work on the first build and in published/ClickOnce layouts. `Publish-Installer.ps1` verifies each deployed projectM file against the prepared payload before installer creation. Presets are extracted to a versioned per-user cache on first use; long preset filenames stay out of installer paths. See [MilkDrop / projectM](MilkDrop-projectM.md) and [notices](../ProjectM-NOTICES.md) for the engine's selected LGPL version and the preset collection's separate permissions.
+
+Validation:
+
+```powershell
+dotnet build -c Release
+dotnet bin/Release/net9.0-windows/lifeviz.dll --smoke-test projectm
+./tests/Test-ProjectM.ps1
+```
+
+The native smoke checks ordered/shuffle/beat scheduling, scene round trips, PCM, actual OpenGL frames, resizing, transitions, group compositing and failure recovery; it writes QA PNGs to the build's `projectm-smoke` folder. `Test-ProjectM.ps1` creates its own audio/video fixture, runs a real two-second background worker, and checks that all 60 frames decode and animate. It keeps its video and diagnostics under a unique `artifacts/projectm-bake-*` directory. Use `-ExecutablePath <published-lifeviz.exe>` to run the export check against an installed/published layout.
+
 The `background-bake` smoke also verifies exit confirmation: an idle queue does not prompt; declining exit before worker startup or during rendering preserves queued jobs and ongoing frame progress; confirming exit prompts once and finalizes partial output before closing. It supplies confirmation responses through a smoke-only callback while exercising the real main-window close handler.
 
 After `dotnet build -c Release`, run `dotnet bin\Release\net9.0-windows\lifeviz.dll --smoke-test group-transparency` for changes to group alpha. It checks real GPU and CPU composites, Pixel Sort alpha, transparent/partial/opaque black pixels, source/group opacity, and a transparent DVD Bounce image grouped over a colored background at several animation times. Fixtures are synthetic and isolated from the saved scene.

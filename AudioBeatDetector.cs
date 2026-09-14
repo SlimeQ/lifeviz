@@ -19,7 +19,7 @@ using NAudio.Wave;
 
 namespace lifeviz;
 
-internal sealed class AudioBeatDetector : IDisposable
+internal sealed partial class AudioBeatDetector : IDisposable
 {
     private struct DebugHistorySample
     {
@@ -550,6 +550,7 @@ internal sealed class AudioBeatDetector : IDisposable
 
     private void ResetState()
     {
+        ResetProjectMPcm();
         _energyHistory.Clear();
         _beatTimestamps.Clear();
         _localEnergyAverage = 0;
@@ -647,6 +648,7 @@ internal sealed class AudioBeatDetector : IDisposable
         bool enableSpectrumAnalysis = _enableSpectrumAnalysis;
         bool enableDebugHistory = _enableDebugHistory;
         double inputGain = _inputGain;
+        CaptureProjectMPcm(samples, inputGain);
         double totalEnergy = 0;
         double totalAbsolute = 0;
         double peakAmplitude = 0;

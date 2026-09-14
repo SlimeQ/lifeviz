@@ -535,6 +535,7 @@
                         <Button Content="Webcam" Click="AddRootWebcam_Click" />
                         <Button Content="File" Click="AddRootFile_Click" />
                         <Button Content="Color Plane" Click="AddRootColorPlane_Click" />
+                        <Button Content="MilkDrop" Click="AddRootProjectM_Click" />
                         <Button Content="YouTube" Click="AddRootYoutube_Click" />
                         <Button Content="Sequence" Click="AddRootSequence_Click" />
                         <Button Content="AutoClip" Click="AddRootAutoClip_Click" />
@@ -550,6 +551,7 @@
                         <Button Content="Webcam" Click="AddChildWebcam_Click" />
                         <Button Content="File" Click="AddChildFile_Click" />
                         <Button Content="Color Plane" Click="AddChildColorPlane_Click" />
+                        <Button Content="MilkDrop" Click="AddChildProjectM_Click" />
                         <Button Content="YouTube" Click="AddChildYoutube_Click" />
                         <Button Content="Sequence" Click="AddChildSequence_Click" />
                         <Button Content="AutoClip" Click="AddChildAutoClip_Click" />
@@ -900,6 +902,18 @@
                                             </StackPanel>
                                         </GroupBox>
 
+                                        <GroupBox Header="MilkDrop / projectM" Margin="0,0,0,10"
+                                                  Visibility="{Binding IsProjectM, Converter={StaticResource BoolToVisibility}}">
+                                            <StackPanel Margin="8">
+                                                <TextBlock Text="{Binding Details}" TextWrapping="Wrap" Margin="0,0,0,6" />
+                                                <WrapPanel>
+                                                    <Button Content="Presets &amp; Playback..." Click="ProjectMSettings_Click" />
+                                                    <Button Content="Previous" Tag="-1" Click="ProjectMControl_Click" IsEnabled="{Binding DataContext.LiveMode, RelativeSource={RelativeSource AncestorType=Window}}" />
+                                                    <Button Content="Next" Tag="1" Click="ProjectMControl_Click" IsEnabled="{Binding DataContext.LiveMode, RelativeSource={RelativeSource AncestorType=Window}}" />
+                                                    <Button Content="Retry / Restart" Tag="0" Click="ProjectMControl_Click" IsEnabled="{Binding DataContext.LiveMode, RelativeSource={RelativeSource AncestorType=Window}}" />
+                                                </WrapPanel>
+                                            </StackPanel>
+                                        </GroupBox>
                                         <GroupBox Header="AutoClip Settings"
                                                   Margin="0,8,0,8"
                                                   Visibility="{Binding IsAutoClip, Converter={StaticResource BoolToVisibility}}">

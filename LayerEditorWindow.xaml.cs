@@ -2323,6 +2323,10 @@ public partial class LayerEditorWindow : Window
         Guid? parentId = parent?.Id;
         switch (kind)
         {
+            case LayerEditorSourceKind.ProjectM:
+                _owner.AddProjectMFromEditor(parentId);
+                return true;
+
             case LayerEditorSourceKind.Group:
                 _owner.AddLayerGroupFromEditor(parentId);
                 return true;
@@ -2415,6 +2419,9 @@ public partial class LayerEditorWindow : Window
     {
         switch (kind)
         {
+            case LayerEditorSourceKind.ProjectM:
+                return new LayerEditorSource { Id = Guid.NewGuid(), Kind = kind, DisplayName = "MilkDrop / projectM", BlendMode = "Normal", FitMode = "Stretch", ProjectM = ProjectMLibrary.Defaults() };
+
             case LayerEditorSourceKind.Group:
                 return new LayerEditorSource
                 {

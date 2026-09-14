@@ -149,6 +149,17 @@ foreach ($name in @('ffmpeg.exe', 'LICENSE', 'README.txt')) {
     }
 }
 Write-Host 'Published FFmpeg executable and notices verified.' -ForegroundColor Green
+$projectMManifest = Join-Path $root 'artifacts\projectm\bundle\bundle-files.txt'
+foreach ($relative in [IO.File]::ReadAllLines($projectMManifest)) {
+    $published = Join-Path $publishedApps[0].DirectoryName ("projectm\" + $relative)
+    $original = Join-Path $root ("artifacts\projectm\bundle\" + $relative)
+    if (-not (Test-Path -LiteralPath $published) -or
+        (Get-FileHash -LiteralPath $published -Algorithm SHA256).Hash -ne
+        (Get-FileHash -LiteralPath $original -Algorithm SHA256).Hash) {
+        throw "Published projectM payload is missing or differs from the prepared bundle: $published"
+    }
+}
+Write-Host 'Published projectM engine, assets, corresponding source and notices verified.' -ForegroundColor Green
 $starterVideo = Join-Path $publishedApps[0].DirectoryName 'Assets\Starter\lifeviz-loop.mp4'
 $sourceVideo = Join-Path $root 'Assets\Starter\lifeviz-loop.mp4'
 if (-not (Test-Path -LiteralPath $starterVideo) -or

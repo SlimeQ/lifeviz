@@ -1,5 +1,9 @@
 # Configuration & Controls
 
+## MilkDrop / projectM
+
+Use **MilkDrop** in the Scene Editor's root/group add controls, or **Add MilkDrop / projectM** in the Sources context menu. Select the layer and open **Presets & Playback...** to search the bundled library, import `.milk` files, edit its playlist, and choose ordered/shuffle playback, timing, transitions or detected-beat changes. **Previous**, **Next**, and **Retry / Restart** control live playback; the Sources menu provides the same actions. Draft settings take effect on Apply. The layer retains the standard source compositing controls and follows the existing Audio Source selection. See [MilkDrop / projectM Layers](MilkDrop-projectM.md) for ranges, persistence and error behavior.
+
 **New Project** sits beside **Load...** and **Save...** in the Scene Editor. After confirmation it immediately replaces the applied scene with the starter video and one Life Sim, resets project render settings, and restarts the demo—even with Live Mode off. Recording-folder and other machine preferences remain unchanged. The previous applied scene is checkpointed in **Recover...**; an unapplied editor draft is preserved separately before reset. Existing named exports are not overwritten. Startup only selects the demo when the existing startup fallback rules apply; saved user scenes, including deliberately empty ones, keep loading normally.
 
 **Update to Latest Release...** can repair an older installation missing FFmpeg, including on a guest account. It downloads a complete installer, validates the new bundled FFmpeg before replacing the app, and preserves settings/scenes. Running the latest installer manually under the affected account provides the same repair if the old app cannot open.

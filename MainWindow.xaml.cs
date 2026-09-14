@@ -6581,6 +6581,7 @@ public partial class MainWindow : Window
 
         SourcesMenu.Items.Add(BuildAddLayerGroupMenuItem(null));
         SourcesMenu.Items.Add(BuildAddColorPlaneMenuItem(null));
+        SourcesMenu.Items.Add(BuildAddProjectMMenuItem(null));
         SourcesMenu.Items.Add(BuildAddWindowMenuItem(null));
         SourcesMenu.Items.Add(BuildAddWebcamMenuItem(null));
         SourcesMenu.Items.Add(BuildAddFileMenuItem(null));
@@ -7269,6 +7270,7 @@ public partial class MainWindow : Window
 
             sourceItem.Items.Add(BuildAddLayerGroupMenuItem(source));
             sourceItem.Items.Add(BuildAddColorPlaneMenuItem(source));
+            sourceItem.Items.Add(BuildAddProjectMMenuItem(source));
             sourceItem.Items.Add(BuildAddWindowMenuItem(source));
             sourceItem.Items.Add(BuildAddWebcamMenuItem(source));
             sourceItem.Items.Add(BuildAddFileMenuItem(source));
@@ -7307,6 +7309,7 @@ public partial class MainWindow : Window
         }
 
         var animationsMenu = BuildAnimationsMenu(source);
+        if (source.Type == CaptureSource.SourceType.ProjectM) AddProjectMContextControls(sourceItem, source);
         MenuItem? colorPlaneColorItem = source.Type == CaptureSource.SourceType.ColorPlane
             ? BuildColorPlaneColorMenuItem(source)
             : null;
@@ -7796,6 +7799,7 @@ public partial class MainWindow : Window
         {
             CaptureSource.SourceType.Webcam => $"{prefix}Camera: {source.DisplayName}",
             CaptureSource.SourceType.File => $"{prefix}File: {source.DisplayName}",
+            CaptureSource.SourceType.ProjectM => $"{prefix}MilkDrop / projectM ({source.ProjectM.Presets.Count} presets)",
             CaptureSource.SourceType.ColorPlane => $"{prefix}Color Plane: {FormatHexColor(source.ColorPlaneR, source.ColorPlaneG, source.ColorPlaneB)}",
             CaptureSource.SourceType.VideoSequence => $"{prefix}Video Sequence: {source.DisplayName}",
             CaptureSource.SourceType.AutoClip => $"{prefix}AutoClip: {source.DisplayName}",
@@ -9744,6 +9748,11 @@ public partial class MainWindow : Window
         {
             source.DisposeVideoSequence();
         }
+        else if (source.Type == CaptureSource.SourceType.ProjectM)
+        {
+            source.ProjectMPlayback?.Dispose();
+            source.ProjectMPlayback = null;
+        }
         else if (source.Type == CaptureSource.SourceType.AutoClip)
         {
             source.DisposeAutoClip();
@@ -11060,6 +11069,7 @@ public partial class MainWindow : Window
         {
             if (!source.Enabled)
             {
+                PauseProjectMSources(source, animationTime);
                 continue;
             }
 
@@ -11077,6 +11087,12 @@ public partial class MainWindow : Window
                 source.HasError = false;
                 source.MissedFrames = 0;
                 source.FirstFrameReceived = true;
+                continue;
+            }
+
+            if (source.Type == CaptureSource.SourceType.ProjectM)
+            {
+                CaptureProjectMSource(source, animationTime);
                 continue;
             }
 
@@ -19952,6 +19968,7 @@ public partial class MainWindow : Window
             var config = new AppConfig.SourceConfig
             {
                 Type = source.Type.ToString(),
+                ProjectM = source.ProjectM.Clone(),
                 Enabled = source.Enabled,
                 WindowTitle = source.Window?.Title,
                 WebcamId = source.WebcamId,
@@ -20106,6 +20123,7 @@ public partial class MainWindow : Window
                     CaptureSource.SourceType.Webcam => LayerEditorSourceKind.Webcam,
                     CaptureSource.SourceType.File => LayerEditorSourceKind.File,
                     CaptureSource.SourceType.ColorPlane => LayerEditorSourceKind.ColorPlane,
+                    CaptureSource.SourceType.ProjectM => LayerEditorSourceKind.ProjectM,
                     CaptureSource.SourceType.VideoSequence => LayerEditorSourceKind.VideoSequence,
                     CaptureSource.SourceType.AutoClip => LayerEditorSourceKind.AutoClip,
                     CaptureSource.SourceType.Group => LayerEditorSourceKind.Group,
@@ -20118,6 +20136,7 @@ public partial class MainWindow : Window
                 WindowHandle = source.Window?.Handle,
                 WebcamId = source.WebcamId,
                 FilePath = source.FilePath,
+                ProjectM = source.ProjectM.Clone(),
                 ColorHex = source.Type == CaptureSource.SourceType.ColorPlane
                     ? FormatHexColor(source.ColorPlaneR, source.ColorPlaneG, source.ColorPlaneB)
                     : "#000000",
@@ -20373,6 +20392,9 @@ public partial class MainWindow : Window
                 return null;
             }
 
+            case LayerEditorSourceKind.ProjectM:
+                return CreateProjectMSource(model.ProjectM, model.DisplayName);
+
             case LayerEditorSourceKind.ColorPlane:
             {
                 return TryParseHexColor(model.ColorHex, out byte r, out byte g, out byte b)
@@ -20472,6 +20494,8 @@ public partial class MainWindow : Window
 
     private void ApplySourceModel(CaptureSource source, LayerEditorSource model)
     {
+        source.ProjectM = model.ProjectM.Clone();
+        source.ProjectMPlayback?.Configure(source.ProjectM);
         source.Enabled = model.Enabled;
         source.BlendMode = ParseBlendModeOrDefault(model.BlendMode, source.BlendMode);
 
@@ -20790,6 +20814,10 @@ public partial class MainWindow : Window
                     }
                     break;
 
+                case CaptureSource.SourceType.ProjectM:
+                    restored = CreateProjectMSource(config.ProjectM ?? new ProjectMSettings(), config.DisplayName);
+                    break;
+
                 case CaptureSource.SourceType.ColorPlane:
                     if (TryParseHexColor(config.Color, out byte colorR, out byte colorG, out byte colorB))
                     {
@@ -21065,6 +21093,7 @@ public partial class MainWindow : Window
 
         public sealed class SourceConfig
         {
+            public ProjectMSettings ProjectM { get; set; } = new();
             public string Type { get; set; } = CaptureSource.SourceType.Window.ToString();
             public bool Enabled { get; set; } = true;
             public string? WindowTitle { get; set; }
@@ -21171,7 +21200,7 @@ public partial class MainWindow : Window
         _mappedEngineRows = engineRows;
     }
 
-    private sealed class CaptureSource
+    private sealed partial class CaptureSource
     {
         public enum SourceType
         {
@@ -21182,7 +21211,8 @@ public partial class MainWindow : Window
             VideoSequence,
             AutoClip,
             Group,
-            SimGroup
+            SimGroup,
+            ProjectM
         }
 
         private CaptureSource(SourceType type, WindowHandleInfo? window, string? webcamId, string? filePath, string displayName, int? fileWidth, int? fileHeight)
@@ -21259,6 +21289,8 @@ public partial class MainWindow : Window
         public static CaptureSource CreateSimulationGroup(string? displayName = null) =>
             new(SourceType.SimGroup, null, null, null, displayName ?? "Sim Group", null, null) { AddedUtc = DateTime.UtcNow };
 
+        public ProjectMSettings ProjectM { get; set; } = new();
+        public ProjectMPlayback? ProjectMPlayback { get; set; }
         public Guid Id { get; } = Guid.NewGuid();
         public SourceType Type { get; }
         public WindowHandleInfo? Window { get; set; }
@@ -21449,7 +21481,7 @@ public partial class MainWindow : Window
         }
 
         public bool IsAspectNeutral =>
-            Type == SourceType.ColorPlane ||
+            Type == SourceType.ColorPlane || Type == SourceType.ProjectM ||
             (Type == SourceType.Group && Children.Count > 0 && Children.All(child => child.IsAspectNeutral));
 
         public int? FallbackWidth => Type switch
