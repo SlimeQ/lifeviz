@@ -38,7 +38,7 @@ The default **Low → Time Spread** mapping adds up to 30 percentage points. Eac
 
 ## Reaction–Diffusion
 
-Two chemical concentrations diffuse and react using a Gray–Scott model. The source image seeds small colonies; Feed and Kill change their growth into spots, islands, or connected patterns. Scene colors tint the result, and colony boundaries receive a warm highlight. Transparent source pixels remain transparent.
+Two chemical concentrations diffuse and react using a Gray–Scott model. The source image seeds small colonies; Feed and Kill change their growth into spots, islands, or connected patterns. Scene colors tint the result, and colony boundaries receive a blue highlight. Transparent source pixels remain transparent.
 
 | Control | Range / default | Effect |
 | --- | --- | --- |
