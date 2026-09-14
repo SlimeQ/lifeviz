@@ -82,14 +82,21 @@ public partial class MainWindow
             source.ProjectMPlayback.Configure(new ProjectMSettings { Presets = new() { "missing-smoke-preset.milk" } });
             CaptureSourceList(_sources, 5);
             Check(source.ProjectMPlayback.Status.StartsWith("No playable presets"), "Live missing presets must report an error without terminating playback.");
-            var dialog = new ProjectMSettingsWindow(settings);
+            var dialog = new ProjectMSettingsWindow(settings, previewAudio: samples => Array.Fill(samples, 0.25f));
             dialog.PopulateLibraryForSmoke();
+            dialog.RunPreviewSmoke();
             var content = (FrameworkElement)dialog.Content;
-            content.Measure(new Size(1040, 700)); content.Arrange(new Rect(0, 0, 1040, 700)); content.UpdateLayout();
-            var image = new RenderTargetBitmap(1040, 700, 96, 96, PixelFormats.Pbgra32); image.Render(content);
+            content.Measure(new Size(1240, 700)); content.Arrange(new Rect(0, 0, 1240, 700)); content.UpdateLayout();
+            var image = new RenderTargetBitmap(1240, 700, 96, 96, PixelFormats.Pbgra32); image.Render(content);
             var encoder = new PngBitmapEncoder(); encoder.Frames.Add(BitmapFrame.Create(image));
             using (var file = File.Create(Path.Combine(folder, "playlist-controls.png"))) encoder.Save(file);
+            content.Measure(new Size(960, 590)); content.Arrange(new Rect(0, 0, 960, 590)); content.UpdateLayout();
+            var compactImage = new RenderTargetBitmap(960, 590, 96, 96, PixelFormats.Pbgra32); compactImage.Render(content);
+            var compactEncoder = new PngBitmapEncoder(); compactEncoder.Frames.Add(BitmapFrame.Create(compactImage));
+            using (var file = File.Create(Path.Combine(folder, "playlist-controls-compact.png"))) compactEncoder.Save(file);
+            dialog.ValidatePreviewTimerForSmoke();
             dialog.Close();
+            dialog.ValidatePreviewClosedForSmoke();
         }
         finally
         {

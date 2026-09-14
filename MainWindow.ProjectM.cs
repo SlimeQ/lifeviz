@@ -46,7 +46,7 @@ public partial class MainWindow
         var settings = new MenuItem { Header = "Presets & Playback..." };
         settings.Click += (_, _) =>
         {
-            var dialog = new ProjectMSettingsWindow(source.ProjectM, () => GetProjectMStatus(source.Id), action => ControlProjectM(source.Id, action)) { Owner = this };
+            var dialog = new ProjectMSettingsWindow(source.ProjectM, () => GetProjectMStatus(source.Id), action => ControlProjectM(source.Id, action), CopyProjectMPreviewAudio) { Owner = this };
             if (dialog.ShowDialog() == true) UpdateProjectMFromEditor(source.Id, dialog.Result);
         };
         menu.Items.Add(settings);
@@ -59,6 +59,7 @@ public partial class MainWindow
     }
 
     internal string GetProjectMStatus(Guid id) => FindSourceById(id)?.ProjectMPlayback?.Status ?? "Waiting for layer playback.";
+    internal void CopyProjectMPreviewAudio(float[] destination) => _audioBeatDetector.CopyProjectMPcm(destination, offline: false);
     internal void ControlProjectM(Guid id, int action)
     {
         var source = FindSourceById(id);

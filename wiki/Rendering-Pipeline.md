@@ -2,6 +2,8 @@
 
 ## MilkDrop / projectM source rendering
 
+The preset picker owns a separate 480×270 OpenGL preview at up to 15 fps, with a 200 ms selection debounce to avoid compiling intermediate selections during quick browsing. It uses the same renderer and textures as scene layers, with either synthetic demo PCM or a copy of the selected audio input. Each audition starts fresh native state, keeping its feedback and timeline independent of scene playback. Pause and minimization suspend rendering; closing the dialog stops the timer and disposes its context. Preview work runs at background dispatcher priority, though native preset compilation can still briefly occupy the UI thread.
+
 Each enabled projectM source owns a thread-affine OpenGL 3.3 context and renders to an offscreen framebuffer at the scene engine's working dimensions. A BGRA readback is flipped into top-down order, made opaque, and published as a tokened `SourceFrame`, feeding the existing CPU/GPU and group compositors. Source opacity, blend, keying, scale and animations apply normally. Procedural projectM layers are aspect-neutral.
 
 The selected audio input's gained mono sample history is shared with all projectM layers through a bounded, synchronized buffer. Live capture, silent video-stack audio and offline decoding use the same path. projectM analyzes PCM for its visuals; a separate LifeViz scheduler uses elapsed scene time or new detected beats for preset changes. Offline renders supply projectM's explicit frame-time API and restart on a fresh timeline; no native wall-clock pacing is used for bakes. Disabled trees pause rendering. Missing presets are skipped; renderer failure is contained during live playback and fails a bake explicitly.

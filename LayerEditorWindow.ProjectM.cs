@@ -20,7 +20,8 @@ public partial class LayerEditorWindow
         bool live = ShouldApplyLive();
         var dialog = new ProjectMSettingsWindow(source.ProjectM,
             live ? () => _owner.GetProjectMStatus(source.Id) : null,
-            live ? action => _owner.ControlProjectM(source.Id, action) : null) { Owner = this };
+            live ? action => _owner.ControlProjectM(source.Id, action) : null,
+            _owner.CopyProjectMPreviewAudio) { Owner = this };
         if (dialog.ShowDialog() != true) return;
         source.ProjectM = dialog.Result.Clone();
         if (live) _owner.UpdateProjectMFromEditor(source.Id, source.ProjectM);

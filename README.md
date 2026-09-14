@@ -1,5 +1,7 @@
 # LifeViz
 
+The MilkDrop preset picker includes an animated preview for library and playlist selections, with a silent demo beat or the current audio input. Audition presets before adding them, pause or restart the preview, and browse without changing the playing layer.
+
 **MilkDrop / projectM layers** add the bundled Cream of the Crop preset collection and textures to the source stack. Build a per-layer playlist, play in order or shuffle without repeats, choose timed or beat-triggered changes, and use smooth transitions or cuts. Live playback follows the selected audio source; background bakes use decoded video audio and a fixed frame clock. See [MilkDrop / projectM](wiki/MilkDrop-projectM.md) for controls and asset-license details.
 
 The engine is tracked in the pinned `Native/projectm` Git submodule. Initialize it with `git submodule update --init --recursive`; Windows builds now require Visual Studio 2022's **Desktop development with C++** tools and CMake in addition to .NET 9. `Prepare-ProjectM.ps1` runs automatically during builds or can be run directly to prefetch/build the bundle; use `-Rebuild` to repair generated files. It builds the unmodified engine, verifies the upstream preset archive, and packages the assets, corresponding source and notices. `Publish-Installer.ps1` also verifies these files. Details: [Build & Install](wiki/Build-and-Install.md#bundled-projectm).

@@ -2,6 +2,8 @@
 
 ## MilkDrop / projectM
 
+The preset picker previews selections from either the bundled library or the layer's playlist, including imported files. **Use demo audio** auditions visuals with a silent beat; turn it off to use the selected Audio Source. **Pause preview** and **Restart preview** control only the audition. Previewing also works in draft mode and does not modify the playing layer or playlist.
+
 Use **MilkDrop** in the Scene Editor's root/group add controls, or **Add MilkDrop / projectM** in the Sources context menu. Select the layer and open **Presets & Playback...** to search the bundled library, import `.milk` files, edit its playlist, and choose ordered/shuffle playback, timing, transitions or detected-beat changes. **Previous**, **Next**, and **Retry / Restart** control live playback; the Sources menu provides the same actions. Draft settings take effect on Apply. The layer retains the standard source compositing controls and follows the existing Audio Source selection. See [MilkDrop / projectM Layers](MilkDrop-projectM.md) for ranges, persistence and error behavior.
 
 ## Datamosh layers

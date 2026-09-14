@@ -21,6 +21,17 @@ playlist; **Remove**, **Move Up** and **Move Down** edit that list. These contro
 do not delete files. **Import .milk Files...** references additional local files;
 keep their textures beside them or in a sibling `textures` directory.
 
+Select a preset in either list to see its animated **Preset preview**. With a
+multi-selection, the most recently selected entry is auditioned. The preview
+works in live and draft editing and has its own renderer; browsing never changes
+the playing layer, adds a preset, or saves settings. **Use demo audio** supplies
+a silent synthetic beat by default, so audio-reactive presets can be auditioned
+without music playing. Uncheck it to use LifeViz's current Audio Source (silence
+when no input is available). **Pause preview** freezes it; **Restart preview**
+reloads the selected preset and can retry a failure. Missing or unsupported
+presets show an inline error and clear the previous image. Closing the picker
+releases its preview renderer.
+
 **Save Playlist Settings** applies the dialog's edits. Cancel discards them.
 In Scene Editor Live Mode this updates playback immediately; in draft mode it
 updates the draft, which takes effect when the scene is applied. Live transport

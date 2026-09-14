@@ -11,7 +11,7 @@ using Microsoft.Win32;
 
 namespace lifeviz;
 
-internal sealed class ProjectMSettingsWindow : Window
+internal sealed partial class ProjectMSettingsWindow : Window
 {
     private readonly ObservableCollection<string> _playlist;
     private readonly ListBox _library = new() { SelectionMode = SelectionMode.Extended };
@@ -25,12 +25,12 @@ internal sealed class ProjectMSettingsWindow : Window
     private static readonly Brush PanelBrush = new SolidColorBrush(Color.FromRgb(42, 42, 42));
     public ProjectMSettings Result { get; private set; }
 
-    public ProjectMSettingsWindow(ProjectMSettings settings, Func<string>? status = null, Action<int>? control = null)
+    public ProjectMSettingsWindow(ProjectMSettings settings, Func<string>? status = null, Action<int>? control = null, Action<float[]>? previewAudio = null)
     {
         Result = settings.Clone();
         _playlist = new(Result.Presets);
         Title = "MilkDrop / projectM — Presets & Playback";
-        Width = 1080; Height = 760; MinWidth = 840; MinHeight = 650;
+        Width = 1280; Height = 760; MinWidth = 1000; MinHeight = 650;
         WindowStartupLocation = WindowStartupLocation.CenterOwner;
         Background = new SolidColorBrush(Color.FromRgb(25, 25, 25)); Foreground = Brushes.WhiteSmoke;
         foreach (Type type in new[] { typeof(TextBox), typeof(ListBox), typeof(ComboBox), typeof(Button) })
@@ -54,8 +54,12 @@ internal sealed class ProjectMSettingsWindow : Window
         var cancel = Button("Cancel", (_, _) => DialogResult = false); cancel.IsCancel = true;
         footer.Children.Add(save); footer.Children.Add(cancel);
         DockPanel.SetDock(footer, Dock.Bottom); root.Children.Add(footer);
+        var body = new Grid(); body.ColumnDefinitions.Add(new()); body.ColumnDefinitions.Add(new() { Width = new GridLength(330) });
+        root.Children.Add(body);
+        var editing = new DockPanel(); body.Children.Add(editing);
+        var preview = BuildPreview(previewAudio); Grid.SetColumn(preview, 1); body.Children.Add(preview);
         var options = new StackPanel { Margin = new Thickness(0, 10, 0, 10) };
-        DockPanel.SetDock(options, Dock.Bottom); root.Children.Add(options);
+        DockPanel.SetDock(options, Dock.Bottom); editing.Children.Add(options);
         var modes = new WrapPanel();
         _order = Choice(new[] { ("Shuffle without repeats", "Shuffle"), ("Ordered loop", "Ordered") }, Result.Order);
         _advance = Choice(new[] { ("After duration", "Timed"), ("After duration, on next beat", "TimedOnBeat"), ("Every N detected beats", "Beats"), ("Hold / manual only", "Hold") }, Result.Advance);
@@ -76,7 +80,7 @@ internal sealed class ProjectMSettingsWindow : Window
             button.IsEnabled = control != null; transport.Children.Add(button);
         }
         options.Children.Add(transport);
-        var current = new TextBlock { TextWrapping = TextWrapping.Wrap, MaxHeight = 52, Text = status?.Invoke() ?? "Draft playlist: apply the scene to hear and see playback." };
+        var current = new TextBlock { TextWrapping = TextWrapping.Wrap, MaxHeight = 52, Text = status?.Invoke() ?? "Draft playlist: apply the scene to start layer playback." };
         options.Children.Add(current);
         if (status != null)
         {
@@ -85,7 +89,8 @@ internal sealed class ProjectMSettingsWindow : Window
         }
         Closed += (_, _) => _statusTimer.Stop();
 
-        var columns = new Grid(); columns.ColumnDefinitions.Add(new()); columns.ColumnDefinitions.Add(new()); root.Children.Add(columns);
+        var columns = new Grid(); columns.ColumnDefinitions.Add(new()); columns.ColumnDefinitions.Add(new());
+        editing.Children.Add(columns);
         var libraryPanel = new DockPanel(); var selectedPanel = new DockPanel { Margin = new Thickness(12, 0, 0, 0) };
         columns.Children.Add(libraryPanel); Grid.SetColumn(selectedPanel, 1); columns.Children.Add(selectedPanel);
         AddTop(libraryPanel, new TextBlock { Text = "Bundled preset library", FontSize = 17, FontWeight = FontWeights.SemiBold });

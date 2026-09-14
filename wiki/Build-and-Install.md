@@ -2,6 +2,8 @@
 
 ## Bundled projectM
 
+The `projectm` smoke also exercises the preset picker's native animated preview: library/playlist/import selection, debounce, pause, audio input, invalid-file recovery, draft isolation, and cleanup on close. Its `projectm-smoke/playlist-controls.png` includes the rendered preview pane for layout inspection.
+
 Windows builds target x64 and require .NET 9 plus Visual Studio 2022 **Desktop development with C++**, including CMake and a Windows SDK. Runtime users need an OpenGL 3.3 graphics driver; they do not need build tools, projectM, or a separate preset download.
 
 Initialize the pinned engine and its evaluator with `git submodule update --init --recursive`. The `Native/projectm` gitlink and `Prepare-ProjectM.ps1` pin the same upstream revision. Keep those pins synchronized when updating the engine; commit any engine modifications in its repository and update the parent gitlink so builds never depend on untracked native edits.
