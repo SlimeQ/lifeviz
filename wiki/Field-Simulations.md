@@ -10,7 +10,7 @@ These are independent GPU simulation layer types, alongside Life Sim, Pixel Sort
 4. Select the simulation to adjust its controls. New effects start with Normal blending, 100% simulation opacity, and one Low audio mapping at 30% amount.
 5. Choose **Audio Source** in the context menu to use hardware audio or **Video Stack (Silent)**. The latter analyzes video layers with Play Audio enabled. Without audio, the authored base values still work.
 
-All simulations within one group read the same input; their outputs blend in list order. Use separate Sim Groups to feed one effect's result into another. Live Mode applies changes immediately; with Live Mode off, press Apply. Save/Load, autosave, editor drafts, and bake snapshots preserve settings independently. Exported projects use version 13; older supported projects still load.
+All simulations within one group read the same input; their outputs blend in list order. Use separate Sim Groups to feed one effect's result into another. Live Mode applies changes immediately; with Live Mode off, press Apply. Save/Load, autosave, editor drafts, and bake snapshots preserve settings independently. Exported projects use version 14; older supported projects still load.
 
 ## Fluid Ink
 

@@ -162,6 +162,9 @@ internal static partial class SmokeTestRunner
                 "gpu-bitwise" => RunGpuBitwiseSmokeTest(),
                 "gpu-pixel-sort" => RunGpuPixelSortSmokeTest(),
                 "datamosh" => RunDatamoshSmokeTest(),
+                "kaleidoscope" => RunDatamoshSmokeTest(kaleidoscope: true),
+                "kaleidoscope-editor" => RunPixelSortEditorRoundTripSmokeTest(kaleidoscope: true),
+                "mapping-options" => RunPixelSortEditorRoundTripSmokeTest(mappingOptions: true),
                 "field-effects" => RunDatamoshSmokeTest(fields: true),
                 "field-effects-editor" => RunPixelSortEditorRoundTripSmokeTest(fields: true),
                 "datamosh-editor" => RunPixelSortEditorRoundTripSmokeTest(datamosh: true),
@@ -379,10 +382,10 @@ internal static partial class SmokeTestRunner
         return 0;
     }
 
-    private static int RunDatamoshSmokeTest(bool fields = false)
+    private static int RunDatamoshSmokeTest(bool fields = false, bool kaleidoscope = false)
     {
         var window = new MainWindow();
-        try { return (fields ? window.RunFieldEffectsSmoke() : window.RunDatamoshSmoke()) ? 0 : 1; }
+        try { return (kaleidoscope ? window.RunKaleidoscopeSmoke() : fields ? window.RunFieldEffectsSmoke() : window.RunDatamoshSmoke()) ? 0 : 1; }
         finally { window.Close(); }
     }
 
@@ -1696,7 +1699,7 @@ internal static partial class SmokeTestRunner
         return exitCode;
     }
 
-    private static int RunPixelSortEditorRoundTripSmokeTest(bool datamosh = false, bool fields = false)
+    private static int RunPixelSortEditorRoundTripSmokeTest(bool datamosh = false, bool fields = false, bool kaleidoscope = false, bool mappingOptions = false)
     {
         int exitCode = 0;
         var thread = new Thread(() =>
@@ -1709,7 +1712,7 @@ internal static partial class SmokeTestRunner
                 window.Show();
                 window.Hide();
                 var editor = new LayerEditorWindow(window);
-                bool ok = fields ? editor.RunFieldEffectsEditorSmoke() : datamosh ? editor.RunDatamoshEditorSmoke() : editor.RunPixelSortEditorRoundTripSmoke();
+                bool ok = mappingOptions ? editor.RunMappingOptionsSmoke() : kaleidoscope ? editor.RunFieldEffectsEditorSmoke(kaleidoscope: true) : fields ? editor.RunFieldEffectsEditorSmoke() : datamosh ? editor.RunDatamoshEditorSmoke() : editor.RunPixelSortEditorRoundTripSmoke();
                 editor.Close();
                 window.Close();
                 app.Shutdown();

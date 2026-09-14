@@ -30,7 +30,10 @@ internal enum SimulationReactiveOutput
     DatamoshDisplacement,
     FluidFlow,
     TimeSpread,
-    ReactionSeed
+    ReactionSeed,
+    KaleidoscopeFeedback,
+    KaleidoscopeZoom,
+    KaleidoscopeRotation
 }
 
 internal sealed class SimulationReactiveMapping
@@ -64,6 +67,8 @@ internal static class SimulationReactivity
     {
         return output switch
         {
+            SimulationReactiveOutput.KaleidoscopeZoom => Math.Clamp(amount, 0, 0.1),
+            SimulationReactiveOutput.KaleidoscopeRotation => Math.Clamp(amount, 0, 10),
             SimulationReactiveOutput.HueShift => Math.Clamp(amount, 0, 360),
             SimulationReactiveOutput.HueSpeed => Math.Clamp(amount, 0, 180),
             SimulationReactiveOutput.PixelSortCellWidth => Math.Clamp(amount, 0, 50),

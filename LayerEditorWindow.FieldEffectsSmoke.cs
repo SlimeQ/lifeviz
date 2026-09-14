@@ -13,18 +13,19 @@ namespace lifeviz;
 
 public partial class LayerEditorWindow
 {
-    internal bool RunFieldEffectsEditorSmoke()
+    internal bool RunFieldEffectsEditorSmoke(bool kaleidoscope = false)
     {
         static void Check(bool value, string message) { if (!value) throw new InvalidOperationException(message); }
         RefreshFromSources();
         var source = EnsureSimulationSourceForSmoke()!;
         SetSelectedSource(source);
-        foreach (var kind in new[] { LayerEditorSimulationLayerType.FluidInk, LayerEditorSimulationLayerType.TimeDisplacement, LayerEditorSimulationLayerType.ReactionDiffusion })
+        foreach (var kind in kaleidoscope ? new[] { LayerEditorSimulationLayerType.FeedbackKaleidoscope } : new[] { LayerEditorSimulationLayerType.FluidInk, LayerEditorSimulationLayerType.TimeDisplacement, LayerEditorSimulationLayerType.ReactionDiffusion })
         {
             AddSimulationLayer(kind);
             var layer = GetSelectedSimulationLayer()!;
             Guid id = layer.Id;
-            Check(layer.LayerType == kind && layer.BlendMode == "Normal" && layer.ReactiveMappings.Count == 1, "Incorrect defaults.");
+            Check(layer.LayerType == kind && layer.BlendMode == "Normal" && layer.ReactiveMappings.Count == (kaleidoscope ? 2 : 1), "Incorrect defaults.");
+            layer.Effects.KaleidoscopeFeedback = 0.77; layer.Effects.KaleidoscopeZoom = 0.985; layer.Effects.KaleidoscopeRotation = -2.3; layer.Effects.KaleidoscopeFolds = 9; layer.Effects.KaleidoscopeCenterX = 0.4; layer.Effects.KaleidoscopeCenterY = 0.6;
             layer.Effects.FluidFlow = 0.71; layer.Effects.TimeSpread = 0.37; layer.Effects.ReactionFeed = 0.041;
             ApplySimulationLayerSettingsLive(force: true);
             Dispatcher.Invoke(() => { }, DispatcherPriority.Background);
@@ -33,7 +34,7 @@ public partial class LayerEditorWindow
             SetSelectedSource(source);
             var refreshed = FindSimulationLayerById(source.SimulationLayers, id)!;
             Check(_owner.TryGetSimulationLayerRuntimeInfoForSmoke(id, out string type, out _, out _) && type == kind.ToString(), "Runtime lost effect type.");
-            bool Matches(LayerEditorSimulationLayer candidate) => candidate.LayerType == kind && candidate.Effects.FluidFlow == 0.71 && candidate.Effects.TimeSpread == 0.37 && candidate.Effects.ReactionFeed == 0.041;
+            bool Matches(LayerEditorSimulationLayer candidate) => candidate.LayerType == kind && candidate.Effects.FluidFlow == 0.71 && candidate.Effects.TimeSpread == 0.37 && candidate.Effects.ReactionFeed == 0.041 && candidate.Effects.KaleidoscopeFeedback == 0.77 && candidate.Effects.KaleidoscopeZoom == 0.985 && candidate.Effects.KaleidoscopeRotation == -2.3 && candidate.Effects.KaleidoscopeFolds == 9 && candidate.Effects.KaleidoscopeCenterX == 0.4 && candidate.Effects.KaleidoscopeCenterY == 0.6;
             Check(Matches(refreshed), "Runtime refresh lost controls.");
             var project = LayerConfigFile.FromEditorSources(_viewModel.Sources, Array.Empty<LayerEditorSimulationLayer>(), _owner.GetProjectSettingsForEditor());
             var roundtrip = LayerConfigFile.Parse(JsonSerializer.Serialize(project)).ToEditorSources();
@@ -44,13 +45,13 @@ public partial class LayerEditorWindow
             SetSelectedSimulationLayer(refreshed);
             Show(); UpdateLayout();
             Dispatcher.Invoke(() => { }, DispatcherPriority.Background);
-            string property = kind switch { LayerEditorSimulationLayerType.FluidInk => "FluidFlow", LayerEditorSimulationLayerType.TimeDisplacement => "TimeSpread", _ => "ReactionSeed" };
+            string property = kind switch { LayerEditorSimulationLayerType.FeedbackKaleidoscope => "KaleidoscopeFeedback", LayerEditorSimulationLayerType.FluidInk => "FluidFlow", LayerEditorSimulationLayerType.TimeDisplacement => "TimeSpread", _ => "ReactionSeed" };
             var slider = FieldSmokeVisuals(this).OfType<Slider>().First(s => s.IsVisible && s.GetBindingExpression(Slider.ValueProperty)?.ParentBinding.Path.Path == "Effects." + property);
             double RuntimeValue()
             {
                 _owner.GetSimulationLayerSettingsForEditor(out var layers);
                 var runtime = EnumerateSimulationLayers(layers).Single(s => s.Id == id).Effects;
-                return kind switch { LayerEditorSimulationLayerType.FluidInk => runtime.FluidFlow, LayerEditorSimulationLayerType.TimeDisplacement => runtime.TimeSpread, _ => runtime.ReactionSeed };
+                return kind switch { LayerEditorSimulationLayerType.FeedbackKaleidoscope => runtime.KaleidoscopeFeedback, LayerEditorSimulationLayerType.FluidInk => runtime.FluidFlow, LayerEditorSimulationLayerType.TimeDisplacement => runtime.TimeSpread, _ => runtime.ReactionSeed };
             }
             slider.SetCurrentValue(Slider.ValueProperty, 0.25);
             Dispatcher.Invoke(() => { }, DispatcherPriority.Background);
@@ -63,6 +64,8 @@ public partial class LayerEditorWindow
             Check(Math.Abs(RuntimeValue() - 0.6) < 1e-6, "Apply did not commit draft controls.");
             SetLiveModeForSmoke(true);
             slider.BringIntoView();
+            if (kaleidoscope)
+                FieldSmokeVisuals(this).OfType<Slider>().First(s => s.IsVisible && s.GetBindingExpression(Slider.ValueProperty)?.ParentBinding.Path.Path == "Effects.KaleidoscopeCenterY").BringIntoView();
             UpdateLayout();
             Dispatcher.Invoke(() => { }, DispatcherPriority.Background);
             var bitmap = new RenderTargetBitmap((int)ActualWidth, (int)ActualHeight, 96, 96, PixelFormats.Pbgra32);

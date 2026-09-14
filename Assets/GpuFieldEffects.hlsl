@@ -11,6 +11,8 @@ cbuffer EffectParameters : register(b1)
     float Flow; float Persistence; float Swirl; float Spread;
     float Scale; float Motion; float Feed; float Kill;
     float Seed; uint Effect; uint SolverPass; uint FieldReady;
+    float KaleidoscopeFeedback; float KaleidoscopeZoom; float KaleidoscopeRotation; float KaleidoscopeFolds;
+    float KaleidoscopeCenterX; float KaleidoscopeCenterY; float EffectPadding0; float EffectPadding1;
 };
 Texture2D<uint4> Previous : register(t0);
 Texture2D<uint4> Scene : register(t1);
@@ -101,6 +103,36 @@ float4 SampleHistory(float2 p,uint slice)
     return lerp(lerp(H(a,slice),H(a+int2(1,0),slice),f.x),lerp(H(a+int2(0,1),slice),H(a+1,slice),f.x),f.y);
 }
 
+float2 MirrorImagePoint(float2 p)
+{
+    float2 span=max(float2(Width,Height)-1,1);
+    return span-abs(frac(p/(2*span))*2*span-span);
+}
+float4 SampleKaleidoscope(float2 p,bool previousFrame)
+{
+    p=MirrorImagePoint(p);
+    int2 a=int2(floor(p)); float2 f=frac(p);
+    if(previousFrame) return SamplePrevious(p);
+    return lerp(lerp(S(a),S(a+int2(1,0)),f.x),lerp(S(a+int2(0,1)),S(a+1),f.x),f.y);
+}
+
+float4 Kaleidoscope(float2 pixel)
+{
+    float2 center=float2(KaleidoscopeCenterX,KaleidoscopeCenterY)*float2(Width-1,Height-1);
+    // Work in pixels so folds have the same geometry on wide and tall canvases.
+    float2 offset=pixel-center;
+    float radius=length(offset);
+    float angle=radius>0.0001 ? atan2(offset.y,offset.x) : 0;
+    float sector=6.28318530718/max(KaleidoscopeFolds,2);
+    float folded=abs(frac(angle/sector+0.5)*sector-sector*0.5);
+    float2 ray=float2(cos(folded),sin(folded))*radius;
+    float4 current=SampleKaleidoscope(center+ray,false);
+    if(HasHistory==0 || KaleidoscopeFeedback<=0) return current;
+    float twist=KaleidoscopeRotation*0.01745329252;
+    float2 retainedRay=float2(cos(folded-twist),sin(folded-twist))*radius/max(KaleidoscopeZoom,0.9);
+    return lerp(current,SampleKaleidoscope(center+retainedRay,true),KaleidoscopeFeedback);
+}
+
 [numthreads(8,8,1)]
 void EffectOutputCS(uint3 id : SV_DispatchThreadID)
 {
@@ -132,5 +164,6 @@ void EffectOutputCS(uint3 id : SV_DispatchThreadID)
         float3 pigment=lerp(fresh.rgb*0.12,fresh.rgb,growth);
         result=float4(lerp(pigment,float3(0.95,0.65,0.25)*fresh.a,edge*0.65),fresh.a);
     }
+    else if(Effect==5) result=Kaleidoscope(float2(id.xy));
     Output[id.xy]=(uint4)round(saturate(result)*255.0);
 }

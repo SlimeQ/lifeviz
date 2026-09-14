@@ -1238,6 +1238,7 @@
                                                     Click="AddSimulationPixelSort_Click" />
                                             <Button Content="Add Datamosh Layer" Click="AddSimulationDatamosh_Click" />
                                             <Button Content="Add Fluid Ink" Click="AddSimulationFluidInk_Click" />
+                                            <Button Content="Add Feedback Kaleidoscope" Click="AddSimulationFeedbackKaleidoscope_Click" />
                                             <Button Content="Add Time Displacement" Click="AddSimulationTimeDisplacement_Click" />
                                             <Button Content="Add Reaction–Diffusion" Click="AddSimulationReactionDiffusion_Click" />
 
@@ -1616,6 +1617,43 @@
                                                               </WrapPanel>
                                                           </StackPanel>
 
+                                                          <StackPanel Margin="0,4,0,8">
+                                                              <StackPanel.Style><Style TargetType="StackPanel"><Setter Property="Visibility" Value="Collapsed"/><Style.Triggers><DataTrigger Binding="{Binding IsFeedbackKaleidoscopeLayer}" Value="True"><Setter Property="Visibility" Value="Visible"/></DataTrigger></Style.Triggers></Style></StackPanel.Style>
+                                                              <TextBlock Text="Fold the scene into mirrored wedges, then zoom and twist its retained history." TextWrapping="Wrap" Foreground="#A0A0A0" Margin="0,0,0,8"/>
+                                                              <WrapPanel>
+                                                                  <StackPanel Orientation="Horizontal" Margin="0,0,12,6">
+                                                                      <TextBlock Text="Feedback" VerticalAlignment="Center"/>
+                                                                      <Slider Minimum="0" Maximum="0.98" TickFrequency="0.01" IsSnapToTickEnabled="True" Value="{Binding Effects.KaleidoscopeFeedback, UpdateSourceTrigger=PropertyChanged}" Width="140" Margin="8,0,0,0" ValueChanged="SimulationLayerDatamosh_Changed"/>
+                                                                      <TextBlock Text="{Binding Effects.KaleidoscopeFeedback, StringFormat={}{0:P0}}" Margin="8,0,0,0" VerticalAlignment="Center"/>
+                                                                  </StackPanel>
+                                                                  <StackPanel Orientation="Horizontal" Margin="0,0,12,6">
+                                                                      <TextBlock Text="Zoom / step" VerticalAlignment="Center"/>
+                                                                      <Slider Minimum="0.9" Maximum="1.1" TickFrequency="0.001" IsSnapToTickEnabled="True" Value="{Binding Effects.KaleidoscopeZoom, UpdateSourceTrigger=PropertyChanged}" Width="140" Margin="8,0,0,0" ValueChanged="SimulationLayerDatamosh_Changed"/>
+                                                                      <TextBlock Text="{Binding Effects.KaleidoscopeZoom, StringFormat={}{0:0.000}}" Margin="8,0,0,0" VerticalAlignment="Center"/>
+                                                                  </StackPanel>
+                                                                  <StackPanel Orientation="Horizontal" Margin="0,0,12,6">
+                                                                      <TextBlock Text="Twist °/step" VerticalAlignment="Center"/>
+                                                                      <Slider Minimum="-10" Maximum="10" TickFrequency="0.1" IsSnapToTickEnabled="True" Value="{Binding Effects.KaleidoscopeRotation, UpdateSourceTrigger=PropertyChanged}" Width="140" Margin="8,0,0,0" ValueChanged="SimulationLayerDatamosh_Changed"/>
+                                                                      <TextBlock Text="{Binding Effects.KaleidoscopeRotation, StringFormat={}{0:0.0}}" Margin="8,0,0,0" VerticalAlignment="Center"/>
+                                                                  </StackPanel>
+                                                                  <StackPanel Orientation="Horizontal" Margin="0,0,12,6">
+                                                                      <TextBlock Text="Folds" VerticalAlignment="Center"/>
+                                                                      <Slider Minimum="2" Maximum="16" TickFrequency="1" IsSnapToTickEnabled="True" Value="{Binding Effects.KaleidoscopeFolds, UpdateSourceTrigger=PropertyChanged}" Width="140" Margin="8,0,0,0" ValueChanged="SimulationLayerDatamosh_Changed"/>
+                                                                      <TextBlock Text="{Binding Effects.KaleidoscopeFolds, StringFormat={}{0:0}}" Margin="8,0,0,0" VerticalAlignment="Center"/>
+                                                                  </StackPanel>
+                                                                  <StackPanel Orientation="Horizontal" Margin="0,0,12,6">
+                                                                      <TextBlock Text="Center X" VerticalAlignment="Center"/>
+                                                                      <Slider Minimum="0" Maximum="1" TickFrequency="0.01" IsSnapToTickEnabled="True" Value="{Binding Effects.KaleidoscopeCenterX, UpdateSourceTrigger=PropertyChanged}" Width="140" Margin="8,0,0,0" ValueChanged="SimulationLayerDatamosh_Changed"/>
+                                                                      <TextBlock Text="{Binding Effects.KaleidoscopeCenterX, StringFormat={}{0:P0}}" Margin="8,0,0,0" VerticalAlignment="Center"/>
+                                                                  </StackPanel>
+                                                                  <StackPanel Orientation="Horizontal" Margin="0,0,12,6">
+                                                                      <TextBlock Text="Center Y" VerticalAlignment="Center"/>
+                                                                      <Slider Minimum="0" Maximum="1" TickFrequency="0.01" IsSnapToTickEnabled="True" Value="{Binding Effects.KaleidoscopeCenterY, UpdateSourceTrigger=PropertyChanged}" Width="140" Margin="8,0,0,0" ValueChanged="SimulationLayerDatamosh_Changed"/>
+                                                                      <TextBlock Text="{Binding Effects.KaleidoscopeCenterY, StringFormat={}{0:P0}}" Margin="8,0,0,0" VerticalAlignment="Center"/>
+                                                                  </StackPanel>
+                                                              </WrapPanel>
+                                                          </StackPanel>
+
                                                           <GroupBox x:Name="SelectedSimulationReactiveMappingsGroupBox"
                                                                   Header="Reactive Mappings"
                                                                   Margin="0,10,0,10">
@@ -1692,7 +1730,11 @@
                                                                                                       SelectedValue="{Binding Output}"
                                                                                                       Width="160"
                                                                                                       Margin="8,0,0,0"
-                                                                                                      SelectionChanged="SimulationReactiveMappingSelection_Changed" />
+                                                                                                      SelectionChanged="SimulationReactiveMappingSelection_Changed">
+                                                                                                <ComboBox.ItemContainerStyle>
+                                                                                                    <Style TargetType="ComboBoxItem"><Setter Property="IsEnabled" Value="{Binding IsEnabled}" /></Style>
+                                                                                                </ComboBox.ItemContainerStyle>
+                                                                                            </ComboBox>
                                                                                         </StackPanel>
 
                                                                                         <StackPanel Orientation="Horizontal"
@@ -1828,6 +1870,7 @@
                                                         Click="AddSimulationPixelSort_Click" />
                                             <Button Content="Add Datamosh Layer" Click="AddSimulationDatamosh_Click" />
                                             <Button Content="Add Fluid Ink" Click="AddSimulationFluidInk_Click" />
+                                            <Button Content="Add Feedback Kaleidoscope" Click="AddSimulationFeedbackKaleidoscope_Click" />
                                             <Button Content="Add Time Displacement" Click="AddSimulationTimeDisplacement_Click" />
                                             <Button Content="Add Reaction–Diffusion" Click="AddSimulationReactionDiffusion_Click" />
 
@@ -2186,7 +2229,11 @@
                                                                                                   SelectedValue="{Binding Output}"
                                                                                                   Width="160"
                                                                                                   Margin="8,0,0,0"
-                                                                                                  SelectionChanged="SimulationReactiveMappingSelection_Changed" />
+                                                                                                  SelectionChanged="SimulationReactiveMappingSelection_Changed">
+                                                                                                <ComboBox.ItemContainerStyle>
+                                                                                                    <Style TargetType="ComboBoxItem"><Setter Property="IsEnabled" Value="{Binding IsEnabled}" /></Style>
+                                                                                                </ComboBox.ItemContainerStyle>
+                                                                                            </ComboBox>
                                                                                     </StackPanel>
 
                                                                                     <StackPanel Orientation="Horizontal"

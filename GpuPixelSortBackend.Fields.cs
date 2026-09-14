@@ -9,7 +9,7 @@ namespace lifeviz;
 internal sealed partial class GpuPixelSortBackend
 {
     public ImageSimulationEffect Effect { get; }
-    public bool IsFieldEffect => Effect is ImageSimulationEffect.FluidInk or ImageSimulationEffect.TimeDisplacement or ImageSimulationEffect.ReactionDiffusion;
+    public bool IsFieldEffect => Effect is ImageSimulationEffect.FluidInk or ImageSimulationEffect.TimeDisplacement or ImageSimulationEffect.ReactionDiffusion or ImageSimulationEffect.FeedbackKaleidoscope;
     private readonly SimulationEffectSettings _effects = new();
     private ID3D11ComputeShader? _advanceFieldShader, _captureHistoryShader;
     private ID3D11Buffer? _effectBuffer;
@@ -29,6 +29,8 @@ internal sealed partial class GpuPixelSortBackend
         public float Scale, Motion, Feed, Kill;
         public float Seed;
         public uint Effect, Pass, FieldReady;
+        public float KaleidoscopeFeedback, KaleidoscopeZoom, KaleidoscopeRotation, KaleidoscopeFolds;
+        public float KaleidoscopeCenterX, KaleidoscopeCenterY, Padding0, Padding1;
     }
 
     public void SetEffectSettings(SimulationEffectSettings settings)
@@ -47,7 +49,7 @@ internal sealed partial class GpuPixelSortBackend
 
     private void EnsureFieldTextures()
     {
-        if (!IsFieldEffect || _fieldA != null || _timeHistory != null) return;
+        if (!IsFieldEffect || Effect == ImageSimulationEffect.FeedbackKaleidoscope || _fieldA != null || _timeHistory != null) return;
         // Bound both solver work and history memory, including very wide scenes.
         double scale = Math.Min(1, Math.Min(360d / _rows, Math.Sqrt(262144d / ((double)_columns * _rows))));
         _fieldWidth = Math.Max(1, (int)(_columns * scale));
@@ -88,7 +90,10 @@ internal sealed partial class GpuPixelSortBackend
             Flow = (float)_effects.FluidFlow, Persistence = (float)_effects.FluidPersistence, Swirl = (float)_effects.FluidSwirl,
             Spread = (float)_effects.TimeSpread, Scale = (float)_effects.TimeScale, Motion = (float)_effects.TimeMotion,
             Feed = (float)_effects.ReactionFeed, Kill = (float)_effects.ReactionKill, Seed = (float)_effects.ReactionSeed,
-            Effect = (uint)Effect, Pass = pass, FieldReady = _fieldReady ? 1u : 0u
+            Effect = (uint)Effect, Pass = pass, FieldReady = _fieldReady ? 1u : 0u,
+            KaleidoscopeFeedback = (float)_effects.KaleidoscopeFeedback, KaleidoscopeZoom = (float)_effects.KaleidoscopeZoom,
+            KaleidoscopeRotation = (float)_effects.KaleidoscopeRotation, KaleidoscopeFolds = (float)_effects.KaleidoscopeFolds,
+            KaleidoscopeCenterX = (float)_effects.KaleidoscopeCenterX, KaleidoscopeCenterY = (float)_effects.KaleidoscopeCenterY
         };
         _context!.UpdateSubresource(in p, _effectBuffer!);
         _context.CSSetConstantBuffers(1, new[] { _effectBuffer! });
@@ -118,7 +123,7 @@ internal sealed partial class GpuPixelSortBackend
             for (int i = 0; i < 12; i++) AdvanceField(2); // Jacobi pressure solve
             AdvanceField(3); // project velocity
         }
-        else
+        else if (Effect == ImageSimulationEffect.ReactionDiffusion)
         {
             // Fixed, stable Euler substeps. Chemical state is float, never color-quantized.
             for (int i = 0; i < 8; i++) AdvanceField(4);

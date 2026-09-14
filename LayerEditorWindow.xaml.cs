@@ -1124,6 +1124,8 @@ public partial class LayerEditorWindow : Window
 
     private void AddSimulationLayerDirect_Click(object sender, RoutedEventArgs e) => AddSimulationLayer(LayerEditorSimulationLayerType.Life);
 
+    private void AddSimulationFeedbackKaleidoscope_Click(object sender, RoutedEventArgs e) => AddSimulationLayer(LayerEditorSimulationLayerType.FeedbackKaleidoscope);
+
     private void AddSimulationFluidInk_Click(object sender, RoutedEventArgs e) => AddSimulationLayer(LayerEditorSimulationLayerType.FluidInk);
     private void AddSimulationTimeDisplacement_Click(object sender, RoutedEventArgs e) => AddSimulationLayer(LayerEditorSimulationLayerType.TimeDisplacement);
     private void AddSimulationReactionDiffusion_Click(object sender, RoutedEventArgs e) => AddSimulationLayer(LayerEditorSimulationLayerType.ReactionDiffusion);
@@ -1192,6 +1194,13 @@ public partial class LayerEditorWindow : Window
             newLayer.LifeOpacity = 1;
             string output = layerType switch { LayerEditorSimulationLayerType.FluidInk => "FluidFlow", LayerEditorSimulationLayerType.TimeDisplacement => "TimeSpread", _ => "ReactionSeed" };
             newLayer.ReactiveMappings.Add(new() { Input = "Bass", Output = output, Amount = 0.3 });
+        }
+        if (layerType == LayerEditorSimulationLayerType.FeedbackKaleidoscope)
+        {
+            newLayer.BlendMode = "Normal";
+            newLayer.LifeOpacity = 1;
+            newLayer.ReactiveMappings.Add(new() { Input = "Bass", Output = "KaleidoscopeZoom", Amount = 0.025 });
+            newLayer.ReactiveMappings.Add(new() { Input = "Mid", Output = "KaleidoscopeRotation", Amount = 2 });
         }
         AttachReactiveMappingHandlers(newLayer);
 

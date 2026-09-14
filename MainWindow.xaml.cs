@@ -10882,6 +10882,15 @@ public partial class MainWindow : Window
                             -MaxRgbHueShiftSpeedDegreesPerSecond,
                             MaxRgbHueShiftSpeedDegreesPerSecond);
                         break;
+                    case SimulationReactiveOutput.KaleidoscopeFeedback:
+                        layer.EffectiveEffects.KaleidoscopeFeedback += inputValue * SimulationReactivity.ClampAmount(mapping.Output, mapping.Amount);
+                        break;
+                    case SimulationReactiveOutput.KaleidoscopeZoom:
+                        layer.EffectiveEffects.KaleidoscopeZoom += inputValue * SimulationReactivity.ClampAmount(mapping.Output, mapping.Amount);
+                        break;
+                    case SimulationReactiveOutput.KaleidoscopeRotation:
+                        layer.EffectiveEffects.KaleidoscopeRotation += inputValue * SimulationReactivity.ClampAmount(mapping.Output, mapping.Amount);
+                        break;
                     case SimulationReactiveOutput.FluidFlow:
                         layer.EffectiveEffects.FluidFlow += inputValue * Math.Clamp(mapping.Amount, 0, 1);
                         break;
@@ -12055,7 +12064,8 @@ public partial class MainWindow : Window
         Datamosh,
         FluidInk,
         TimeDisplacement,
-        ReactionDiffusion
+        ReactionDiffusion,
+        FeedbackKaleidoscope
     }
 
     private enum AudioReactiveSeedPattern

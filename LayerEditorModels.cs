@@ -35,19 +35,22 @@ internal enum LayerEditorSimulationLayerType
     Datamosh,
     FluidInk,
     TimeDisplacement,
-    ReactionDiffusion
+    ReactionDiffusion,
+    FeedbackKaleidoscope
 }
 
 internal sealed class LayerEditorOption
 {
-    public LayerEditorOption(string value, string label)
+    public LayerEditorOption(string value, string label, bool isEnabled = true)
     {
         Value = value;
         Label = label;
+        IsEnabled = isEnabled;
     }
 
     public string Value { get; }
     public string Label { get; }
+    public bool IsEnabled { get; }
 
     public override string ToString() => Label;
 }
@@ -233,7 +236,10 @@ internal static class LayerEditorOptions
         new LayerEditorOption(nameof(SimulationReactiveOutput.DatamoshDisplacement), "Datamosh Displacement"),
         new LayerEditorOption(nameof(SimulationReactiveOutput.FluidFlow), "Fluid Flow"),
         new LayerEditorOption(nameof(SimulationReactiveOutput.TimeSpread), "Time Spread"),
-        new LayerEditorOption(nameof(SimulationReactiveOutput.ReactionSeed), "Reaction Seeding")
+        new LayerEditorOption(nameof(SimulationReactiveOutput.ReactionSeed), "Reaction Seeding"),
+        new LayerEditorOption(nameof(SimulationReactiveOutput.KaleidoscopeFeedback), "Kaleidoscope Feedback"),
+        new LayerEditorOption(nameof(SimulationReactiveOutput.KaleidoscopeZoom), "Kaleidoscope Zoom"),
+        new LayerEditorOption(nameof(SimulationReactiveOutput.KaleidoscopeRotation), "Kaleidoscope Twist")
     };
 }
 
@@ -1095,8 +1101,12 @@ internal sealed class LayerEditorSimulationReactiveMapping : LayerEditorNotify
         get => _output;
         set
         {
+            // WPF briefly clears SelectedValue when ItemsSource changes; that is not
+            // an authored edit. Keep old unsupported mappings until explicitly replaced.
+            if (string.IsNullOrWhiteSpace(value)) return;
             if (SetField(ref _output, value))
             {
+                RefreshOutputOptions();
                 Amount = SimulationReactivity.ClampAmount(ParseOutput(value), Amount);
                 OnPropertyChanged(nameof(IsHueShiftOutput));
                 OnPropertyChanged(nameof(AmountMaximum));
@@ -1170,6 +1180,8 @@ internal sealed class LayerEditorSimulationReactiveMapping : LayerEditorNotify
     public bool IsHueSpeedOutput => ParseOutput(Output) == SimulationReactiveOutput.HueSpeed;
     public double AmountMaximum => ParseOutput(Output) switch
     {
+        SimulationReactiveOutput.KaleidoscopeZoom => 0.1,
+        SimulationReactiveOutput.KaleidoscopeRotation => 10.0,
         SimulationReactiveOutput.HueShift => 360.0,
         SimulationReactiveOutput.HueSpeed => 180.0,
         SimulationReactiveOutput.PixelSortCellWidth => 50.0,
@@ -1178,6 +1190,8 @@ internal sealed class LayerEditorSimulationReactiveMapping : LayerEditorNotify
     };
     public double AmountTickFrequency => ParseOutput(Output) switch
     {
+        SimulationReactiveOutput.KaleidoscopeZoom => 0.005,
+        SimulationReactiveOutput.KaleidoscopeRotation => 0.5,
         SimulationReactiveOutput.HueShift => 15.0,
         SimulationReactiveOutput.HueSpeed => 10.0,
         SimulationReactiveOutput.PixelSortCellWidth => 1.0,
@@ -1186,6 +1200,8 @@ internal sealed class LayerEditorSimulationReactiveMapping : LayerEditorNotify
     };
     public double AmountLargeChange => ParseOutput(Output) switch
     {
+        SimulationReactiveOutput.KaleidoscopeZoom => 0.01,
+        SimulationReactiveOutput.KaleidoscopeRotation => 1.0,
         SimulationReactiveOutput.HueShift => 15.0,
         SimulationReactiveOutput.HueSpeed => 10.0,
         SimulationReactiveOutput.PixelSortCellWidth => 5.0,
@@ -1194,6 +1210,8 @@ internal sealed class LayerEditorSimulationReactiveMapping : LayerEditorNotify
     };
     public double AmountSmallChange => ParseOutput(Output) switch
     {
+        SimulationReactiveOutput.KaleidoscopeZoom => 0.001,
+        SimulationReactiveOutput.KaleidoscopeRotation => 0.1,
         SimulationReactiveOutput.HueShift => 1.0,
         SimulationReactiveOutput.HueSpeed => 1.0,
         SimulationReactiveOutput.PixelSortCellWidth => 1.0,
@@ -1202,6 +1220,8 @@ internal sealed class LayerEditorSimulationReactiveMapping : LayerEditorNotify
     };
     public string AmountLabel => ParseOutput(Output) switch
     {
+        SimulationReactiveOutput.KaleidoscopeZoom => "Max +Zoom",
+        SimulationReactiveOutput.KaleidoscopeRotation => "Max +Deg/step",
         SimulationReactiveOutput.HueShift => "Degrees",
         SimulationReactiveOutput.HueSpeed => "Deg/sec",
         SimulationReactiveOutput.PixelSortCellWidth => "Max +Pixels",
@@ -1210,6 +1230,8 @@ internal sealed class LayerEditorSimulationReactiveMapping : LayerEditorNotify
     };
     public string AmountDisplay => ParseOutput(Output) switch
     {
+        SimulationReactiveOutput.KaleidoscopeZoom => $"+{Amount:0.000}×",
+        SimulationReactiveOutput.KaleidoscopeRotation => $"+{Amount:0.#}°/step",
         SimulationReactiveOutput.HueShift => $"{Amount:0.#}deg",
         SimulationReactiveOutput.HueSpeed => $"{Amount:0.#}deg/s",
         SimulationReactiveOutput.PixelSortCellWidth => $"+{Amount:0.#}px",
@@ -1221,7 +1243,31 @@ internal sealed class LayerEditorSimulationReactiveMapping : LayerEditorNotify
     public string DisplayText => $"{ResolveLabel(Input, LayerEditorOptions.SimulationReactiveInputs)} -> {ResolveLabel(Output, LayerEditorOptions.SimulationReactiveOutputs)} ({AmountDisplay}, In {ThresholdMinDisplay}-{ThresholdMaxDisplay})";
 
     public IReadOnlyList<LayerEditorOption> InputOptions => LayerEditorOptions.SimulationReactiveInputs;
-    public IReadOnlyList<LayerEditorOption> OutputOptions => LayerEditorOptions.SimulationReactiveOutputs;
+    private LayerEditorSimulationLayerType _simulationType = LayerEditorSimulationLayerType.Life;
+    private IReadOnlyList<LayerEditorOption>? _outputOptions;
+    public IReadOnlyList<LayerEditorOption> OutputOptions => _outputOptions ??= BuildOutputOptions();
+    internal void SetSimulationType(LayerEditorSimulationLayerType type)
+    {
+        if (_simulationType == type && _outputOptions != null) return;
+        _simulationType = type;
+        RefreshOutputOptions();
+    }
+    private IReadOnlyList<LayerEditorOption> BuildOutputOptions()
+    {
+        var supported = LayerEditorOptions.SimulationReactiveOutputs
+            .Where(o => SimulationMappingOptions.Supports(_simulationType, o.Value)).ToList();
+        if (!supported.Any(o => o.Value == Output))
+            supported.Add(new(Output, ResolveLabel(Output, LayerEditorOptions.SimulationReactiveOutputs) + " (not used by this sim)", false));
+        return supported;
+    }
+    private void RefreshOutputOptions()
+    {
+        var updated = BuildOutputOptions();
+        if (_outputOptions != null && _outputOptions.Select(o => (o.Value, o.IsEnabled, o.Label)).SequenceEqual(updated.Select(o => (o.Value, o.IsEnabled, o.Label)))) return;
+        _outputOptions = updated;
+        OnPropertyChanged(nameof(OutputOptions));
+        OnPropertyChanged(nameof(Output));
+    }
 
     private static SimulationReactiveOutput ParseOutput(string? value)
     {
@@ -1246,6 +1292,12 @@ internal sealed class LayerEditorSimulationReactiveMapping : LayerEditorNotify
 
 internal sealed class LayerEditorSimulationLayer : LayerEditorNotify
 {
+    public LayerEditorSimulationLayer() => _reactiveMappings.CollectionChanged += ReactiveMappingsChanged;
+    private void ReactiveMappingsChanged(object? sender, System.Collections.Specialized.NotifyCollectionChangedEventArgs e) => RefreshMappingOptions();
+    private void RefreshMappingOptions()
+    {
+        foreach (var mapping in _reactiveMappings) mapping.SetSimulationType(LayerType);
+    }
     private Guid _id;
     private LayerEditorSimulationItemKind _kind = LayerEditorSimulationItemKind.Layer;
     private LayerEditorSimulationLayerType _layerType = LayerEditorSimulationLayerType.Life;
@@ -1320,6 +1372,8 @@ internal sealed class LayerEditorSimulationLayer : LayerEditorNotify
                 OnPropertyChanged(nameof(IsFluidInkLayer));
                 OnPropertyChanged(nameof(IsTimeDisplacementLayer));
                 OnPropertyChanged(nameof(IsReactionDiffusionLayer));
+                OnPropertyChanged(nameof(IsFeedbackKaleidoscopeLayer));
+                RefreshMappingOptions();
                 OnPropertyChanged(nameof(KindLabel));
                 OnPropertyChanged(nameof(TreeLabel));
                 OnPropertyChanged(nameof(Details));
@@ -1564,7 +1618,10 @@ internal sealed class LayerEditorSimulationLayer : LayerEditorNotify
         {
             if (!ReferenceEquals(_reactiveMappings, value))
             {
+                _reactiveMappings.CollectionChanged -= ReactiveMappingsChanged;
                 _reactiveMappings = value ?? new ObservableCollection<LayerEditorSimulationReactiveMapping>();
+                _reactiveMappings.CollectionChanged += ReactiveMappingsChanged;
+                RefreshMappingOptions();
                 OnPropertyChanged();
                 OnPropertyChanged(nameof(Details));
             }
@@ -1611,6 +1668,7 @@ internal sealed class LayerEditorSimulationLayer : LayerEditorNotify
 
     public bool IsDatamoshLayer => !IsGroup && LayerType == LayerEditorSimulationLayerType.Datamosh;
 
+    public bool IsFeedbackKaleidoscopeLayer => !IsGroup && LayerType == LayerEditorSimulationLayerType.FeedbackKaleidoscope;
     public bool IsFluidInkLayer => !IsGroup && LayerType == LayerEditorSimulationLayerType.FluidInk;
     public bool IsTimeDisplacementLayer => !IsGroup && LayerType == LayerEditorSimulationLayerType.TimeDisplacement;
     public bool IsReactionDiffusionLayer => !IsGroup && LayerType == LayerEditorSimulationLayerType.ReactionDiffusion;
@@ -1624,7 +1682,7 @@ internal sealed class LayerEditorSimulationLayer : LayerEditorNotify
 
     public string Details => IsGroup
         ? $"{(Enabled ? "Enabled" : "Disabled")} | {Children.Count} item{(Children.Count == 1 ? string.Empty : "s")}"
-        : IsFluidInkLayer || IsTimeDisplacementLayer || IsReactionDiffusionLayer
+        : IsFluidInkLayer || IsTimeDisplacementLayer || IsReactionDiffusionLayer || IsFeedbackKaleidoscopeLayer
             ? $"{(Enabled ? "Enabled" : "Disabled")} | {TypeLabel} | {BlendMode} | Opacity {LifeOpacity:P0} | Reactive {ReactiveMappings.Count}"
         : IsDatamoshLayer
             ? $"{(Enabled ? "Enabled" : "Disabled")} | Datamosh | {BlendMode} | Feedback {DatamoshFeedback:P0} | Displacement {DatamoshDisplacement:P0} | Block {DatamoshBlockSize}px | Reactive {ReactiveMappings.Count}"

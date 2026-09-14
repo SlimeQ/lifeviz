@@ -1,5 +1,13 @@
 # Rendering Pipeline
 
+## Feedback Kaleidoscope
+
+`ImageSimulationEffect.FeedbackKaleidoscope` uses the shared full-color GPU backend. Each output pixel is converted to polar coordinates about the chosen center, then its angle is folded into a mirrored sector. The current source is bilinearly sampled there; previous simulation output is sampled with inverse zoom and twist and mixed by Feedback. Coordinates reflect at image boundaries, and all interpolation operates on premultiplied color and alpha. Geometry uses pixel coordinates to avoid aspect distortion. Zero feedback still folds the source but has no temporal dependence.
+
+The effect uses one full-resolution output compute pass and the existing image ping-pong textures. It skips auxiliary field/history allocation and solver passes. GPU publication, CPU readback for recording, group blending, and reset/resize follow the other image simulations. Zoom and twist advance per simulation step; fixed-clock bakes begin with cleared history and apply offline audio before stepping. The six authored controls are cloned across editor, autosave, project, and bake snapshots; reactive adjustments use the separate effective settings object. See [Feedback Kaleidoscope](Feedback-Kaleidoscope.md).
+
+Reactive output filtering lives in the editor model and is refreshed when a mapping joins a layer, a collection is replaced, or the sim type changes. A cached option list avoids per-frame filtering. Unsupported saved mappings remain visible as disabled compatibility entries until replaced, preserving their serialized values.
+
 ## Field and temporal simulations
 
 `GpuPixelSortBackend.Fields.cs` extends the shared full-color simulation backend with independent Fluid Ink, Time Displacement, and Reaction–Diffusion state. `ImageSimulationEffect` selects the shader mode; `SimulationEffectSettings` is cloned across runtime/editor/autosave/project/bake boundaries. Reactive mappings operate on a reusable effective settings object, leaving authored values unchanged. These effects publish standalone output through the same alpha-preserving GPU surfaces and BGRA-to-RGBA readback path as Datamosh and Pixel Sort. All children of a Sim Group consume the same input and blend their outputs in order.
