@@ -1124,6 +1124,11 @@ public partial class LayerEditorWindow : Window
 
     private void AddSimulationLayerDirect_Click(object sender, RoutedEventArgs e) => AddSimulationLayer(LayerEditorSimulationLayerType.Life);
 
+    private void AddSimulationParticleErosion_Click(object sender, RoutedEventArgs e) => AddSimulationLayer(LayerEditorSimulationLayerType.ParticleErosion);
+    private void AddSimulationRippleField_Click(object sender, RoutedEventArgs e) => AddSimulationLayer(LayerEditorSimulationLayerType.RippleField);
+    private void AddSimulationChromaticMemory_Click(object sender, RoutedEventArgs e) => AddSimulationLayer(LayerEditorSimulationLayerType.ChromaticMemory);
+    private void AddSimulationContourCurrent_Click(object sender, RoutedEventArgs e) => AddSimulationLayer(LayerEditorSimulationLayerType.ContourCurrent);
+
     private void AddSimulationFeedbackKaleidoscope_Click(object sender, RoutedEventArgs e) => AddSimulationLayer(LayerEditorSimulationLayerType.FeedbackKaleidoscope);
 
     private void AddSimulationFluidInk_Click(object sender, RoutedEventArgs e) => AddSimulationLayer(LayerEditorSimulationLayerType.FluidInk);
@@ -1201,6 +1206,35 @@ public partial class LayerEditorWindow : Window
             newLayer.LifeOpacity = 1;
             newLayer.ReactiveMappings.Add(new() { Input = "Bass", Output = "KaleidoscopeZoom", Amount = 0.025 });
             newLayer.ReactiveMappings.Add(new() { Input = "Mid", Output = "KaleidoscopeRotation", Amount = 2 });
+        }
+        if (layerType == LayerEditorSimulationLayerType.ParticleErosion)
+        {
+            newLayer.BlendMode = "Normal";
+            newLayer.LifeOpacity = 1;
+            newLayer.ReactiveMappings.Add(new() { Input = "Bass", Output = "ParticleEmission", Amount = 0.25 });
+            newLayer.ReactiveMappings.Add(new() { Input = "Mid", Output = "ParticleTurbulence", Amount = 0.25 });
+        }
+        if (layerType == LayerEditorSimulationLayerType.RippleField)
+        {
+            newLayer.BlendMode = "Normal";
+            newLayer.LifeOpacity = 1;
+            newLayer.ReactiveMappings.Add(new() { Input = "Bass", Output = "RippleImpulse", Amount = 0.25 });
+            newLayer.ReactiveMappings.Add(new() { Input = "Mid", Output = "RippleRefraction", Amount = 0.25 });
+        }
+        if (layerType == LayerEditorSimulationLayerType.ChromaticMemory)
+        {
+            newLayer.BlendMode = "Normal";
+            newLayer.LifeOpacity = 1;
+            newLayer.ReactiveMappings.Add(new() { Input = "Bass", Output = "ChromaticRed", Amount = 0.07 });
+            newLayer.ReactiveMappings.Add(new() { Input = "Mid", Output = "ChromaticGreen", Amount = 0.07 });
+            newLayer.ReactiveMappings.Add(new() { Input = "High", Output = "ChromaticBlue", Amount = 0.07 });
+        }
+        if (layerType == LayerEditorSimulationLayerType.ContourCurrent)
+        {
+            newLayer.BlendMode = "Normal";
+            newLayer.LifeOpacity = 1;
+            newLayer.ReactiveMappings.Add(new() { Input = "Bass", Output = "ContourFlow", Amount = 0.25 });
+            newLayer.ReactiveMappings.Add(new() { Input = "Mid", Output = "ContourThickness", Amount = 0.25 });
         }
         AttachReactiveMappingHandlers(newLayer);
 

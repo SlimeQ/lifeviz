@@ -1,5 +1,6 @@
-param([string]$ExecutablePath = 'bin/Release/net9.0-windows/lifeviz.exe', [switch]$KaleidoscopeOnly)
+param([string]$ExecutablePath = 'bin/Release/net9.0-windows/lifeviz.exe', [switch]$KaleidoscopeOnly, [switch]$ToysOnly)
 $ErrorActionPreference = 'Stop'
+if ($KaleidoscopeOnly -and $ToysOnly) { throw 'Choose either -KaleidoscopeOnly or -ToysOnly.' }
 $executable = (Resolve-Path -LiteralPath $ExecutablePath).Path
 $appDirectory = Split-Path -Parent $executable
 $ffmpeg = Join-Path $appDirectory 'ffmpeg\ffmpeg.exe'
@@ -9,13 +10,13 @@ New-Item -ItemType Directory -Path $testRoot | Out-Null
 $fixture = Join-Path $testRoot 'source.mp4'
 & $ffmpeg -hide_banner -loglevel error -f lavfi -i 'testsrc2=s=256x144:r=30:d=3' -f lavfi -i 'sine=frequency=110:sample_rate=48000:duration=3' -c:v libx264 -pix_fmt yuv420p -c:a aac -shortest $fixture
 if ($LASTEXITCODE -ne 0) { throw 'Could not create the video/audio fixture.' }
-$effects = if ($KaleidoscopeOnly) { @('FeedbackKaleidoscope') } else { @('FluidInk', 'TimeDisplacement', 'ReactionDiffusion', 'FeedbackKaleidoscope') }
+$effects = if ($ToysOnly) { @('ParticleErosion', 'RippleField', 'ChromaticMemory', 'ContourCurrent') } elseif ($KaleidoscopeOnly) { @('FeedbackKaleidoscope') } else { @('FluidInk', 'TimeDisplacement', 'ReactionDiffusion', 'FeedbackKaleidoscope', 'ParticleErosion', 'RippleField', 'ChromaticMemory', 'ContourCurrent') }
 foreach ($effect in $effects) {
     $referenceHashes = $null
     foreach ($run in 1..2) {
         $job = Join-Path $testRoot "$effect-$run"
         New-Item -ItemType Directory -Path $job | Out-Null
-        $target = switch ($effect) { FluidInk { 'FluidFlow' } TimeDisplacement { 'TimeSpread' } ReactionDiffusion { 'ReactionSeed' } FeedbackKaleidoscope { 'KaleidoscopeFeedback' } }
+        $target = switch ($effect) { FluidInk { 'FluidFlow' } TimeDisplacement { 'TimeSpread' } ReactionDiffusion { 'ReactionSeed' } FeedbackKaleidoscope { 'KaleidoscopeFeedback' } ParticleErosion { 'ParticleEmission' } RippleField { 'RippleImpulse' } ChromaticMemory { 'ChromaticRed' } ContourCurrent { 'ContourFlow' } }
         $scene = @{
             ConfigVersion = 1; Height = 144; Depth = 24; Framerate = 30; Fullscreen = $false
             AspectRatioLocked = $true; LockedAspectRatio = 16.0 / 9.0; RecordingQuality = 'Lossless'

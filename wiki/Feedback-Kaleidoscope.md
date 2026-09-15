@@ -16,6 +16,6 @@ New layers map **Low → Kaleidoscope Zoom** with a maximum additive amount of `
 
 For a calmer effect, remove the two default mappings and set Twist to zero. Increase Feedback for longer trails; lower it for a clearer source image. Zoom and Twist are per simulation step, so changing simulation Framerate changes their speed in seconds.
 
-Live Mode applies edits immediately; draft mode waits for **Apply**. Settings and mappings survive autosaves, cloning, and version 14 scene projects. **Randomize** clears retained imagery; disabling the layer holds its state. Resizing and background bakes start with fresh history.
+Live Mode applies edits immediately; draft mode waits for **Apply**. Settings and mappings survive autosaves, cloning, and version 15 scene projects. **Randomize** clears retained imagery; disabling the layer holds its state. Resizing and background bakes start with fresh history.
 
 The GPU folds in pixel coordinates so wide and tall scenes retain the same geometry. Bilinear sampling smooths transformed pixels, reflected edges avoid clamped edge smears, and premultiplied alpha preserves transparency. One full-resolution output pass reuses the existing image ping-pong textures; it allocates no extra field grid or temporal ring and creates no decoder or disk cache. See [Rendering Pipeline](Rendering-Pipeline.md) and [validation commands](Build-and-Install.md#validate-feedback-kaleidoscope-and-mapping-filters).

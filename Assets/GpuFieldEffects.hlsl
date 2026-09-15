@@ -13,6 +13,11 @@ cbuffer EffectParameters : register(b1)
     float Seed; uint Effect; uint SolverPass; uint FieldReady;
     float KaleidoscopeFeedback; float KaleidoscopeZoom; float KaleidoscopeRotation; float KaleidoscopeFolds;
     float KaleidoscopeCenterX; float KaleidoscopeCenterY; float EffectPadding0; float EffectPadding1;
+    float ParticleEmission; float ParticleGravity; float ParticleTurbulence; float ParticlePersistence;
+    float RippleImpulse; float RippleSpeed; float RippleDamping; float RippleRefraction;
+    float ChromaticRed; float ChromaticGreen; float ChromaticBlue; float ChromaticDrift;
+    float ContourFlow; float ContourThickness; float ContourPersistence; float ToyPadding;
+
 };
 Texture2D<uint4> Previous : register(t0);
 Texture2D<uint4> Scene : register(t1);
@@ -70,6 +75,23 @@ void AdvanceFieldCS(uint3 id : SV_DispatchThreadID)
         if(p.x==0 || p.x==int(FieldWidth)-1) v.x=0;
         if(p.y==0 || p.y==int(FieldHeight)-1) v.y=0;
         FieldOutput[p]=float4(clamp(v,-5.0,5.0),0,0);
+    }
+    else if(SolverPass==5 || SolverPass==6)
+    {
+        // Damped wave equation: x=height, y=velocity, z=last scene luminance.
+        // The coefficient never exceeds the stable 2-D four-neighbor limit.
+        float luminance=Luma(S(scenePoint));
+        float lap=l.x+r.x+u.x+d.x-4*c.x;
+        float impulse=0;
+        if(SolverPass==5)
+        {
+            impulse=(luminance-c.z)*RippleImpulse*1.8;
+            // Sparse deterministic drips keep a still image gently moving.
+            float drip=Hash(id.xy/3)>0.995 ? sin(float(FrameIndex)*0.13+Hash(id.xy/3)*40) : 0;
+            impulse+=drip*luminance*RippleImpulse*0.035;
+        }
+        float velocity=clamp((c.y+lap*(0.08+RippleSpeed*0.36)+impulse)*RippleDamping,-1,1);
+        FieldOutput[p]=float4(clamp(c.x+velocity,-3,3),velocity,luminance,0);
     }
     else
     {
@@ -133,6 +155,79 @@ float4 Kaleidoscope(float2 pixel)
     return lerp(current,SampleKaleidoscope(center+retainedRay,true),KaleidoscopeFeedback);
 }
 
+float2 SceneGradient(int2 p,int radius)
+{
+    return float2(Luma(S(p+int2(radius,0)))-Luma(S(p-int2(radius,0))),
+                  Luma(S(p+int2(0,radius)))-Luma(S(p-int2(0,radius))));
+}
+float2 CurlCurrent(float2 uv,float t)
+{
+    return float2(sin(uv.y*13+t)*cos(uv.x*9-t*0.7),-cos(uv.y*13+t)*sin(uv.x*9-t*0.7));
+}
+float4 TrailSample(float2 p,bool nearest)
+{
+    if(HasHistory==0 || any(p<0) || any(p>float2(Width-1,Height-1))) return 0;
+    return nearest ? P(int2(round(p))) : SamplePrevious(p);
+}
+float4 FadeTrail(float4 color,float persistence)
+{
+    // Spend at least one alpha byte each step so quantized trails can fully disappear.
+    float alpha=max(0,color.a*persistence-1.0/255);
+    return color*(alpha/max(color.a,1.0/255));
+}
+float4 Erosion(int2 p,float2 uv)
+{
+    float unit=max(float(Height)/144,1);
+    float2 velocity=CurlCurrent(uv,float(FrameIndex)*0.023)*ParticleTurbulence*3.5;
+    velocity.y+=ParticleGravity*3;
+    // Nearest sampling keeps grains discrete, with open boundaries for departing grains.
+    float4 grains=FadeTrail(TrailSample(float2(p)-velocity*unit,true),ParticlePersistence);
+    int cell=max(1,int(round(unit*2)));
+    uint2 tile=uint2(p)/uint(cell);
+    float4 color=S(int2(tile)*cell+(cell>>1));
+    float edge=saturate(length(SceneGradient(p,max(1,int(unit))))*3);
+    float available=saturate(edge+Luma(color)*0.18);
+    float scatter=Hash(tile+uint2(FrameIndex*17,FrameIndex*31));
+    float emission=scatter<ParticleEmission*available*0.25 ? 1 : 0;
+    float4 fresh=color*emission;
+    return fresh+grains*(1-fresh.a);
+}
+float4 Chromatic(int2 p,float4 fresh)
+{
+    if(HasHistory==0) return fresh;
+    float unit=max(float(Height)/144,1)*ChromaticDrift*2;
+    float4 red=TrailSample(float2(p)-float2(unit,0),false);
+    float4 green=TrailSample(float2(p)-float2(0,-unit*0.65),false);
+    float4 blue=TrailSample(float2(p)-float2(-unit,unit*0.4),false);
+    // Backend storage is BGRA. A separate coverage history is unnecessary:
+    // max per-channel coverage bounds each premultiplied color component.
+    float3 retention=float3(ChromaticBlue,ChromaticGreen,ChromaticRed);
+    float3 channels=lerp(fresh.rgb,float3(blue.x,green.y,red.z),retention);
+    float3 coverage=lerp(fresh.aaa,float3(blue.a,green.a,red.a),retention);
+    if(fresh.a==0)
+    {
+        float3 faded=max(0,coverage-1.0/255);
+        channels*=faded/max(coverage,1.0/255);
+        coverage=faded;
+    }
+    return float4(channels,max(coverage.x,max(coverage.y,coverage.z)));
+}
+float4 Contours(int2 p,float2 uv)
+{
+    float unit=max(float(Height)/144,1);
+    int radius=max(1,int(round((1+ContourThickness*4)*unit)));
+    float2 gradient=SceneGradient(p,radius);
+    float edge=smoothstep(0.025,0.3,length(gradient));
+    float4 color=S(p);
+    // Preserve source coverage, brighten edge pigment, and transport previous threads.
+    float4 thread=float4(min(color.rgb*1.4+color.a*0.15,color.aaa),color.a)*edge;
+    float2 curl=CurlCurrent(uv,float(FrameIndex)*0.018);
+    float2 tangent=float2(-gradient.y,gradient.x);
+    float2 velocity=(curl*2.5+tangent*2)*ContourFlow*unit;
+    float4 old=FadeTrail(TrailSample(float2(p)-velocity,false),ContourPersistence);
+    return thread+old*(1-thread.a);
+}
+
 [numthreads(8,8,1)]
 void EffectOutputCS(uint3 id : SV_DispatchThreadID)
 {
@@ -165,5 +260,15 @@ void EffectOutputCS(uint3 id : SV_DispatchThreadID)
         result=float4(lerp(pigment,float3(0.95,0.65,0.25)*fresh.a,edge*0.65),fresh.a);
     }
     else if(Effect==5) result=Kaleidoscope(float2(id.xy));
+    else if(Effect==6) result=Erosion(int2(id.xy),uv);
+    else if(Effect==7 && RippleRefraction>0)
+    {
+        float2 gradient=float2(SampleField(fp+float2(1,0)).x-SampleField(fp-float2(1,0)).x,
+                               SampleField(fp+float2(0,1)).x-SampleField(fp-float2(0,1)).x);
+        float2 offset=gradient*RippleRefraction*18*float2(Width,Height)/float2(FieldWidth,FieldHeight);
+        result=SampleKaleidoscope(float2(id.xy)+offset,false);
+    }
+    else if(Effect==8) result=Chromatic(int2(id.xy),fresh);
+    else if(Effect==9) result=Contours(int2(id.xy),uv);
     Output[id.xy]=(uint4)round(saturate(result)*255.0);
 }

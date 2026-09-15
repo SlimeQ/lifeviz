@@ -9,7 +9,8 @@ namespace lifeviz;
 internal sealed partial class GpuPixelSortBackend
 {
     public ImageSimulationEffect Effect { get; }
-    public bool IsFieldEffect => Effect is ImageSimulationEffect.FluidInk or ImageSimulationEffect.TimeDisplacement or ImageSimulationEffect.ReactionDiffusion or ImageSimulationEffect.FeedbackKaleidoscope;
+    public bool IsFieldEffect => Effect is ImageSimulationEffect.FluidInk or ImageSimulationEffect.TimeDisplacement or ImageSimulationEffect.ReactionDiffusion or ImageSimulationEffect.FeedbackKaleidoscope
+        or ImageSimulationEffect.ParticleErosion or ImageSimulationEffect.RippleField or ImageSimulationEffect.ChromaticMemory or ImageSimulationEffect.ContourCurrent;
     private readonly SimulationEffectSettings _effects = new();
     private ID3D11ComputeShader? _advanceFieldShader, _captureHistoryShader;
     private ID3D11Buffer? _effectBuffer;
@@ -19,6 +20,7 @@ internal sealed partial class GpuPixelSortBackend
     private bool _fieldAIsSource = true, _fieldReady;
     private int _fieldWidth, _fieldHeight, _historyHead, _historyCount;
     internal const int HistoryCapacity = 64;
+    internal long AuxiliaryFieldBytes => _fieldA != null ? (long)_fieldWidth * _fieldHeight * 32 : 0;
     internal long HistoryBytes => Effect == ImageSimulationEffect.TimeDisplacement ? (long)_fieldWidth * _fieldHeight * 4 * HistoryCapacity : 0;
 
     [StructLayout(LayoutKind.Sequential)]
@@ -31,6 +33,10 @@ internal sealed partial class GpuPixelSortBackend
         public uint Effect, Pass, FieldReady;
         public float KaleidoscopeFeedback, KaleidoscopeZoom, KaleidoscopeRotation, KaleidoscopeFolds;
         public float KaleidoscopeCenterX, KaleidoscopeCenterY, Padding0, Padding1;
+        public float ParticleEmission, ParticleGravity, ParticleTurbulence, ParticlePersistence;
+        public float RippleImpulse, RippleSpeed, RippleDamping, RippleRefraction;
+        public float ChromaticRed, ChromaticGreen, ChromaticBlue, ChromaticDrift;
+        public float ContourFlow, ContourThickness, ContourPersistence, ToyPadding;
     }
 
     public void SetEffectSettings(SimulationEffectSettings settings)
@@ -49,7 +55,7 @@ internal sealed partial class GpuPixelSortBackend
 
     private void EnsureFieldTextures()
     {
-        if (!IsFieldEffect || Effect == ImageSimulationEffect.FeedbackKaleidoscope || _fieldA != null || _timeHistory != null) return;
+        if (!IsFieldEffect || (Effect is ImageSimulationEffect.FeedbackKaleidoscope or ImageSimulationEffect.ParticleErosion or ImageSimulationEffect.ChromaticMemory or ImageSimulationEffect.ContourCurrent) || _fieldA != null || _timeHistory != null) return;
         // Bound both solver work and history memory, including very wide scenes.
         double scale = Math.Min(1, Math.Min(360d / _rows, Math.Sqrt(262144d / ((double)_columns * _rows))));
         _fieldWidth = Math.Max(1, (int)(_columns * scale));
@@ -93,7 +99,22 @@ internal sealed partial class GpuPixelSortBackend
             Effect = (uint)Effect, Pass = pass, FieldReady = _fieldReady ? 1u : 0u,
             KaleidoscopeFeedback = (float)_effects.KaleidoscopeFeedback, KaleidoscopeZoom = (float)_effects.KaleidoscopeZoom,
             KaleidoscopeRotation = (float)_effects.KaleidoscopeRotation, KaleidoscopeFolds = (float)_effects.KaleidoscopeFolds,
-            KaleidoscopeCenterX = (float)_effects.KaleidoscopeCenterX, KaleidoscopeCenterY = (float)_effects.KaleidoscopeCenterY
+            KaleidoscopeCenterX = (float)_effects.KaleidoscopeCenterX, KaleidoscopeCenterY = (float)_effects.KaleidoscopeCenterY,
+            ParticleEmission = (float)_effects.ParticleEmission,
+            ParticleGravity = (float)_effects.ParticleGravity,
+            ParticleTurbulence = (float)_effects.ParticleTurbulence,
+            ParticlePersistence = (float)_effects.ParticlePersistence,
+            RippleImpulse = (float)_effects.RippleImpulse,
+            RippleSpeed = (float)_effects.RippleSpeed,
+            RippleDamping = (float)_effects.RippleDamping,
+            RippleRefraction = (float)_effects.RippleRefraction,
+            ChromaticRed = (float)_effects.ChromaticRed,
+            ChromaticGreen = (float)_effects.ChromaticGreen,
+            ChromaticBlue = (float)_effects.ChromaticBlue,
+            ChromaticDrift = (float)_effects.ChromaticDrift,
+            ContourFlow = (float)_effects.ContourFlow,
+            ContourThickness = (float)_effects.ContourThickness,
+            ContourPersistence = (float)_effects.ContourPersistence
         };
         _context!.UpdateSubresource(in p, _effectBuffer!);
         _context.CSSetConstantBuffers(1, new[] { _effectBuffer! });
@@ -127,6 +148,11 @@ internal sealed partial class GpuPixelSortBackend
         {
             // Fixed, stable Euler substeps. Chemical state is float, never color-quantized.
             for (int i = 0; i < 8; i++) AdvanceField(4);
+        }
+        if (Effect == ImageSimulationEffect.RippleField)
+        {
+            AdvanceField(5); // Wave velocity/height, with one scene impulse per step.
+            AdvanceField(6); // Second stable wave substep.
         }
         UploadEffectParameters();
         _context.CSSetShaderResources(2, new[] { CurrentField!, _timeHistorySrv! });

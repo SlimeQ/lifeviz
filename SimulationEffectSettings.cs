@@ -4,7 +4,7 @@ using System.Runtime.CompilerServices;
 namespace lifeviz;
 
 // Numeric values are shared with GpuFieldEffects.hlsl.
-internal enum ImageSimulationEffect { PixelSort = 0, Datamosh = 1, FluidInk = 2, TimeDisplacement = 3, ReactionDiffusion = 4, FeedbackKaleidoscope = 5 }
+internal enum ImageSimulationEffect { PixelSort = 0, Datamosh = 1, FluidInk = 2, TimeDisplacement = 3, ReactionDiffusion = 4, FeedbackKaleidoscope = 5, ParticleErosion = 6, RippleField = 7, ChromaticMemory = 8, ContourCurrent = 9 }
 
 // Shared by editor, autosave, scene projects and bake snapshots. Each owner gets a clone.
 internal sealed class SimulationEffectSettings : INotifyPropertyChanged
@@ -29,6 +29,36 @@ internal sealed class SimulationEffectSettings : INotifyPropertyChanged
     public double ReactionFeed { get => _reactionFeed; set => Set(ref _reactionFeed, value, 0.01, 0.08); }
     public double ReactionKill { get => _reactionKill; set => Set(ref _reactionKill, value, 0.03, 0.075); }
     public double ReactionSeed { get => _reactionSeed; set => Set(ref _reactionSeed, value, 0, 1); }
+    private double _particleEmission = 0.45;
+    public double ParticleEmission { get => _particleEmission; set => Set(ref _particleEmission, value, 0, 1); }
+    private double _particleGravity = 0.45;
+    public double ParticleGravity { get => _particleGravity; set => Set(ref _particleGravity, value, -1, 1); }
+    private double _particleTurbulence = 0.55;
+    public double ParticleTurbulence { get => _particleTurbulence; set => Set(ref _particleTurbulence, value, 0, 1); }
+    private double _particlePersistence = 0.94;
+    public double ParticlePersistence { get => _particlePersistence; set => Set(ref _particlePersistence, value, 0, 0.99); }
+    private double _rippleImpulse = 0.55;
+    public double RippleImpulse { get => _rippleImpulse; set => Set(ref _rippleImpulse, value, 0, 1); }
+    private double _rippleSpeed = 0.45;
+    public double RippleSpeed { get => _rippleSpeed; set => Set(ref _rippleSpeed, value, 0, 1); }
+    private double _rippleDamping = 0.985;
+    public double RippleDamping { get => _rippleDamping; set => Set(ref _rippleDamping, value, 0.9, 0.999); }
+    private double _rippleRefraction = 0.65;
+    public double RippleRefraction { get => _rippleRefraction; set => Set(ref _rippleRefraction, value, 0, 1); }
+    private double _chromaticRed = 0.92;
+    public double ChromaticRed { get => _chromaticRed; set => Set(ref _chromaticRed, value, 0, 0.99); }
+    private double _chromaticGreen = 0.8;
+    public double ChromaticGreen { get => _chromaticGreen; set => Set(ref _chromaticGreen, value, 0, 0.99); }
+    private double _chromaticBlue = 0.65;
+    public double ChromaticBlue { get => _chromaticBlue; set => Set(ref _chromaticBlue, value, 0, 0.99); }
+    private double _chromaticDrift = 0.35;
+    public double ChromaticDrift { get => _chromaticDrift; set => Set(ref _chromaticDrift, value, 0, 1); }
+    private double _contourFlow = 0.5;
+    public double ContourFlow { get => _contourFlow; set => Set(ref _contourFlow, value, 0, 1); }
+    private double _contourThickness = 0.4;
+    public double ContourThickness { get => _contourThickness; set => Set(ref _contourThickness, value, 0, 1); }
+    private double _contourPersistence = 0.94;
+    public double ContourPersistence { get => _contourPersistence; set => Set(ref _contourPersistence, value, 0, 0.99); }
     public event PropertyChangedEventHandler? PropertyChanged;
     private void Set(ref double field, double value, double min, double max, [CallerMemberName] string? name = null)
     {
@@ -40,6 +70,21 @@ internal sealed class SimulationEffectSettings : INotifyPropertyChanged
     public SimulationEffectSettings Clone() { var result = new SimulationEffectSettings(); result.CopyFrom(this); return result; }
     public void CopyFrom(SimulationEffectSettings source)
     {
+        ParticleEmission = source.ParticleEmission;
+        ParticleGravity = source.ParticleGravity;
+        ParticleTurbulence = source.ParticleTurbulence;
+        ParticlePersistence = source.ParticlePersistence;
+        RippleImpulse = source.RippleImpulse;
+        RippleSpeed = source.RippleSpeed;
+        RippleDamping = source.RippleDamping;
+        RippleRefraction = source.RippleRefraction;
+        ChromaticRed = source.ChromaticRed;
+        ChromaticGreen = source.ChromaticGreen;
+        ChromaticBlue = source.ChromaticBlue;
+        ChromaticDrift = source.ChromaticDrift;
+        ContourFlow = source.ContourFlow;
+        ContourThickness = source.ContourThickness;
+        ContourPersistence = source.ContourPersistence;
         KaleidoscopeFeedback = source.KaleidoscopeFeedback; KaleidoscopeZoom = source.KaleidoscopeZoom;
         KaleidoscopeRotation = source.KaleidoscopeRotation; KaleidoscopeFolds = source.KaleidoscopeFolds;
         KaleidoscopeCenterX = source.KaleidoscopeCenterX; KaleidoscopeCenterY = source.KaleidoscopeCenterY;
@@ -49,6 +94,10 @@ internal sealed class SimulationEffectSettings : INotifyPropertyChanged
     }
     public static string DisplayName(string type) => type switch
     {
+        "ParticleErosion" => "Particle Erosion",
+        "RippleField" => "Ripple Field",
+        "ChromaticMemory" => "Chromatic Memory",
+        "ContourCurrent" => "Contour Current",
         "FeedbackKaleidoscope" => "Feedback Kaleidoscope",
         "FluidInk" => "Fluid Ink", "TimeDisplacement" => "Time Displacement",
         "ReactionDiffusion" => "Reaction–Diffusion", "Datamosh" => "Datamosh",

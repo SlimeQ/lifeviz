@@ -33,7 +33,16 @@ internal enum SimulationReactiveOutput
     ReactionSeed,
     KaleidoscopeFeedback,
     KaleidoscopeZoom,
-    KaleidoscopeRotation
+    KaleidoscopeRotation,
+    ParticleEmission,
+    ParticleTurbulence,
+    RippleImpulse,
+    RippleRefraction,
+    ChromaticRed,
+    ChromaticGreen,
+    ChromaticBlue,
+    ContourFlow,
+    ContourThickness
 }
 
 internal sealed class SimulationReactiveMapping

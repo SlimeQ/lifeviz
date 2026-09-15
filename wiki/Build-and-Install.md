@@ -1,5 +1,19 @@
 # Build & Install
 
+## Validate the four additional simulations
+
+```powershell
+dotnet build -c Release
+dotnet bin/Release/net9.0-windows/lifeviz.dll --smoke-test toy-effects
+dotnet bin/Release/net9.0-windows/lifeviz.dll --smoke-test toy-effects-editor
+dotnet bin/Release/net9.0-windows/lifeviz.dll --smoke-test mapping-options
+./tests/Test-FieldEffects.ps1 -ToysOnly
+```
+
+The GPU smoke checks all four effects and every control, all new reactive outputs, deterministic reset/replay, still-source evolution, transparent/partial-alpha input, complete trail fadeout, exact neutral behavior, independent RGB channel retention, GPU publication, recording channel order, resize reset, and the Ripple field memory budget. It writes representative PNGs under `toy-effects-smoke` beside the executable. The editor smoke exercises every actual slider in live and draft modes, cloning and project roundtrips, and captures editor PNGs. The mapping smoke covers all eleven sim types.
+
+`tests/Test-FieldEffects.ps1` now tests all eight newer effects by default. `-ToysOnly` selects Particle Erosion, Ripple Field, Chromatic Memory, and Contour Current; `-KaleidoscopeOnly` retains its existing behavior. The two selection switches cannot be combined. Pass `-ExecutablePath <lifeviz.exe>` to test a published payload. Each selected effect gets two 90-frame lossless background bakes; decoded frames must match across runs and show animation. Fixtures and logs remain in private `artifacts/field-effects-bake-*` folders. No new build or runtime dependency is required.
+
 ## Validate Feedback Kaleidoscope and mapping filters
 
 ```powershell
@@ -10,9 +24,9 @@ dotnet bin/Release/net9.0-windows/lifeviz.dll --smoke-test mapping-options
 ./tests/Test-FieldEffects.ps1 -KaleidoscopeOnly
 ```
 
-The GPU smoke verifies evolving feedback, deterministic replay, all six geometric controls, fold symmetry, zero-feedback independence, transparent input, GPU publication, recording channel order, audio propagation/reset, persistence, and dimension resets. Frames are written to `kaleidoscope-smoke` beside the executable. The editor smoke checks default mappings, real slider bindings, live/draft isolation and scene roundtrips. The mapping smoke checks the actual dropdowns for all seven simulation types, selection preservation, collection replacement, cloning and incompatible saved outputs. Editor and dropdown PNGs are saved beside the executable.
+The GPU smoke verifies evolving feedback, deterministic replay, all six geometric controls, fold symmetry, zero-feedback independence, transparent input, GPU publication, recording channel order, audio propagation/reset, persistence, and dimension resets. Frames are written to `kaleidoscope-smoke` beside the executable. The editor smoke checks default mappings, real slider bindings, live/draft isolation and scene roundtrips. The mapping smoke checks the actual dropdowns for all eleven simulation types, selection preservation, collection replacement, cloning and incompatible saved outputs. Editor and dropdown PNGs are saved beside the executable.
 
-`tests/Test-FieldEffects.ps1` includes Kaleidoscope with the three field effects by default; `-KaleidoscopeOnly` selects just this layer. Each selected effect gets two three-second background bakes, with all 90 decoded frames compared for identical output. Pass `-ExecutablePath <lifeviz.exe>` to test a published build. Fixtures and diagnostics stay under `artifacts/field-effects-bake-*`. No new runtime dependency or installation step is required.
+`tests/Test-FieldEffects.ps1` includes all eight newer effects by default; `-KaleidoscopeOnly` selects just this layer. Each selected effect gets two three-second background bakes, with all 90 decoded frames compared for identical output. Pass `-ExecutablePath <lifeviz.exe>` to test a published build. Fixtures and diagnostics stay under `artifacts/field-effects-bake-*`. No new runtime dependency or installation step is required.
 
 ## Validate field simulations
 
@@ -25,7 +39,7 @@ dotnet bin/Release/net9.0-windows/lifeviz.dll --smoke-test field-effects-editor
 
 The GPU smoke checks all three effects for evolving output, deterministic reset/replay, audio-to-control propagation and reset, autosave clones, transparent and partial-alpha input, GPU publication, recording channel order, dimension resets, and the 4K time-history budget. It saves representative frames under `bin/Release/net9.0-windows/field-effects-smoke`. The editor smoke checks add/default controls, live updates, project/draft roundtrips and settings isolation, and saves editor PNGs beside the executable. Existing `datamosh`, `gpu-pixel-sort`, `simulation-blending`, and `group-transparency` checks cover the shared infrastructure.
 
-`tests/Test-FieldEffects.ps1` generates a video/audio fixture and runs Fluid Ink, Time Displacement, Reaction–Diffusion, and Feedback Kaleidoscope through two three-second lossless background bakes. It checks completion, exactly 90 decoded frames, animation, and identical decoded frames across repeated bakes, including consistent audio from frame zero while video metadata initializes. Use `-ExecutablePath <lifeviz.exe>` to validate a published payload. Videos, previews, requests and logs remain in isolated `artifacts/field-effects-bake-*` folders; it does not load or change the user's scene. The regular build compiles and embeds all three new shader entry points; the installer requires no additional dependencies for these layers.
+`tests/Test-FieldEffects.ps1` generates a video/audio fixture and runs all eight newer effects through two three-second lossless background bakes. It checks completion, exactly 90 decoded frames, animation, and identical decoded frames across repeated bakes, including consistent audio from frame zero while video metadata initializes. Use `-ExecutablePath <lifeviz.exe>` to validate a published payload. Videos, previews, requests and logs remain in isolated `artifacts/field-effects-bake-*` folders; it does not load or change the user's scene. The regular build compiles and embeds all three new shader entry points; the installer requires no additional dependencies for these layers.
 
 ## Bundled projectM
 

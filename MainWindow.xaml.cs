@@ -10882,6 +10882,33 @@ public partial class MainWindow : Window
                             -MaxRgbHueShiftSpeedDegreesPerSecond,
                             MaxRgbHueShiftSpeedDegreesPerSecond);
                         break;
+                    case SimulationReactiveOutput.ParticleEmission:
+                        layer.EffectiveEffects.ParticleEmission += inputValue * SimulationReactivity.ClampAmount(mapping.Output, mapping.Amount);
+                        break;
+                    case SimulationReactiveOutput.ParticleTurbulence:
+                        layer.EffectiveEffects.ParticleTurbulence += inputValue * SimulationReactivity.ClampAmount(mapping.Output, mapping.Amount);
+                        break;
+                    case SimulationReactiveOutput.RippleImpulse:
+                        layer.EffectiveEffects.RippleImpulse += inputValue * SimulationReactivity.ClampAmount(mapping.Output, mapping.Amount);
+                        break;
+                    case SimulationReactiveOutput.RippleRefraction:
+                        layer.EffectiveEffects.RippleRefraction += inputValue * SimulationReactivity.ClampAmount(mapping.Output, mapping.Amount);
+                        break;
+                    case SimulationReactiveOutput.ChromaticRed:
+                        layer.EffectiveEffects.ChromaticRed += inputValue * SimulationReactivity.ClampAmount(mapping.Output, mapping.Amount);
+                        break;
+                    case SimulationReactiveOutput.ChromaticGreen:
+                        layer.EffectiveEffects.ChromaticGreen += inputValue * SimulationReactivity.ClampAmount(mapping.Output, mapping.Amount);
+                        break;
+                    case SimulationReactiveOutput.ChromaticBlue:
+                        layer.EffectiveEffects.ChromaticBlue += inputValue * SimulationReactivity.ClampAmount(mapping.Output, mapping.Amount);
+                        break;
+                    case SimulationReactiveOutput.ContourFlow:
+                        layer.EffectiveEffects.ContourFlow += inputValue * SimulationReactivity.ClampAmount(mapping.Output, mapping.Amount);
+                        break;
+                    case SimulationReactiveOutput.ContourThickness:
+                        layer.EffectiveEffects.ContourThickness += inputValue * SimulationReactivity.ClampAmount(mapping.Output, mapping.Amount);
+                        break;
                     case SimulationReactiveOutput.KaleidoscopeFeedback:
                         layer.EffectiveEffects.KaleidoscopeFeedback += inputValue * SimulationReactivity.ClampAmount(mapping.Output, mapping.Amount);
                         break;
@@ -12065,7 +12092,11 @@ public partial class MainWindow : Window
         FluidInk,
         TimeDisplacement,
         ReactionDiffusion,
-        FeedbackKaleidoscope
+        FeedbackKaleidoscope,
+        ParticleErosion,
+        RippleField,
+        ChromaticMemory,
+        ContourCurrent
     }
 
     private enum AudioReactiveSeedPattern

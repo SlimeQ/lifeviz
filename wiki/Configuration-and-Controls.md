@@ -1,8 +1,12 @@
 # Configuration & Controls
 
+## Four additional simulations
+
+In a Sim Group, choose **Add Particle Erosion**, **Add Ripple Field**, **Add Chromatic Memory**, or **Add Contour Current**. Particle Erosion exposes Emission, signed Gravity, Turbulence, and Persistence. Ripple Field exposes Impulse, Wave Speed, Persistence, and Refraction. Chromatic Memory exposes separate Red/Green/Blue Memory controls and Separation. Contour Current exposes Flow, Thickness, and Persistence. Each starts at Normal blend and full opacity with audio mappings. Set the group's Layer Blend to Normal for a direct view. Controls support live/draft editing and version 15 scene projects. [Ranges, defaults, and examples](More-Simulations.md).
+
 ## Feedback Kaleidoscope and filtered reactive mappings
 
-Choose **Add Feedback Kaleidoscope** in a Sim Group. Its controls are Feedback (0–98%), Zoom / step (0.900–1.100), Twist (−10–10°/step), Folds (2–16), and Center X/Y (0–100%). New layers use Normal blend and map Low audio to Zoom and Mid to Twist. Live/draft editing follows the usual Apply behavior; version 14 projects retain every control. See [Feedback Kaleidoscope](Feedback-Kaleidoscope.md) for defaults, examples, and reset behavior.
+Choose **Add Feedback Kaleidoscope** in a Sim Group. Its controls are Feedback (0–98%), Zoom / step (0.900–1.100), Twist (−10–10°/step), Folds (2–16), and Center X/Y (0–100%). New layers use Normal blend and map Low audio to Zoom and Mid to Twist. Live/draft editing follows the usual Apply behavior; version 15 projects retain every control. See [Feedback Kaleidoscope](Feedback-Kaleidoscope.md) for defaults, examples, and reset behavior.
 
 Each simulation's reactive **Output** dropdown automatically filters by that layer's type. All types retain Opacity, Framerate, Hue Shift, and Hue Speed, plus these specific outputs:
 
@@ -15,6 +19,10 @@ Each simulation's reactive **Output** dropdown automatically filters by that lay
 | Time Displacement | Time Spread |
 | Reaction–Diffusion | Reaction Seeding |
 | Feedback Kaleidoscope | Kaleidoscope Feedback, Kaleidoscope Zoom, Kaleidoscope Twist |
+| Particle Erosion | Particle Emission, Particle Turbulence |
+| Ripple Field | Ripple Impulse, Ripple Refraction |
+| Chromatic Memory | Red Memory, Green Memory, Blue Memory |
+| Contour Current | Contour Flow, Contour Thickness |
 
 All eight audio inputs remain available. An existing incompatible mapping stays selected with **(not used by this sim)** and keeps its amount and thresholds when saved. That entry cannot be selected as a new mapping; choosing a supported output removes the old entry. Filtering also follows imported scenes, draft clones, and replaced mapping lists.
 
@@ -22,7 +30,7 @@ All eight audio inputs remain available. An existing incompatible mapping stays 
 
 Select a Sim Group in the Scene Editor and choose **Add Fluid Ink**, **Add Time Displacement**, or **Add Reaction–Diffusion**. Fluid Ink exposes Flow, Persistence, and Swirl; Time Displacement exposes Time Spread, Pattern Scale, and Pattern Motion; Reaction–Diffusion exposes Feed, Kill, and Scene Seeding. Each uses shared simulation blend/opacity/hue controls and adds one Low audio mapping at 30% amount. New mapping outputs are **Fluid Flow**, **Time Spread**, and **Reaction Seeding**, each adding normalized input × amount to the base control and clamping at 100%. Choose Audio Source in the context menu; no audio leaves base settings active.
 
-Live Mode applies these controls immediately; draft mode waits for Apply. Set the group's Layer Blend to Normal to audition a processed image directly. Randomize resets history/fields; disable holds state. Scene projects use version 14. See [Field Simulations](Field-Simulations.md) for ranges, defaults, example setups, and history/performance limits.
+Live Mode applies these controls immediately; draft mode waits for Apply. Set the group's Layer Blend to Normal to audition a processed image directly. Randomize resets history/fields; disable holds state. Scene projects use version 15. See [Field Simulations](Field-Simulations.md) for ranges, defaults, example setups, and history/performance limits.
 
 ## MilkDrop / projectM
 

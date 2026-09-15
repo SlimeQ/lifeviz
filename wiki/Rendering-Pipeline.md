@@ -1,5 +1,13 @@
 # Rendering Pipeline
 
+## Grain, wave, channel-memory, and contour simulations
+
+Four more `ImageSimulationEffect` modes use the shared full-color GPU backend, settings snapshots, image ping-pong textures, standalone publication, and recording readback. Particle Erosion uses nearest-neighbor grain transport with open boundaries and deterministic sparse edge/brightness emission. Chromatic Memory interpolates independent BGRA channel histories with different offsets and retention; coverage is the maximum of channel coverages. Contour Current extracts adjustable-radius luminance edges and carries brightened source pigment through smooth curl and edge-tangent flow. These three require one full-resolution output pass and no extra fields or temporal rings. Trail decay removes at least one alpha byte per step to prevent permanent quantization residue.
+
+Ripple Field adds two stable substeps of a damped four-neighbor wave equation. Height, velocity, and previous scene luminance occupy two RGBA32F textures. Scene luminance changes inject one impulse per simulation step; sparse deterministic drips keep still input active. A height-gradient lookup refracts the full-resolution source. Field size is bounded at 360 rows and 262,144 pixels (8 MiB for the pair), independent of the full-resolution image textures. Refraction zero returns exact source pixels while maintaining wave evolution.
+
+Every new control is cloned into effective runtime settings before audio modulation. Scene projects use version 15. Reset/resize and bake initialization clear history; fixed-step rendering is deterministic for identical input/audio. All paths preserve premultiplied alpha. There are no new decoders, media caches, or runtime file writes. Details: [More Simulations](More-Simulations.md).
+
 ## Feedback Kaleidoscope
 
 `ImageSimulationEffect.FeedbackKaleidoscope` uses the shared full-color GPU backend. Each output pixel is converted to polar coordinates about the chosen center, then its angle is folded into a mirrored sector. The current source is bilinearly sampled there; previous simulation output is sampled with inverse zoom and twist and mixed by Feedback. Coordinates reflect at image boundaries, and all interpolation operates on premultiplied color and alpha. Geometry uses pixel coordinates to avoid aspect distortion. Zero feedback still folds the source but has no temporal dependence.

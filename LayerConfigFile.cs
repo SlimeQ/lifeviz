@@ -25,12 +25,12 @@ internal sealed class LayerConfigFile
             if (document.RootElement.TryGetProperty("BlendMode", out var blendMode))
                 file.ProjectSettings.CompositeBlendMode = blendMode.GetString() ?? "Additive";
         }
-        else if (!document.RootElement.TryGetProperty("Version", out _) || file.Version > 14)
+        else if (!document.RootElement.TryGetProperty("Version", out _) || file.Version > 15)
             throw new InvalidDataException("This is not a supported LifeViz scene project.");
         return file;
     }
 
-    public int Version { get; set; } = 14;
+    public int Version { get; set; } = 15;
     public DateTime SavedUtc { get; set; } = DateTime.UtcNow;
     public LayerConfigProjectSettings ProjectSettings { get; set; } = new();
     public List<LayerConfigSimulationLayer> SimulationLayers { get; set; } = new();

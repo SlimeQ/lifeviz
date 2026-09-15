@@ -36,7 +36,11 @@ internal enum LayerEditorSimulationLayerType
     FluidInk,
     TimeDisplacement,
     ReactionDiffusion,
-    FeedbackKaleidoscope
+    FeedbackKaleidoscope,
+    ParticleErosion,
+    RippleField,
+    ChromaticMemory,
+    ContourCurrent
 }
 
 internal sealed class LayerEditorOption
@@ -239,7 +243,16 @@ internal static class LayerEditorOptions
         new LayerEditorOption(nameof(SimulationReactiveOutput.ReactionSeed), "Reaction Seeding"),
         new LayerEditorOption(nameof(SimulationReactiveOutput.KaleidoscopeFeedback), "Kaleidoscope Feedback"),
         new LayerEditorOption(nameof(SimulationReactiveOutput.KaleidoscopeZoom), "Kaleidoscope Zoom"),
-        new LayerEditorOption(nameof(SimulationReactiveOutput.KaleidoscopeRotation), "Kaleidoscope Twist")
+        new LayerEditorOption(nameof(SimulationReactiveOutput.KaleidoscopeRotation), "Kaleidoscope Twist"),
+        new LayerEditorOption(nameof(SimulationReactiveOutput.ParticleEmission), "Particle Emission"),
+        new LayerEditorOption(nameof(SimulationReactiveOutput.ParticleTurbulence), "Particle Turbulence"),
+        new LayerEditorOption(nameof(SimulationReactiveOutput.RippleImpulse), "Ripple Impulse"),
+        new LayerEditorOption(nameof(SimulationReactiveOutput.RippleRefraction), "Ripple Refraction"),
+        new LayerEditorOption(nameof(SimulationReactiveOutput.ChromaticRed), "Red Memory"),
+        new LayerEditorOption(nameof(SimulationReactiveOutput.ChromaticGreen), "Green Memory"),
+        new LayerEditorOption(nameof(SimulationReactiveOutput.ChromaticBlue), "Blue Memory"),
+        new LayerEditorOption(nameof(SimulationReactiveOutput.ContourFlow), "Contour Flow"),
+        new LayerEditorOption(nameof(SimulationReactiveOutput.ContourThickness), "Contour Thickness")
     };
 }
 
@@ -908,7 +921,7 @@ internal sealed class LayerEditorSource : LayerEditorNotify
         Kind == LayerEditorSourceKind.VideoSequence ||
         Kind == LayerEditorSourceKind.AutoClip ||
         Kind == LayerEditorSourceKind.Youtube ||
-        (Kind == LayerEditorSourceKind.File && !string.IsNullOrWhiteSpace(FilePath) && 
+        (Kind == LayerEditorSourceKind.File && !string.IsNullOrWhiteSpace(FilePath) &&
             (FileCaptureService.IsVideoPath(FilePath) || FilePath.StartsWith("youtube:")));
     public bool VideoSeekAvailable => VideoPlaybackDurationSeconds > 0.001;
     public bool SupportsVideoTransport => IsVideo && !IsAutoClip;
@@ -1373,6 +1386,11 @@ internal sealed class LayerEditorSimulationLayer : LayerEditorNotify
                 OnPropertyChanged(nameof(IsTimeDisplacementLayer));
                 OnPropertyChanged(nameof(IsReactionDiffusionLayer));
                 OnPropertyChanged(nameof(IsFeedbackKaleidoscopeLayer));
+                OnPropertyChanged(nameof(IsParticleErosionLayer));
+                OnPropertyChanged(nameof(IsRippleFieldLayer));
+                OnPropertyChanged(nameof(IsChromaticMemoryLayer));
+                OnPropertyChanged(nameof(IsContourCurrentLayer));
+
                 RefreshMappingOptions();
                 OnPropertyChanged(nameof(KindLabel));
                 OnPropertyChanged(nameof(TreeLabel));
@@ -1668,6 +1686,10 @@ internal sealed class LayerEditorSimulationLayer : LayerEditorNotify
 
     public bool IsDatamoshLayer => !IsGroup && LayerType == LayerEditorSimulationLayerType.Datamosh;
 
+    public bool IsParticleErosionLayer => !IsGroup && LayerType == LayerEditorSimulationLayerType.ParticleErosion;
+    public bool IsRippleFieldLayer => !IsGroup && LayerType == LayerEditorSimulationLayerType.RippleField;
+    public bool IsChromaticMemoryLayer => !IsGroup && LayerType == LayerEditorSimulationLayerType.ChromaticMemory;
+    public bool IsContourCurrentLayer => !IsGroup && LayerType == LayerEditorSimulationLayerType.ContourCurrent;
     public bool IsFeedbackKaleidoscopeLayer => !IsGroup && LayerType == LayerEditorSimulationLayerType.FeedbackKaleidoscope;
     public bool IsFluidInkLayer => !IsGroup && LayerType == LayerEditorSimulationLayerType.FluidInk;
     public bool IsTimeDisplacementLayer => !IsGroup && LayerType == LayerEditorSimulationLayerType.TimeDisplacement;
@@ -1682,7 +1704,7 @@ internal sealed class LayerEditorSimulationLayer : LayerEditorNotify
 
     public string Details => IsGroup
         ? $"{(Enabled ? "Enabled" : "Disabled")} | {Children.Count} item{(Children.Count == 1 ? string.Empty : "s")}"
-        : IsFluidInkLayer || IsTimeDisplacementLayer || IsReactionDiffusionLayer || IsFeedbackKaleidoscopeLayer
+        : IsFluidInkLayer || IsTimeDisplacementLayer || IsReactionDiffusionLayer || IsFeedbackKaleidoscopeLayer || IsParticleErosionLayer || IsRippleFieldLayer || IsChromaticMemoryLayer || IsContourCurrentLayer
             ? $"{(Enabled ? "Enabled" : "Disabled")} | {TypeLabel} | {BlendMode} | Opacity {LifeOpacity:P0} | Reactive {ReactiveMappings.Count}"
         : IsDatamoshLayer
             ? $"{(Enabled ? "Enabled" : "Disabled")} | Datamosh | {BlendMode} | Feedback {DatamoshFeedback:P0} | Displacement {DatamoshDisplacement:P0} | Block {DatamoshBlockSize}px | Reactive {ReactiveMappings.Count}"

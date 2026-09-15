@@ -19,6 +19,10 @@ public partial class LayerEditorWindow
         static void Check(bool value, string message) { if (!value) throw new InvalidOperationException(message); }
         var expected = new Dictionary<LayerEditorSimulationLayerType, string[]>
         {
+            [LayerEditorSimulationLayerType.ParticleErosion] = new[] { "ParticleEmission", "ParticleTurbulence" },
+            [LayerEditorSimulationLayerType.RippleField] = new[] { "RippleImpulse", "RippleRefraction" },
+            [LayerEditorSimulationLayerType.ChromaticMemory] = new[] { "ChromaticRed", "ChromaticGreen", "ChromaticBlue" },
+            [LayerEditorSimulationLayerType.ContourCurrent] = new[] { "ContourFlow", "ContourThickness" },
             [LayerEditorSimulationLayerType.Life] = new[] { "InjectionNoise", "ThresholdMin", "ThresholdMax" },
             [LayerEditorSimulationLayerType.PixelSort] = new[] { "PixelSortCellWidth", "PixelSortCellHeight" },
             [LayerEditorSimulationLayerType.Datamosh] = new[] { "DatamoshFeedback", "DatamoshDisplacement" },
@@ -82,7 +86,7 @@ public partial class LayerEditorWindow
         var loaded = LayerConfigFile.Parse(JsonSerializer.Serialize(project)).ToEditorSources();
         var old = EnumerateSources(loaded).SelectMany(s => s.SimulationLayers).Single(s => s.Id == compatibility.Id).ReactiveMappings[0];
         Check(old.Output == "DatamoshFeedback" && old.Amount == 0.73 && old.OutputOptions.Any(o => o.Value == old.Output && !o.IsEnabled), "Project load discarded an incompatible mapping.");
-        Logger.Info("Reactive output filter smoke passed: all seven types, real dropdowns, selection changes, collection replacement, clones and incompatible saved mappings.");
+        Logger.Info("Reactive output filter smoke passed: all eleven types, real dropdowns, selection changes, collection replacement, clones and incompatible saved mappings.");
         return true;
     }
 }

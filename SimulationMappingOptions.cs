@@ -16,6 +16,10 @@ internal static class SimulationMappingOptions
             LayerEditorSimulationLayerType.TimeDisplacement => value == SimulationReactiveOutput.TimeSpread,
             LayerEditorSimulationLayerType.ReactionDiffusion => value == SimulationReactiveOutput.ReactionSeed,
             LayerEditorSimulationLayerType.FeedbackKaleidoscope => value is SimulationReactiveOutput.KaleidoscopeFeedback or SimulationReactiveOutput.KaleidoscopeZoom or SimulationReactiveOutput.KaleidoscopeRotation,
+            LayerEditorSimulationLayerType.ParticleErosion => value is SimulationReactiveOutput.ParticleEmission or SimulationReactiveOutput.ParticleTurbulence,
+            LayerEditorSimulationLayerType.RippleField => value is SimulationReactiveOutput.RippleImpulse or SimulationReactiveOutput.RippleRefraction,
+            LayerEditorSimulationLayerType.ChromaticMemory => value is SimulationReactiveOutput.ChromaticRed or SimulationReactiveOutput.ChromaticGreen or SimulationReactiveOutput.ChromaticBlue,
+            LayerEditorSimulationLayerType.ContourCurrent => value is SimulationReactiveOutput.ContourFlow or SimulationReactiveOutput.ContourThickness,
             _ => false
         };
     }
