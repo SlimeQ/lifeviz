@@ -60,7 +60,7 @@ public partial class LayerEditorWindow
             Check(JsonSerializer.Serialize(clone.Effects) == expected, "Clone lost controls.");
             clone.Effects.ParticleGravity = -1; Check(layer.Effects.ParticleGravity != -1, "Draft shares settings.");
             var project = LayerConfigFile.FromEditorSources(_viewModel.Sources, Array.Empty<LayerEditorSimulationLayer>(), _owner.GetProjectSettingsForEditor());
-            Check(project.Version == 15, "Scene version was not advanced.");
+            Check(project.Version == 16, "Scene version was not advanced.");
             var loaded = LayerConfigFile.Parse(JsonSerializer.Serialize(project)).ToEditorSources();
             var saved = EnumerateSources(loaded).Where(s => s.IsSimulationGroup).SelectMany(s => EnumerateSimulationLayers(s.SimulationLayers)).Single(s => s.Id == id);
             Check(saved.LayerType == kind && JsonSerializer.Serialize(saved.Effects) == expected && saved.ReactiveMappings.Count == count, "Scene roundtrip lost settings or mappings.");

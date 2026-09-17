@@ -1,5 +1,20 @@
 # Build & Install
 
+## Validate simulation audio response
+
+```powershell
+dotnet build -c Release
+dotnet bin/Release/net9.0-windows/lifeviz.dll --smoke-test audio-response
+dotnet bin/Release/net9.0-windows/lifeviz.dll --smoke-test audio-response-editor
+dotnet bin/Release/net9.0-windows/lifeviz.dll --smoke-test mapping-options
+dotnet bin/Release/net9.0-windows/lifeviz.dll --smoke-test audio-capture
+./tests/Test-FieldEffects.ps1
+```
+
+The analyzer checks equal-amplitude 100/900/4,500 Hz tones at five packet sizes, synthetic onset timing, silence, frame-rate independence, jitter reduction, and stale live input. The runtime smoke checks every supported output across all eleven sim types for signed travel, envelope propagation, presets and persistence. The editor smoke exercises actual strength/attack/release sliders, live/draft isolation, scene cloning and the preset button; it saves `smoke-audio-response-editor.png` beside the executable. The capture check requires a default Windows output device and opens it for 500 ms, logging callback sizes without saving PCM or playing a test tone.
+
+`tests/Test-FieldEffects.ps1` now generates a video with pulsed 110/880/3,500 Hz audio, then compares two lossless 90-frame bakes per selected effect. Default selection covers all eight newer effects; `-ToysOnly`, `-KaleidoscopeOnly`, and `-ExecutablePath <lifeviz.exe>` retain their behavior. Fixtures and logs stay under `artifacts/field-effects-bake-*`. Use its generated `source.mp4` with `--smoke-test live-video-audio <path>` and `--smoke-test offline-video-audio <path>` to check real decoding. The live check stalls analysis for 350 ms and verifies that returned audio remains bounded at 2,048 samples. These tests do not replace measuring the full hardware/display path with the user's scene.
+
 ## Validate the four additional simulations
 
 ```powershell

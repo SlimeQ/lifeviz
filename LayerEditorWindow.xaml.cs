@@ -533,7 +533,9 @@ public partial class LayerEditorWindow : Window
             Output = source.Output,
             Amount = source.Amount,
             ThresholdMin = source.ThresholdMin,
-            ThresholdMax = source.ThresholdMax
+            ThresholdMax = source.ThresholdMax,
+            AttackMs = source.AttackMs,
+            ReleaseMs = source.ReleaseMs
         };
     }
 
@@ -1185,56 +1187,10 @@ public partial class LayerEditorWindow : Window
             PixelSortCellWidth = selectedSimulationLayer?.PixelSortCellWidth ?? 12,
             PixelSortCellHeight = selectedSimulationLayer?.PixelSortCellHeight ?? 8
         };
-        if (layerType == LayerEditorSimulationLayerType.Datamosh)
+        if (layerType is not (LayerEditorSimulationLayerType.Life or LayerEditorSimulationLayerType.PixelSort))
         {
-            newLayer.BlendMode = "Normal";
-            newLayer.ReactiveMappings.Add(new LayerEditorSimulationReactiveMapping
-            { Id = Guid.NewGuid(), Input = "Bass", Output = "DatamoshFeedback", Amount = 0.8 });
-            newLayer.ReactiveMappings.Add(new LayerEditorSimulationReactiveMapping
-            { Id = Guid.NewGuid(), Input = "Mid", Output = "DatamoshDisplacement", Amount = 0.6 });
-        }
-        if (layerType is LayerEditorSimulationLayerType.FluidInk or LayerEditorSimulationLayerType.TimeDisplacement or LayerEditorSimulationLayerType.ReactionDiffusion)
-        {
-            newLayer.BlendMode = "Normal";
-            newLayer.LifeOpacity = 1;
-            string output = layerType switch { LayerEditorSimulationLayerType.FluidInk => "FluidFlow", LayerEditorSimulationLayerType.TimeDisplacement => "TimeSpread", _ => "ReactionSeed" };
-            newLayer.ReactiveMappings.Add(new() { Input = "Bass", Output = output, Amount = 0.3 });
-        }
-        if (layerType == LayerEditorSimulationLayerType.FeedbackKaleidoscope)
-        {
-            newLayer.BlendMode = "Normal";
-            newLayer.LifeOpacity = 1;
-            newLayer.ReactiveMappings.Add(new() { Input = "Bass", Output = "KaleidoscopeZoom", Amount = 0.025 });
-            newLayer.ReactiveMappings.Add(new() { Input = "Mid", Output = "KaleidoscopeRotation", Amount = 2 });
-        }
-        if (layerType == LayerEditorSimulationLayerType.ParticleErosion)
-        {
-            newLayer.BlendMode = "Normal";
-            newLayer.LifeOpacity = 1;
-            newLayer.ReactiveMappings.Add(new() { Input = "Bass", Output = "ParticleEmission", Amount = 0.25 });
-            newLayer.ReactiveMappings.Add(new() { Input = "Mid", Output = "ParticleTurbulence", Amount = 0.25 });
-        }
-        if (layerType == LayerEditorSimulationLayerType.RippleField)
-        {
-            newLayer.BlendMode = "Normal";
-            newLayer.LifeOpacity = 1;
-            newLayer.ReactiveMappings.Add(new() { Input = "Bass", Output = "RippleImpulse", Amount = 0.25 });
-            newLayer.ReactiveMappings.Add(new() { Input = "Mid", Output = "RippleRefraction", Amount = 0.25 });
-        }
-        if (layerType == LayerEditorSimulationLayerType.ChromaticMemory)
-        {
-            newLayer.BlendMode = "Normal";
-            newLayer.LifeOpacity = 1;
-            newLayer.ReactiveMappings.Add(new() { Input = "Bass", Output = "ChromaticRed", Amount = 0.07 });
-            newLayer.ReactiveMappings.Add(new() { Input = "Mid", Output = "ChromaticGreen", Amount = 0.07 });
-            newLayer.ReactiveMappings.Add(new() { Input = "High", Output = "ChromaticBlue", Amount = 0.07 });
-        }
-        if (layerType == LayerEditorSimulationLayerType.ContourCurrent)
-        {
-            newLayer.BlendMode = "Normal";
-            newLayer.LifeOpacity = 1;
-            newLayer.ReactiveMappings.Add(new() { Input = "Bass", Output = "ContourFlow", Amount = 0.25 });
-            newLayer.ReactiveMappings.Add(new() { Input = "Mid", Output = "ContourThickness", Amount = 0.25 });
+            newLayer.BlendMode = "Normal"; newLayer.LifeOpacity = 1;
+            newLayer.ReactiveMappings = SimulationReactivePresets.Create(newLayer);
         }
         AttachReactiveMappingHandlers(newLayer);
 
@@ -1549,6 +1505,15 @@ public partial class LayerEditorWindow : Window
         {
             ApplySimulationLayerSettingsLive();
         }
+    }
+
+    private void PunchySimulationMappings_Click(object sender, RoutedEventArgs e)
+    {
+        var layer = GetSelectedSimulationLayer();
+        if (layer == null) return;
+        layer.ReactiveMappings = SimulationReactivePresets.Create(layer);
+        AttachReactiveMappingHandlers(layer);
+        if (ShouldApplyLive()) ApplySimulationLayerSettingsLive();
     }
 
     private void AddSimulationReactiveMapping_Click(object sender, RoutedEventArgs e)

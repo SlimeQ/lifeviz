@@ -252,7 +252,22 @@ internal static class LayerEditorOptions
         new LayerEditorOption(nameof(SimulationReactiveOutput.ChromaticGreen), "Green Memory"),
         new LayerEditorOption(nameof(SimulationReactiveOutput.ChromaticBlue), "Blue Memory"),
         new LayerEditorOption(nameof(SimulationReactiveOutput.ContourFlow), "Contour Flow"),
-        new LayerEditorOption(nameof(SimulationReactiveOutput.ContourThickness), "Contour Thickness")
+        new LayerEditorOption(nameof(SimulationReactiveOutput.ContourThickness), "Contour Thickness"),
+        new LayerEditorOption(nameof(SimulationReactiveOutput.FluidPersistence), "Fluid Persistence"),
+        new LayerEditorOption(nameof(SimulationReactiveOutput.FluidSwirl), "Fluid Swirl"),
+        new LayerEditorOption(nameof(SimulationReactiveOutput.TimeScale), "Time Pattern Scale"),
+        new LayerEditorOption(nameof(SimulationReactiveOutput.TimeMotion), "Time Pattern Motion"),
+        new LayerEditorOption(nameof(SimulationReactiveOutput.ReactionFeed), "Reaction Feed"),
+        new LayerEditorOption(nameof(SimulationReactiveOutput.ReactionKill), "Reaction Kill"),
+        new LayerEditorOption(nameof(SimulationReactiveOutput.KaleidoscopeFolds), "Kaleidoscope Folds"),
+        new LayerEditorOption(nameof(SimulationReactiveOutput.KaleidoscopeCenterX), "Kaleidoscope Center X"),
+        new LayerEditorOption(nameof(SimulationReactiveOutput.KaleidoscopeCenterY), "Kaleidoscope Center Y"),
+        new LayerEditorOption(nameof(SimulationReactiveOutput.ParticleGravity), "Particle Gravity"),
+        new LayerEditorOption(nameof(SimulationReactiveOutput.ParticlePersistence), "Particle Persistence"),
+        new LayerEditorOption(nameof(SimulationReactiveOutput.RippleSpeed), "Ripple Wave Speed"),
+        new LayerEditorOption(nameof(SimulationReactiveOutput.RippleDamping), "Ripple Persistence"),
+        new LayerEditorOption(nameof(SimulationReactiveOutput.ChromaticDrift), "Chromatic Separation"),
+        new LayerEditorOption(nameof(SimulationReactiveOutput.ContourPersistence), "Contour Persistence")
     };
 }
 
@@ -1090,6 +1105,10 @@ internal sealed class LayerEditorSimulationReactiveMapping : LayerEditorNotify
     private double _amount = 1.0;
     private double _thresholdMin;
     private double _thresholdMax = 1.0;
+    private double _attackMs = 5, _releaseMs = 80;
+    public double AttackMs { get => _attackMs; set => SetField(ref _attackMs, SimulationReactivity.ClampAttack(value)); }
+    public double ReleaseMs { get => _releaseMs; set => SetField(ref _releaseMs, SimulationReactivity.ClampRelease(value)); }
+    public double AmountMinimum => -AmountMaximum;
 
     public Guid Id
     {
@@ -1123,6 +1142,7 @@ internal sealed class LayerEditorSimulationReactiveMapping : LayerEditorNotify
                 Amount = SimulationReactivity.ClampAmount(ParseOutput(value), Amount);
                 OnPropertyChanged(nameof(IsHueShiftOutput));
                 OnPropertyChanged(nameof(AmountMaximum));
+                OnPropertyChanged(nameof(AmountMinimum));
                 OnPropertyChanged(nameof(AmountTickFrequency));
                 OnPropertyChanged(nameof(AmountLargeChange));
                 OnPropertyChanged(nameof(AmountSmallChange));
@@ -1191,18 +1211,16 @@ internal sealed class LayerEditorSimulationReactiveMapping : LayerEditorNotify
 
     public bool IsHueShiftOutput => ParseOutput(Output) == SimulationReactiveOutput.HueShift;
     public bool IsHueSpeedOutput => ParseOutput(Output) == SimulationReactiveOutput.HueSpeed;
-    public double AmountMaximum => ParseOutput(Output) switch
-    {
-        SimulationReactiveOutput.KaleidoscopeZoom => 0.1,
-        SimulationReactiveOutput.KaleidoscopeRotation => 10.0,
-        SimulationReactiveOutput.HueShift => 360.0,
-        SimulationReactiveOutput.HueSpeed => 180.0,
-        SimulationReactiveOutput.PixelSortCellWidth => 50.0,
-        SimulationReactiveOutput.PixelSortCellHeight => 50.0,
-        _ => 1.0
-    };
+    public double AmountMaximum => SimulationReactivity.MaximumAmount(ParseOutput(Output));
     public double AmountTickFrequency => ParseOutput(Output) switch
     {
+        SimulationReactiveOutput.TimeScale => 0.115000,
+        SimulationReactiveOutput.ReactionFeed => 0.000700,
+        SimulationReactiveOutput.ReactionKill => 0.000450,
+        SimulationReactiveOutput.KaleidoscopeFolds => 0.140000,
+        SimulationReactiveOutput.ParticleGravity => 0.020000,
+        SimulationReactiveOutput.RippleDamping => 0.000990,
+
         SimulationReactiveOutput.KaleidoscopeZoom => 0.005,
         SimulationReactiveOutput.KaleidoscopeRotation => 0.5,
         SimulationReactiveOutput.HueShift => 15.0,
@@ -1213,6 +1231,13 @@ internal sealed class LayerEditorSimulationReactiveMapping : LayerEditorNotify
     };
     public double AmountLargeChange => ParseOutput(Output) switch
     {
+        SimulationReactiveOutput.TimeScale => 1.150000,
+        SimulationReactiveOutput.ReactionFeed => 0.007000,
+        SimulationReactiveOutput.ReactionKill => 0.004500,
+        SimulationReactiveOutput.KaleidoscopeFolds => 1.400000,
+        SimulationReactiveOutput.ParticleGravity => 0.200000,
+        SimulationReactiveOutput.RippleDamping => 0.009900,
+
         SimulationReactiveOutput.KaleidoscopeZoom => 0.01,
         SimulationReactiveOutput.KaleidoscopeRotation => 1.0,
         SimulationReactiveOutput.HueShift => 15.0,
@@ -1223,6 +1248,13 @@ internal sealed class LayerEditorSimulationReactiveMapping : LayerEditorNotify
     };
     public double AmountSmallChange => ParseOutput(Output) switch
     {
+        SimulationReactiveOutput.TimeScale => 0.115000,
+        SimulationReactiveOutput.ReactionFeed => 0.000700,
+        SimulationReactiveOutput.ReactionKill => 0.000450,
+        SimulationReactiveOutput.KaleidoscopeFolds => 0.140000,
+        SimulationReactiveOutput.ParticleGravity => 0.020000,
+        SimulationReactiveOutput.RippleDamping => 0.000990,
+
         SimulationReactiveOutput.KaleidoscopeZoom => 0.001,
         SimulationReactiveOutput.KaleidoscopeRotation => 0.1,
         SimulationReactiveOutput.HueShift => 1.0,
@@ -1233,22 +1265,29 @@ internal sealed class LayerEditorSimulationReactiveMapping : LayerEditorNotify
     };
     public string AmountLabel => ParseOutput(Output) switch
     {
-        SimulationReactiveOutput.KaleidoscopeZoom => "Max +Zoom",
-        SimulationReactiveOutput.KaleidoscopeRotation => "Max +Deg/step",
+        SimulationReactiveOutput.KaleidoscopeZoom => "Max ±Zoom",
+        SimulationReactiveOutput.KaleidoscopeRotation => "Max ±Deg/step",
         SimulationReactiveOutput.HueShift => "Degrees",
         SimulationReactiveOutput.HueSpeed => "Deg/sec",
-        SimulationReactiveOutput.PixelSortCellWidth => "Max +Pixels",
-        SimulationReactiveOutput.PixelSortCellHeight => "Max +Pixels",
+        SimulationReactiveOutput.PixelSortCellWidth => "Max ±Pixels",
+        SimulationReactiveOutput.PixelSortCellHeight => "Max ±Pixels",
         _ => "Strength"
     };
     public string AmountDisplay => ParseOutput(Output) switch
     {
-        SimulationReactiveOutput.KaleidoscopeZoom => $"+{Amount:0.000}×",
-        SimulationReactiveOutput.KaleidoscopeRotation => $"+{Amount:0.#}°/step",
+        SimulationReactiveOutput.TimeScale => $"{Amount:+0.000;-0.000;0}",
+        SimulationReactiveOutput.ReactionFeed => $"{Amount:+0.000;-0.000;0}",
+        SimulationReactiveOutput.ReactionKill => $"{Amount:+0.000;-0.000;0}",
+        SimulationReactiveOutput.KaleidoscopeFolds => $"{Amount:+0.000;-0.000;0}",
+        SimulationReactiveOutput.ParticleGravity => $"{Amount:+0.000;-0.000;0}",
+        SimulationReactiveOutput.RippleDamping => $"{Amount:+0.000;-0.000;0}",
+
+        SimulationReactiveOutput.KaleidoscopeZoom => $"{Amount:0.000}×",
+        SimulationReactiveOutput.KaleidoscopeRotation => $"{Amount:0.#}°/step",
         SimulationReactiveOutput.HueShift => $"{Amount:0.#}deg",
         SimulationReactiveOutput.HueSpeed => $"{Amount:0.#}deg/s",
-        SimulationReactiveOutput.PixelSortCellWidth => $"+{Amount:0.#}px",
-        SimulationReactiveOutput.PixelSortCellHeight => $"+{Amount:0.#}px",
+        SimulationReactiveOutput.PixelSortCellWidth => $"{Amount:0.#}px",
+        SimulationReactiveOutput.PixelSortCellHeight => $"{Amount:0.#}px",
         _ => $"{Amount:P0}"
     };
     public string ThresholdMinDisplay => $"{ThresholdMin:P0}";

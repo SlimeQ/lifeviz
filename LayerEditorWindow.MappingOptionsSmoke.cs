@@ -19,17 +19,17 @@ public partial class LayerEditorWindow
         static void Check(bool value, string message) { if (!value) throw new InvalidOperationException(message); }
         var expected = new Dictionary<LayerEditorSimulationLayerType, string[]>
         {
-            [LayerEditorSimulationLayerType.ParticleErosion] = new[] { "ParticleEmission", "ParticleTurbulence" },
-            [LayerEditorSimulationLayerType.RippleField] = new[] { "RippleImpulse", "RippleRefraction" },
-            [LayerEditorSimulationLayerType.ChromaticMemory] = new[] { "ChromaticRed", "ChromaticGreen", "ChromaticBlue" },
-            [LayerEditorSimulationLayerType.ContourCurrent] = new[] { "ContourFlow", "ContourThickness" },
+            [LayerEditorSimulationLayerType.ParticleErosion] = new[] { "ParticleEmission", "ParticleTurbulence", "ParticleGravity", "ParticlePersistence" },
+            [LayerEditorSimulationLayerType.RippleField] = new[] { "RippleImpulse", "RippleRefraction", "RippleSpeed", "RippleDamping" },
+            [LayerEditorSimulationLayerType.ChromaticMemory] = new[] { "ChromaticRed", "ChromaticGreen", "ChromaticBlue", "ChromaticDrift" },
+            [LayerEditorSimulationLayerType.ContourCurrent] = new[] { "ContourFlow", "ContourThickness", "ContourPersistence" },
             [LayerEditorSimulationLayerType.Life] = new[] { "InjectionNoise", "ThresholdMin", "ThresholdMax" },
             [LayerEditorSimulationLayerType.PixelSort] = new[] { "PixelSortCellWidth", "PixelSortCellHeight" },
             [LayerEditorSimulationLayerType.Datamosh] = new[] { "DatamoshFeedback", "DatamoshDisplacement" },
-            [LayerEditorSimulationLayerType.FluidInk] = new[] { "FluidFlow" },
-            [LayerEditorSimulationLayerType.TimeDisplacement] = new[] { "TimeSpread" },
-            [LayerEditorSimulationLayerType.ReactionDiffusion] = new[] { "ReactionSeed" },
-            [LayerEditorSimulationLayerType.FeedbackKaleidoscope] = new[] { "KaleidoscopeFeedback", "KaleidoscopeZoom", "KaleidoscopeRotation" }
+            [LayerEditorSimulationLayerType.FluidInk] = new[] { "FluidFlow", "FluidPersistence", "FluidSwirl" },
+            [LayerEditorSimulationLayerType.TimeDisplacement] = new[] { "TimeSpread", "TimeScale", "TimeMotion" },
+            [LayerEditorSimulationLayerType.ReactionDiffusion] = new[] { "ReactionSeed", "ReactionFeed", "ReactionKill" },
+            [LayerEditorSimulationLayerType.FeedbackKaleidoscope] = new[] { "KaleidoscopeFeedback", "KaleidoscopeZoom", "KaleidoscopeRotation", "KaleidoscopeFolds", "KaleidoscopeCenterX", "KaleidoscopeCenterY" }
         };
         string[] common = { "Opacity", "Framerate", "HueShift", "HueSpeed" };
         RefreshFromSources(); var source = EnsureSimulationSourceForSmoke()!; SetSelectedSource(source);
@@ -58,7 +58,7 @@ public partial class LayerEditorWindow
                 Check(combo.Items.Cast<LayerEditorOption>().Single(o => o.Value == "DatamoshFeedback").IsEnabled == false, "Old incompatible mapping was offered as a new choice.");
                 combo.SetCurrentValue(ComboBox.SelectedValueProperty, "FluidFlow");
                 Dispatcher.Invoke(() => { }, DispatcherPriority.Background);
-                Check(mapping.Output == "FluidFlow" && combo.Items.Count == 5, "Replacing an incompatible mapping left a stale option.");
+                Check(mapping.Output == "FluidFlow" && combo.Items.Count == 7, "Replacing an incompatible mapping left a stale option.");
             }
             if (type is LayerEditorSimulationLayerType.FluidInk or LayerEditorSimulationLayerType.FeedbackKaleidoscope)
             {

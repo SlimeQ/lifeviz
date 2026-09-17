@@ -25,12 +25,12 @@ internal sealed class LayerConfigFile
             if (document.RootElement.TryGetProperty("BlendMode", out var blendMode))
                 file.ProjectSettings.CompositeBlendMode = blendMode.GetString() ?? "Additive";
         }
-        else if (!document.RootElement.TryGetProperty("Version", out _) || file.Version > 15)
+        else if (!document.RootElement.TryGetProperty("Version", out _) || file.Version > 16)
             throw new InvalidDataException("This is not a supported LifeViz scene project.");
         return file;
     }
 
-    public int Version { get; set; } = 15;
+    public int Version { get; set; } = 16;
     public DateTime SavedUtc { get; set; } = DateTime.UtcNow;
     public LayerConfigProjectSettings ProjectSettings { get; set; } = new();
     public List<LayerConfigSimulationLayer> SimulationLayers { get; set; } = new();
@@ -282,7 +282,9 @@ internal sealed class LayerConfigFile
                     Output = string.IsNullOrWhiteSpace(mapping.Output) ? nameof(SimulationReactiveOutput.Opacity) : mapping.Output,
                     Amount = mapping.Amount,
                     ThresholdMin = mapping.ThresholdMin,
-                    ThresholdMax = mapping.ThresholdMax
+                    ThresholdMax = mapping.ThresholdMax,
+                    AttackMs = mapping.AttackMs,
+                    ReleaseMs = mapping.ReleaseMs
                 })
                 .ToList(),
             ThresholdMin = Math.Clamp(layer.ThresholdMin, 0, 1),
@@ -422,7 +424,9 @@ internal sealed class LayerConfigFile
                     ParseReactiveOutputOrDefault(mapping.Output, SimulationReactiveOutput.Opacity),
                     mapping.Amount),
                 ThresholdMin = Math.Clamp(mapping.ThresholdMin, 0, 1),
-                ThresholdMax = Math.Clamp(mapping.ThresholdMax, 0, 1)
+                ThresholdMax = Math.Clamp(mapping.ThresholdMax, 0, 1),
+                AttackMs = SimulationReactivity.ClampAttack(mapping.AttackMs),
+                ReleaseMs = SimulationReactivity.ClampRelease(mapping.ReleaseMs)
             })
             .ToList();
 
@@ -541,7 +545,9 @@ internal sealed class LayerConfigFile
                 Output = mapping.Output,
                 Amount = mapping.Amount,
                 ThresholdMin = mapping.ThresholdMin,
-                ThresholdMax = mapping.ThresholdMax
+                ThresholdMax = mapping.ThresholdMax,
+                AttackMs = mapping.AttackMs,
+                ReleaseMs = mapping.ReleaseMs
             }).ToList(),
             ThresholdMin = layer.ThresholdMin,
             ThresholdMax = layer.ThresholdMax,
@@ -794,6 +800,8 @@ internal sealed class LayerConfigReactiveMapping
     public double Amount { get; set; } = 1.0;
     public double ThresholdMin { get; set; }
     public double ThresholdMax { get; set; } = 1.0;
+    public double AttackMs { get; set; } = 5;
+    public double ReleaseMs { get; set; } = 80;
 }
 
 internal sealed class LayerConfigProjectSettings

@@ -1,5 +1,13 @@
 # Rendering Pipeline
 
+## Audio-driven simulation updates
+
+Audio analysis uses a persistent 1,024-sample Hann window at 120 analysis hops/second, summed band power corrected for window energy, and energy-weighted geometric frequency centroids. It no longer selects FFT length from capture packet size or averages wide-band magnitude into near-zero outputs. Loudness reads the newest 10 ms. Output capture requests event-driven 20 ms shared buffers and microphone capture requests the lowest endpoint quantum. Live silent-video analysis trims obsolete PCM to its newest 2,048 samples; offline decoding retains exact sample order.
+
+Each frame takes one shared input snapshot, applies each mapping's threshold window, then its independent time-based attack/release envelope. Signed strength modifies authored controls without accumulating into them. Compatible parameter edits keep envelope continuity; removed or changed inputs discard their state. Live stale-input detection releases held values; offline start clears all envelopes and advances them by the fixed frame delta. Settings persist; transient envelopes do not. Presets select useful direction/headroom and are explicitly available for existing layers through Punchy mappings.
+
+Fluid Flow additionally scales the current advected displacement. Ripple stores the previous Impulse in its auxiliary field's fourth channel and adds a localized wave on parameter changes. Reaction–Diffusion similarly remembers Seeding and injects a one-substep chemical pulse on changes. Existing fields are reused and remain within their memory budgets. See [Audio Response](Audio-Response.md) for timing limits and controls.
+
 ## Grain, wave, channel-memory, and contour simulations
 
 Four more `ImageSimulationEffect` modes use the shared full-color GPU backend, settings snapshots, image ping-pong textures, standalone publication, and recording readback. Particle Erosion uses nearest-neighbor grain transport with open boundaries and deterministic sparse edge/brightness emission. Chromatic Memory interpolates independent BGRA channel histories with different offsets and retention; coverage is the maximum of channel coverages. Contour Current extracts adjustable-radius luminance edges and carries brightened source pigment through smooth curl and edge-tangent flow. These three require one full-resolution output pass and no extra fields or temporal rings. Trail decay removes at least one alpha byte per step to prevent permanent quantization residue.

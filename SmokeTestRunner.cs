@@ -162,6 +162,9 @@ internal static partial class SmokeTestRunner
                 "gpu-bitwise" => RunGpuBitwiseSmokeTest(),
                 "gpu-pixel-sort" => RunGpuPixelSortSmokeTest(),
                 "datamosh" => RunDatamoshSmokeTest(),
+                "audio-capture" => AudioResponseSmoke.RunCapture(),
+                "audio-response" => RunDatamoshSmokeTest(audioResponse: true),
+                "audio-response-editor" => RunPixelSortEditorRoundTripSmokeTest(audioResponse: true),
                 "toy-effects" => RunDatamoshSmokeTest(toys: true),
                 "toy-effects-editor" => RunPixelSortEditorRoundTripSmokeTest(toys: true),
                 "kaleidoscope" => RunDatamoshSmokeTest(kaleidoscope: true),
@@ -384,10 +387,10 @@ internal static partial class SmokeTestRunner
         return 0;
     }
 
-    private static int RunDatamoshSmokeTest(bool fields = false, bool kaleidoscope = false, bool toys = false)
+    private static int RunDatamoshSmokeTest(bool fields = false, bool kaleidoscope = false, bool toys = false, bool audioResponse = false)
     {
         var window = new MainWindow();
-        try { return (toys ? window.RunToyEffectsSmoke() : kaleidoscope ? window.RunKaleidoscopeSmoke() : fields ? window.RunFieldEffectsSmoke() : window.RunDatamoshSmoke()) ? 0 : 1; }
+        try { return (audioResponse ? window.RunAudioResponseSmoke() : toys ? window.RunToyEffectsSmoke() : kaleidoscope ? window.RunKaleidoscopeSmoke() : fields ? window.RunFieldEffectsSmoke() : window.RunDatamoshSmoke()) ? 0 : 1; }
         finally { window.Close(); }
     }
 
@@ -1701,7 +1704,7 @@ internal static partial class SmokeTestRunner
         return exitCode;
     }
 
-    private static int RunPixelSortEditorRoundTripSmokeTest(bool datamosh = false, bool fields = false, bool kaleidoscope = false, bool mappingOptions = false, bool toys = false)
+    private static int RunPixelSortEditorRoundTripSmokeTest(bool datamosh = false, bool fields = false, bool kaleidoscope = false, bool mappingOptions = false, bool toys = false, bool audioResponse = false)
     {
         int exitCode = 0;
         var thread = new Thread(() =>
@@ -1714,7 +1717,7 @@ internal static partial class SmokeTestRunner
                 window.Show();
                 window.Hide();
                 var editor = new LayerEditorWindow(window);
-                bool ok = toys ? editor.RunToyEffectsEditorSmoke() : mappingOptions ? editor.RunMappingOptionsSmoke() : kaleidoscope ? editor.RunFieldEffectsEditorSmoke(kaleidoscope: true) : fields ? editor.RunFieldEffectsEditorSmoke() : datamosh ? editor.RunDatamoshEditorSmoke() : editor.RunPixelSortEditorRoundTripSmoke();
+                bool ok = audioResponse ? editor.RunAudioResponseEditorSmoke() : toys ? editor.RunToyEffectsEditorSmoke() : mappingOptions ? editor.RunMappingOptionsSmoke() : kaleidoscope ? editor.RunFieldEffectsEditorSmoke(kaleidoscope: true) : fields ? editor.RunFieldEffectsEditorSmoke() : datamosh ? editor.RunDatamoshEditorSmoke() : editor.RunPixelSortEditorRoundTripSmoke();
                 editor.Close();
                 window.Close();
                 app.Shutdown();
@@ -2446,14 +2449,17 @@ internal static partial class SmokeTestRunner
         double peakRms = 0;
         double peakLevel = 0;
         double peakBand = 0;
+        bool recentAudioBounded = true;
         try
         {
             for (int attempt = 0; attempt < 100; attempt++)
             {
+                if (attempt == 40) Thread.Sleep(350); // Analysis must skip obsolete PCM after a stalled render frame.
                 Thread.Sleep(40);
                 capture.CaptureFrame(smokeVideoPath, 160, 90, FitMode.Fill);
                 Array.Clear(samples);
                 int sampleCount = capture.MixLiveVideoAudioSamples(smokeVideoPath, samples);
+                recentAudioBounded &= sampleCount <= 2048;
                 if (sampleCount <= 0)
                 {
                     continue;
@@ -2484,7 +2490,7 @@ internal static partial class SmokeTestRunner
                                   resumeApplied && resumeClockHeldBeforePublication &&
                                   resumedFreshFrame.HasValue && resumedClockReleased &&
                                   postStallBurstBounded;
-        bool ok = setupWasNonblocking && mutedIgnored && resumeGenerationOk &&
+        bool ok = setupWasNonblocking && mutedIgnored && resumeGenerationOk && recentAudioBounded &&
                   receivedAudio && peakRms > 0.0001 && peakLevel > 0.01 && peakBand > 0.001;
         Logger.Info($"Live video-audio smoke: mutedIgnored={mutedIgnored}, received={receivedAudio}, peakRms={peakRms:F6}, " +
                     $"peakLevel={peakLevel:F3}, peakBand={peakBand:F3}, setupMs={setupStopwatch.Elapsed.TotalMilliseconds:F1}, " +
@@ -2493,7 +2499,7 @@ internal static partial class SmokeTestRunner
                     $"resumeApplied={resumeApplied}, resumeClockHeld={resumeClockHeldBeforePublication}, " +
                     $"freshResumeFrame={resumedFreshFrame.HasValue}, resumedClockReleased={resumedClockReleased}, " +
                     $"debtRebaseFrames={pacingStall.framesRead}, debtRebaseSpan={pacingStall.spanSeconds:F3}s, " +
-                    $"debtRebaseWarning={pacingStall.sawResetWarning}, postStallBurstBounded={postStallBurstBounded}, ok={ok}.");
+                    $"debtRebaseWarning={pacingStall.sawResetWarning}, postStallBurstBounded={postStallBurstBounded}, recentAudioBounded={recentAudioBounded}, ok={ok}.");
         return ok ? 0 : 1;
     }
 

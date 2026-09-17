@@ -8,7 +8,7 @@ $repository = Split-Path -Parent $PSScriptRoot
 $testRoot = Join-Path $repository ('artifacts\field-effects-bake-' + [Guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $testRoot | Out-Null
 $fixture = Join-Path $testRoot 'source.mp4'
-& $ffmpeg -hide_banner -loglevel error -f lavfi -i 'testsrc2=s=256x144:r=30:d=3' -f lavfi -i 'sine=frequency=110:sample_rate=48000:duration=3' -c:v libx264 -pix_fmt yuv420p -c:a aac -shortest $fixture
+& $ffmpeg -hide_banner -loglevel error -f lavfi -i 'testsrc2=s=256x144:r=30:d=3' -f lavfi -i 'aevalsrc=0.16*(sin(2*PI*110*t)+0.5*sin(2*PI*880*t)+0.3*sin(2*PI*3500*t))*(0.15+0.85*pow(max(0\,sin(2*PI*2*t))\,6)):s=48000:d=3' -c:v libx264 -pix_fmt yuv420p -c:a aac -shortest $fixture
 if ($LASTEXITCODE -ne 0) { throw 'Could not create the video/audio fixture.' }
 $effects = if ($ToysOnly) { @('ParticleErosion', 'RippleField', 'ChromaticMemory', 'ContourCurrent') } elseif ($KaleidoscopeOnly) { @('FeedbackKaleidoscope') } else { @('FluidInk', 'TimeDisplacement', 'ReactionDiffusion', 'FeedbackKaleidoscope', 'ParticleErosion', 'RippleField', 'ChromaticMemory', 'ContourCurrent') }
 foreach ($effect in $effects) {

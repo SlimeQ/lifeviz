@@ -3926,7 +3926,7 @@ public partial class MainWindow : Window
         }
         ApplyAudioReactiveFps();
         ApplyAudioReactiveLifeOpacity();
-        ApplySimulationLayerReactiveState();
+        ApplySimulationLayerReactiveState(dt);
         _audioReactiveLevelSeedBurstsLastStep = 0;
         _audioReactiveBeatSeedBurstsLastStep = 0;
         EndProfileStamp("audio_update_ms", audioUpdateStamp);
@@ -5257,6 +5257,7 @@ public partial class MainWindow : Window
             RefreshMinimizedMediaSuspension();
             _offlineVideoAudioActive = HasEnabledOfflineVideoAudio(_sources);
             _audioBeatDetector.BeginOfflineInput();
+            foreach (var layer in EnumerateSimulationLeafLayers(_simulationLayers)) layer.ReactiveEnvelopes.Clear();
             offlineAudioInputStarted = true;
             UpdateAudioAnalysisRequirements();
             Logger.Info(_offlineVideoAudioActive
@@ -8774,7 +8775,9 @@ public partial class MainWindow : Window
                     Output = mapping.Output,
                     Amount = mapping.Amount,
                     ThresholdMin = mapping.ThresholdMin,
-                    ThresholdMax = mapping.ThresholdMax
+                    ThresholdMax = mapping.ThresholdMax,
+                    AttackMs = mapping.AttackMs,
+                    ReleaseMs = mapping.ReleaseMs
                 })
                 .ToList(),
             ThresholdMin = layer.ThresholdMin,
@@ -10783,7 +10786,7 @@ public partial class MainWindow : Window
 
     private double GetReactiveInputValue(SimulationReactiveInput input)
     {
-        if (!HasSimulationReactiveAudioInput())
+        if (!HasSimulationReactiveAudioInput() || !_audioBeatDetector.HasFreshReactiveSamples)
         {
             return 0;
         }
@@ -10820,8 +10823,10 @@ public partial class MainWindow : Window
         return Math.Clamp((clampedValue - min) / (max - min), 0, 1);
     }
 
-    private void ApplySimulationLayerReactiveState()
+    private void ApplySimulationLayerReactiveState(double deltaSeconds = 0)
     {
+        Span<double> inputs = stackalloc double[8];
+        for (int i = 0; i < inputs.Length; i++) inputs[i] = GetReactiveInputValue((SimulationReactiveInput)i);
         foreach (var layer in EnumerateSimulationLeafLayers(_simulationLayers))
         {
             layer.EffectiveEffects.CopyFrom(layer.Effects);
@@ -10843,12 +10848,14 @@ public partial class MainWindow : Window
             if (!layer.Enabled)
             {
                 layer.TimeSinceLastStep = 0;
+                layer.ReactiveEnvelopes.Clear();
                 ApplySimulationLayerEngineSettings(layer);
                 continue;
             }
 
             if (!HasSimulationReactiveAudioInput())
             {
+                layer.ReactiveEnvelopes.Clear();
                 ApplySimulationLayerEngineSettings(layer);
                 continue;
             }
@@ -10856,31 +10863,81 @@ public partial class MainWindow : Window
             foreach (var mapping in layer.ReactiveMappings)
             {
                 double inputValue = NormalizeReactiveInputThreshold(
-                    GetReactiveInputValue(mapping.Input),
+                    (uint)mapping.Input < (uint)inputs.Length ? inputs[(int)mapping.Input] : 0,
                     mapping.ThresholdMin,
                     mapping.ThresholdMax);
+                if (!layer.ReactiveEnvelopes.TryGetValue(mapping.Id, out var envelope))
+                    layer.ReactiveEnvelopes[mapping.Id] = envelope = new ReactiveEnvelope();
+                inputValue = envelope.Process(inputValue, deltaSeconds, mapping.AttackMs, mapping.ReleaseMs);
                 switch (mapping.Output)
                 {
                     case SimulationReactiveOutput.Opacity:
                     {
-                        double multiplier = 1.0 + ((inputValue - 1.0) * Math.Clamp(mapping.Amount, 0, 1));
+                        double amount = SimulationReactivity.ClampAmount(mapping.Output, mapping.Amount);
+                        double multiplier = amount >= 0 ? 1 + (inputValue - 1) * amount : 1 + inputValue * amount;
                         layer.EffectiveLifeOpacity = Math.Clamp(layer.EffectiveLifeOpacity * multiplier, 0, 1);
                         break;
                     }
                     case SimulationReactiveOutput.Framerate:
                     {
-                        double multiplier = 1.0 + ((inputValue - 1.0) * Math.Clamp(mapping.Amount, 0, 1));
+                        double amount = SimulationReactivity.ClampAmount(mapping.Output, mapping.Amount);
+                        double multiplier = amount >= 0 ? 1 + (inputValue - 1) * amount : 1 + inputValue * amount;
                         layer.EffectiveSimulationTargetFps = Math.Max(0, layer.EffectiveSimulationTargetFps * multiplier);
                         break;
                     }
                     case SimulationReactiveOutput.HueShift:
-                        layer.ReactiveHueShiftDegrees += inputValue * Math.Clamp(mapping.Amount, 0, 360);
+                        layer.ReactiveHueShiftDegrees += inputValue * SimulationReactivity.ClampAmount(mapping.Output, mapping.Amount);
                         break;
                     case SimulationReactiveOutput.HueSpeed:
                         layer.EffectiveRgbHueShiftSpeedDegreesPerSecond = Math.Clamp(
-                            layer.EffectiveRgbHueShiftSpeedDegreesPerSecond + (inputValue * Math.Clamp(mapping.Amount, 0, 180)),
+                            layer.EffectiveRgbHueShiftSpeedDegreesPerSecond + (inputValue * SimulationReactivity.ClampAmount(mapping.Output, mapping.Amount)),
                             -MaxRgbHueShiftSpeedDegreesPerSecond,
                             MaxRgbHueShiftSpeedDegreesPerSecond);
+                        break;
+                    case SimulationReactiveOutput.FluidPersistence:
+                        layer.EffectiveEffects.FluidPersistence += inputValue * SimulationReactivity.ClampAmount(mapping.Output, mapping.Amount);
+                        break;
+                    case SimulationReactiveOutput.FluidSwirl:
+                        layer.EffectiveEffects.FluidSwirl += inputValue * SimulationReactivity.ClampAmount(mapping.Output, mapping.Amount);
+                        break;
+                    case SimulationReactiveOutput.TimeScale:
+                        layer.EffectiveEffects.TimeScale += inputValue * SimulationReactivity.ClampAmount(mapping.Output, mapping.Amount);
+                        break;
+                    case SimulationReactiveOutput.TimeMotion:
+                        layer.EffectiveEffects.TimeMotion += inputValue * SimulationReactivity.ClampAmount(mapping.Output, mapping.Amount);
+                        break;
+                    case SimulationReactiveOutput.ReactionFeed:
+                        layer.EffectiveEffects.ReactionFeed += inputValue * SimulationReactivity.ClampAmount(mapping.Output, mapping.Amount);
+                        break;
+                    case SimulationReactiveOutput.ReactionKill:
+                        layer.EffectiveEffects.ReactionKill += inputValue * SimulationReactivity.ClampAmount(mapping.Output, mapping.Amount);
+                        break;
+                    case SimulationReactiveOutput.KaleidoscopeFolds:
+                        layer.EffectiveEffects.KaleidoscopeFolds += inputValue * SimulationReactivity.ClampAmount(mapping.Output, mapping.Amount);
+                        break;
+                    case SimulationReactiveOutput.KaleidoscopeCenterX:
+                        layer.EffectiveEffects.KaleidoscopeCenterX += inputValue * SimulationReactivity.ClampAmount(mapping.Output, mapping.Amount);
+                        break;
+                    case SimulationReactiveOutput.KaleidoscopeCenterY:
+                        layer.EffectiveEffects.KaleidoscopeCenterY += inputValue * SimulationReactivity.ClampAmount(mapping.Output, mapping.Amount);
+                        break;
+                    case SimulationReactiveOutput.ParticleGravity:
+                        layer.EffectiveEffects.ParticleGravity += inputValue * SimulationReactivity.ClampAmount(mapping.Output, mapping.Amount);
+                        break;
+                    case SimulationReactiveOutput.ParticlePersistence:
+                        layer.EffectiveEffects.ParticlePersistence += inputValue * SimulationReactivity.ClampAmount(mapping.Output, mapping.Amount);
+                        break;
+                    case SimulationReactiveOutput.RippleSpeed:
+                        layer.EffectiveEffects.RippleSpeed += inputValue * SimulationReactivity.ClampAmount(mapping.Output, mapping.Amount);
+                        break;
+                    case SimulationReactiveOutput.RippleDamping:
+                        layer.EffectiveEffects.RippleDamping += inputValue * SimulationReactivity.ClampAmount(mapping.Output, mapping.Amount);
+                        break;
+                    case SimulationReactiveOutput.ChromaticDrift:
+                        layer.EffectiveEffects.ChromaticDrift += inputValue * SimulationReactivity.ClampAmount(mapping.Output, mapping.Amount);
+                        break;
+                    case SimulationReactiveOutput.ContourPersistence:
+                        layer.EffectiveEffects.ContourPersistence += inputValue * SimulationReactivity.ClampAmount(mapping.Output, mapping.Amount);
                         break;
                     case SimulationReactiveOutput.ParticleEmission:
                         layer.EffectiveEffects.ParticleEmission += inputValue * SimulationReactivity.ClampAmount(mapping.Output, mapping.Amount);
@@ -10919,34 +10976,34 @@ public partial class MainWindow : Window
                         layer.EffectiveEffects.KaleidoscopeRotation += inputValue * SimulationReactivity.ClampAmount(mapping.Output, mapping.Amount);
                         break;
                     case SimulationReactiveOutput.FluidFlow:
-                        layer.EffectiveEffects.FluidFlow += inputValue * Math.Clamp(mapping.Amount, 0, 1);
+                        layer.EffectiveEffects.FluidFlow += inputValue * SimulationReactivity.ClampAmount(mapping.Output, mapping.Amount);
                         break;
                     case SimulationReactiveOutput.TimeSpread:
-                        layer.EffectiveEffects.TimeSpread += inputValue * Math.Clamp(mapping.Amount, 0, 1);
+                        layer.EffectiveEffects.TimeSpread += inputValue * SimulationReactivity.ClampAmount(mapping.Output, mapping.Amount);
                         break;
                     case SimulationReactiveOutput.ReactionSeed:
-                        layer.EffectiveEffects.ReactionSeed += inputValue * Math.Clamp(mapping.Amount, 0, 1);
+                        layer.EffectiveEffects.ReactionSeed += inputValue * SimulationReactivity.ClampAmount(mapping.Output, mapping.Amount);
                         break;
                     case SimulationReactiveOutput.DatamoshFeedback:
-                        layer.EffectiveDatamoshFeedback = Math.Clamp(layer.EffectiveDatamoshFeedback + inputValue * Math.Clamp(mapping.Amount, 0, 1), 0, 0.98);
+                        layer.EffectiveDatamoshFeedback = Math.Clamp(layer.EffectiveDatamoshFeedback + inputValue * SimulationReactivity.ClampAmount(mapping.Output, mapping.Amount), 0, 0.98);
                         break;
                     case SimulationReactiveOutput.DatamoshDisplacement:
-                        layer.EffectiveDatamoshDisplacement = Math.Clamp(layer.EffectiveDatamoshDisplacement + inputValue * Math.Clamp(mapping.Amount, 0, 1), 0, 1);
+                        layer.EffectiveDatamoshDisplacement = Math.Clamp(layer.EffectiveDatamoshDisplacement + inputValue * SimulationReactivity.ClampAmount(mapping.Output, mapping.Amount), 0, 1);
                         break;
                     case SimulationReactiveOutput.InjectionNoise:
-                        layer.EffectiveInjectionNoise = Math.Clamp(layer.EffectiveInjectionNoise + (inputValue * Math.Clamp(mapping.Amount, 0, 1)), 0, 1);
+                        layer.EffectiveInjectionNoise = Math.Clamp(layer.EffectiveInjectionNoise + (inputValue * SimulationReactivity.ClampAmount(mapping.Output, mapping.Amount)), 0, 1);
                         break;
                     case SimulationReactiveOutput.ThresholdMin:
-                        layer.EffectiveThresholdMin = Math.Clamp(layer.EffectiveThresholdMin + (inputValue * Math.Clamp(mapping.Amount, 0, 1)), 0, 1);
+                        layer.EffectiveThresholdMin = Math.Clamp(layer.EffectiveThresholdMin + (inputValue * SimulationReactivity.ClampAmount(mapping.Output, mapping.Amount)), 0, 1);
                         break;
                     case SimulationReactiveOutput.ThresholdMax:
-                        layer.EffectiveThresholdMax = Math.Clamp(layer.EffectiveThresholdMax - (inputValue * Math.Clamp(mapping.Amount, 0, 1)), 0, 1);
+                        layer.EffectiveThresholdMax = Math.Clamp(layer.EffectiveThresholdMax - (inputValue * SimulationReactivity.ClampAmount(mapping.Output, mapping.Amount)), 0, 1);
                         break;
                     case SimulationReactiveOutput.PixelSortCellWidth:
                     {
                         int maxWidth = Math.Max(1, layer.Engine?.Columns ?? _configuredRows);
                         layer.EffectivePixelSortCellWidth = Math.Clamp(
-                            layer.EffectivePixelSortCellWidth + (int)Math.Round(inputValue * Math.Clamp(mapping.Amount, 0, 50)),
+                            layer.EffectivePixelSortCellWidth + (int)Math.Round(inputValue * SimulationReactivity.ClampAmount(mapping.Output, mapping.Amount)),
                             1,
                             maxWidth);
                         break;
@@ -10955,7 +11012,7 @@ public partial class MainWindow : Window
                     {
                         int maxHeight = Math.Max(1, layer.Engine?.Rows ?? _configuredRows);
                         layer.EffectivePixelSortCellHeight = Math.Clamp(
-                            layer.EffectivePixelSortCellHeight + (int)Math.Round(inputValue * Math.Clamp(mapping.Amount, 0, 50)),
+                            layer.EffectivePixelSortCellHeight + (int)Math.Round(inputValue * SimulationReactivity.ClampAmount(mapping.Output, mapping.Amount)),
                             1,
                             maxHeight);
                         break;
@@ -12145,6 +12202,7 @@ public partial class MainWindow : Window
         public SimulationEffectSettings EffectiveEffects { get; } = new();
         public double EffectiveDatamoshFeedback { get; set; } = 0.15;
         public double EffectiveDatamoshDisplacement { get; set; }
+        public readonly Dictionary<Guid, ReactiveEnvelope> ReactiveEnvelopes = new();
         public double TimeSinceLastStep { get; set; }
         public SimulationLayerState? Parent { get; set; }
         public List<SimulationLayerState> Children { get; } = new();
@@ -12407,7 +12465,9 @@ public partial class MainWindow : Window
                     Output = mapping.Output.ToString(),
                     Amount = mapping.Amount,
                     ThresholdMin = mapping.ThresholdMin,
-                    ThresholdMax = mapping.ThresholdMax
+                    ThresholdMax = mapping.ThresholdMax,
+                    AttackMs = mapping.AttackMs,
+                    ReleaseMs = mapping.ReleaseMs
                 })),
             ThresholdMin = layer.ThresholdMin,
             ThresholdMax = layer.ThresholdMax,
@@ -12457,7 +12517,9 @@ public partial class MainWindow : Window
                     Output = mapping.Output.ToString(),
                     Amount = mapping.Amount,
                     ThresholdMin = mapping.ThresholdMin,
-                    ThresholdMax = mapping.ThresholdMax
+                    ThresholdMax = mapping.ThresholdMax,
+                    AttackMs = mapping.AttackMs,
+                    ReleaseMs = mapping.ReleaseMs
                 })),
             ThresholdMin = layer.ThresholdMin,
             ThresholdMax = layer.ThresholdMax,
@@ -12730,7 +12792,9 @@ public partial class MainWindow : Window
                     Output = output,
                     Amount = SimulationReactivity.ClampAmount(output, mapping.Amount),
                     ThresholdMin = Math.Clamp(mapping.ThresholdMin, 0, 1),
-                    ThresholdMax = Math.Clamp(mapping.ThresholdMax, 0, 1)
+                    ThresholdMax = Math.Clamp(mapping.ThresholdMax, 0, 1),
+                    AttackMs = SimulationReactivity.ClampAttack(mapping.AttackMs),
+                    ReleaseMs = SimulationReactivity.ClampRelease(mapping.ReleaseMs)
                 });
             }
         }
@@ -12767,7 +12831,9 @@ public partial class MainWindow : Window
                     Output = output,
                     Amount = SimulationReactivity.ClampAmount(output, mapping.Amount),
                     ThresholdMin = Math.Clamp(mapping.ThresholdMin, 0, 1),
-                    ThresholdMax = Math.Clamp(mapping.ThresholdMax, 0, 1)
+                    ThresholdMax = Math.Clamp(mapping.ThresholdMax, 0, 1),
+                    AttackMs = SimulationReactivity.ClampAttack(mapping.AttackMs),
+                    ReleaseMs = SimulationReactivity.ClampRelease(mapping.ReleaseMs)
                 });
             }
         }
@@ -13017,7 +13083,9 @@ public partial class MainWindow : Window
                 Output = mapping.Output,
                 Amount = mapping.Amount,
                 ThresholdMin = mapping.ThresholdMin,
-                ThresholdMax = mapping.ThresholdMax
+                ThresholdMax = mapping.ThresholdMax,
+                AttackMs = mapping.AttackMs,
+                ReleaseMs = mapping.ReleaseMs
             }).ToList(),
             ThresholdMin = spec.ThresholdMin,
             ThresholdMax = spec.ThresholdMax,
@@ -13404,6 +13472,14 @@ public partial class MainWindow : Window
         layer.RgbHueShiftDegrees = spec.RgbHueShiftDegrees;
         layer.RgbHueShiftSpeedDegreesPerSecond = spec.RgbHueShiftSpeedDegreesPerSecond;
         layer.AudioFrequencyHueShiftDegrees = spec.AudioFrequencyHueShiftDegrees;
+        foreach (var mappingId in layer.ReactiveEnvelopes.Keys.ToArray())
+        {
+            var oldMapping = layer.ReactiveMappings.FirstOrDefault(m => m.Id == mappingId);
+            var newMapping = spec.ReactiveMappings.FirstOrDefault(m => m.Id == mappingId);
+            if (oldMapping == null || newMapping == null || oldMapping.Input != newMapping.Input ||
+                oldMapping.ThresholdMin != newMapping.ThresholdMin || oldMapping.ThresholdMax != newMapping.ThresholdMax)
+                layer.ReactiveEnvelopes.Remove(mappingId);
+        }
         layer.ReactiveMappings = CloneReactiveMappings(spec.ReactiveMappings);
         layer.ThresholdMin = spec.ThresholdMin;
         layer.ThresholdMax = spec.ThresholdMax;
@@ -16115,7 +16191,9 @@ public partial class MainWindow : Window
                     Output = mapping.Output,
                     Amount = mapping.Amount,
                     ThresholdMin = mapping.ThresholdMin,
-                    ThresholdMax = mapping.ThresholdMax
+                    ThresholdMax = mapping.ThresholdMax,
+                    AttackMs = mapping.AttackMs,
+                    ReleaseMs = mapping.ReleaseMs
                 }).ToList()
             }
         };
@@ -19832,7 +19910,9 @@ public partial class MainWindow : Window
                 Output = mapping.Output.ToString(),
                 Amount = mapping.Amount,
                 ThresholdMin = mapping.ThresholdMin,
-                ThresholdMax = mapping.ThresholdMax
+                ThresholdMax = mapping.ThresholdMax,
+                AttackMs = mapping.AttackMs,
+                ReleaseMs = mapping.ReleaseMs
             }).ToList(),
             ThresholdMin = layer.ThresholdMin,
             ThresholdMax = layer.ThresholdMax,
@@ -19879,7 +19959,9 @@ public partial class MainWindow : Window
                 Output = mapping.Output.ToString(),
                 Amount = mapping.Amount,
                 ThresholdMin = mapping.ThresholdMin,
-                ThresholdMax = mapping.ThresholdMax
+                ThresholdMax = mapping.ThresholdMax,
+                AttackMs = mapping.AttackMs,
+                ReleaseMs = mapping.ReleaseMs
             }).ToList(),
             ThresholdMin = layer.ThresholdMin,
             ThresholdMax = layer.ThresholdMax,
@@ -21104,6 +21186,8 @@ public partial class MainWindow : Window
             public double Amount { get; set; } = 1.0;
             public double ThresholdMin { get; set; }
             public double ThresholdMax { get; set; } = 1.0;
+            public double AttackMs { get; set; } = 5;
+            public double ReleaseMs { get; set; } = 80;
         }
 
         public sealed class SourceConfig

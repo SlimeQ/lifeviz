@@ -39,13 +39,13 @@ internal sealed partial class AudioBeatDetector : IDisposable
     private const int AudioDebugHistorySeconds = 30;
     private const int AudioDebugHistorySampleRate = 120;
     private const int WaveformHistorySize = AudioDebugHistorySeconds * AudioDebugHistorySampleRate;
-    private const double SpectrumAnalysisRateHz = 60.0;
+    private const double SpectrumAnalysisRateHz = 120.0;
     private AudioGraph? _graph;
     private AudioDeviceInputNode? _inputNode;
     private AudioFrameOutputNode? _frameOutputNode;
     private MMDeviceEnumerator? _wasapiDeviceEnumerator;
     private MMDevice? _wasapiRenderDevice;
-    private WasapiLoopbackCapture? _wasapiLoopbackCapture;
+    private WasapiCapture? _wasapiLoopbackCapture;
     private readonly SemaphoreSlim _lock = new(1, 1);
     private readonly object _waveformLock = new();
     private string? _currentDeviceId;
@@ -69,8 +69,8 @@ internal sealed partial class AudioBeatDetector : IDisposable
     private const double EnvelopeNormalizationCeilingDb = -6.0;
     private const double PeakNormalizationFloorDb = -42.0;
     private const double PeakNormalizationCeilingDb = -6.0;
-    private const double BandNormalizationFloorDb = -60.0;
-    private const double BandNormalizationCeilingDb = -18.0;
+    private const double BandNormalizationFloorDb = -48.0;
+    private const double BandNormalizationCeilingDb = -6.0;
     private const string RenderSelectionPrefix = "render:";
     private const string DefaultRenderSelectionId = "render:default";
     private const double EnergyBaselineFollow = 0.22;
@@ -419,7 +419,7 @@ internal sealed partial class AudioBeatDetector : IDisposable
                 return;
             }
 
-            var settings = new AudioGraphSettings(AudioRenderCategory.Media);
+            var settings = new AudioGraphSettings(AudioRenderCategory.Media) { QuantumSizeSelectionMode = QuantumSizeSelectionMode.LowestLatency };
             var result = await AudioGraph.CreateAsync(settings);
             if (result.Status != AudioGraphCreationStatus.Success)
             {
@@ -551,6 +551,9 @@ internal sealed partial class AudioBeatDetector : IDisposable
     private void ResetState()
     {
         ResetProjectMPcm();
+        _smokeInputActive = false;
+        _lastPcmTimestamp = 0;
+        Array.Clear(_spectrumSamples); _spectrumWriteIndex = 0; _spectrumAnalysisAccumulator = 0;
         _energyHistory.Clear();
         _beatTimestamps.Clear();
         _localEnergyAverage = 0;
@@ -645,6 +648,7 @@ internal sealed partial class AudioBeatDetector : IDisposable
             return;
         }
 
+        Volatile.Write(ref _lastPcmTimestamp, System.Diagnostics.Stopwatch.GetTimestamp());
         bool enableSpectrumAnalysis = _enableSpectrumAnalysis;
         bool enableDebugHistory = _enableDebugHistory;
         double inputGain = _inputGain;
@@ -652,7 +656,8 @@ internal sealed partial class AudioBeatDetector : IDisposable
         double totalEnergy = 0;
         double totalAbsolute = 0;
         double peakAmplitude = 0;
-        for (int i = 0; i < samples.Length; i++)
+        int energySamples = Math.Min(samples.Length, (int)_sampleRate / 100);
+        for (int i = samples.Length - energySamples; i < samples.Length; i++)
         {
             double scaledSample = Math.Clamp(samples[i] * inputGain, -1.0, 1.0);
             totalEnergy += scaledSample * scaledSample;
@@ -660,9 +665,8 @@ internal sealed partial class AudioBeatDetector : IDisposable
             peakAmplitude = Math.Max(peakAmplitude, Math.Abs(scaledSample));
         }
 
-        double rms = Math.Sqrt(totalEnergy / samples.Length);
-        double meanAbsolute = totalAbsolute / samples.Length;
-        bool hasSignal = rms >= SignalFloorRms;
+        double rms = Math.Sqrt(totalEnergy / energySamples);
+        double meanAbsolute = totalAbsolute / energySamples;
         if (enableDebugHistory)
         {
             AppendWaveformHistory(samples, inputGain);
@@ -675,52 +679,7 @@ internal sealed partial class AudioBeatDetector : IDisposable
             _waveformBucketMax = -1.0;
         }
 
-        if (enableSpectrumAnalysis)
-        {
-            _spectrumAnalysisAccumulator += samples.Length;
-        }
-        else
-        {
-            _spectrumAnalysisAccumulator = 0;
-        }
-
-        double requiredSpectrumSamples = Math.Max(1.0, _sampleRate / SpectrumAnalysisRateHz);
-        if (enableSpectrumAnalysis && hasSignal && samples.Length >= 256 && _spectrumAnalysisAccumulator >= requiredSpectrumSamples)
-        {
-            _spectrumAnalysisAccumulator -= requiredSpectrumSamples;
-            int fftSize = 1024;
-            while (fftSize > samples.Length) fftSize /= 2;
-
-            if (fftSize >= 256)
-            {
-                var fftBuffer = _fftBuffer;
-                int start = samples.Length - fftSize;
-                for (int i = 0; i < fftSize; i++)
-                {
-                    double sample = Math.Clamp(samples[start + i] * inputGain, -1.0, 1.0);
-                    double window = 0.5 * (1 - Math.Cos(2 * Math.PI * i / (fftSize - 1)));
-                    fftBuffer[i] = new Complex(sample * window, 0);
-                }
-
-                CalculateFFT(fftBuffer, fftSize);
-                AnalyzeSpectrum(fftBuffer, fftSize);
-            }
-        }
-        else if (!enableSpectrumAnalysis || !hasSignal)
-        {
-            MainFrequency = 0;
-            BassFrequency = 0;
-            MidFrequency = 0;
-            HighFrequency = 0;
-            BassEnergy = 0;
-            BassNormalizedLevel = 0;
-            MidNormalizedLevel = 0;
-            HighNormalizedLevel = 0;
-            MainFrequencyNormalized = 0;
-            BassFrequencyNormalized = 0;
-            MidFrequencyNormalized = 0;
-            HighFrequencyNormalized = 0;
-        }
+        ProcessSpectrumSamples(samples, inputGain, enableSpectrumAnalysis);
 
         ProcessEnergy(meanAbsolute, rms, peakAmplitude);
     }
@@ -796,95 +755,33 @@ internal sealed partial class AudioBeatDetector : IDisposable
     
     private void AnalyzeSpectrum(Complex[] fftBuffer, int fftSize)
     {
-        double maxMagnitude = 0;
-        int maxIndex = 0;
-        double bassSum = 0;
-        double midSum = 0;
-        double highSum = 0;
-        double bassMaxMagnitude = 0;
-        int bassMaxIndex = 0;
-        double midMaxMagnitude = 0;
-        int midMaxIndex = 0;
-        double highMaxMagnitude = 0;
-        int highMaxIndex = 0;
-        
-        // Frequencies up to Nyquist (SampleRate / 2)
-        // Bin resolution = SampleRate / fftSize
-        double binRes = (double)_sampleRate / fftSize;
-        
-        // Define frequency bands for overlay/debug traces.
-        int bassStartBin = (int)(20 / binRes);
-        int bassEndBin = (int)(250 / binRes);
-        int midStartBin = Math.Max(bassEndBin + 1, (int)(250 / binRes));
-        int midEndBin = (int)(2000 / binRes);
-        int highStartBin = Math.Max(midEndBin + 1, (int)(2000 / binRes));
-        int highEndBin = (int)(8000 / binRes);
-        
-        // Only need to check first half (positive frequencies)
-        int halfSize = fftSize / 2;
-        
-        for (int i = 1; i < halfSize; i++) // Skip DC component at 0
+        Span<double> powers = stackalloc double[3];
+        Span<double> logFrequencies = stackalloc double[3];
+        powers.Clear();
+        logFrequencies.Clear();
+        double binResolution = (double)_sampleRate / fftSize;
+        for (int i = 1; i < fftSize / 2; i++)
         {
-            double magnitude = fftBuffer[i].Magnitude;
-            if (magnitude > maxMagnitude)
-            {
-                maxMagnitude = magnitude;
-                maxIndex = i;
-            }
-            
-            if (i >= bassStartBin && i <= bassEndBin)
-            {
-                bassSum += magnitude;
-            }
-            else if (i >= midStartBin && i <= midEndBin)
-            {
-                midSum += magnitude;
-            }
-            else if (i >= highStartBin && i <= highEndBin)
-            {
-                highSum += magnitude;
-            }
-
-            if (i >= bassStartBin && i <= bassEndBin && magnitude > bassMaxMagnitude)
-            {
-                bassMaxMagnitude = magnitude;
-                bassMaxIndex = i;
-            }
-
-            if (i >= midStartBin && i <= midEndBin && magnitude > midMaxMagnitude)
-            {
-                midMaxMagnitude = magnitude;
-                midMaxIndex = i;
-            }
-
-            if (i >= highStartBin && i <= highEndBin && magnitude > highMaxMagnitude)
-            {
-                highMaxMagnitude = magnitude;
-                highMaxIndex = i;
-            }
+            double hz = i * binResolution;
+            if (hz < 20 || hz > 8000) continue;
+            int band = hz <= 250 ? 0 : hz <= 2000 ? 1 : 2;
+            double power = fftBuffer[i].Real * fftBuffer[i].Real + fftBuffer[i].Imaginary * fftBuffer[i].Imaginary;
+            powers[band] += power; logFrequencies[band] += power * Math.Log(hz);
         }
-        
-        MainFrequency = maxIndex * binRes;
-        BassFrequency = bassMaxIndex > 0 ? bassMaxIndex * binRes : 0;
-        MidFrequency = midMaxIndex > 0 ? midMaxIndex * binRes : 0;
-        HighFrequency = highMaxIndex > 0 ? highMaxIndex * binRes : 0;
-
-        int bassBins = Math.Max(1, bassEndBin - bassStartBin + 1);
-        int midBins = Math.Max(1, midEndBin - midStartBin + 1);
-        int highBins = Math.Max(1, highEndBin - highStartBin + 1);
-        double avgBassMag = bassSum / bassBins;
-        double avgMidMag = midSum / midBins;
-        double avgHighMag = highSum / highBins;
-
-        BassEnergy = Math.Clamp(avgBassMag / 50.0, 0, 10);
-        BassNormalizedLevel = NormalizeAmplitude(avgBassMag / Math.Max(1.0, fftSize), BandNormalizationFloorDb, BandNormalizationCeilingDb);
-        MidNormalizedLevel = NormalizeAmplitude(avgMidMag / Math.Max(1.0, fftSize), BandNormalizationFloorDb, BandNormalizationCeilingDb);
-        HighNormalizedLevel = NormalizeAmplitude(avgHighMag / Math.Max(1.0, fftSize), BandNormalizationFloorDb, BandNormalizationCeilingDb);
-
-        MainFrequencyNormalized = maxMagnitude > 0 ? NormalizeLogFrequencyWithinBand(MainFrequency, 20.0, 8000.0) : 0;
-        BassFrequencyNormalized = bassMaxMagnitude > 0 && BassNormalizedLevel > 0.001 ? NormalizeLogFrequencyWithinBand(BassFrequency, 20.0, 250.0) : 0;
-        MidFrequencyNormalized = midMaxMagnitude > 0 && MidNormalizedLevel > 0.001 ? NormalizeLogFrequencyWithinBand(MidFrequency, 250.0, 2000.0) : 0;
-        HighFrequencyNormalized = highMaxMagnitude > 0 && HighNormalizedLevel > 0.001 ? NormalizeLogFrequencyWithinBand(HighFrequency, 2000.0, 8000.0) : 0;
+        double scale = 2.0 / (fftSize * fftSize * 0.375); // Hann window mean-square correction.
+        BassNormalizedLevel = NormalizeAmplitude(Math.Sqrt(powers[0] * scale), BandNormalizationFloorDb, BandNormalizationCeilingDb);
+        MidNormalizedLevel = NormalizeAmplitude(Math.Sqrt(powers[1] * scale), BandNormalizationFloorDb, BandNormalizationCeilingDb);
+        HighNormalizedLevel = NormalizeAmplitude(Math.Sqrt(powers[2] * scale), BandNormalizationFloorDb, BandNormalizationCeilingDb);
+        BassEnergy = Math.Clamp(Math.Sqrt(powers[0] * scale) * 12, 0, 10);
+        double total = powers[0] + powers[1] + powers[2];
+        MainFrequency = total > 0 ? Math.Exp((logFrequencies[0]+logFrequencies[1]+logFrequencies[2])/total) : 0;
+        BassFrequency = powers[0] > 0 ? Math.Exp(logFrequencies[0]/powers[0]) : 0;
+        MidFrequency = powers[1] > 0 ? Math.Exp(logFrequencies[1]/powers[1]) : 0;
+        HighFrequency = powers[2] > 0 ? Math.Exp(logFrequencies[2]/powers[2]) : 0;
+        MainFrequencyNormalized = Math.Max(BassNormalizedLevel,Math.Max(MidNormalizedLevel,HighNormalizedLevel)) > 0.001 ? NormalizeLogFrequencyWithinBand(MainFrequency,20,8000) : 0;
+        BassFrequencyNormalized = BassNormalizedLevel > 0.001 ? NormalizeLogFrequencyWithinBand(BassFrequency,20,250) : 0;
+        MidFrequencyNormalized = MidNormalizedLevel > 0.001 ? NormalizeLogFrequencyWithinBand(MidFrequency,250,2000) : 0;
+        HighFrequencyNormalized = HighNormalizedLevel > 0.001 ? NormalizeLogFrequencyWithinBand(HighFrequency,2000,8000) : 0;
     }
 
     private static void CalculateFFT(Complex[] buffer, int n)
@@ -1063,6 +960,7 @@ internal sealed partial class AudioBeatDetector : IDisposable
         double midFrequency,
         double highFrequency)
     {
+        _smokeInputActive = true;
         NormalizedEnergy = Math.Clamp(level, 0, 1);
         EnvelopeEnergy = Math.Clamp(level, 0, 1);
         PeakNormalizedEnergy = Math.Clamp(level, 0, 1);
@@ -1185,7 +1083,7 @@ internal sealed partial class AudioBeatDetector : IDisposable
             ? _wasapiDeviceEnumerator.GetDefaultAudioEndpoint(DataFlow.Render, Role.Multimedia)
             : ResolveWasapiRenderDevice(renderDeviceId);
 
-        _wasapiLoopbackCapture = new WasapiLoopbackCapture(_wasapiRenderDevice);
+        _wasapiLoopbackCapture = new LowLatencyLoopbackCapture(_wasapiRenderDevice);
         _sampleRate = (uint)_wasapiLoopbackCapture.WaveFormat.SampleRate;
         _wasapiLoopbackCapture.DataAvailable += WasapiLoopbackCapture_DataAvailable;
         _wasapiLoopbackCapture.RecordingStopped += WasapiLoopbackCapture_RecordingStopped;

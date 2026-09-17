@@ -1723,7 +1723,7 @@ internal sealed class FileCaptureService : IDisposable
         private long _audioPipelineGeneration;
         private WaveOutEvent? _audioOutput;
         private BufferedWaveProvider? _audioBuffer;
-        private const int LiveAudioAnalysisBufferCapacity = 48000 * 2;
+        private const int LiveAudioAnalysisBufferCapacity = 4800;
         private readonly object _liveAudioAnalysisLock = new();
         private readonly float[] _liveAudioAnalysisBuffer = new float[LiveAudioAnalysisBufferCapacity];
         private int _liveAudioAnalysisReadIndex;
@@ -3579,6 +3579,12 @@ internal sealed class FileCaptureService : IDisposable
             int sampleCount;
             lock (_liveAudioAnalysisLock)
             {
+                // Visual analysis follows the newest audio after UI/render stalls.
+                // Playback and offline decoding retain their independent exact queues.
+                int keep = Math.Min(destination.Length, 2048);
+                int skip = Math.Max(0, _liveAudioAnalysisCount - keep);
+                _liveAudioAnalysisReadIndex = (_liveAudioAnalysisReadIndex + skip) % LiveAudioAnalysisBufferCapacity;
+                _liveAudioAnalysisCount -= skip;
                 sampleCount = Math.Min(destination.Length, _liveAudioAnalysisCount);
                 for (int i = 0; i < sampleCount; i++)
                 {

@@ -1,12 +1,16 @@
 # Configuration & Controls
 
+## Simulation audio response
+
+Reactive mapping rows now support **signed Strength**, **Attack ms** (0–150, default 5), and **Release ms** (0–500, default 80). Click **Punchy mappings** to replace the selected layer's mappings with a responsive preset; its base controls remain unchanged. Live/draft behavior follows Apply as usual. Existing scenes keep their mappings and gain the default response times. New image-effect layers use the presets automatically; Life and Pixel Sort can opt in with the button. Version 16 scene projects save strength and timing independently. See [Audio Response](Audio-Response.md) for preset routing, polarity exceptions, expanded outputs, calibration, and tuning.
+
 ## Four additional simulations
 
-In a Sim Group, choose **Add Particle Erosion**, **Add Ripple Field**, **Add Chromatic Memory**, or **Add Contour Current**. Particle Erosion exposes Emission, signed Gravity, Turbulence, and Persistence. Ripple Field exposes Impulse, Wave Speed, Persistence, and Refraction. Chromatic Memory exposes separate Red/Green/Blue Memory controls and Separation. Contour Current exposes Flow, Thickness, and Persistence. Each starts at Normal blend and full opacity with audio mappings. Set the group's Layer Blend to Normal for a direct view. Controls support live/draft editing and version 15 scene projects. [Ranges, defaults, and examples](More-Simulations.md).
+In a Sim Group, choose **Add Particle Erosion**, **Add Ripple Field**, **Add Chromatic Memory**, or **Add Contour Current**. Particle Erosion exposes Emission, signed Gravity, Turbulence, and Persistence. Ripple Field exposes Impulse, Wave Speed, Persistence, and Refraction. Chromatic Memory exposes separate Red/Green/Blue Memory controls and Separation. Contour Current exposes Flow, Thickness, and Persistence. Each starts at Normal blend and full opacity with audio mappings. Set the group's Layer Blend to Normal for a direct view. Controls support live/draft editing and version 16 scene projects. [Ranges, defaults, and examples](More-Simulations.md).
 
 ## Feedback Kaleidoscope and filtered reactive mappings
 
-Choose **Add Feedback Kaleidoscope** in a Sim Group. Its controls are Feedback (0–98%), Zoom / step (0.900–1.100), Twist (−10–10°/step), Folds (2–16), and Center X/Y (0–100%). New layers use Normal blend and map Low audio to Zoom and Mid to Twist. Live/draft editing follows the usual Apply behavior; version 15 projects retain every control. See [Feedback Kaleidoscope](Feedback-Kaleidoscope.md) for defaults, examples, and reset behavior.
+Choose **Add Feedback Kaleidoscope** in a Sim Group. Its controls are Feedback (0–98%), Zoom / step (0.900–1.100), Twist (−10–10°/step), Folds (2–16), and Center X/Y (0–100%). New layers use Normal blend and map Low audio to Zoom and Mid to Twist, with strength chosen to leave room for movement. Live/draft editing follows the usual Apply behavior; version 16 projects retain every control. See [Feedback Kaleidoscope](Feedback-Kaleidoscope.md) for defaults, examples, and reset behavior.
 
 Each simulation's reactive **Output** dropdown automatically filters by that layer's type. All types retain Opacity, Framerate, Hue Shift, and Hue Speed, plus these specific outputs:
 
@@ -15,22 +19,22 @@ Each simulation's reactive **Output** dropdown automatically filters by that lay
 | Life Sim | Injection Noise, Threshold Min, Threshold Max |
 | Pixel Sort | Cell Width, Cell Height |
 | Datamosh | Datamosh Feedback, Datamosh Displacement |
-| Fluid Ink | Fluid Flow |
-| Time Displacement | Time Spread |
-| Reaction–Diffusion | Reaction Seeding |
-| Feedback Kaleidoscope | Kaleidoscope Feedback, Kaleidoscope Zoom, Kaleidoscope Twist |
-| Particle Erosion | Particle Emission, Particle Turbulence |
-| Ripple Field | Ripple Impulse, Ripple Refraction |
-| Chromatic Memory | Red Memory, Green Memory, Blue Memory |
-| Contour Current | Contour Flow, Contour Thickness |
+| Fluid Ink | Fluid Flow, Fluid Persistence, Fluid Swirl |
+| Time Displacement | Time Spread, Time Pattern Scale, Time Pattern Motion |
+| Reaction–Diffusion | Reaction Seeding, Reaction Feed, Reaction Kill |
+| Feedback Kaleidoscope | Kaleidoscope Feedback, Zoom, Twist, Folds, Center X/Y |
+| Particle Erosion | Particle Emission, Turbulence, Gravity, Persistence |
+| Ripple Field | Ripple Impulse, Refraction, Wave Speed, Persistence |
+| Chromatic Memory | Red/Green/Blue Memory, Chromatic Separation |
+| Contour Current | Contour Flow, Thickness, Persistence |
 
 All eight audio inputs remain available. An existing incompatible mapping stays selected with **(not used by this sim)** and keeps its amount and thresholds when saved. That entry cannot be selected as a new mapping; choosing a supported output removes the old entry. Filtering also follows imported scenes, draft clones, and replaced mapping lists.
 
 ## Fluid Ink, Time Displacement, and Reaction–Diffusion
 
-Select a Sim Group in the Scene Editor and choose **Add Fluid Ink**, **Add Time Displacement**, or **Add Reaction–Diffusion**. Fluid Ink exposes Flow, Persistence, and Swirl; Time Displacement exposes Time Spread, Pattern Scale, and Pattern Motion; Reaction–Diffusion exposes Feed, Kill, and Scene Seeding. Each uses shared simulation blend/opacity/hue controls and adds one Low audio mapping at 30% amount. New mapping outputs are **Fluid Flow**, **Time Spread**, and **Reaction Seeding**, each adding normalized input × amount to the base control and clamping at 100%. Choose Audio Source in the context menu; no audio leaves base settings active.
+Select a Sim Group in the Scene Editor and choose **Add Fluid Ink**, **Add Time Displacement**, or **Add Reaction–Diffusion**. Fluid Ink exposes Flow, Persistence, and Swirl; Time Displacement exposes Time Spread, Pattern Scale, and Pattern Motion; Reaction–Diffusion exposes Feed, Kill, and Scene Seeding. Each uses shared simulation blend/opacity/hue controls and starts with a punchy two-mapping preset. New mapping outputs are **Fluid Flow**, **Time Spread**, and **Reaction Seeding**, each adding normalized input × amount to the base control and clamping at 100%. Choose Audio Source in the context menu; no audio leaves base settings active.
 
-Live Mode applies these controls immediately; draft mode waits for Apply. Set the group's Layer Blend to Normal to audition a processed image directly. Randomize resets history/fields; disable holds state. Scene projects use version 15. See [Field Simulations](Field-Simulations.md) for ranges, defaults, example setups, and history/performance limits.
+Live Mode applies these controls immediately; draft mode waits for Apply. Set the group's Layer Blend to Normal to audition a processed image directly. Randomize resets history/fields; disable holds state. Scene projects use version 16. See [Field Simulations](Field-Simulations.md) for ranges, defaults, example setups, and history/performance limits.
 
 ## MilkDrop / projectM
 

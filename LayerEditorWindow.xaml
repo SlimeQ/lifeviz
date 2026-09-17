@@ -1796,7 +1796,7 @@
                                                             <StackPanel Margin="8">
                                                                 <DockPanel LastChildFill="False"
                                                                            Margin="0,0,0,8">
-                                                                    <TextBlock Text="Map audio inputs to per-layer outputs."
+                                                                    <TextBlock Text="Signed strength: push (+), pull (−)."
                                                                                Foreground="#A0A0A0"
                                                                                VerticalAlignment="Center"
                                                                                DockPanel.Dock="Left" />
@@ -1804,6 +1804,7 @@
                                                                             Content="Add Mapping"
                                                                             DockPanel.Dock="Right"
                                                                             Click="AddSimulationReactiveMapping_Click" />
+                                                                        <Button Content="Punchy mappings" DockPanel.Dock="Right" ToolTip="Replace this layer’s mappings with a responsive preset. Base controls stay unchanged." Click="PunchySimulationMappings_Click" />
                                                                 </DockPanel>
 
                                                                 <TextBlock Text="No reactive mappings on this layer."
@@ -1877,7 +1878,7 @@
                                                                                                     Margin="0,0,12,6">
                                                                                             <TextBlock Text="{Binding AmountLabel}"
                                                                                                        VerticalAlignment="Center" />
-                                                                                            <Slider Minimum="0"
+                                                                                            <Slider Minimum="{Binding AmountMinimum}"
                                                                                                     Maximum="{Binding AmountMaximum}"
                                                                                                     TickFrequency="{Binding AmountTickFrequency}"
                                                                                                     SmallChange="{Binding AmountSmallChange}"
@@ -1892,6 +1893,16 @@
                                                                                                        VerticalAlignment="Center" />
                                                                                         </StackPanel>
 
+                                                                                        <StackPanel Orientation="Horizontal" Margin="0,0,12,6">
+                                                                                            <TextBlock Text="Attack ms" ToolTip="How quickly the mapping follows a rise. Zero is immediate; 5 ms keeps hits sharp." VerticalAlignment="Center" />
+                                                                                            <Slider Minimum="0" Maximum="150" Value="{Binding AttackMs, UpdateSourceTrigger=PropertyChanged}" Width="100" Margin="8,0,0,0" ValueChanged="SimulationReactiveMappingAmount_Changed" />
+                                                                                            <TextBlock Text="{Binding AttackMs, StringFormat={}{0:0}}" Margin="6,0,0,0" VerticalAlignment="Center" />
+                                                                                        </StackPanel>
+                                                                                        <StackPanel Orientation="Horizontal" Margin="0,0,12,6">
+                                                                                            <TextBlock Text="Release ms" ToolTip="How quickly the mapping settles after a hit. Increase for smoother trails; decrease for tight rhythmic cuts." VerticalAlignment="Center" />
+                                                                                            <Slider Minimum="0" Maximum="500" Value="{Binding ReleaseMs, UpdateSourceTrigger=PropertyChanged}" Width="100" Margin="8,0,0,0" ValueChanged="SimulationReactiveMappingAmount_Changed" />
+                                                                                            <TextBlock Text="{Binding ReleaseMs, StringFormat={}{0:0}}" Margin="6,0,0,0" VerticalAlignment="Center" />
+                                                                                        </StackPanel>
                                                                                         <StackPanel Orientation="Horizontal"
                                                                                                     Margin="0,0,12,6">
                                                                                             <TextBlock Text="Input Min"
@@ -2301,13 +2312,14 @@
                                                         <StackPanel Margin="8">
                                                             <DockPanel LastChildFill="False"
                                                                        Margin="0,0,0,8">
-                                                                <TextBlock Text="Map audio inputs to per-layer outputs."
+                                                                <TextBlock Text="Signed strength: push (+), pull (−)."
                                                                            Foreground="#A0A0A0"
                                                                            VerticalAlignment="Center"
                                                                            DockPanel.Dock="Left" />
                                                                 <Button Content="Add Mapping"
                                                                         DockPanel.Dock="Right"
                                                                         Click="AddSimulationReactiveMapping_Click" />
+                                                                        <Button Content="Punchy mappings" DockPanel.Dock="Right" ToolTip="Replace this layer’s mappings with a responsive preset. Base controls stay unchanged." Click="PunchySimulationMappings_Click" />
                                                             </DockPanel>
 
                                                             <TextBlock Text="No reactive mappings on this layer."
@@ -2381,7 +2393,7 @@
                                                                                                 Margin="0,0,12,6">
                                                                                         <TextBlock Text="{Binding AmountLabel}"
                                                                                                    VerticalAlignment="Center" />
-                                                                                        <Slider Minimum="0"
+                                                                                        <Slider Minimum="{Binding AmountMinimum}"
                                                                                                 Maximum="{Binding AmountMaximum}"
                                                                                                 TickFrequency="{Binding AmountTickFrequency}"
                                                                                                 SmallChange="{Binding AmountSmallChange}"
@@ -2396,7 +2408,17 @@
                                                                                                    VerticalAlignment="Center" />
                                                                                     </StackPanel>
 
-                                                                                    <StackPanel Orientation="Horizontal"
+                                                                                    <StackPanel Orientation="Horizontal" Margin="0,0,12,6">
+                                                                                            <TextBlock Text="Attack ms" ToolTip="How quickly the mapping follows a rise. Zero is immediate; 5 ms keeps hits sharp." VerticalAlignment="Center" />
+                                                                                            <Slider Minimum="0" Maximum="150" Value="{Binding AttackMs, UpdateSourceTrigger=PropertyChanged}" Width="100" Margin="8,0,0,0" ValueChanged="SimulationReactiveMappingAmount_Changed" />
+                                                                                            <TextBlock Text="{Binding AttackMs, StringFormat={}{0:0}}" Margin="6,0,0,0" VerticalAlignment="Center" />
+                                                                                        </StackPanel>
+                                                                                        <StackPanel Orientation="Horizontal" Margin="0,0,12,6">
+                                                                                            <TextBlock Text="Release ms" ToolTip="How quickly the mapping settles after a hit. Increase for smoother trails; decrease for tight rhythmic cuts." VerticalAlignment="Center" />
+                                                                                            <Slider Minimum="0" Maximum="500" Value="{Binding ReleaseMs, UpdateSourceTrigger=PropertyChanged}" Width="100" Margin="8,0,0,0" ValueChanged="SimulationReactiveMappingAmount_Changed" />
+                                                                                            <TextBlock Text="{Binding ReleaseMs, StringFormat={}{0:0}}" Margin="6,0,0,0" VerticalAlignment="Center" />
+                                                                                        </StackPanel>
+                                                                                        <StackPanel Orientation="Horizontal"
                                                                                                 Margin="0,0,12,6">
                                                                                         <TextBlock Text="Input Min"
                                                                                                    VerticalAlignment="Center" />

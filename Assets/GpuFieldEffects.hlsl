@@ -86,12 +86,14 @@ void AdvanceFieldCS(uint3 id : SV_DispatchThreadID)
         if(SolverPass==5)
         {
             impulse=(luminance-c.z)*RippleImpulse*1.8;
+            float2 center=uv-float2(0.5,0.5);
+            impulse+=abs(RippleImpulse-c.w)*exp(-dot(center,center)*90)*4;
             // Sparse deterministic drips keep a still image gently moving.
             float drip=Hash(id.xy/3)>0.995 ? sin(float(FrameIndex)*0.13+Hash(id.xy/3)*40) : 0;
             impulse+=drip*luminance*RippleImpulse*0.035;
         }
         float velocity=clamp((c.y+lap*(0.08+RippleSpeed*0.36)+impulse)*RippleDamping,-1,1);
-        FieldOutput[p]=float4(clamp(c.x+velocity,-3,3),velocity,luminance,0);
+        FieldOutput[p]=float4(clamp(c.x+velocity,-3,3),velocity,luminance,RippleImpulse);
     }
     else
     {
@@ -100,14 +102,14 @@ void AdvanceFieldCS(uint3 id : SV_DispatchThreadID)
         {
             // Spatially coherent colonies, with deterministic initialization for bakes.
             float colony=(Hash(id.xy/6)>0.80 && luminance>0.08) ? 0.8*Seed : 0;
-            FieldOutput[p]=float4(1-colony,colony,0,0); return;
+            FieldOutput[p]=float4(1-colony,colony,0,Seed); return;
         }
         float2 lap=-c.xy+0.2*(l.xy+r.xy+u.xy+d.xy)+0.05*(F(p-1).xy+F(p+1).xy+F(p+int2(-1,1)).xy+F(p+int2(1,-1)).xy);
         float reaction=c.x*c.y*c.y;
         float2 change=float2(lap.x-reaction+Feed*(1-c.x),0.5*lap.y+reaction-(Kill+Feed)*c.y);
         // Sparse continuous scene injection leaves space for autonomous growth.
-        float injection=Seed*0.006*luminance*(Hash(id.xy/6)>0.96 ? 1:0);
-        FieldOutput[p]=float4(saturate(c.xy+change*0.8+float2(-injection,injection)),0,0);
+        float injection=(Seed*0.006+abs(Seed-c.w)*0.55)*luminance*(Hash(id.xy/6)>0.80 ? 1:0);
+        FieldOutput[p]=float4(saturate(c.xy+change*0.8+float2(-injection,injection)),0,Seed);
     }
 }
 
@@ -237,7 +239,7 @@ void EffectOutputCS(uint3 id : SV_DispatchThreadID)
     float4 fresh=S(int2(id.xy)), result=fresh;
     if(Effect==2 && HasHistory!=0) // FluidInk
     {
-        float2 velocity=SampleField(fp).xy*float2(Width,Height)/float2(FieldWidth,FieldHeight);
+        float2 velocity=SampleField(fp).xy*float2(Width,Height)/float2(FieldWidth,FieldHeight)*(0.2+Flow*3.0);
         result=lerp(fresh,SamplePrevious(float2(id.xy)-velocity),Persistence);
     }
     else if(Effect==3 && HistoryCount>1 && Spread>0) // TimeDisplacement

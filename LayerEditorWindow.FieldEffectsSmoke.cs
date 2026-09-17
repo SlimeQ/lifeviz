@@ -24,7 +24,7 @@ public partial class LayerEditorWindow
             AddSimulationLayer(kind);
             var layer = GetSelectedSimulationLayer()!;
             Guid id = layer.Id;
-            Check(layer.LayerType == kind && layer.BlendMode == "Normal" && layer.ReactiveMappings.Count == (kaleidoscope ? 2 : 1), "Incorrect defaults.");
+            Check(layer.LayerType == kind && layer.BlendMode == "Normal" && layer.ReactiveMappings.Count == 2, "Incorrect defaults.");
             layer.Effects.KaleidoscopeFeedback = 0.77; layer.Effects.KaleidoscopeZoom = 0.985; layer.Effects.KaleidoscopeRotation = -2.3; layer.Effects.KaleidoscopeFolds = 9; layer.Effects.KaleidoscopeCenterX = 0.4; layer.Effects.KaleidoscopeCenterY = 0.6;
             layer.Effects.FluidFlow = 0.71; layer.Effects.TimeSpread = 0.37; layer.Effects.ReactionFeed = 0.041;
             ApplySimulationLayerSettingsLive(force: true);

@@ -7,10 +7,10 @@ These are independent GPU simulation layer types, alongside Life Sim, Pixel Sort
 1. Add a video, image, webcam, window, or Color Plane, followed by a **Sim Group**.
 2. Select that group in the Scene Editor and click **Add Fluid Ink**, **Add Time Displacement**, or **Add Reaction–Diffusion**.
 3. Disable the default Life Sim to audition one effect. Set the group's **Layer Blend** to **Normal** and **Layer Opacity** to 100% to see its processed image directly.
-4. Select the simulation to adjust its controls. New effects start with Normal blending, 100% simulation opacity, and one Low audio mapping at 30% amount.
+4. Select the simulation to adjust its controls. New effects start with Normal blending, full opacity, and [Punchy mappings](Audio-Response.md), with signed strength, a 5 ms attack and an 80 ms release. All effect controls are available as mapping outputs.
 5. Choose **Audio Source** in the context menu to use hardware audio or **Video Stack (Silent)**. The latter analyzes video layers with Play Audio enabled. Without audio, the authored base values still work.
 
-All simulations within one group read the same input; their outputs blend in list order. Use separate Sim Groups to feed one effect's result into another. Live Mode applies changes immediately; with Live Mode off, press Apply. Save/Load, autosave, editor drafts, and bake snapshots preserve settings independently. Exported projects use version 15; older supported projects still load.
+All simulations within one group read the same input; their outputs blend in list order. Use separate Sim Groups to feed one effect's result into another. Live Mode applies changes immediately; with Live Mode off, press Apply. Save/Load, autosave, editor drafts, and bake snapshots preserve settings independently. Exported projects use version 16; older supported projects still load.
 
 ## Fluid Ink
 
@@ -18,11 +18,11 @@ Scene colors feed a persistent image transported by an evolving, pressure-correc
 
 | Control | Range / default | Effect |
 | --- | --- | --- |
-| Flow | 0–100% / 45% | Strength of new forces. Setting it to zero lets existing velocity decay. |
+| Flow | 0–100% / 45% | Strength of new forces and current image displacement. Setting it to zero lets existing velocity decay. |
 | Persistence | 0–99.5% / 94% | Retained dye versus fresh scene each simulation step. Zero returns exact current input. |
 | Swirl | 0–100% / 45% | Additional broad curling forces, scaled by Flow. |
 
-The default **Low → Fluid Flow** mapping adds up to 30 percentage points. A moving, colorful subject at 90–97% persistence is a useful starting point. High persistence can soften or obscure the source.
+The preset maps **Low → Fluid Flow** and **High → Persistence**, reducing retention on high-frequency hits. A moving, colorful subject at 90–97% persistence is a useful starting point. High persistence can soften or obscure the source.
 
 ## Time Displacement
 
@@ -34,7 +34,7 @@ A moving interference pattern selects different ages of the source across the im
 | Pattern Scale | 0.5–12 / 3 | Number of spatial wave cycles across the image. |
 | Pattern Motion | 0–100% / 30% | Speed at which the spatial delay pattern changes. Zero holds the pattern, while history still updates. |
 
-The default **Low → Time Spread** mapping adds up to 30 percentage points. Each layer retains 64 simulation-step samples, including the latest: the oldest is 63 steps behind (2.1 seconds at 30 simulation FPS, 1.05 seconds at 60). History fills gradually after startup/reset; missing history is never sampled. Delayed frames use a reduced-resolution buffer with bilinear spatial and temporal interpolation, so high-resolution delayed regions can look softer. The current-frame endpoint and zero-spread bypass retain full resolution.
+The preset maps **Low → Time Spread** and **Mid → Pattern Motion**, choosing a direction with room to move. Each layer retains 64 simulation-step samples, including the latest: the oldest is 63 steps behind (2.1 seconds at 30 simulation FPS, 1.05 seconds at 60). History fills gradually after startup/reset; missing history is never sampled. Delayed frames use a reduced-resolution buffer with bilinear spatial and temporal interpolation, so high-resolution delayed regions can look softer. The current-frame endpoint and zero-spread bypass retain full resolution.
 
 ## Reaction–Diffusion
 
@@ -46,7 +46,7 @@ Two chemical concentrations diffuse and react using a Gray–Scott model. The so
 | Kill | 0.0300–0.0750 / 0.0649 | Removal of the second chemical, in addition to Feed. |
 | Scene Seeding | 0–100% / 35% | Initial colony strength and sparse ongoing source-driven injection. Zero stops new injection; established chemistry keeps evolving. |
 
-The default **Low → Reaction Seeding** mapping adds up to 30 percentage points. Give patterns several seconds to develop. Feed/Kill combinations can settle into uniform output or extinguish the colonies; this is part of the model. Raise Seeding and use Randomize to start again. A bright still image or Color Plane can sustain growth without moving video.
+The preset maps **Low → Reaction Seeding** and **Mid → Feed**. Seeding changes inject an immediate chemical pulse alongside the continuous source term. Give patterns several seconds to develop. Feed/Kill combinations can settle into uniform output or extinguish the colonies; this is part of the model. Raise Seeding and use Randomize to start again. A bright still image or Color Plane can sustain growth without moving video.
 
 ## State, timing, and performance
 
