@@ -37,6 +37,7 @@ public partial class LayerEditorWindow
         foreach (var (type, specific) in expected)
         {
             AddSimulationLayer(type); var layer = GetSelectedSimulationLayer()!;
+            if (type == LayerEditorSimulationLayerType.Life) layer.LifeMode = "RgbChannels";
             layer.ReactiveMappings = new() { new() { Output = "HueShift", Amount = 42, ThresholdMin = 0.2, ThresholdMax = 0.8 } };
             var mapping = layer.ReactiveMappings[0];
             string[] wanted = common.Concat(specific).OrderBy(s => s).ToArray();
@@ -78,6 +79,12 @@ public partial class LayerEditorWindow
         }
         var compatibility = new LayerEditorSimulationLayer { Id = Guid.NewGuid(), LayerType = LayerEditorSimulationLayerType.FluidInk,
             ReactiveMappings = new() { new() { Output = "DatamoshFeedback", Amount = 0.73 } } };
+        var life = new LayerEditorSimulationLayer { ReactiveMappings = new() {new() {Output="HueSpeed",Amount=90}} };
+        Check(!life.ReactiveMappings[0].OutputOptions.Single(o=>o.Value=="HueSpeed").IsEnabled,"Grayscale offered an ineffective hue mapping.");
+        life.LifeMode="RgbChannels";
+        Check(life.ReactiveMappings[0].OutputOptions.Single(o=>o.Value=="HueSpeed").IsEnabled,"RGB did not restore hue mapping.");
+        life.LifeMode="Bitwise";
+        Check(!life.ReactiveMappings[0].OutputOptions.Any(o=>o.IsEnabled && o.Value is "ThresholdMin" or "ThresholdMax"),"Bitwise offered ineffective thresholds.");
         compatibility.LayerType = LayerEditorSimulationLayerType.Datamosh;
         Check(compatibility.ReactiveMappings[0].OutputOptions.All(o => o.IsEnabled), "Changing sim type did not refresh supported status.");
         compatibility.LayerType = LayerEditorSimulationLayerType.FluidInk;

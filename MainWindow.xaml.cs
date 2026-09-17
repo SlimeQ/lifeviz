@@ -3927,6 +3927,7 @@ public partial class MainWindow : Window
         ApplyAudioReactiveFps();
         ApplyAudioReactiveLifeOpacity();
         ApplySimulationLayerReactiveState(dt);
+        AdvanceSimulationLayerHue(dt);
         _audioReactiveLevelSeedBurstsLastStep = 0;
         _audioReactiveBeatSeedBurstsLastStep = 0;
         EndProfileStamp("audio_update_ms", audioUpdateStamp);
@@ -5257,7 +5258,11 @@ public partial class MainWindow : Window
             RefreshMinimizedMediaSuspension();
             _offlineVideoAudioActive = HasEnabledOfflineVideoAudio(_sources);
             _audioBeatDetector.BeginOfflineInput();
-            foreach (var layer in EnumerateSimulationLeafLayers(_simulationLayers)) layer.ReactiveEnvelopes.Clear();
+            foreach (var layer in EnumerateSimulationLeafLayers(_simulationLayers))
+            {
+                layer.ReactiveEnvelopes.Clear();
+                layer.AccumulatedHueDegrees = 0;
+            }
             offlineAudioInputStarted = true;
             UpdateAudioAnalysisRequirements();
             Logger.Info(_offlineVideoAudioActive
@@ -10842,6 +10847,8 @@ public partial class MainWindow : Window
             layer.EffectiveInjectionNoise = Math.Clamp(layer.InjectionNoise, 0, 1);
             layer.EffectiveThresholdMin = Math.Clamp(layer.ThresholdMin, 0, 1);
             layer.EffectiveThresholdMax = Math.Clamp(layer.ThresholdMax, 0, 1);
+            if (layer.EffectiveThresholdMin > layer.EffectiveThresholdMax)
+                (layer.EffectiveThresholdMin, layer.EffectiveThresholdMax) = (layer.EffectiveThresholdMax, layer.EffectiveThresholdMin);
             layer.EffectivePixelSortCellWidth = Math.Clamp(layer.PixelSortCellWidth, 1, Math.Max(1, layer.Engine?.Columns ?? _configuredRows));
             layer.EffectivePixelSortCellHeight = Math.Clamp(layer.PixelSortCellHeight, 1, Math.Max(1, layer.Engine?.Rows ?? _configuredRows));
 
@@ -10994,10 +11001,10 @@ public partial class MainWindow : Window
                         layer.EffectiveInjectionNoise = Math.Clamp(layer.EffectiveInjectionNoise + (inputValue * SimulationReactivity.ClampAmount(mapping.Output, mapping.Amount)), 0, 1);
                         break;
                     case SimulationReactiveOutput.ThresholdMin:
-                        layer.EffectiveThresholdMin = Math.Clamp(layer.EffectiveThresholdMin + (inputValue * SimulationReactivity.ClampAmount(mapping.Output, mapping.Amount)), 0, 1);
+                        layer.EffectiveThresholdMin = Math.Clamp(layer.EffectiveThresholdMin + (inputValue * SimulationReactivity.ClampAmount(mapping.Output, mapping.Amount)), 0, layer.EffectiveThresholdMax);
                         break;
                     case SimulationReactiveOutput.ThresholdMax:
-                        layer.EffectiveThresholdMax = Math.Clamp(layer.EffectiveThresholdMax - (inputValue * SimulationReactivity.ClampAmount(mapping.Output, mapping.Amount)), 0, 1);
+                        layer.EffectiveThresholdMax = Math.Clamp(layer.EffectiveThresholdMax - (inputValue * SimulationReactivity.ClampAmount(mapping.Output, mapping.Amount)), layer.EffectiveThresholdMin, 1);
                         break;
                     case SimulationReactiveOutput.PixelSortCellWidth:
                     {
@@ -12193,6 +12200,7 @@ public partial class MainWindow : Window
         public double EffectiveLifeOpacity { get; set; } = 1.0;
         public double EffectiveSimulationTargetFps { get; set; } = DefaultFps;
         public double ReactiveHueShiftDegrees { get; set; }
+        public double AccumulatedHueDegrees { get; set; }
         public double EffectiveRgbHueShiftSpeedDegreesPerSecond { get; set; }
         public double EffectiveInjectionNoise { get; set; }
         public double EffectiveThresholdMin { get; set; } = 0.35;
@@ -15754,13 +15762,17 @@ public partial class MainWindow : Window
             Engine = backend
         };
 
-        double previousSmoothedFreq = _smoothedFreq;
+        var previousLayers = _simulationLayers.ToArray();
+        string? previousAudioDevice = _selectedAudioDeviceId;
         bool previousRecording = _isRecording;
         try
         {
             _isRecording = false;
-
-            _smoothedFreq = MinReactiveHueFrequencyHz;
+            _simulationLayers.Clear(); _simulationLayers.Add(layer);
+            _selectedAudioDeviceId = "smoke";
+            layer.ReactiveMappings = new() { new() { Input=SimulationReactiveInput.Frequency, Output=SimulationReactiveOutput.HueShift, Amount=reactiveHueDegrees, AttackMs=0, ReleaseMs=0 } };
+            _audioBeatDetector.SetSmokeReactiveState(0,0,0,0,0,0,0,0);
+            ApplySimulationLayerReactiveState(1d/60);
             if (!TryBuildSimulationPresentationLayer(layer, 1.0, out var lowPresentation))
             {
                 Logger.Warn("GPU frequency-hue smoke: failed to build low-frequency presentation layer.");
@@ -15780,7 +15792,8 @@ public partial class MainWindow : Window
             byte lowB = lowBuffer[centerIndex + 2];
             float lowHue = lowPresentation.HueShiftDegrees;
 
-            _smoothedFreq = MaxReactiveHueFrequencyHz;
+            _audioBeatDetector.SetSmokeReactiveState(0,0,0,0,1,0,0,0);
+            ApplySimulationLayerReactiveState(1d/60);
             if (!TryBuildSimulationPresentationLayer(layer, 1.0, out var highPresentation))
             {
                 Logger.Warn("GPU frequency-hue smoke: failed to build high-frequency presentation layer.");
@@ -15813,7 +15826,8 @@ public partial class MainWindow : Window
         }
         finally
         {
-            _smoothedFreq = previousSmoothedFreq;
+            _simulationLayers.Clear(); _simulationLayers.AddRange(previousLayers);
+            _selectedAudioDeviceId = previousAudioDevice;
             _isRecording = previousRecording;
         }
     }
@@ -18675,19 +18689,23 @@ public partial class MainWindow : Window
         return Math.Clamp((Math.Log(clampedHz) - minLogFrequency) / logRange, 0, 1);
     }
 
+    private void AdvanceSimulationLayerHue(double seconds)
+    {
+        if (_isPaused || seconds <= 0) return;
+        foreach (var layer in EnumerateEnabledSimulationLeaves(_simulationLayers))
+            layer.AccumulatedHueDegrees = NormalizeHueDegrees(layer.AccumulatedHueDegrees +
+                layer.EffectiveRgbHueShiftSpeedDegreesPerSecond * seconds);
+    }
+
     private double CurrentRgbHueShiftDegrees(SimulationLayerState layer)
     {
-        if (layer.LifeMode != GameOfLifeEngine.LifeMode.RgbChannels &&
+        if (layer.LayerType == SimulationLayerType.Life && layer.LifeMode != GameOfLifeEngine.LifeMode.RgbChannels &&
             layer.LifeMode != GameOfLifeEngine.LifeMode.Bitwise)
         {
             return 0;
         }
 
-        double animatedDegrees = layer.RgbHueShiftDegrees;
-        if (Math.Abs(layer.EffectiveRgbHueShiftSpeedDegreesPerSecond) > 0.001)
-        {
-            animatedDegrees += _lifetimeStopwatch.Elapsed.TotalSeconds * layer.EffectiveRgbHueShiftSpeedDegreesPerSecond;
-        }
+        double animatedDegrees = layer.RgbHueShiftDegrees + layer.AccumulatedHueDegrees;
 
         animatedDegrees += layer.ReactiveHueShiftDegrees;
 

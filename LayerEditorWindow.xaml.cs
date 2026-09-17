@@ -47,7 +47,11 @@ public partial class LayerEditorWindow : Window
         {
             Interval = TimeSpan.FromMilliseconds(250)
         };
-        _videoTransportTimer.Tick += (_, _) => RefreshSelectedVideoTransportState();
+        _videoTransportTimer.Tick += (_, _) =>
+        {
+            RefreshSelectedVideoTransportState();
+            RefreshReactiveMappingStatus();
+        };
         _videoTransportTimer.Start();
         Closed += (_, _) => _videoTransportTimer.Stop();
     }
@@ -555,7 +559,17 @@ public partial class LayerEditorWindow : Window
 
     private void ReactiveMapping_PropertyChanged(object? sender, PropertyChangedEventArgs e)
     {
+        if (e.PropertyName == nameof(LayerEditorSimulationReactiveMapping.LiveStatus)) return;
         GetSelectedSimulationLayer()?.NotifyDetailsChanged();
+    }
+
+    private void RefreshReactiveMappingStatus()
+    {
+        if (_ownerIsShuttingDown || GetSelectedSimulationLayer() is not { } layer) return;
+        foreach (var mapping in layer.ReactiveMappings)
+            mapping.LiveStatus = _viewModel.LiveMode
+                ? _owner.GetSimulationMappingStatus(layer.Id, mapping.Id)
+                : "Draft — Apply to hear and see these settings";
     }
 
     private LayerEditorSource? GetSelectedSimulationSource() =>

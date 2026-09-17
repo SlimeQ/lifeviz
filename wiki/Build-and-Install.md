@@ -1,5 +1,19 @@
 # Build & Install
 
+## Validate Fluid and Life controls
+
+```powershell
+dotnet build -c Release
+dotnet bin/Release/net9.0-windows/lifeviz.dll --smoke-test simulation-controls
+dotnet bin/Release/net9.0-windows/lifeviz.dll --smoke-test field-effects-editor
+dotnet bin/Release/net9.0-windows/lifeviz.dll --smoke-test mapping-options
+dotnet bin/Release/net9.0-windows/lifeviz.dll --smoke-test gpu-injection-mode
+dotnet bin/Release/net9.0-windows/lifeviz.dll --smoke-test gpu-bitwise
+./tests/Test-FieldEffects.ps1
+```
+
+`simulation-controls` builds an isolated static scene through the real inline GPU Sim Group path. It asserts visible differences for Flow, Persistence and Swirl; feeds generated pulsed 110/880 Hz PCM through the analyzer and Fluid preset; verifies deterministic audio replay; and checks positive/negative Level → Opacity direction in rendered pixels. It also checks hue integration and threshold crossings, all three Life modes' injection/dropout behavior, and grayscale/RGB CPU/GPU Conway evolution with Fill/Binary at depths 3, 24, 72 and 96. Images are written under `control-audit` beside the executable. The editor test checks all Fluid sliders and live readouts; mapping-options checks Life-mode filtering. These fixtures do not establish whether audio is reaching a different computer's endpoint; use the new live mapping readouts there.
+
 ## Validate simulation audio response
 
 ```powershell

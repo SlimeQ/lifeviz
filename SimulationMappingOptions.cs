@@ -2,9 +2,14 @@ namespace lifeviz;
 
 internal static class SimulationMappingOptions
 {
-    internal static bool Supports(LayerEditorSimulationLayerType type, string output)
+    internal static bool Supports(LayerEditorSimulationLayerType type, string output, string? lifeMode = null)
     {
         if (!Enum.TryParse<SimulationReactiveOutput>(output, out var value)) return false;
+        if (type == LayerEditorSimulationLayerType.Life)
+        {
+            if (lifeMode == "NaiveGrayscale" && value is SimulationReactiveOutput.HueShift or SimulationReactiveOutput.HueSpeed) return false;
+            if (lifeMode == "Bitwise" && value is SimulationReactiveOutput.ThresholdMin or SimulationReactiveOutput.ThresholdMax) return false;
+        }
         if (value is SimulationReactiveOutput.Opacity or SimulationReactiveOutput.Framerate
             or SimulationReactiveOutput.HueShift or SimulationReactiveOutput.HueSpeed) return true;
         return type switch

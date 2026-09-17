@@ -20,14 +20,16 @@ internal static class SimulationReactivePresets
         switch (layer.LayerType)
         {
             case LayerEditorSimulationLayerType.Life:
-                Add("Bass", "InjectionNoise", Travel(layer.InjectionNoise)); Add("Mid", "HueSpeed", 120); break;
+                if (layer.LifeMode == "Bitwise") { Add("Bass", "Opacity", 0.65); Add("Mid", "HueSpeed", 120); break; }
+                Add("Bass", "ThresholdMin", -layer.ThresholdMin * 0.85);
+                Add("Mid", layer.LifeMode == "NaiveGrayscale" ? "Opacity" : "HueSpeed", layer.LifeMode == "NaiveGrayscale" ? 0.65 : 120); break;
             case LayerEditorSimulationLayerType.PixelSort:
                 Add("Bass", "PixelSortCellWidth", 32); Add("Mid", "PixelSortCellHeight", 20); break;
             case LayerEditorSimulationLayerType.Datamosh:
                 Add("Bass", "DatamoshFeedback", Travel(layer.DatamoshFeedback, 0, 0.98));
                 Add("Mid", "DatamoshDisplacement", Travel(layer.DatamoshDisplacement)); break;
             case LayerEditorSimulationLayerType.FluidInk:
-                Add("Bass", "FluidFlow", Travel(s.FluidFlow)); Add("High", "FluidPersistence", -s.FluidPersistence * 0.6); break;
+                Add("Bass", "FluidFlow", Travel(s.FluidFlow)); Add("Mid", "FluidSwirl", Travel(s.FluidSwirl)); break;
             case LayerEditorSimulationLayerType.TimeDisplacement:
                 Add("Bass", "TimeSpread", Travel(s.TimeSpread)); Add("Mid", "TimeMotion", Travel(s.TimeMotion)); break;
             case LayerEditorSimulationLayerType.ReactionDiffusion:

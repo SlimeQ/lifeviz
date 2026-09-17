@@ -249,7 +249,9 @@ uint EvaluateSlice(int2 coord, uint sliceStart, uint sliceLength)
 
     if (BinningMode == 1)
     {
-        uint value = 0;
+        // Normalized binary weights avoid both a shift-by-32 and the
+        // value*255 overflow at channel depths above 24.
+        float value = 0;
         [loop]
         for (uint i = 0; i < frames; i++)
         {
@@ -261,13 +263,12 @@ uint EvaluateSlice(int2 coord, uint sliceStart, uint sliceLength)
 
             if (ReadHistory(coord, historyIndex) != 0)
             {
-                uint bit = frames - 1 - i;
-                value |= 1u << bit;
+                value += exp2(-float(i + 1u));
             }
         }
 
-        uint maxValue = (1u << frames) - 1u;
-        return maxValue == 0 ? 0 : (value * 255u + (maxValue / 2u)) / maxValue;
+        float maxValue = 1.0 - exp2(-float(frames));
+        return (uint)round(saturate(value / maxValue) * 255.0);
     }
 
     uint alive = 0;

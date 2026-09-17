@@ -63,7 +63,23 @@ public partial class LayerEditorWindow
             ApplyButton_Click(ApplyButton, new RoutedEventArgs(Button.ClickEvent, ApplyButton));
             Check(Math.Abs(RuntimeValue() - 0.6) < 1e-6, "Apply did not commit draft controls.");
             SetLiveModeForSmoke(true);
+            if (kind == LayerEditorSimulationLayerType.FluidInk)
+            {
+                foreach (string control in new[] { "FluidPersistence", "FluidSwirl" })
+                {
+                    var actual = FieldSmokeVisuals(this).OfType<Slider>().Single(s => s.IsVisible && s.GetBindingExpression(Slider.ValueProperty)?.ParentBinding.Path.Path == "Effects." + control);
+                    actual.SetCurrentValue(Slider.ValueProperty, 0.8);
+                    Dispatcher.Invoke(() => { }, DispatcherPriority.Background);
+                    _owner.GetSimulationLayerSettingsForEditor(out var values);
+                    var settings=EnumerateSimulationLayers(values).Single(s=>s.Id==id).Effects;
+                    Check(Math.Abs((double)typeof(SimulationEffectSettings).GetProperty(control)!.GetValue(settings)!-0.8)<1e-6, control+" slider failed to update runtime.");
+                }
+                _owner.SetReactiveMeterForSmoke(); RefreshReactiveMappingStatus();
+                Check(GetSelectedSimulationLayer()!.ReactiveMappings.All(m=>m.LiveStatus.Contains("Live output")), "Fluid mapping meter missing live values.");
+            }
             slider.BringIntoView();
+            if (kind == LayerEditorSimulationLayerType.FluidInk)
+                FieldSmokeVisuals(this).OfType<TextBlock>().First(t=>t.IsVisible && t.GetBindingExpression(TextBlock.TextProperty)?.ParentBinding.Path.Path=="LiveStatus").BringIntoView();
             if (kaleidoscope)
                 FieldSmokeVisuals(this).OfType<Slider>().First(s => s.IsVisible && s.GetBindingExpression(Slider.ValueProperty)?.ParentBinding.Path.Path == "Effects.KaleidoscopeCenterY").BringIntoView();
             UpdateLayout();

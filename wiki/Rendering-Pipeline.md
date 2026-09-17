@@ -1,5 +1,13 @@
 # Rendering Pipeline
 
+## Fluid response and Life control corrections
+
+Fluid's output displacement now uses `Flow * (0.7 + 6.1 * Flow)`: approximately the previous 1.55 multiplier at the 45% default, zero transport at zero Flow, and 6.8 at full Flow. The completed velocity field stores prior Swirl/Flow in its spare channels. On the next force pass, positive Flow changes and absolute Swirl changes add a bounded curl impulse before pressure projection. There are no new textures or solver passes; steady forcing remains unchanged. The preset no longer reduces Persistence while increasing Flow.
+
+Simulation Hue Speed now integrates degrees/second with the frame delta into a per-layer phase. Speed edits change future motion without multiplying the new rate by app uptime. Paused/disabled layers hold phase; offline start resets it for deterministic bakes. Full-color effects apply hue regardless of their unused Life-mode field.
+
+Reactive Life threshold endpoints clamp at the other endpoint; they no longer swap when driven across one another. GPU Binning changes invalidate the published color texture immediately. Binary rendering uses normalized floating-point bit weights to avoid uint multiplication overflow and shift-by-32 at deep history settings. CPU RGB evolution avoids recycling/clearing the current frame when a channel has only one history frame. Conway rules and authored presets remain unchanged except for the revised opt-in Punchy mappings.
+
 ## Audio-driven simulation updates
 
 Audio analysis uses a persistent 1,024-sample Hann window at 120 analysis hops/second, summed band power corrected for window energy, and energy-weighted geometric frequency centroids. It no longer selects FFT length from capture packet size or averages wide-band magnitude into near-zero outputs. Loudness reads the newest 10 ms. Output capture requests event-driven 20 ms shared buffers and microphone capture requests the lowest endpoint quantum. Live silent-video analysis trims obsolete PCM to its newest 2,048 samples; offline decoding retains exact sample order.

@@ -163,6 +163,7 @@ internal static partial class SmokeTestRunner
                 "gpu-pixel-sort" => RunGpuPixelSortSmokeTest(),
                 "datamosh" => RunDatamoshSmokeTest(),
                 "audio-capture" => AudioResponseSmoke.RunCapture(),
+                "simulation-controls" => RunDatamoshSmokeTest(controls: true),
                 "audio-response" => RunDatamoshSmokeTest(audioResponse: true),
                 "audio-response-editor" => RunPixelSortEditorRoundTripSmokeTest(audioResponse: true),
                 "toy-effects" => RunDatamoshSmokeTest(toys: true),
@@ -387,10 +388,10 @@ internal static partial class SmokeTestRunner
         return 0;
     }
 
-    private static int RunDatamoshSmokeTest(bool fields = false, bool kaleidoscope = false, bool toys = false, bool audioResponse = false)
+    private static int RunDatamoshSmokeTest(bool fields = false, bool kaleidoscope = false, bool toys = false, bool audioResponse = false, bool controls = false)
     {
         var window = new MainWindow();
-        try { return (audioResponse ? window.RunAudioResponseSmoke() : toys ? window.RunToyEffectsSmoke() : kaleidoscope ? window.RunKaleidoscopeSmoke() : fields ? window.RunFieldEffectsSmoke() : window.RunDatamoshSmoke()) ? 0 : 1; }
+        try { return (controls ? window.RunSimulationControlSmoke() : audioResponse ? window.RunAudioResponseSmoke() : toys ? window.RunToyEffectsSmoke() : kaleidoscope ? window.RunKaleidoscopeSmoke() : fields ? window.RunFieldEffectsSmoke() : window.RunDatamoshSmoke()) ? 0 : 1; }
         finally { window.Close(); }
     }
 

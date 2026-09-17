@@ -1,5 +1,15 @@
 # Configuration & Controls
 
+## Fluid and Life control feedback
+
+Reactive mapping rows show **Input → Response → Live output** four times per second in Live Mode. Response includes the input window and attack/release; Live output is the final effective setting after all mappings and clamping. Missing audio, disabled groups, unapplied drafts, mode-incompatible mappings, and inputs at their maximum are identified explicitly. These readouts do not alter or save authored values.
+
+Positive Level → Opacity increases the simulation's contribution; negative strength decreases it. Base Opacity remains the ceiling. At zero, the lower scene is visible. Subtractive blend darkens with increasing opacity, so image brightness is not an opacity meter. Choose Normal to inspect the processed image directly.
+
+Fluid Flow reaches stronger transport at high settings and stops transport at zero. Flow increases and Swirl changes stir the field immediately. The updated Punchy mappings preset drives Flow and Swirl, preserving dye Persistence; press the button on existing Fluid layers to replace their older mappings.
+
+Life's **Injection Dropout** is the existing Noise control under a clearer label: 0% admits eligible input, 100% blocks it, and existing cells keep evolving. Bitwise mode disables threshold, injection-mode and binning controls; grayscale disables Hue controls. Mapping options follow these restrictions and preserve imported incompatible rows as disabled choices. RGB modes retain hue controls. Reactive threshold cutoffs stop at each other instead of crossing and reopening. [More detail](Audio-Response.md).
+
 ## Simulation audio response
 
 Reactive mapping rows now support **signed Strength**, **Attack ms** (0–150, default 5), and **Release ms** (0–500, default 80). Click **Punchy mappings** to replace the selected layer's mappings with a responsive preset; its base controls remain unchanged. Live/draft behavior follows Apply as usual. Existing scenes keep their mappings and gain the default response times. New image-effect layers use the presets automatically; Life and Pixel Sort can opt in with the button. Version 16 scene projects save strength and timing independently. See [Audio Response](Audio-Response.md) for preset routing, polarity exceptions, expanded outputs, calibration, and tuning.

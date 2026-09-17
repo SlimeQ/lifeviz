@@ -64,8 +64,11 @@ void AdvanceFieldCS(uint3 id : SV_DispatchThreadID)
         // Smooth changing curl forcing also moves flat-color regions.
         float t=float(FrameIndex)*0.018;
         float2 curl=float2(sin(uv.y*12+t)*cos(uv.x*9-t),-cos(uv.y*12+t)*sin(uv.x*9-t));
-        v+=Flow*(float2(-grad.y,grad.x)*2.0 + Swirl*curl*0.18);
-        FieldOutput[p]=float4(clamp(v,-5.0,5.0),0,0);
+        // Changes in the controls kick the existing fluid immediately; steady
+        // settings keep the original continuous forcing and character.
+        float kick=FieldReady!=0 ? max(0,Flow-c.w)*4.0+abs(Swirl-c.z)*Flow*2.0 : 0;
+        v+=Flow*(float2(-grad.y,grad.x)*2.0 + Swirl*curl*0.18)+curl*kick;
+        FieldOutput[p]=float4(clamp(v,-5.0,5.0),Swirl,Flow);
     }
     else if(SolverPass==1) FieldOutput[p]=float4(c.xy,0,0.5*(r.x-l.x+d.y-u.y));
     else if(SolverPass==2) FieldOutput[p]=float4(c.xy,(l.z+r.z+u.z+d.z-c.w)*0.25,c.w);
@@ -74,7 +77,7 @@ void AdvanceFieldCS(uint3 id : SV_DispatchThreadID)
         float2 v=c.xy-0.5*float2(r.z-l.z,d.z-u.z);
         if(p.x==0 || p.x==int(FieldWidth)-1) v.x=0;
         if(p.y==0 || p.y==int(FieldHeight)-1) v.y=0;
-        FieldOutput[p]=float4(clamp(v,-5.0,5.0),0,0);
+        FieldOutput[p]=float4(clamp(v,-5.0,5.0),Swirl,Flow);
     }
     else if(SolverPass==5 || SolverPass==6)
     {
@@ -239,7 +242,9 @@ void EffectOutputCS(uint3 id : SV_DispatchThreadID)
     float4 fresh=S(int2(id.xy)), result=fresh;
     if(Effect==2 && HasHistory!=0) // FluidInk
     {
-        float2 velocity=SampleField(fp).xy*float2(Width,Height)/float2(FieldWidth,FieldHeight)*(0.2+Flow*3.0);
+        // Zero freezes transport; the upper half has enough travel for audio
+        // while the default Flow=0.45 retains its established displacement.
+        float2 velocity=SampleField(fp).xy*float2(Width,Height)/float2(FieldWidth,FieldHeight)*(Flow*(0.7+6.1*Flow));
         result=lerp(fresh,SamplePrevious(float2(id.xy)-velocity),Persistence);
     }
     else if(Effect==3 && HistoryCount>1 && Spread>0) // TimeDisplacement

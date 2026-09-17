@@ -153,7 +153,12 @@ internal sealed class GpuSimulationBackend : IGpuSimulationSurfaceBackend
 
     public void SetBinningMode(GameOfLifeEngine.BinningMode mode)
     {
-        _binningMode = mode;
+        lock (_sync)
+        {
+            if (_binningMode == mode) return;
+            _binningMode = mode;
+            _colorTextureDirty = true;
+        }
     }
 
     public void SetInjectionMode(GameOfLifeEngine.InjectionMode mode)

@@ -1359,7 +1359,7 @@
                                                         <WrapPanel>
                                                             <StackPanel Orientation="Horizontal" Margin="0,0,12,6">
                                                                 <TextBlock Text="Hue Offset" VerticalAlignment="Center" />
-                                                                <Slider Minimum="0"
+                                                                <Slider IsEnabled="{Binding SupportsHue}" Minimum="0"
                                                                         Maximum="360"
                                                                         Value="{Binding RgbHueShiftDegrees}"
                                                                         Width="150"
@@ -1368,7 +1368,7 @@
                                                             </StackPanel>
                                                             <StackPanel Orientation="Horizontal" Margin="0,0,12,6">
                                                                 <TextBlock Text="Hue Speed" VerticalAlignment="Center" />
-                                                                <Slider Minimum="-180"
+                                                                <Slider IsEnabled="{Binding SupportsHue}" Minimum="-180"
                                                                         Maximum="180"
                                                                         Value="{Binding RgbHueShiftSpeedDegreesPerSecond}"
                                                                         Width="150"
@@ -1402,7 +1402,7 @@
                                                                 </StackPanel>
                                                                 <StackPanel Orientation="Horizontal" Margin="0,0,12,6">
                                                                     <TextBlock Text="Injection" VerticalAlignment="Center" />
-                                                                    <ComboBox ItemsSource="{Binding InjectionModeOptions}"
+                                                                    <ComboBox IsEnabled="{Binding SupportsLifeThresholds}" ItemsSource="{Binding InjectionModeOptions}"
                                                                               DisplayMemberPath="Label"
                                                                               SelectedValuePath="Value"
                                                                               SelectedValue="{Binding InjectionMode}"
@@ -1423,9 +1423,10 @@
                                                                               Width="180"
                                                                               SelectionChanged="SimulationLayerLifeMode_Changed" />
                                                                 </StackPanel>
+<TextBlock Text="{Binding LifeControlHint}" TextWrapping="Wrap" Foreground="#AAAAAA" Margin="0,0,8,8" MaxWidth="600"/>
                                                                 <StackPanel Orientation="Horizontal" Margin="0,0,12,6">
                                                                     <TextBlock Text="Binning" VerticalAlignment="Center" />
-                                                                    <ComboBox ItemsSource="{Binding BinningModeOptions}"
+                                                                    <ComboBox IsEnabled="{Binding SupportsLifeThresholds}" ItemsSource="{Binding BinningModeOptions}"
                                                                               DisplayMemberPath="Label"
                                                                               SelectedValuePath="Value"
                                                                               SelectedValue="{Binding BinningMode}"
@@ -1434,7 +1435,7 @@
                                                                               SelectionChanged="SimulationLayerBinningMode_Changed" />
                                                                 </StackPanel>
                                                                 <StackPanel Orientation="Horizontal" Margin="0,0,12,6">
-                                                                    <TextBlock Text="Noise" VerticalAlignment="Center" />
+                                                                    <TextBlock Text="Injection Dropout" ToolTip="Chance to discard incoming cells. 100% stops new injection; existing Life continues." VerticalAlignment="Center" />
                                                                     <Slider Minimum="0"
                                                                             Maximum="1"
                                                                             Value="{Binding InjectionNoise}"
@@ -1545,7 +1546,7 @@
                                                               <TextBlock Text="Advect scene colors through an evolving flow field." TextWrapping="Wrap" Foreground="#A0A0A0" Margin="0,0,0,8"/>
                                                               <WrapPanel>
                                                                   <StackPanel Orientation="Horizontal" Margin="0,0,12,6">
-                                                                      <TextBlock Text="Flow" VerticalAlignment="Center"/>
+                                                                      <TextBlock Text="Flow" ToolTip="Transport strength. Zero freezes transport; higher values push dye farther each step." VerticalAlignment="Center"/>
                                                                       <Slider Minimum="0" Maximum="1" TickFrequency="0.01" IsSnapToTickEnabled="True" Value="{Binding Effects.FluidFlow, UpdateSourceTrigger=PropertyChanged}" Width="140" Margin="8,0,0,0" ValueChanged="SimulationLayerDatamosh_Changed"/>
                                                                       <TextBlock Text="{Binding Effects.FluidFlow, StringFormat={}{0:P0}}" Margin="8,0,0,0" VerticalAlignment="Center"/>
                                                                   </StackPanel>
@@ -1555,7 +1556,7 @@
                                                                       <TextBlock Text="{Binding Effects.FluidPersistence, StringFormat={}{0:P1}}" Margin="8,0,0,0" VerticalAlignment="Center"/>
                                                                   </StackPanel>
                                                                   <StackPanel Orientation="Horizontal" Margin="0,0,12,6">
-                                                                      <TextBlock Text="Swirl" VerticalAlignment="Center"/>
+                                                                      <TextBlock Text="Swirl" ToolTip="Curling forces. Changes stir the fluid immediately; steady values sustain the current." VerticalAlignment="Center"/>
                                                                       <Slider Minimum="0" Maximum="1" TickFrequency="0.01" IsSnapToTickEnabled="True" Value="{Binding Effects.FluidSwirl, UpdateSourceTrigger=PropertyChanged}" Width="140" Margin="8,0,0,0" ValueChanged="SimulationLayerDatamosh_Changed"/>
                                                                       <TextBlock Text="{Binding Effects.FluidSwirl, StringFormat={}{0:P0}}" Margin="8,0,0,0" VerticalAlignment="Center"/>
                                                                   </StackPanel>
@@ -1773,7 +1774,7 @@
                                                               <TextBlock Text="Scene edges become luminous threads carried through a curling current." TextWrapping="Wrap" Foreground="#A0A0A0" Margin="0,0,0,8" />
                                                               <WrapPanel>
                                                                   <StackPanel Orientation="Horizontal" Margin="0,0,12,6">
-                                                                      <TextBlock Text="Flow" VerticalAlignment="Center" />
+                                                                      <TextBlock Text="Flow" ToolTip="Transport strength. Zero freezes transport; higher values push dye farther each step." VerticalAlignment="Center" />
                                                                       <Slider Minimum="0" Maximum="1" TickFrequency=".01" IsSnapToTickEnabled="True" Value="{Binding Effects.ContourFlow, UpdateSourceTrigger=PropertyChanged}" Width="130" Margin="8,0,0,0" ValueChanged="SimulationLayerDatamosh_Changed" />
                                                                       <TextBlock Text="{Binding Effects.ContourFlow, StringFormat={}{0:P1}}" Margin="8,0,0,0" VerticalAlignment="Center" />
                                                                   </StackPanel>
@@ -1842,6 +1843,8 @@
                                                                                                 Padding="8,2"
                                                                                                 Click="RemoveSimulationReactiveMapping_Click" />
                                                                                     </DockPanel>
+<TextBlock Text="{Binding LiveStatus}" Foreground="#79D8C5" TextWrapping="Wrap" Margin="0,0,0,6"/>
+<TextBlock Text="{Binding MappingHint}" Foreground="#AAAAAA" TextWrapping="Wrap" Margin="0,0,0,6" MaxWidth="600"/>
 
                                                                                     <WrapPanel>
                                                                                         <StackPanel Orientation="Horizontal"
@@ -1962,7 +1965,7 @@
                                                             </WrapPanel.Style>
                                                             <StackPanel Orientation="Horizontal" Margin="0,0,12,6">
                                                                 <TextBlock Text="Threshold Min" VerticalAlignment="Center" />
-                                                                <Slider x:Name="SelectedSimulationThresholdMinSlider"
+                                                                <Slider IsEnabled="{Binding SupportsLifeThresholds}" x:Name="SelectedSimulationThresholdMinSlider"
                                                                         Minimum="0"
                                                                         Maximum="1"
                                                                         Value="{Binding ThresholdMin}"
@@ -1972,14 +1975,14 @@
                                                             </StackPanel>
                                                             <StackPanel Orientation="Horizontal" Margin="0,0,12,6">
                                                                 <TextBlock Text="Threshold Max" VerticalAlignment="Center" />
-                                                                <Slider Minimum="0"
+                                                                <Slider IsEnabled="{Binding SupportsLifeThresholds}" Minimum="0"
                                                                         Maximum="1"
                                                                         Value="{Binding ThresholdMax}"
                                                                         Width="150"
                                                                         Margin="8,0,0,0"
                                                                         ValueChanged="SimulationLayerThreshold_Changed" />
                                                             </StackPanel>
-                                                            <CheckBox Content="Invert Threshold"
+                                                            <CheckBox IsEnabled="{Binding SupportsLifeThresholds}" Content="Invert Threshold"
                                                                       Margin="0,0,12,6"
                                                                       IsChecked="{Binding InvertThreshold}"
                                                                       Checked="SimulationLayerInvertThreshold_Changed"
@@ -2204,7 +2207,7 @@
                                                                 Margin="0,8,0,0">
                                                         <TextBlock Text="Injection"
                                                                    VerticalAlignment="Center" />
-                                                        <ComboBox ItemsSource="{Binding InjectionModeOptions}"
+                                                        <ComboBox IsEnabled="{Binding SupportsLifeThresholds}" ItemsSource="{Binding InjectionModeOptions}"
                                                                   DisplayMemberPath="Label"
                                                                   SelectedValuePath="Value"
                                                                   SelectedValue="{Binding InjectionMode}"
@@ -2242,12 +2245,13 @@
                                                                   Width="180"
                                                                   SelectionChanged="SimulationLayerLifeMode_Changed" />
                                                     </StackPanel>
+<TextBlock Text="{Binding LifeControlHint}" TextWrapping="Wrap" Foreground="#AAAAAA" Margin="0,0,8,8" MaxWidth="600"/>
 
                                                     <StackPanel Orientation="Horizontal"
                                                                 Margin="0,8,0,0">
                                                         <TextBlock Text="Binning"
                                                                    VerticalAlignment="Center" />
-                                                        <ComboBox ItemsSource="{Binding BinningModeOptions}"
+                                                        <ComboBox IsEnabled="{Binding SupportsLifeThresholds}" ItemsSource="{Binding BinningModeOptions}"
                                                                   DisplayMemberPath="Label"
                                                                   SelectedValuePath="Value"
                                                                   SelectedValue="{Binding BinningMode}"
@@ -2258,7 +2262,7 @@
 
                                                     <StackPanel Orientation="Horizontal"
                                                                 Margin="0,8,0,0">
-                                                        <TextBlock Text="Noise"
+                                                        <TextBlock Text="Injection Dropout" ToolTip="Chance to discard incoming cells. 100% stops new injection; existing Life continues."
                                                                    VerticalAlignment="Center" />
                                                         <Slider Minimum="0"
                                                                 Maximum="1"
@@ -2277,7 +2281,7 @@
                                                                 Margin="0,8,0,0">
                                                         <TextBlock Text="Hue Offset"
                                                                    VerticalAlignment="Center" />
-                                                        <Slider Minimum="0"
+                                                        <Slider IsEnabled="{Binding SupportsHue}" Minimum="0"
                                                                 Maximum="360"
                                                                 Value="{Binding RgbHueShiftDegrees}"
                                                                 Width="160"
@@ -2294,7 +2298,7 @@
                                                                 Margin="0,8,0,0">
                                                         <TextBlock Text="Hue Speed"
                                                                    VerticalAlignment="Center" />
-                                                        <Slider Minimum="-180"
+                                                        <Slider IsEnabled="{Binding SupportsHue}" Minimum="-180"
                                                                 Maximum="180"
                                                                 Value="{Binding RgbHueShiftSpeedDegreesPerSecond}"
                                                                 Width="160"
@@ -2357,6 +2361,8 @@
                                                                                             Padding="8,2"
                                                                                             Click="RemoveSimulationReactiveMapping_Click" />
                                                                                 </DockPanel>
+<TextBlock Text="{Binding LiveStatus}" Foreground="#79D8C5" TextWrapping="Wrap" Margin="0,0,0,6"/>
+<TextBlock Text="{Binding MappingHint}" Foreground="#AAAAAA" TextWrapping="Wrap" Margin="0,0,0,6" MaxWidth="600"/>
 
                                                                                 <WrapPanel>
                                                                                     <StackPanel Orientation="Horizontal"
@@ -2468,7 +2474,7 @@
                                                                 Margin="0,8,0,0">
                                                         <TextBlock Text="Threshold Min"
                                                                    VerticalAlignment="Center" />
-                                                        <Slider Minimum="0"
+                                                        <Slider IsEnabled="{Binding SupportsLifeThresholds}" Minimum="0"
                                                                 Maximum="1"
                                                                 Value="{Binding ThresholdMin}"
                                                                 Width="160"
@@ -2485,7 +2491,7 @@
                                                                 Margin="0,6,0,0">
                                                         <TextBlock Text="Threshold Max"
                                                                    VerticalAlignment="Center" />
-                                                        <Slider Minimum="0"
+                                                        <Slider IsEnabled="{Binding SupportsLifeThresholds}" Minimum="0"
                                                                 Maximum="1"
                                                                 Value="{Binding ThresholdMax}"
                                                                 Width="160"
@@ -2498,7 +2504,7 @@
                                                                    VerticalAlignment="Center" />
                                                     </StackPanel>
 
-                                                    <CheckBox Content="Invert Threshold Window"
+                                                    <CheckBox IsEnabled="{Binding SupportsLifeThresholds}" Content="Invert Threshold Window"
                                                               IsChecked="{Binding InvertThreshold}"
                                                               Margin="0,8,0,0"
                                                               Checked="SimulationLayerInvertThreshold_Changed"

@@ -10,10 +10,10 @@ Presets use a narrower input window (8–85%) and choose a direction with room t
 
 | Simulation | Preset mappings |
 | --- | --- |
-| Life | Low → Injection Noise, Mid → Hue Speed |
+| Life | Grayscale: Low → lower Threshold Min, Mid → Opacity; RGB: Low → lower Threshold Min, Mid → Hue Speed; Bitwise: Low → Opacity, Mid → Hue Speed |
 | Pixel Sort | Low → Cell Width, Mid → Cell Height |
 | Datamosh | Low → Feedback, Mid → Displacement |
-| Fluid Ink | Low → Flow, High → Persistence (decrease) |
+| Fluid Ink | Low → Flow, Mid → Swirl (preserves Persistence) |
 | Time Displacement | Low → Time Spread, Mid → Pattern Motion |
 | Reaction–Diffusion | Low → Scene Seeding, Mid → Feed |
 | Feedback Kaleidoscope | Low → Zoom, Mid → Twist |
@@ -45,6 +45,14 @@ Windows output loopback requests event-driven 20 ms shared-mode capture; microph
 
 Each mapping has one causal exponential envelope after input normalization, with time-based coefficients that are independent of presentation FPS. A single input snapshot is used across the simulation layers in each frame. Parameter edits preserve an envelope when its input and threshold window are unchanged; removing/replacing an input clears the corresponding state. Disconnecting audio, disabling a layer, or starting an offline timeline clears envelope state. Runtime envelopes are not serialized.
 
-Fluid Flow now also scales the current advected displacement, giving changes an immediate visible component alongside accumulated fluid motion. Ripple Impulse changes excite a localized wave even on a still image. Reaction Seeding changes inject a chemical pulse once per parameter change rather than only altering a slow continuous source term. These respond to manual edits as well as audio; the simulations still evolve over time.
+Fluid Flow has a nonlinear transport range with zero movement at zero and approximately unchanged default strength. Increasing Flow or changing Swirl also applies a curl impulse to the existing velocity field. The Fluid preset now drives both without reducing dye retention. Ripple Impulse changes excite a localized wave even on a still image. Reaction Seeding changes inject a chemical pulse once per parameter change rather than only altering a slow continuous source term. These respond to manual edits as well as audio; the simulations still evolve over time.
 
 Synthetic 48 kHz checks measured an 11.7 ms bass onset through analysis and the default envelope, excluding capture, simulation cadence, and display latency. One tested Windows output endpoint delivered 10 ms packets. These are measured checks, not an end-to-end latency guarantee. Slow simulation FPS, high persistence, and expensive scenes can still make an effect feel slower. See [Build & Install](Build-and-Install.md#validate-simulation-audio-response) for the tests.
+
+## Reading the live response
+
+Each mapping displays raw Input, normalized/smoothed Response, and its final Live output after all mappings and clamping. If Input stays at Max, lower capture gain or raise Input Max to restore headroom. If Input moves but Response stays zero, lower Input Min. If Response moves but Live output stays pinned, reduce Strength or move the base setting away from its limit. Draft rows require Apply. Missing samples and disabled or incompatible mappings get an explicit status.
+
+Opacity measures contribution, not brightness. With Normal blending, +100% strength maps silence to transparent and full input to base Opacity; −100% reverses it. The lower scene remains visible through the simulation. Subtractive blending darkens as the effect contribution increases. Multiple opacity mappings multiply, and group opacity also affects the final result.
+
+Life thresholds select new input, not existing cells. Injection Dropout (formerly Noise) discards that input; 100% does not clear history. Bitwise uses source RGB bits directly, so threshold/injection-mode/binning controls do not apply. Grayscale hue mappings do not apply. The editor filters these choices and retains older incompatible mappings with a status message. Hue Speed now advances continuously when its rate changes.

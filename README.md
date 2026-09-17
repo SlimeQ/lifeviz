@@ -1,5 +1,13 @@
 # LifeViz
 
+## Fluid Ink response and simulation control audit
+
+Fluid Ink now has stronger upper-range Flow and immediate stirring when Flow/Swirl change, while keeping its default transport strength. **Punchy mappings** now drives Low → Flow and Mid → Swirl without reducing Persistence. Mapping rows show live input, envelope response, and effective output, including missing audio and input-ceiling indicators. Opacity help explains direction and Subtractive blending.
+
+Life fixes include bounded reactive thresholds, continuous Hue Speed, immediate Binning refresh, correct deep Binary bins, and the CPU RGB one-frame history case. Controls and mapping choices now reflect the selected Life mode; Noise is labeled **Injection Dropout**. Existing settings remain intact. See [Audio Response](wiki/Audio-Response.md).
+
+Validate with `dotnet build -c Release`, `dotnet bin/Release/net9.0-windows/lifeviz.dll --smoke-test simulation-controls`, `--smoke-test field-effects-editor`, `--smoke-test mapping-options`, and `./tests/Test-FieldEffects.ps1`. The control audit compares actual rendered pixels, PCM-driven Fluid output, opacity direction, Life injection, and CPU/GPU evolution. [Validation details](wiki/Build-and-Install.md#validate-fluid-and-life-controls).
+
 **Simulation audio response has been reworked:** stable band-power analysis, faster capture, bounded live analysis backlog, signed mapping strength, and per-row Attack/Release controls reduce delayed and abrupt modulation. Select a simulation and click **Punchy mappings** to replace its mappings with a stronger preset while preserving its base controls. All eleven types are covered, additional effect controls are mappable, and Fluid Ink, Ripple Field, and Reaction–Diffusion respond more directly to parameter changes. [Audio response and tuning](wiki/Audio-Response.md).
 
 Validate with `dotnet build -c Release`, then `dotnet bin/Release/net9.0-windows/lifeviz.dll --smoke-test audio-response`, `--smoke-test audio-response-editor`, and `--smoke-test mapping-options` using the same executable. `--smoke-test audio-capture` opens the current default output for a short in-memory capture check. `./tests/Test-FieldEffects.ps1` now uses pulsed low/mid/high audio for all eight newer effects and verifies identical repeated bakes; its selection switches and `-ExecutablePath` remain supported. [Build & Install](wiki/Build-and-Install.md#validate-simulation-audio-response).

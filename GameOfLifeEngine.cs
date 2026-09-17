@@ -461,7 +461,7 @@ namespace lifeviz;
 
         var current = history[0];
         bool[,] next;
-        if (history.Count >= depth && history[^1].GetLength(0) == Rows && history[^1].GetLength(1) == Columns)
+        if (history.Count >= depth && !ReferenceEquals(history[^1], current) && history[^1].GetLength(0) == Rows && history[^1].GetLength(1) == Columns)
         {
             next = history[^1];
             Array.Clear(next);

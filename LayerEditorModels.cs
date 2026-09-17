@@ -231,7 +231,7 @@ internal static class LayerEditorOptions
         new LayerEditorOption(nameof(SimulationReactiveOutput.Framerate), "Framerate"),
         new LayerEditorOption(nameof(SimulationReactiveOutput.HueShift), "Hue Shift"),
         new LayerEditorOption(nameof(SimulationReactiveOutput.HueSpeed), "Hue Speed"),
-        new LayerEditorOption(nameof(SimulationReactiveOutput.InjectionNoise), "Injection Noise"),
+        new LayerEditorOption(nameof(SimulationReactiveOutput.InjectionNoise), "Injection Dropout"),
         new LayerEditorOption(nameof(SimulationReactiveOutput.ThresholdMin), "Threshold Min"),
         new LayerEditorOption(nameof(SimulationReactiveOutput.ThresholdMax), "Threshold Max"),
         new LayerEditorOption(nameof(SimulationReactiveOutput.PixelSortCellWidth), "Cell Width"),
@@ -1109,6 +1109,17 @@ internal sealed class LayerEditorSimulationReactiveMapping : LayerEditorNotify
     public double AttackMs { get => _attackMs; set => SetField(ref _attackMs, SimulationReactivity.ClampAttack(value)); }
     public double ReleaseMs { get => _releaseMs; set => SetField(ref _releaseMs, SimulationReactivity.ClampRelease(value)); }
     public double AmountMinimum => -AmountMaximum;
+    private string _liveStatus = "";
+    [System.Text.Json.Serialization.JsonIgnore]
+    public string LiveStatus { get => _liveStatus; set => SetField(ref _liveStatus, value); }
+    public string MappingHint => ParseOutput(Output) switch
+    {
+        SimulationReactiveOutput.Opacity => "Positive: louder = stronger effect. Negative: louder = weaker effect. Subtractive blend darkens as opacity rises. Base opacity is the ceiling; lower layers remain visible.",
+        SimulationReactiveOutput.InjectionNoise => "Injection Dropout: higher values discard more incoming cells; 100% blocks new injection. Existing Life keeps evolving.",
+        SimulationReactiveOutput.ThresholdMax => "Positive strength lowers the upper cutoff; negative raises it. The cutoff stops at Threshold Min.",
+        SimulationReactiveOutput.ThresholdMin => "Positive strength raises the lower cutoff; negative lowers it. The cutoff stops at Threshold Max.",
+        _ => ""
+    };
 
     public Guid Id
     {
@@ -1143,6 +1154,7 @@ internal sealed class LayerEditorSimulationReactiveMapping : LayerEditorNotify
                 OnPropertyChanged(nameof(IsHueShiftOutput));
                 OnPropertyChanged(nameof(AmountMaximum));
                 OnPropertyChanged(nameof(AmountMinimum));
+                OnPropertyChanged(nameof(MappingHint));
                 OnPropertyChanged(nameof(AmountTickFrequency));
                 OnPropertyChanged(nameof(AmountLargeChange));
                 OnPropertyChanged(nameof(AmountSmallChange));
@@ -1296,18 +1308,20 @@ internal sealed class LayerEditorSimulationReactiveMapping : LayerEditorNotify
 
     public IReadOnlyList<LayerEditorOption> InputOptions => LayerEditorOptions.SimulationReactiveInputs;
     private LayerEditorSimulationLayerType _simulationType = LayerEditorSimulationLayerType.Life;
+    private string? _simulationLifeMode;
     private IReadOnlyList<LayerEditorOption>? _outputOptions;
     public IReadOnlyList<LayerEditorOption> OutputOptions => _outputOptions ??= BuildOutputOptions();
-    internal void SetSimulationType(LayerEditorSimulationLayerType type)
+    internal void SetSimulationType(LayerEditorSimulationLayerType type, string? lifeMode = null)
     {
-        if (_simulationType == type && _outputOptions != null) return;
+        if (_simulationType == type && _simulationLifeMode == lifeMode && _outputOptions != null) return;
         _simulationType = type;
+        _simulationLifeMode = lifeMode;
         RefreshOutputOptions();
     }
     private IReadOnlyList<LayerEditorOption> BuildOutputOptions()
     {
         var supported = LayerEditorOptions.SimulationReactiveOutputs
-            .Where(o => SimulationMappingOptions.Supports(_simulationType, o.Value)).ToList();
+            .Where(o => SimulationMappingOptions.Supports(_simulationType, o.Value, _simulationLifeMode)).ToList();
         if (!supported.Any(o => o.Value == Output))
             supported.Add(new(Output, ResolveLabel(Output, LayerEditorOptions.SimulationReactiveOutputs) + " (not used by this sim)", false));
         return supported;
@@ -1348,7 +1362,7 @@ internal sealed class LayerEditorSimulationLayer : LayerEditorNotify
     private void ReactiveMappingsChanged(object? sender, System.Collections.Specialized.NotifyCollectionChangedEventArgs e) => RefreshMappingOptions();
     private void RefreshMappingOptions()
     {
-        foreach (var mapping in _reactiveMappings) mapping.SetSimulationType(LayerType);
+        foreach (var mapping in _reactiveMappings) mapping.SetSimulationType(LayerType, LifeMode);
     }
     private Guid _id;
     private LayerEditorSimulationItemKind _kind = LayerEditorSimulationItemKind.Layer;
@@ -1419,6 +1433,7 @@ internal sealed class LayerEditorSimulationLayer : LayerEditorNotify
             {
                 OnPropertyChanged(nameof(TypeLabel));
                 OnPropertyChanged(nameof(IsLifeLayer));
+                OnPropertyChanged(nameof(SupportsHue));
                 OnPropertyChanged(nameof(IsPixelSortLayer));
                 OnPropertyChanged(nameof(IsDatamoshLayer));
                 OnPropertyChanged(nameof(IsFluidInkLayer));
@@ -1494,6 +1509,10 @@ internal sealed class LayerEditorSimulationLayer : LayerEditorNotify
         {
             if (SetField(ref _lifeMode, value))
             {
+                OnPropertyChanged(nameof(SupportsLifeThresholds));
+                OnPropertyChanged(nameof(SupportsHue));
+                OnPropertyChanged(nameof(LifeControlHint));
+                RefreshMappingOptions();
                 OnPropertyChanged(nameof(Details));
             }
         }
@@ -1720,6 +1739,11 @@ internal sealed class LayerEditorSimulationLayer : LayerEditorNotify
     public bool IsGroup => Kind == LayerEditorSimulationItemKind.Group;
 
     public bool IsLifeLayer => !IsGroup && LayerType == LayerEditorSimulationLayerType.Life;
+    public bool SupportsLifeThresholds => LifeMode != "Bitwise";
+    public bool SupportsHue => !IsLifeLayer || LifeMode != "NaiveGrayscale";
+    public string LifeControlHint => LifeMode == "Bitwise"
+        ? "Bitwise evolves 24 RGB bit planes. Threshold, injection mode and binning do not apply; Dropout still controls incoming cells."
+        : "Threshold selects incoming cells; it does not erase existing Life. Dropout removes a fraction of incoming cells. Hue applies in RGB modes.";
 
     public bool IsPixelSortLayer => !IsGroup && LayerType == LayerEditorSimulationLayerType.PixelSort;
 
@@ -1749,7 +1773,7 @@ internal sealed class LayerEditorSimulationLayer : LayerEditorNotify
             ? $"{(Enabled ? "Enabled" : "Disabled")} | Datamosh | {BlendMode} | Feedback {DatamoshFeedback:P0} | Displacement {DatamoshDisplacement:P0} | Block {DatamoshBlockSize}px | Reactive {ReactiveMappings.Count}"
             : LayerType == LayerEditorSimulationLayerType.PixelSort
             ? $"{(Enabled ? "Enabled" : "Disabled")} | Pixel Sort | {BlendMode} | Cell {PixelSortCellWidth}x{PixelSortCellHeight} | Opacity {LifeOpacity:P0} | Hue {RgbHueShiftDegrees:0.#}deg {RgbHueShiftSpeedDegreesPerSecond:+0.#;-0.#;0}deg/s | Reactive {ReactiveMappings.Count}"
-            : $"{(Enabled ? "Enabled" : "Disabled")} | {InputFunction} | {BlendMode} | {LifeMode} | {BinningMode} | Noise {InjectionNoise:P0} | Opacity {LifeOpacity:P0} | Hue {RgbHueShiftDegrees:0.#}deg {RgbHueShiftSpeedDegreesPerSecond:+0.#;-0.#;0}deg/s | Reactive {ReactiveMappings.Count} | {InjectionMode} | Th {ThresholdMin:P0}-{ThresholdMax:P0}{(InvertThreshold ? " inv" : string.Empty)}";
+            : $"{(Enabled ? "Enabled" : "Disabled")} | {InputFunction} | {BlendMode} | {LifeMode} | {BinningMode} | Dropout {InjectionNoise:P0} | Opacity {LifeOpacity:P0} | Hue {RgbHueShiftDegrees:0.#}deg {RgbHueShiftSpeedDegreesPerSecond:+0.#;-0.#;0}deg/s | Reactive {ReactiveMappings.Count} | {InjectionMode} | Th {ThresholdMin:P0}-{ThresholdMax:P0}{(InvertThreshold ? " inv" : string.Empty)}";
 
     public IReadOnlyList<LayerEditorOption> BlendModeOptions => LayerEditorOptions.BlendModes;
     public IReadOnlyList<LayerEditorOption> InputFunctionOptions => LayerEditorOptions.SimulationInputFunctions;

@@ -18,11 +18,11 @@ Scene colors feed a persistent image transported by an evolving, pressure-correc
 
 | Control | Range / default | Effect |
 | --- | --- | --- |
-| Flow | 0–100% / 45% | Strength of new forces and current image displacement. Setting it to zero lets existing velocity decay. |
+| Flow | 0–100% / 45% | Strength of new forces and current image displacement. Zero stops dye transport while velocity decays; increases add an immediate stirring impulse. |
 | Persistence | 0–99.5% / 94% | Retained dye versus fresh scene each simulation step. Zero returns exact current input. |
-| Swirl | 0–100% / 45% | Additional broad curling forces, scaled by Flow. |
+| Swirl | 0–100% / 45% | Additional broad curling forces, scaled by Flow. Changes also stir the existing field immediately. |
 
-The preset maps **Low → Fluid Flow** and **High → Persistence**, reducing retention on high-frequency hits. A moving, colorful subject at 90–97% persistence is a useful starting point. High persistence can soften or obscure the source.
+The preset maps **Low → Fluid Flow** and **Mid → Swirl**, preserving dye Persistence on hits. A moving, colorful subject at 90–97% persistence is a useful starting point. High persistence can soften or obscure the source.
 
 ## Time Displacement
 
