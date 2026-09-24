@@ -259,33 +259,8 @@ internal sealed class WebcamCaptureService : IDisposable
     private static void Downscale(byte[] source, int sourceWidth, int sourceHeight, byte[] destination, int targetWidth, int targetHeight, FitMode fitMode)
     {
         var mapping = ImageFit.GetMapping(fitMode, sourceWidth, sourceHeight, targetWidth, targetHeight);
-        int destStride = targetWidth * 4;
-        int sourceStride = sourceWidth * 4;
-
-        Parallel.For(0, targetHeight, row =>
-        {
-            int destRowOffset = row * destStride;
-
-            for (int col = 0; col < targetWidth; col++)
-            {
-                int destIndex = destRowOffset + (col * 4);
-                if (ImageFit.TrySampleMappedBgraSupersampled(source, sourceWidth, sourceHeight, mapping,
-                    col + 0.5, row + 0.5, mirror: false,
-                    out destination[destIndex],
-                    out destination[destIndex + 1],
-                    out destination[destIndex + 2],
-                    out _))
-                {
-                }
-                else
-                {
-                    destination[destIndex] = 0;
-                    destination[destIndex + 1] = 0;
-                    destination[destIndex + 2] = 0;
-                }
-                destination[destIndex + 3] = 255;
-            }
-        });
+        ImageFit.ResampleBgraSupersampled(source, sourceWidth, sourceHeight, mapping, destination, targetWidth, targetHeight,
+            opaque: true, parallel: true);
     }
 
     public void Reset(string? cameraId = null)

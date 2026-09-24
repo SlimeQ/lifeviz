@@ -5,7 +5,12 @@ $ProgressPreference = 'SilentlyContinue'
 # Keep the version, URL and independently pinned upstream checksum together.
 $version = '9.0.1'
 $archiveName = "ffmpeg-$version-essentials_build.zip"
-$archiveUrl = "https://www.gyan.dev/ffmpeg/builds/packages/$archiveName"
+# gyan.dev drops superseded builds from /packages, so prefer Gyan's permanent GitHub
+# release mirror (byte-identical archive) and keep gyan.dev as a fallback.
+$archiveUrls = @(
+    "https://github.com/GyanD/codexffmpeg/releases/download/$version/$archiveName",
+    "https://www.gyan.dev/ffmpeg/builds/packages/$archiveName"
+)
 $expectedHash = 'fec81ae03971d9dd4be3ebe02e263bd2ec1d789483f931bdba5f5715e65da2e9'
 $cacheRoot = Join-Path $PSScriptRoot 'artifacts\ffmpeg'
 $archivePath = Join-Path $cacheRoot $archiveName
@@ -24,18 +29,28 @@ function Get-Sha256 {
 
 if (-not (Test-Path -LiteralPath $archivePath)) {
     Write-Host "Downloading bundled FFmpeg $version..."
-    $downloadPath = "$archivePath.$([Guid]::NewGuid().ToString('N')).download"
-    try {
-        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-        Invoke-WebRequest -UseBasicParsing -Uri $archiveUrl -OutFile $downloadPath
-        if ((Get-Sha256 $downloadPath) -ne $expectedHash) {
-            throw 'Downloaded FFmpeg archive failed SHA-256 verification.'
+    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+    $failures = @()
+    foreach ($archiveUrl in $archiveUrls) {
+        $downloadPath = "$archivePath.$([Guid]::NewGuid().ToString('N')).download"
+        try {
+            Invoke-WebRequest -UseBasicParsing -Uri $archiveUrl -OutFile $downloadPath
+            if ((Get-Sha256 $downloadPath) -ne $expectedHash) {
+                throw 'Downloaded FFmpeg archive failed SHA-256 verification.'
+            }
+            Move-Item -LiteralPath $downloadPath -Destination $archivePath -Force
+            break
+        } catch {
+            $failures += "${archiveUrl}: $($_.Exception.Message)"
+            Write-Warning "FFmpeg download from $archiveUrl failed: $($_.Exception.Message)"
+        } finally {
+            if (Test-Path -LiteralPath $downloadPath) {
+                Remove-Item -LiteralPath $downloadPath -Force
+            }
         }
-        Move-Item -LiteralPath $downloadPath -Destination $archivePath -Force
-    } finally {
-        if (Test-Path -LiteralPath $downloadPath) {
-            Remove-Item -LiteralPath $downloadPath -Force
-        }
+    }
+    if (-not (Test-Path -LiteralPath $archivePath)) {
+        throw "Could not download FFmpeg $version from any source:`n$($failures -join "`n")"
     }
 }
 

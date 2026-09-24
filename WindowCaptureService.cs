@@ -147,6 +147,7 @@ internal sealed class WindowCaptureService : IDisposable
     private sealed class WindowCaptureSession : IDisposable
     {
         private const int CaptureIntervalMilliseconds = 33;
+        private const int ParallelResamplePixelThreshold = 640 * 360;
         private readonly IntPtr _handle;
         private readonly CancellationTokenSource _cts = new();
         private readonly Task _captureTask;
@@ -157,9 +158,18 @@ internal sealed class WindowCaptureService : IDisposable
         private byte[]? _latestBuffer;
         private int _latestWidth;
         private int _latestHeight;
+        private long _latestSequence;
         
         private byte[]? _downscaleBuffer;
         private byte[]? _sourceCopyBuffer;
+
+        // The render loop can poll faster than the ~30 Hz capture loop; re-resampling an unchanged capture is pure waste.
+        private WindowCaptureFrame? _cachedFrame;
+        private long _cachedSequence;
+        private int _cachedColumns;
+        private int _cachedRows;
+        private FitMode _cachedFitMode;
+        private bool _cachedIncludeSource;
 
         public WindowCaptureSession(IntPtr handle)
         {
@@ -204,17 +214,30 @@ internal sealed class WindowCaptureService : IDisposable
                     return null;
                 }
 
-                // Check if we need to resize or if we can just use the buffer
-                // We need a stable copy or we need to hold the lock while downscaling.
-                // Downscaling inside lock is safer for memory but blocks the capture thread from updating.
-                // Capture thread updates every ~16-30ms. Downscale takes ~1-2ms. 
-                // Blocking capture thread briefly is fine.
-                
+                if (_cachedFrame != null &&
+                    _cachedSequence == _latestSequence &&
+                    _cachedColumns == targetColumns &&
+                    _cachedRows == targetRows &&
+                    _cachedFitMode == fitMode &&
+                    _cachedIncludeSource == includeSource)
+                {
+                    return _cachedFrame;
+                }
+
+                // Downscale while holding the lock so the capture thread cannot overwrite _latestBuffer mid-read.
+                // The resample is a few ms, and the capture thread only needs the lock for its final swap.
                 width = _latestWidth;
                 height = _latestHeight;
                 bufferToProcess = _latestBuffer;
 
-                return DownscaleToFrame(bufferToProcess, width, height, targetColumns, targetRows, fitMode, includeSource);
+                var frame = DownscaleToFrame(bufferToProcess, width, height, targetColumns, targetRows, fitMode, includeSource);
+                _cachedFrame = frame;
+                _cachedSequence = _latestSequence;
+                _cachedColumns = targetColumns;
+                _cachedRows = targetRows;
+                _cachedFitMode = fitMode;
+                _cachedIncludeSource = includeSource;
+                return frame;
             }
         }
 
@@ -406,6 +429,7 @@ internal sealed class WindowCaptureService : IDisposable
                             Buffer.BlockCopy(finalBuffer, 0, _latestBuffer, 0, requiredSize);
                             _latestWidth = finalWidth;
                             _latestHeight = finalHeight;
+                            _latestSequence++;
                         }
 
                         if (finalBuffer != buffer)
@@ -456,28 +480,8 @@ internal sealed class WindowCaptureService : IDisposable
             }
             
             var mapping = ImageFit.GetMapping(fitMode, sourceWidth, sourceHeight, columns, rows);
-            
-            Parallel.For(0, rows, row =>
-            {
-                int overlayRowOffset = row * columns * 4;
-
-                for (int col = 0; col < columns; col++)
-                {
-                    byte b = 0;
-                    byte g = 0;
-                    byte r = 0;
-                    if (ImageFit.TrySampleMappedBgraSupersampled(sourceBuffer, sourceWidth, sourceHeight, mapping,
-                        col + 0.5, row + 0.5, mirror: false, out b, out g, out r, out _))
-                    {
-                    }
-                    
-                    int overlayIndex = overlayRowOffset + (col * 4);
-                    overlay[overlayIndex] = b;
-                    overlay[overlayIndex + 1] = g;
-                    overlay[overlayIndex + 2] = r;
-                    overlay[overlayIndex + 3] = 255;
-                }
-            });
+            ImageFit.ResampleBgraSupersampled(sourceBuffer, sourceWidth, sourceHeight, mapping, overlay, columns, rows,
+                opaque: true, parallel: rows * columns >= ParallelResamplePixelThreshold);
             
             // We must return copies or handle buffer lifecycle carefully. 
             // WindowCaptureFrame is used by MainWindow.
