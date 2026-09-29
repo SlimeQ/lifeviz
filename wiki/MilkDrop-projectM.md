@@ -118,18 +118,37 @@ claim to relicense these assets. See [full notices](../ProjectM-NOTICES.md).
 
 ## Rendering limits and verification
 
-Each active layer owns a private OpenGL 3.3 context and renders to an offscreen
-framebuffer at the scene's working resolution. BGRA pixels are read back, flipped
-vertically, made opaque, and handed to LifeViz's existing source compositor.
-Normal opacity, blending and keying then control transparency. This implementation
-does not share OpenGL textures directly with Direct3D; GPU readback and preset
-shader compilation can affect frame pacing, especially at high resolutions or
-with several layers. Rendering and preset loading are currently on the owning
-render/UI thread. Windows x64 and an OpenGL 3.3 graphics driver are required.
+Each active layer owns a private OpenGL 3.3 context on its own render thread and
+renders to an offscreen framebuffer at the scene's working resolution. BGRA pixels
+are read back, flipped vertically, made opaque, and handed to LifeViz's existing
+source compositor. Normal opacity, blending and keying then control transparency.
+This implementation does not share OpenGL textures directly with Direct3D.
+
+Live playback never blocks the UI thread on projectM. Preset loads (shader
+compilation typically takes 0.5–2 s), renderer start-up and each frame's GPU
+wait and readback all happen on the layer's render thread; the frame loop posts
+the newest time/size/audio and shows the newest finished frame, one frame behind.
+While the next preset compiles, the current one keeps playing. Before this, a
+1080p layer used roughly two thirds of the UI thread (about 16 ms per frame) and
+each preset change froze the window for up to two seconds, which with busy scenes
+or the preset preview open left too little time for input and Windows reported
+LifeViz as not responding. The preset preview in **Presets & Playback** uses its
+own render thread the same way, so auditioning presets never stalls the dialog or
+the output behind it. Offline bakes still wait for each preset load and frame, so
+exported frames stay tied to the fixed frame clock.
+
+Each projectM instance holds several scene-sized float render targets; at 1080p
+expect roughly 300 MB of memory per layer. Windows x64 and an OpenGL 3.3 graphics
+driver are required.
+
+Preset loads are logged (`projectM loading preset '...'`) so a freeze or crash
+report can name the preset that was loading; see [Logs and Crash Reports](Logs-and-Crash-Reports.md).
 
 After a Release build, run `dotnet bin/Release/net9.0-windows/lifeviz.dll --smoke-test projectm`
 for playlist, persistence, native rendering, audio, transition, resize, group
-compositing and failure/recovery checks. PNG inspection artifacts are written
+compositing and failure/recovery checks. It also runs live playback through a
+renderer start and a preset switch and fails if any frame-loop tick blocks for
+250 ms or more (measured worst tick is about 2 ms). PNG inspection artifacts are written
 under `bin/Release/net9.0-windows/projectm-smoke/`.
 Run `./tests/Test-ProjectM.ps1` to create a short audio fixture, launch a real
 background bake worker and verify all 60 exported frames decode and animate.

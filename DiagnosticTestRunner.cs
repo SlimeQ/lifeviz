@@ -21,7 +21,7 @@ internal static class DiagnosticTestRunner
             return false;
         }
 
-        Logger.Initialize();
+        Logger.Initialize(testRun: true);
         App.SuppressErrorDialogs = true;
         App.IsDiagnosticTestMode = true;
 

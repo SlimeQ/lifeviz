@@ -28,6 +28,8 @@ public partial class MainWindow
     internal void BeginSceneReplacement()
     {
         FlushPendingConfigSave();
+        // A new/imported scene replaces the old one wholesale, including layers kept for missing inputs.
+        _missingSources.Clear();
         if (_configReady && !_configLoadBlocked)
         {
             string checkpoint = Path.Combine(SceneRecoveryDirectory, DateTime.UtcNow.ToString("yyyyMMdd'T'HHmmssfffffff'Z'") + "-before-import.json");
@@ -41,7 +43,7 @@ public partial class MainWindow
         _configLoadBlocked = !complete;
         _configReady = complete;
         if (complete) SaveConfig();
-        else ReportScenePersistenceIssue("The scene could not be fully applied. Autosave is paused to protect the previous scene. Reconnect missing inputs or load another scene.");
+        else ReportScenePersistenceIssue("The scene could not be fully applied. Autosave is paused to protect the previous scene; this session's changes are kept in a recovery file you can load with Recover... in the Scene Editor. Reconnect missing inputs or load another scene.");
     }
 
     internal void ResetToDefaultProject()
@@ -91,11 +93,11 @@ public partial class MainWindow
         }));
     }
 
-    internal string SceneSaveStatus => _configLoadBlocked ? "Autosave paused: saved scene protected"
-        : _configConflict ? "Autosave paused: another session changed the file"
+    internal string SceneSaveStatus => _configLoadBlocked ? "Autosave paused: saved scene protected (changes kept in a recovery file)"
+        : _configConflict ? "Autosave paused: another session changed the file (changes kept in a recovery file)"
         : _configWriteFailed ? "Autosave failed: retrying"
-        : _configSaveDirty || _pendingConfigJson != null || _inFlightConfigJson != null ? "Autosave pending"
-        : "Autosave up to date";
+        : (_configSaveDirty || _pendingConfigJson != null || _inFlightConfigJson != null ? "Autosave pending" : "Autosave up to date")
+            + MissingInputsStatusSuffix;
 
     internal string? SceneSaveError => _configSaveError;
     internal string SceneRecoveryDirectory => SceneFileStore.HistoryDirectory(ConfigPath);

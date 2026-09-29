@@ -1,5 +1,15 @@
 # LifeViz
 
+## MilkDrop stays responsive, scenes survive missing inputs, crashes leave evidence
+
+**MilkDrop / projectM** layers now render on their own thread. Preset loads (0.5–2 s of shader compilation each) and 1080p frames no longer run on the UI thread, which previously spent about two thirds of its time inside projectM and could stop processing input entirely ("Not Responding") during preset changes or while auditioning presets. The frame loop now stays at about 2 ms per tick through preset switches; the preset preview uses its own render thread too. See [MilkDrop / projectM](wiki/MilkDrop-projectM.md).
+
+**Missing inputs no longer pause autosave.** A saved layer whose file, window (for example a Picture-in-Picture window) or webcam is unavailable is kept in the saved scene at its position and loads again when available; inputs that vanish mid-session are kept the same way. Previously one missing input silently paused autosave for the whole session, so every later edit was lost on restart. **Forget Missing Inputs...** in the main context menu removes them. When autosave truly must pause (unreadable scene, session conflict), the live scene still goes to an `autosave-paused-*.json` recovery file. See [Scene Saving & Recovery](wiki/Scene-Saving-and-Recovery.md).
+
+**Crash and freeze visibility.** Previous session logs are kept (`lifeviz.1-3.log`), a session that ends without a clean shutdown is reported on the next launch with its saved log and last MilkDrop preset, UI freezes over 4 s are logged, and background-thread failures are logged before exit. See [Logs and Crash Reports](wiki/Logs-and-Crash-Reports.md).
+
+Validate with `dotnet build -c Release`, then `--smoke-test projectm`, `--smoke-test scene-persistence`, `--smoke-test session-health`, and `./tests/Test-ProjectM.ps1`.
+
 ## Fluid Ink response and simulation control audit
 
 Fluid Ink now has stronger upper-range Flow and immediate stirring when Flow/Swirl change, while keeping its default transport strength. **Punchy mappings** now drives Low → Flow and Mid → Swirl without reducing Persistence. Mapping rows show live input, envelope response, and effective output, including missing audio and input-ceiling indicators. Opacity help explains direction and Subtractive blending.

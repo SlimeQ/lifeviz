@@ -15,7 +15,17 @@ LifeViz autosaves the applied scene to `%APPDATA%\lifeviz\config.json`. A graphi
 
 Startup validates the primary file, then tries its `.bak` and newest valid automatic history if the primary is missing or corrupt. A deliberately empty `Sources` array is valid and does not trigger recovery. Damaged predecessor contents are retained as `.invalid` files when a repaired revision is committed. Files from a newer autosave schema pause loading rather than falling back and overwriting them with an older schema.
 
-If no revision loads, or some saved inputs cannot be restored, autosave pauses and explains why. The original scene stays on disk while a default or partial scene is displayed. Reconnect the missing windows, cameras, or media and restart, or explicitly load/apply a complete replacement. Export new work to a separate file while autosave is paused. A startup recovery flag may reduce display settings for launch, but it does not eagerly rewrite the scene before its sources load.
+### Missing inputs
+
+A saved layer whose input is unavailable at startup — a moved or deleted file, a window that is not open (for example a browser Picture-in-Picture window), or an unplugged webcam — no longer pauses autosave. LifeViz keeps that layer's saved settings exactly as they were and writes them back into every autosave at the same position (including inside groups), so the layer loads again on a later launch once the input is back. A startup message lists the missing inputs. Inputs that disappear during a session (a captured window closes, a camera is unplugged, a file is deleted or moved) are detached from the live output as before, but they are kept in the saved scene the same way. Media that is present but cannot be decoded is still removed.
+
+The main context menu's status line shows how many missing inputs are being kept, and **Forget Missing Inputs...** removes them from the saved scene after confirmation (the previous file stays in history). **Remove All Sources**, **New Project** and loading/recovering another scene also discard them. Deleting a group discards the missing inputs it contained.
+
+Before this change a single missing input paused autosave for the whole session, so a long session's edits could be lost on the next restart without any visible sign.
+
+### When autosave must pause
+
+If no revision loads, the file uses an unsupported source type or newer schema, a replacement scene only partly applies, or another session changed the file, autosave pauses and explains why. The original scene stays on disk while a default or partial scene is displayed. The live scene is still written, after each change, to `config.json.historyutosave-paused-<time>-<session>.json` (the newest ten are kept, separately from automatic history), including at shutdown. The next launch points to that file if it is newer than `config.json`; load it with **Recover...**. A startup recovery flag may reduce display settings for launch, but it does not eagerly rewrite the scene before its sources load.
 
 ## Recovering a previous scene
 
@@ -31,4 +41,4 @@ Old releases did not maintain this revision history. Updating cannot reconstruct
 
 ## Validation
 
-`--smoke-test scene-persistence` checks replacement/backups, deliberate empty saves, corrupted primary and backup recovery, stale-writer rejection, history retention, project import, locked-file retry without another edit, unavailable-input protection, failed-load protection, editor toolbar layout, and a dirty shutdown with an in-flight writer. `config-save-coalescing` separately covers duplicate saves and an `A -> B -> A` race. See [Build & Install](Build-and-Install.md) for commands. These use isolated smoke data; they do not induce a real graphics-driver fault or a physical power loss.
+`--smoke-test scene-persistence` checks replacement/backups, deliberate empty saves, corrupted primary and backup recovery, stale-writer rejection, history retention, project import, locked-file retry without another edit, missing-input preservation (positions, nesting, neighbour edits, group deletion, mid-session detaches, Forget), the blocked-autosave recovery file, failed-load protection, editor toolbar layout, and a dirty shutdown with an in-flight writer. `config-save-coalescing` separately covers duplicate saves and an `A -> B -> A` race. See [Build & Install](Build-and-Install.md) for commands. These use isolated smoke data; they do not induce a real graphics-driver fault or a physical power loss.

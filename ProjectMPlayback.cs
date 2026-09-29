@@ -6,12 +6,16 @@ namespace lifeviz;
 
 internal sealed class ProjectMPlayback : IDisposable
 {
-    private ProjectMRenderer? _renderer;
+    private static readonly TimeSpan OfflineTimeout = TimeSpan.FromSeconds(60);
+    private ProjectMRenderWorker? _worker;
     private readonly ProjectMPlaylist _playlist = new();
     private ProjectMSettings _settings = new();
     private readonly float[] _audio = new float[1024];
     private readonly HashSet<string> _failedPresets = new(StringComparer.OrdinalIgnoreCase);
     private string? _loaded;
+    private string? _requested;
+    private int _loadId;
+    private long _consumedToken;
     private double? _lastSceneTime;
     private double _time;
     private double _lastRenderedTime = -1;
@@ -32,6 +36,9 @@ internal sealed class ProjectMPlayback : IDisposable
 
     public void Pause(double sceneTime) => _lastSceneTime = sceneTime;
 
+    // Live playback never blocks the UI thread on projectM: preset loads and frames run on the
+    // layer's render thread and the newest finished frame is shown (one frame of latency).
+    // Offline bakes wait for each result so exported frames stay exact and deterministic.
     public byte[]? Render(int width, int height, double sceneTime, bool offline, AudioBeatDetector audio)
     {
         if (_offline != offline || (_lastSceneTime.HasValue && sceneTime < _lastSceneTime))
@@ -49,50 +56,48 @@ internal sealed class ProjectMPlayback : IDisposable
         if (_fatal) return _frame;
         try
         {
-            if (_renderer == null && _loaded == null) _time = 0;
+            if (_worker == null && _loaded == null) _time = 0;
             if (!ProjectMLibrary.EnsureReady(offline))
             {
                 Status = "Preparing the bundled preset library for first use...";
                 return null;
             }
-            _renderer ??= new ProjectMRenderer();
+            _worker ??= new ProjectMRenderWorker("LifeViz projectM layer");
+            if (_worker.FatalError is string fatal) throw new InvalidOperationException(fatal);
             _playlist.Tick(_time, audio.BeatCount);
-            // Bound retries per frame; a broken preset cannot trap the UI in a loop.
-            for (int attempt = 0; attempt < Math.Min(4, _settings.Presets.Count); attempt++)
+            if (!ResolvePreset(offline, audio.BeatCount))
             {
-                string? candidate = _playlist.Current;
-                if (candidate == null || candidate == _loaded) break;
-                if (!_failedPresets.Contains(candidate))
-                {
-                    string? error;
-                    try { error = File.Exists(ProjectMLibrary.Resolve(candidate))
-                        ? _renderer.Load(candidate, _time, _settings.TransitionSeconds, _loaded == null)
-                        : "Preset file is missing."; }
-                    catch (Exception ex) when (ex is IOException or ArgumentException or UnauthorizedAccessException) { error = ex.Message; }
-                    if (error == null)
-                    {
-                        _loaded = candidate;
-                        _lastRenderedTime = -1;
-                        Status = $"Playing: {candidate}";
-                        break;
-                    }
-                    _failedPresets.Add(candidate);
-                    Logger.Warn($"projectM skipped '{candidate}': {error}");
-                }
-                if (_failedPresets.Count >= _settings.Presets.Count)
-                {
-                    Status = "No playable presets. Check the playlist files; press Retry / Restart after fixing them.";
-                    if (offline) throw new InvalidOperationException(Status);
-                    return _frame;
-                }
-                _playlist.Move(1, _time, audio.BeatCount);
+                Status = "No playable presets. Check the playlist files; press Retry / Restart after fixing them.";
+                if (offline) throw new InvalidOperationException(Status);
+                return _frame;
             }
-            if (_loaded == null) return null;
-            if (_lastRenderedTime == _time && width == _lastWidth && height == _lastHeight) return _frame;
-            audio.CopyProjectMPcm(_audio, offline);
-            _frame = _renderer.Render(width, height, _time, _audio);
-            _lastRenderedTime = _time; _lastWidth = width; _lastHeight = height;
-            FrameToken++;
+            if (_loaded == null)
+            {
+                if (_requested != null) Status = $"Loading: {_requested}";
+                return null;
+            }
+
+            bool stale = _lastRenderedTime != _time || width != _lastWidth || height != _lastHeight;
+            if (stale)
+            {
+                audio.CopyProjectMPcm(_audio, offline);
+                _worker.RequestRender(width, height, _time, _audio);
+                _lastRenderedTime = _time; _lastWidth = width; _lastHeight = height;
+                if (offline && !_worker.WaitForFrame(_consumedToken, OfflineTimeout))
+                    throw new InvalidOperationException(_worker.FatalError ?? "projectM did not finish a frame in time.");
+            }
+
+            byte[]? pixels = _worker.AcquireLatest(out int frameWidth, out int frameHeight, out long token);
+            if (token != _consumedToken)
+            {
+                _consumedToken = token;
+                if (pixels != null && frameWidth == width && frameHeight == height)
+                {
+                    _frame = pixels;
+                    FrameToken++;
+                }
+            }
+            if (_worker.FatalError is string failed) throw new InvalidOperationException(failed);
             return _frame;
         }
         catch (Exception ex)
@@ -100,19 +105,92 @@ internal sealed class ProjectMPlayback : IDisposable
             Status = $"projectM unavailable: {ex.Message}";
             Logger.Warn(Status);
             _fatal = true;
-            _renderer?.Dispose(); _renderer = null;
+            _worker?.Dispose(); _worker = null;
             if (offline) throw new InvalidOperationException(Status, ex);
             return _frame;
         }
     }
 
+    // Returns false when every playlist entry has failed.
+    private bool ResolvePreset(bool offline, long beatCount)
+    {
+        if (_requested != null)
+        {
+            // Live: a load is in flight on the render thread; keep showing the current preset.
+            var result = _worker!.TakeLoadResult();
+            if (result == null || result.Id != _loadId) return true;
+            string requested = _requested;
+            _requested = null;
+            if (!ApplyLoadResult(requested, result.Error))
+            {
+                if (AllPresetsFailed) return false;
+                _playlist.Move(1, _time, beatCount);
+            }
+        }
+
+        // Bound retries per frame; a broken preset cannot trap the UI in a loop.
+        for (int attempt = 0; attempt < Math.Min(4, _settings.Presets.Count); attempt++)
+        {
+            string? candidate = _playlist.Current;
+            if (candidate == null || candidate == _loaded) break;
+            if (!_failedPresets.Contains(candidate))
+            {
+                string? missing = null;
+                try { if (!File.Exists(ProjectMLibrary.Resolve(candidate))) missing = "Preset file is missing."; }
+                catch (Exception ex) when (ex is IOException or ArgumentException or UnauthorizedAccessException) { missing = ex.Message; }
+                if (missing != null)
+                {
+                    MarkFailed(candidate, missing);
+                }
+                else
+                {
+                    int id = ++_loadId;
+                    _requested = candidate;
+                    Logger.Info($"projectM loading preset '{candidate}'.");
+                    _worker!.RequestLoad(id, candidate, _time, _settings.TransitionSeconds, _loaded == null);
+                    if (!offline) return true;
+                    var result = _worker.WaitForLoadResult(id, OfflineTimeout)
+                        ?? throw new InvalidOperationException($"projectM did not finish loading '{candidate}' in time.");
+                    if (_worker.FatalError is string fatal) throw new InvalidOperationException(fatal);
+                    _requested = null;
+                    if (ApplyLoadResult(candidate, result.Error)) break;
+                }
+            }
+            if (AllPresetsFailed) return false;
+            _playlist.Move(1, _time, beatCount);
+        }
+        return true;
+    }
+
+    private bool AllPresetsFailed => _failedPresets.Count >= _settings.Presets.Count;
+
+    private bool ApplyLoadResult(string candidate, string? error)
+    {
+        if (error == null)
+        {
+            _loaded = candidate;
+            _lastRenderedTime = -1;
+            Status = $"Playing: {candidate}";
+            return true;
+        }
+        MarkFailed(candidate, error);
+        return false;
+    }
+
+    private void MarkFailed(string candidate, string error)
+    {
+        _failedPresets.Add(candidate);
+        Logger.Warn($"projectM skipped '{candidate}': {error}");
+    }
+
     public void Move(int direction, long beatCount) => _playlist.Move(direction, _time, beatCount);
     public void Reset()
     {
-        _renderer?.Dispose(); _renderer = null;
-        _playlist.Reset(); _failedPresets.Clear(); _loaded = null; _fatal = false;
+        _worker?.Dispose(); _worker = null;
+        _playlist.Reset(); _failedPresets.Clear(); _loaded = null; _requested = null; _fatal = false;
+        _consumedToken = 0;
         _time = 0; _lastSceneTime = null; _lastRenderedTime = -1; _frame = null;
         Status = "Preparing projectM...";
     }
-    public void Dispose() { _renderer?.Dispose(); _renderer = null; }
+    public void Dispose() { _worker?.Dispose(); _worker = null; }
 }

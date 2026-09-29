@@ -79,6 +79,7 @@ public partial class MainWindow
             CaptureSourceList(_sources, 4);
             Check(source.ProjectMPlayback.Status.StartsWith("Playing:"), "Preset retry failed to recover.");
             _isOfflineRendering = false;
+            RunLiveProjectMNonBlockingSmoke(source, settings);
             source.ProjectMPlayback.Configure(new ProjectMSettings { Presets = new() { "missing-smoke-preset.milk" } });
             CaptureSourceList(_sources, 5);
             Check(source.ProjectMPlayback.Status.StartsWith("No playable presets"), "Live missing presets must report an error without terminating playback.");
@@ -109,5 +110,38 @@ public partial class MainWindow
         var bitmap = BitmapSource.Create(width, height, 96, 96, PixelFormats.Bgra32, null, pixels, width * 4);
         var encoder = new PngBitmapEncoder(); encoder.Frames.Add(BitmapFrame.Create(bitmap));
         using var stream = File.Create(path); encoder.Save(stream);
+    }
+
+    // Live projectM work (renderer creation, preset shader compiles, frames) runs on a render
+    // thread. The frame loop must keep ticking quickly while presets load and switch.
+    private void RunLiveProjectMNonBlockingSmoke(CaptureSource source, ProjectMSettings settings)
+    {
+        static void Check(bool ok, string message) { if (!ok) throw new InvalidOperationException(message); }
+        var playback = source.ProjectMPlayback!;
+        playback.Configure(settings); playback.Reset();
+        double time = 20, worst = 0;
+        bool Tick()
+        {
+            long start = System.Diagnostics.Stopwatch.GetTimestamp();
+            CaptureSourceList(_sources, time += 1.0 / 30);
+            worst = Math.Max(worst, System.Diagnostics.Stopwatch.GetElapsedTime(start).TotalMilliseconds);
+            System.Threading.Thread.Sleep(5);
+            return true;
+        }
+        bool TickUntil(Func<bool> done)
+        {
+            var deadline = DateTime.UtcNow.AddSeconds(20);
+            while (DateTime.UtcNow < deadline) { Tick(); if (done()) return true; }
+            return false;
+        }
+        Check(TickUntil(() => source.LastFrame != null && playback.Status.StartsWith("Playing:")),
+            $"Live projectM never produced a frame: {playback.Status}");
+        long token = playback.FrameToken;
+        Check(TickUntil(() => playback.FrameToken > token + 5), "Live projectM stopped delivering frames.");
+        playback.Move(1, _audioBeatDetector.BeatCount);
+        Check(TickUntil(() => playback.Status.Contains(settings.Presets[1]) && playback.FrameToken > token + 10),
+            $"Live projectM did not switch presets: {playback.Status}");
+        Check(worst < 250, $"Live projectM blocked the frame loop for {worst:F0} ms while loading presets.");
+        Logger.Info($"projectM live playback stayed off the UI thread: worst frame-loop tick {worst:F1} ms across renderer start and a preset switch.");
     }
 }

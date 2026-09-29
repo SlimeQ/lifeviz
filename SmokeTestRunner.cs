@@ -84,7 +84,7 @@ internal static partial class SmokeTestRunner
             return false;
         }
 
-        Logger.Initialize();
+        Logger.Initialize(testRun: true);
         App.SuppressErrorDialogs = true;
         App.IsSmokeTestMode = true;
 
@@ -197,6 +197,7 @@ internal static partial class SmokeTestRunner
                 "gpu-source" => RunGpuSourceCompositeSmokeTest(),
                 "source-reset" => RunSourceResetSmokeTest(),
                 "file-replacement" => RunFileReplacementSmokeTest(),
+                "session-health" => RunSessionHealthSmokeTest(),
                 "gpu-render" => RunGpuPresentationSmokeTest(),
                 "profile-mainloop" => RunFrameProfileSmokeTest(),
                 "profile-mainloop-sim-group" => RunFrameProfileSmokeTest(240, "smoke-mainloop-sim-group", rgbMode: false, smokeVideoPath: null, includeSimGroup: true),

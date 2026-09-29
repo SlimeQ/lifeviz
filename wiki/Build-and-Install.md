@@ -87,6 +87,7 @@ Validation:
 ```powershell
 dotnet build -c Release
 dotnet bin/Release/net9.0-windows/lifeviz.dll --smoke-test projectm
+# includes a live check that preset loads/switches never block the frame loop (>= 250 ms fails)
 ./tests/Test-ProjectM.ps1
 ```
 
@@ -450,7 +451,10 @@ dotnet build lifeviz.csproj -c Release
 dotnet bin/Release/net9.0-windows/lifeviz.dll --smoke-test scene-persistence
 dotnet bin/Release/net9.0-windows/lifeviz.dll --smoke-test config-save-coalescing
 dotnet bin/Release/net9.0-windows/lifeviz.dll --smoke-test render-failure-cleanup
+dotnet bin/Release/net9.0-windows/lifeviz.dll --smoke-test session-health
 ```
+
+The persistence smoke also covers missing-input preservation (positions, nesting, neighbour edits, group deletion, mid-session detaches, **Forget Missing Inputs**) and the recovery file written while autosave is paused. `session-health` covers unexpected-exit reports, session-log rotation and the UI freeze watchdog in an isolated temp folder; see [Logs and Crash Reports](Logs-and-Crash-Reports.md). Smoke and diagnostic runs log to `%APPDATA%\lifeviz\logs\lifeviz-test.log`, not the desktop app's `lifeviz.log`.
 
 The persistence smoke uses a unique temporary directory and leaves failed fixtures for diagnosis. It also writes `smoke-scene-recovery-editor.png` beside the test executable for layout inspection. It verifies real locked-file retry, backups/corruption/conflict behavior, and an in-flight save during shutdown without overwriting the user's scene. See [Scene Saving & Recovery](Scene-Saving-and-Recovery.md). Changes take effect in builds/installers containing this code; existing installed releases retain their previous behavior.
 
@@ -463,3 +467,4 @@ dotnet bin/Release/net9.0-windows/lifeviz.dll --smoke-test group-transparency
 ```
 
 The isolated blending smoke exercises both compositors, all 64 simulation/group blend combinations, shared inputs, ordered clipping, stacked groups over successive frames, more than eight outputs, empty/disabled groups, editor live/draft controls, and scene roundtrips. It writes `smoke-simulation-blending-editor.png` beside the executable for visual inspection. No saved user scene is loaded or modified. The group-transparency smoke checks the resolved group alpha and its subsequent Normal blend over the input stack separately.
+
