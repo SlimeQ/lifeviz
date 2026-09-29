@@ -96,6 +96,7 @@ public partial class MainWindow
         if (pixels != null && pixels.Length != engine.Columns * engine.Rows * 4) pixels = null;
         source.LastFrame = pixels == null ? null : new SourceFrame(pixels, engine.Columns, engine.Rows, null,
             engine.Columns, engine.Rows, source.ProjectMPlayback.FrameToken);
+        if (source.LastFrame != null) RecordSourceFreshnessMetrics(source, source.LastFrame);
         source.FirstFrameReceived = pixels != null;
         source.HasError = pixels == null;
     }

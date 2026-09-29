@@ -180,12 +180,19 @@ internal sealed class ProjectMRenderWorker : IDisposable
                     if (load != null)
                     {
                         string? error;
+                        long loadStart = System.Diagnostics.Stopwatch.GetTimestamp();
                         try { error = renderer.Load(load.Path, load.Time, load.TransitionSeconds, load.First); }
                         catch (Exception ex) when (ex is System.IO.IOException or ArgumentException or UnauthorizedAccessException) { error = ex.Message; }
                         lock (_gate) _loadResult = new LoadResult(load.Id, error);
+                        LogIfSlow("preset load", loadStart, 1000);
                     }
 
-                    if (render != null) Publish(renderer.Render(render.Width, render.Height, render.Time, render.Audio), render.Width, render.Height);
+                    if (render != null)
+                    {
+                        long renderStart = System.Diagnostics.Stopwatch.GetTimestamp();
+                        Publish(renderer.Render(render.Width, render.Height, render.Time, render.Audio), render.Width, render.Height);
+                        LogIfSlow($"{render.Width}x{render.Height} frame", renderStart, 200);
+                    }
                 }
                 finally
                 {
@@ -205,6 +212,26 @@ internal sealed class ProjectMRenderWorker : IDisposable
             // _wake is deliberately not disposed: the UI thread may still signal it after exit.
         }
     }
+
+    // Slow native calls are the usual cause of a stuttering MilkDrop layer; make them visible.
+    // Rate-limited to one line per 10 s per renderer so a very heavy preset cannot flood the log.
+    private void LogIfSlow(string operation, long startTimestamp, double thresholdMilliseconds)
+    {
+        double elapsed = System.Diagnostics.Stopwatch.GetElapsedTime(startTimestamp).TotalMilliseconds;
+        if (elapsed < thresholdMilliseconds) return;
+        if (_lastSlowLog != 0 && System.Diagnostics.Stopwatch.GetElapsedTime(_lastSlowLog).TotalSeconds < 10)
+        {
+            _suppressedSlowLogs++;
+            return;
+        }
+        string more = _suppressedSlowLogs > 0 ? $" ({_suppressedSlowLogs} more slow operations in the previous 10 s)" : "";
+        Logger.Info($"{_thread.Name}: {operation} took {elapsed:F0} ms{more}.");
+        _lastSlowLog = System.Diagnostics.Stopwatch.GetTimestamp();
+        _suppressedSlowLogs = 0;
+    }
+
+    private long _lastSlowLog;
+    private int _suppressedSlowLogs;
 
     private void Publish(byte[] pixels, int width, int height)
     {

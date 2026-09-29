@@ -128,7 +128,32 @@ Live playback never blocks the UI thread on projectM. Preset loads (shader
 compilation typically takes 0.5–2 s), renderer start-up and each frame's GPU
 wait and readback all happen on the layer's render thread; the frame loop posts
 the newest time/size/audio and shows the newest finished frame, one frame behind.
-While the next preset compiles, the current one keeps playing. Before this, a
+
+Preset changes are seamless. Each layer keeps a pair of renderers, each on its
+own thread with its own OpenGL context. The next preset loads into the idle one
+while the current preset keeps animating, plays off screen for 0.75 s (fed with
+the live audio, so it is already in motion and warps the image that renderer
+last showed, much like MilkDrop's own morph), then the two outputs crossfade over
+the playlist's **Transition** time; the old renderer becomes the idle one for the
+next change. Loading into the displayed renderer instead froze the layer's image
+for 0.2–0.9 s on every change (longer for heavy presets). The pair is created
+once, while the first preset loads, and the idle renderer renders once whenever
+the scene size changes, because creating an OpenGL context or allocating a
+renderer's scene-sized targets mid-switch also stalls the playing renderer.
+Only one change runs at a time. With **Transition** at 0 the switch is a cut
+after the pre-roll.
+
+About one preset in ten only warps the image it is given and draws nothing
+itself. If such a preset is still black after the pre-roll, LifeViz loads it
+into the playing renderer with projectM's own soft transition instead (which
+hands it the current image), accepting that renderer's brief load pause for just
+that switch. Very heavy presets can still render slowly on their own; each
+renderer logs any frame slower than 200 ms or preset load slower than 1 s
+(at most one line per 10 s).
+
+Because of the renderer pair, expect roughly twice projectM's memory per layer
+(each instance holds several scene-sized float render targets; about 300 MB at
+1080p). Before this, a
 1080p layer used roughly two thirds of the UI thread (about 16 ms per frame) and
 each preset change froze the window for up to two seconds, which with busy scenes
 or the preset preview open left too little time for input and Windows reported
@@ -137,9 +162,10 @@ own render thread the same way, so auditioning presets never stalls the dialog o
 the output behind it. Offline bakes still wait for each preset load and frame, so
 exported frames stay tied to the fixed frame clock.
 
-Each projectM instance holds several scene-sized float render targets; at 1080p
-expect roughly 300 MB of memory per layer. Windows x64 and an OpenGL 3.3 graphics
-driver are required.
+Windows x64 and an OpenGL 3.3 graphics driver are required. Profiling runs
+(`--smoke-test profile-current-scene` and friends) now report
+`capture_projectm_fresh_frame_ratio`, the share of frames in which a MilkDrop
+layer delivered a new image.
 
 Preset loads are logged (`projectM loading preset '...'`) so a freeze or crash
 report can name the preset that was loading; see [Logs and Crash Reports](Logs-and-Crash-Reports.md).
@@ -148,7 +174,10 @@ After a Release build, run `dotnet bin/Release/net9.0-windows/lifeviz.dll --smok
 for playlist, persistence, native rendering, audio, transition, resize, group
 compositing and failure/recovery checks. It also runs live playback through a
 renderer start and a preset switch and fails if any frame-loop tick blocks for
-250 ms or more (measured worst tick is about 2 ms). PNG inspection artifacts are written
+250 ms or more (measured worst tick is about 2–7 ms), and switches presets at a
+real 30 fps: presets that draw on their own must crossfade from the standby
+renderer without the layer's image pausing for 250 ms or more (measured 36 ms,
+one frame), and a warp-only preset must not leave the layer black. PNG inspection artifacts are written
 under `bin/Release/net9.0-windows/projectm-smoke/`.
 Run `./tests/Test-ProjectM.ps1` to create a short audio fixture, launch a real
 background bake worker and verify all 60 exported frames decode and animate.

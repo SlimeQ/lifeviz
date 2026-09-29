@@ -12318,6 +12318,7 @@ public partial class MainWindow : Window
             CaptureSource.SourceType.File => "capture_file_fresh_frame_ratio",
             CaptureSource.SourceType.VideoSequence => "capture_sequence_fresh_frame_ratio",
             CaptureSource.SourceType.AutoClip => "capture_autoclip_fresh_frame_ratio",
+            CaptureSource.SourceType.ProjectM => "capture_projectm_fresh_frame_ratio",
             _ => string.Empty
         };
 

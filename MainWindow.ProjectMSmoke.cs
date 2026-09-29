@@ -119,13 +119,28 @@ public partial class MainWindow
         static void Check(bool ok, string message) { if (!ok) throw new InvalidOperationException(message); }
         var playback = source.ProjectMPlayback!;
         playback.Configure(settings); playback.Reset();
-        double time = 20, worst = 0;
+        double time = 20, worst = 0, worstGap = 0;
+        long lastFreshToken = 0, lastFreshAt = 0;
+        string lastPhase = "";
+        long nextTick = System.Diagnostics.Stopwatch.GetTimestamp();
         bool Tick()
         {
             long start = System.Diagnostics.Stopwatch.GetTimestamp();
             CaptureSourceList(_sources, time += 1.0 / 30);
             worst = Math.Max(worst, System.Diagnostics.Stopwatch.GetElapsedTime(start).TotalMilliseconds);
-            System.Threading.Thread.Sleep(5);
+            if (playback.FrameToken != lastFreshToken)
+            {
+                double gap = System.Diagnostics.Stopwatch.GetElapsedTime(lastFreshAt).TotalMilliseconds;
+                if (lastFreshToken != 0 && gap > 120) Logger.Info($"projectM smoke gap {gap:F0} ms: {lastPhase} -> {playback.Phase}");
+                if (lastFreshToken != 0) worstGap = Math.Max(worstGap, gap);
+                lastFreshToken = playback.FrameToken; lastFreshAt = System.Diagnostics.Stopwatch.GetTimestamp();
+                lastPhase = playback.Phase;
+            }
+            // Tick in real time at 30 fps like the app, so scene time and render-thread time agree.
+            nextTick += System.Diagnostics.Stopwatch.Frequency / 30;
+            long wait = nextTick - System.Diagnostics.Stopwatch.GetTimestamp();
+            if (wait > 0) System.Threading.Thread.Sleep(TimeSpan.FromSeconds(wait / (double)System.Diagnostics.Stopwatch.Frequency));
+            else nextTick = System.Diagnostics.Stopwatch.GetTimestamp();
             return true;
         }
         bool TickUntil(Func<bool> done)
@@ -138,10 +153,52 @@ public partial class MainWindow
             $"Live projectM never produced a frame: {playback.Status}");
         long token = playback.FrameToken;
         Check(TickUntil(() => playback.FrameToken > token + 5), "Live projectM stopped delivering frames.");
-        playback.Move(1, _audioBeatDetector.BeatCount);
-        Check(TickUntil(() => playback.Status.Contains(settings.Presets[1]) && playback.FrameToken > token + 10),
-            $"Live projectM did not switch presets: {playback.Status}");
+        Check(worst < 250, $"Live projectM blocked the frame loop for {worst:F0} ms while starting the renderer.");
+
+        // Presets that draw on their own from a clean start (verified with silent audio) switch via a
+        // standby renderer and crossfade; the layer must keep animating through each switch.
+        string[] drawing =
+        {
+            "Fractal/Nested Circle/NeW Adam Master Mashup FX 2 Geiss - Reaction Diffusion 34 + Swelling Spiral  + Liquid Fire  + Geiss an28 --- Isosceles edit.milk",
+            "Geometric/Honeycomb/suksma - yin - 360 - Organic circuits - hate shade.milk",
+            "Particles/Points Trails/271 nz+ m19.milk"
+        };
+        // Only warps the image it inherits; from a clean renderer it stays black, so it switches in place.
+        const string feedbackOnly = "Waveform/Spectrum/couldn't not.milk";
+        foreach (string preset in drawing.Append(feedbackOnly))
+            Check(ProjectMLibrary.Presets.Contains(preset), $"Smoke preset missing from the bundled library: {preset}");
+        var switching = new ProjectMSettings { Presets = new(drawing) { feedbackOnly }, Order = "Ordered", Advance = "Hold", TransitionSeconds = 1 };
+        playback.Configure(switching); playback.Reset();
+        Check(TickUntil(() => playback.Status.Contains(drawing[0]) && playback.FrameToken > 0 && !playback.IsSwitchingPresets),
+            $"Live projectM did not start the switching playlist: {playback.Status}");
+        double worstCrossfadeGap = 0;
+        for (int i = 1; i <= drawing.Length; i++)
+        {
+            // Let the current preset reach steady playback first; its own first frames are not the switch.
+            long settled = playback.FrameToken;
+            Check(TickUntil(() => playback.FrameToken > settled + 15), "Live projectM stopped delivering frames before a switch.");
+            long before = playback.FrameToken, inPlaceBefore = playback.InPlaceSwitches, crossfadeBefore = playback.CrossfadeFrames;
+            worstGap = 0;
+            playback.Move(1, _audioBeatDetector.BeatCount);
+            string expected = i < drawing.Length ? drawing[i] : feedbackOnly;
+            Check(TickUntil(() => !playback.IsSwitchingPresets && playback.Status.Contains(expected) && playback.FrameToken > before + 10),
+                $"Live projectM did not complete the switch to {expected}: {playback.Status}");
+            if (i < drawing.Length)
+            {
+                Check(playback.InPlaceSwitches == inPlaceBefore && playback.CrossfadeFrames > crossfadeBefore + 2,
+                    $"Switching to {expected} did not crossfade from a standby renderer.");
+                worstCrossfadeGap = Math.Max(worstCrossfadeGap, worstGap);
+            }
+            else
+            {
+                // A warp-only preset either warps the reused standby's image or, if that is black,
+                // switches in place with projectM's transition. Either way the layer must not go black.
+                Check(source.LastFrame != null && ProjectMPlayback.MeanLuminance(source.LastFrame.Downscaled) >= 3,
+                    $"The feedback-only preset left the layer black ({playback.InPlaceSwitches - inPlaceBefore} in-place switches).");
+            }
+        }
         Check(worst < 250, $"Live projectM blocked the frame loop for {worst:F0} ms while loading presets.");
-        Logger.Info($"projectM live playback stayed off the UI thread: worst frame-loop tick {worst:F1} ms across renderer start and a preset switch.");
+        Check(worstCrossfadeGap < 250, $"The projectM layer froze for {worstCrossfadeGap:F0} ms during a crossfaded preset switch.");
+        Logger.Info($"projectM live playback stayed off the UI thread: worst frame-loop tick {worst:F1} ms; crossfaded switches kept the layer moving (longest frame gap {worstCrossfadeGap:F0} ms, {playback.CrossfadeFrames} blended frames); feedback-only preset stayed visible ({playback.InPlaceSwitches} in-place switches).");
     }
 }

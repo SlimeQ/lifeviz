@@ -97,13 +97,23 @@ public partial class MainWindow
         int count = _missingSources.Count;
         if (count == _missingSourcesReported) return;
         _missingSourcesReported = count;
-        string message = $"LifeViz could not find {(count == 1 ? "this input" : $"these {count} inputs")} from your saved scene:\n\n" +
-            string.Join("\n", _missingSources.Take(12).Select(missing => "• " + missing.Description)) +
-            (count > 12 ? $"\n• …and {count - 12} more" : "") +
-            "\n\nThey stay in your saved scene and will load again when they are available. Autosave keeps running for everything else.\n\n" +
-            "To remove them for good, right-click the output and choose Forget Missing Inputs.";
-        Logger.Warn(message.Replace("\n", " "));
-        ShowSceneNotice(message);
+        string list = string.Join("\n", _missingSources.Take(12).Select(missing => "• " + missing.Description)) +
+            (count > 12 ? $"\n• …and {count - 12} more" : "");
+        Logger.Warn($"Saved inputs unavailable at startup ({count}): {list.Replace('\n', ' ')}");
+        if (App.SuppressErrorDialogs || App.IsSmokeTestMode || App.IsDiagnosticTestMode || BackgroundBakeWorker.IsWorker) return;
+        // These layers are not visible in the Scene Editor, so ask once instead of warning on every
+        // launch about something the user cannot find or delete there.
+        string message = $"LifeViz could not find {(count == 1 ? "this input" : $"these {count} inputs")} from your saved scene:\n\n{list}\n\n" +
+            "Remove them from the scene?\n\n" +
+            "Yes: remove them for good (the current scene file stays in history).\n" +
+            "No: keep them hidden in the saved scene; they load again once the file, window or camera is back. " +
+            "You can remove them later with Forget Missing Inputs in the right-click menu.";
+        Dispatcher.BeginInvoke(new Action(() =>
+        {
+            if (_isShuttingDown || _missingSources.Count == 0) return;
+            if (MessageBox.Show(this, message, "Missing inputs", MessageBoxButton.YesNo, MessageBoxImage.Question) == MessageBoxResult.Yes)
+                ForgetMissingInputs();
+        }));
     }
 
     private void ShowSceneNotice(string message, string title = "LifeViz scene")
