@@ -16933,7 +16933,7 @@ public partial class MainWindow : Window
         var roundTrip = config.ToEditorSources()
             .First(candidate => candidate.Kind == LayerEditorSourceKind.Group &&
                                 string.Equals(candidate.DisplayName, "Transform Smoke", StringComparison.Ordinal));
-        bool persistenceOk = config.Version == 12 &&
+        bool persistenceOk = config.Version == new LayerConfigFile().Version &&
                              Math.Abs(roundTrip.Scale - 1.75) < 0.0001 &&
                              roundTrip.Animations.Count == 1 &&
                              Math.Abs(roundTrip.Animations[0].StartAngleDegrees - 123) < 0.0001;
