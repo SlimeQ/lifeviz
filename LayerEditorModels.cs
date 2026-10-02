@@ -494,6 +494,23 @@ internal sealed class LayerEditorAutoClipVideoOverride : LayerEditorNotify
     }
 
     public bool KeyControlsEnabled => !string.Equals(KeyMode, "Disabled", StringComparison.OrdinalIgnoreCase);
+
+    private double _loopBpm;
+
+    /// <summary>Per-file loop BPM tag; 0 inherits the layer/scene BPM.</summary>
+    public double LoopBpm
+    {
+        get => _loopBpm;
+        set
+        {
+            if (SetField(ref _loopBpm, value))
+            {
+                OnPropertyChanged(nameof(LoopBpmLabel));
+            }
+        }
+    }
+
+    public string LoopBpmLabel => _loopBpm > 0 ? $"{_loopBpm:0.#} BPM" : string.Empty;
     public IReadOnlyList<LayerEditorOption> BlendModeOptions => LayerEditorOptions.AutoClipOverrideBlendModes;
     public IReadOnlyList<LayerEditorOption> KeyModeOptions => LayerEditorOptions.AutoClipKeyModes;
 }
@@ -741,6 +758,60 @@ internal sealed class LayerEditorSource : LayerEditorNotify
         get => _autoClipLoopSelectedFile;
         set => SetField(ref _autoClipLoopSelectedFile, value);
     }
+
+    private bool _supportsTempoSync;
+    private bool _tempoSyncEnabled;
+    private double _tempoLoopBpm;
+    private double _sceneLoopBpm = TempoSyncSettings.DefaultLoopBpm;
+
+    /// <summary>File video/GIF and AutoClip layers can lock their loops to the beat clock.</summary>
+    public bool SupportsTempoSync
+    {
+        get => _supportsTempoSync;
+        set => SetField(ref _supportsTempoSync, value);
+    }
+
+    public bool TempoSyncEnabled
+    {
+        get => _tempoSyncEnabled;
+        set => SetField(ref _tempoSyncEnabled, value);
+    }
+
+    /// <summary>Layer loop BPM; 0 inherits the scene's Video Loop BPM.</summary>
+    public double TempoLoopBpm
+    {
+        get => _tempoLoopBpm;
+        set
+        {
+            if (SetField(ref _tempoLoopBpm, value))
+            {
+                OnPropertyChanged(nameof(TempoLoopBpmText));
+            }
+        }
+    }
+
+    public double SceneLoopBpm
+    {
+        get => _sceneLoopBpm;
+        set
+        {
+            if (SetField(ref _sceneLoopBpm, value))
+            {
+                OnPropertyChanged(nameof(TempoLoopBpmHint));
+            }
+        }
+    }
+
+    /// <summary>Text-box view of <see cref="TempoLoopBpm"/>: blank means "scene default".</summary>
+    public string TempoLoopBpmText
+    {
+        get => _tempoLoopBpm > 0 ? _tempoLoopBpm.ToString("0.##", System.Globalization.CultureInfo.InvariantCulture) : string.Empty;
+        set => TempoLoopBpm = double.TryParse(value, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out double bpm) && bpm > 0
+            ? TempoSyncSettings.NormalizeBpm(bpm)
+            : 0;
+    }
+
+    public string TempoLoopBpmHint => $"blank = scene default ({_sceneLoopBpm:0.#} BPM)";
 
     public string BlendMode
     {

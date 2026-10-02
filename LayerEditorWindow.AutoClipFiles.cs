@@ -28,6 +28,7 @@ public partial class LayerEditorWindow
             source.SelectedAutoClipVideoOverride = count == 1 ? AutoClipFileList.SelectedItems[0] as LayerEditorAutoClipVideoOverride : null;
         AutoClipFileSelectionSummary.Text = $"{count} of {AutoClipFileList.Items.Count} files selected";
         AutoClipRemoveFilesButton.IsEnabled = count > 0;
+        AutoClipTagLoopBpmButton.IsEnabled = AutoClipClearLoopBpmButton.IsEnabled = count > 0;
         AutoClipMoveFilesUpButton.IsEnabled = AutoClipMoveFilesDownButton.IsEnabled = count > 0 && count < AutoClipFileList.Items.Count;
         AutoClipMoveFilesTopButton.IsEnabled = AutoClipMoveFilesBottomButton.IsEnabled = count > 0 && count < AutoClipFileList.Items.Count;
         AutoClipFileOverrides.Visibility = count == 1 ? Visibility.Visible : Visibility.Collapsed;
@@ -35,6 +36,44 @@ public partial class LayerEditorWindow
     }
 
     private void AutoClipSelectAll_Click(object sender, RoutedEventArgs e) => AutoClipFileList.SelectAll();
+
+    private void AutoClipTagLoopBpm_Click(object sender, RoutedEventArgs e)
+    {
+        if (!double.TryParse(AutoClipLoopBpmBox.Text, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out double bpm) || bpm <= 0)
+        {
+            AutoClipLoopBpmBox.Focus();
+            AutoClipLoopBpmBox.SelectAll();
+            return;
+        }
+
+        TagSelectedAutoClipFiles(TempoSyncSettings.NormalizeBpm(bpm));
+    }
+
+    private void AutoClipClearLoopBpm_Click(object sender, RoutedEventArgs e) => TagSelectedAutoClipFiles(0);
+
+    private void AutoClipLoopBpmBox_KeyDown(object sender, KeyEventArgs e)
+    {
+        if (e.Key == Key.Enter)
+        {
+            AutoClipTagLoopBpm_Click(sender, e);
+            e.Handled = true;
+        }
+    }
+
+    // One action tags every selected file, so a whole playlist made at one tempo
+    // is a Select All + Tag Selected.
+    private void TagSelectedAutoClipFiles(double loopBpm)
+    {
+        if (AutoClipFileList.DataContext is not LayerEditorSource { IsAutoClip: true } source) return;
+        foreach (var item in GetSelectedAutoClipFiles())
+        {
+            item.LoopBpm = loopBpm;
+            if (ShouldApplyLive())
+            {
+                _owner.UpdateAutoClipVideoOverrideFromEditor(source.Id, item);
+            }
+        }
+    }
 
     private void AutoClipFileList_KeyDown(object sender, KeyEventArgs e)
     {

@@ -102,6 +102,22 @@ internal sealed partial class AudioBeatDetector : IDisposable
     private bool _externalInputActive;
     private double _offlineTimelineSeconds;
     
+    private readonly BeatTracker _beatTracker = new();
+
+    /// <summary>Tempo/phase estimate for <see cref="BeatClock"/>; times are in <see cref="LiveAnalysisSeconds"/> (offline: render timeline).</summary>
+    public BeatEstimate BeatEstimate => _beatTracker.Estimate;
+
+    /// <summary>Lower bound of the one-octave tempo detection range.</summary>
+    public double TempoRangeMinBpm
+    {
+        get => _beatTracker.MinBpm;
+        set => _beatTracker.MinBpm = value;
+    }
+
+    public static double LiveAnalysisSeconds =>
+        System.Diagnostics.Stopwatch.GetTimestamp() / (double)System.Diagnostics.Stopwatch.Frequency;
+
+    // Onset events (not the tempo grid): used by onset-triggered effects such as Beat -> Seeder.
     public DateTime LastBeatTime { get; private set; } = DateTime.MinValue;
     public long BeatCount { get; private set; }
 
@@ -556,6 +572,7 @@ internal sealed partial class AudioBeatDetector : IDisposable
         Array.Clear(_spectrumSamples); _spectrumWriteIndex = 0; _spectrumAnalysisAccumulator = 0;
         _energyHistory.Clear();
         _beatTimestamps.Clear();
+        _beatTracker.Reset();
         _localEnergyAverage = 0;
         _detectedBpm = 120;
         LastBeatTime = DateTime.MinValue;
@@ -680,6 +697,10 @@ internal sealed partial class AudioBeatDetector : IDisposable
         }
 
         ProcessSpectrumSamples(samples, inputGain, enableSpectrumAnalysis);
+        double endTimeSeconds = _offlineInputActive
+            ? _offlineTimelineSeconds + (samples.Length - 1) / (double)_sampleRate
+            : LiveAnalysisSeconds;
+        _beatTracker.ProcessSamples(samples, _sampleRate, inputGain, endTimeSeconds);
 
         ProcessEnergy(meanAbsolute, rms, peakAmplitude);
     }

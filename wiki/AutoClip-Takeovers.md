@@ -60,3 +60,17 @@ Use **Reset AutoClip Sequence** in the AutoClip settings or its right-click Sour
 A fixed-duration render starts its ordered playlist at the first file and uses the export frame clock; live playback position and the next ordered file are restored afterward.
 
 Existing Video Sequence layers remain supported. Existing scenes retain their previous AutoClip defaults: random timed clips, no initial delay, and no visibility group or takeover. Whole-file playback has no reserved trailing excerpt; at a zero-delay live seam the final source frame can be held briefly if the next decoder is not ready.
+
+## Tempo-synced loops
+
+If your AutoClip files are loops made at a known tempo, enable **Sync to beat** in the Scene Editor's **Tempo Sync** group, or **Sync to Beat** in the layer menu. Then tag the files:
+- select them all and use **Loop BPM for selected → Tag Selected** with their authored BPM, or leave them untagged to inherit the layer/scene **Video loop BPM**;
+- a file made at a different tempo keeps its own tag.
+
+Synced clips take their frames from the beat clock, so they follow **Animation BPM** or the detected tempo.
+
+Clip and delay times still come from the ranges above, but each phase now ends on the bar line nearest its nominal end. For example, a 20 s clip at 140 BPM becomes 48 beats (12 bars), so switches land on downbeats. Press **B** on a "1" to align the bar grid.
+
+**Play whole file** plays exactly one loop. Synced clips are silent.
+
+Frames come from the RAM [Loop Frame Cache](Tempo-Synced-Video.md#frame-sources-ram-cache-or-streaming) when the loop fits the budget, otherwise from a beat-following stream. A synced AutoClip prefetches every file in its list into the cache.

@@ -201,13 +201,16 @@ internal sealed class LayerConfigFile
             AutoClipMaxDelaySeconds = source.AutoClipMaxDelaySeconds,
             AutoClipFadeSeconds = source.AutoClipFadeSeconds,
             AutoClipLoopSelectedFile = source.AutoClipLoopSelectedFile,
+            TempoSyncEnabled = source.TempoSyncEnabled,
+            TempoLoopBpm = source.TempoLoopBpm,
             AutoClipVideoOverrides = source.AutoClipVideoOverrides.Select(item => new LayerConfigAutoClipVideoOverride
             {
                 FilePath = item.FilePath,
                 BlendMode = item.BlendMode,
                 KeyMode = item.KeyMode,
                 KeyColor = item.KeyColorHex,
-                KeyTolerance = item.KeyTolerance
+                KeyTolerance = item.KeyTolerance,
+                LoopBpm = item.LoopBpm
             }).ToList()
         };
 
@@ -345,6 +348,10 @@ internal sealed class LayerConfigFile
             AutoClipMaxDelaySeconds = config.AutoClipMaxDelaySeconds,
             AutoClipFadeSeconds = Math.Clamp(config.AutoClipFadeSeconds, 0, 10),
             AutoClipLoopSelectedFile = config.AutoClipLoopSelectedFile,
+            SupportsTempoSync = kind == LayerEditorSourceKind.AutoClip ||
+                                (kind == LayerEditorSourceKind.File && FileCaptureService.SupportsTempoSyncPath(config.FilePath ?? string.Empty)),
+            TempoSyncEnabled = config.TempoSyncEnabled,
+            TempoLoopBpm = config.TempoLoopBpm > 0 ? TempoSyncSettings.NormalizeBpm(config.TempoLoopBpm) : 0,
             Parent = parent
         };
 
@@ -364,7 +371,8 @@ internal sealed class LayerConfigFile
                         BlendMode = string.IsNullOrWhiteSpace(saved?.BlendMode) ? "Inherit" : saved.BlendMode,
                         KeyMode = string.IsNullOrWhiteSpace(saved?.KeyMode) ? "Inherit" : saved.KeyMode,
                         KeyColorHex = string.IsNullOrWhiteSpace(saved?.KeyColor) ? "#000000" : saved.KeyColor,
-                        KeyTolerance = Math.Clamp(saved?.KeyTolerance ?? 0.1, 0, 1)
+                        KeyTolerance = Math.Clamp(saved?.KeyTolerance ?? 0.1, 0, 1),
+                        LoopBpm = saved?.LoopBpm > 0 ? TempoSyncSettings.NormalizeBpm(saved.LoopBpm) : 0
                     });
                 }
             }
@@ -724,6 +732,8 @@ internal sealed class LayerConfigSource
     public double AutoClipMaxDelaySeconds { get; set; }
     public double AutoClipFadeSeconds { get; set; }
     public bool AutoClipLoopSelectedFile { get; set; }
+    public bool TempoSyncEnabled { get; set; }
+    public double TempoLoopBpm { get; set; }
     public List<LayerConfigAutoClipVideoOverride> AutoClipVideoOverrides { get; set; } = new();
     public bool Mirror { get; set; }
     public bool KeyEnabled { get; set; }
@@ -741,6 +751,7 @@ internal sealed class LayerConfigAutoClipVideoOverride
     public string? KeyMode { get; set; } = "Inherit";
     public string? KeyColor { get; set; } = "#000000";
     public double KeyTolerance { get; set; } = 0.1;
+    public double LoopBpm { get; set; }
 }
 
 internal sealed class LayerConfigAnimation

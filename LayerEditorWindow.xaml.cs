@@ -2154,6 +2154,29 @@ public partial class LayerEditorWindow : Window
         }
     }
 
+    private void TempoSync_Changed(object sender, RoutedEventArgs e) => PushTempoSync(sender);
+
+    private void TempoLoopBpm_LostFocus(object sender, RoutedEventArgs e) => PushTempoSync(sender);
+
+    private void TempoLoopBpm_KeyDown(object sender, KeyEventArgs e)
+    {
+        if (e.Key == Key.Enter && sender is TextBox box)
+        {
+            box.GetBindingExpression(TextBox.TextProperty)?.UpdateSource();
+            PushTempoSync(sender);
+            e.Handled = true;
+        }
+    }
+
+    private void PushTempoSync(object sender)
+    {
+        LayerEditorSource? source = ResolveSourceContext(sender);
+        if (source?.SupportsTempoSync == true && ShouldApplyLive())
+        {
+            _owner.UpdateTempoSyncFromEditor(source.Id, source.TempoSyncEnabled, source.TempoLoopBpm);
+        }
+    }
+
     private void AutoClipLoopSelectedFile_Changed(object sender, RoutedEventArgs e)
     {
         LayerEditorSource? source = ResolveSourceContext(sender);

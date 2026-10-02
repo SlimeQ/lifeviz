@@ -930,6 +930,29 @@
                                                 </WrapPanel>
                                             </StackPanel>
                                         </GroupBox>
+                                        <GroupBox Header="Tempo Sync"
+                                                  Margin="0,8,0,8"
+                                                  Visibility="{Binding SupportsTempoSync, Converter={StaticResource BoolToVisibility}}">
+                                            <StackPanel Margin="8">
+                                                <CheckBox Content="Sync to beat"
+                                                          IsChecked="{Binding TempoSyncEnabled}"
+                                                          Checked="TempoSync_Changed"
+                                                          Unchecked="TempoSync_Changed"
+                                                          ToolTip="Pick each frame from the beat clock instead of real time, so loops stay locked to the music at any tempo." />
+                                                <WrapPanel Margin="0,6,0,4">
+                                                    <TextBlock Text="Loops authored at" VerticalAlignment="Center" Margin="0,0,8,0" />
+                                                    <TextBox Text="{Binding TempoLoopBpmText, UpdateSourceTrigger=LostFocus}"
+                                                             Width="60"
+                                                             LostFocus="TempoLoopBpm_LostFocus"
+                                                             KeyDown="TempoLoopBpm_KeyDown"
+                                                             ToolTip="The tempo these loops were made at. A loop's length in beats is its duration at this tempo." />
+                                                    <TextBlock Text="BPM" VerticalAlignment="Center" Margin="6,0,8,0" />
+                                                    <TextBlock Text="{Binding TempoLoopBpmHint}" Foreground="#9A9A9A" VerticalAlignment="Center" />
+                                                </WrapPanel>
+                                                <TextBlock TextWrapping="Wrap" Foreground="#9A9A9A"
+                                                           Text="Playback follows Animation BPM, or the detected tempo when Sync to Audio BPM is on. AutoClip tags in the file list override this per file. Clip and delay ends snap to bar lines. Synced loops play without audio; frames are cached in RAM within the Loop Frame Cache budget, otherwise streamed." />
+                                            </StackPanel>
+                                        </GroupBox>
                                         <GroupBox Header="AutoClip Settings"
                                                   Margin="0,8,0,8"
                                                   Visibility="{Binding IsAutoClip, Converter={StaticResource BoolToVisibility}}">
@@ -944,13 +967,23 @@
                                                          DataContextChanged="AutoClipFileList_DataContextChanged"
                                                          SelectionChanged="AutoClipFileSelection_Changed"
                                                          PreviewKeyDown="AutoClipFileList_KeyDown"
-                                                         DisplayMemberPath="DisplayName"
                                                          Height="180"
                                                          Background="#151515"
                                                          Foreground="#E8E8E8"
                                                          BorderBrush="#404040"
                                                          HorizontalContentAlignment="Stretch"
                                                          Margin="0,0,0,6">
+                                                    <ListBox.ItemTemplate>
+                                                        <DataTemplate>
+                                                            <DockPanel>
+                                                                <TextBlock DockPanel.Dock="Right"
+                                                                           Text="{Binding LoopBpmLabel}"
+                                                                           Foreground="#8FB8E8"
+                                                                           Margin="8,0,0,0" />
+                                                                <TextBlock Text="{Binding DisplayName}" TextTrimming="CharacterEllipsis" />
+                                                            </DockPanel>
+                                                        </DataTemplate>
+                                                    </ListBox.ItemTemplate>
                                                     <ListBox.ItemContainerStyle>
                                                         <Style TargetType="ListBoxItem">
                                                             <Setter Property="ToolTip" Value="{Binding FilePath}" />
@@ -987,6 +1020,13 @@
                                                     <Button x:Name="AutoClipMoveFilesDownButton" Content="Move Down" Click="AutoClipMoveDown_Click" IsEnabled="False" ToolTip="Alt+Down" />
                                                     <Button x:Name="AutoClipMoveFilesTopButton" Content="Move to Top" Click="AutoClipMoveTop_Click" IsEnabled="False" ToolTip="Alt+Home" />
                                                     <Button x:Name="AutoClipMoveFilesBottomButton" Content="Move to Bottom" Click="AutoClipMoveBottom_Click" IsEnabled="False" ToolTip="Alt+End" />
+                                                </WrapPanel>
+                                                <WrapPanel Margin="0,0,0,8"
+                                                           ToolTip="Tag the selected files with the tempo they were made at. Untagged files use the Tempo Sync BPM above.">
+                                                    <TextBlock Text="Loop BPM for selected" VerticalAlignment="Center" Margin="0,0,8,0" />
+                                                    <TextBox x:Name="AutoClipLoopBpmBox" Width="60" VerticalAlignment="Center" KeyDown="AutoClipLoopBpmBox_KeyDown" />
+                                                    <Button x:Name="AutoClipTagLoopBpmButton" Content="Tag Selected" Click="AutoClipTagLoopBpm_Click" IsEnabled="False" />
+                                                    <Button x:Name="AutoClipClearLoopBpmButton" Content="Use Layer BPM" Click="AutoClipClearLoopBpm_Click" IsEnabled="False" />
                                                 </WrapPanel>
                                                 <TextBlock x:Name="AutoClipSingleFileHint" Text="Select one file to edit its blend and keying overrides."
                                                            Foreground="#AFAFAF" Margin="0,0,0,8" />

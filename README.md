@@ -1,5 +1,22 @@
 # LifeViz
 
+## Tempo-synced video loops
+
+File (video/GIF) and AutoClip layers have a **Sync to Beat** option. Make loops at any tempo, then tag them:
+- a scene **Video loop BPM** (in the Animation BPM menu);
+- a per-layer BPM in the Scene Editor's **Tempo Sync** group;
+- bulk per-file tags in the AutoClip file list (**Select All → Tag Selected**).
+
+Synced loops follow Animation BPM or the detected tempo. AutoClip clip and delay ends snap to bar lines, and **B** resyncs the downbeat. Frames come from a RAM **Loop Frame Cache** (Performance menu; Auto = a quarter of RAM, at most 16 GB) or, when caching is off or a loop doesn't fit, from a beat-following stream.
+
+Validate with `--smoke-test tempo-sync` and `--smoke-test tempo-sync-app`. Measure your own loops with `--smoke-test tempo-sync-loops <folder>`. [Tempo-Synced Video](wiki/Tempo-Synced-Video.md) · [Build & Install](wiki/Build-and-Install.md#validate-tempo-synced-video-loops)
+
+## Beat clock
+
+BPM-synced animations, Beat Shake and audio-synced FPS Modulation now follow a **beat clock** instead of raw onset timestamps. A new tempo tracker locks to the music's tempo and beat phase. It folds half-time and double-time readings into a one-octave **Detect range** and ignores 3:4 and 4:3 misreads during breakdowns. The clock moves forward smoothly, holds through dropouts, and no longer jumps when you move the BPM slider. The **Animation BPM** menu shows the detected tempo and lock state. Tempo-synced video loops use the same clock.
+
+Validate with `dotnet build -c Release`, then `dotnet bin/Release/net9.0-windows/lifeviz.dll --smoke-test beat-tracking`. Run `--smoke-test beat-tracking-file <track>` to see how the tracker reads real music. [Beat Clock](wiki/Beat-Clock.md) · [Build & Install](wiki/Build-and-Install.md#validate-beat-tracking)
+
 ## Fluid Ink response and simulation control audit
 
 Fluid Ink now has stronger upper-range Flow and immediate stirring when Flow/Swirl change, while keeping its default transport strength. **Punchy mappings** now drives Low → Flow and Mid → Swirl without reducing Persistence. Mapping rows show live input, envelope response, and effective output, including missing audio and input-ceiling indicators. Opacity help explains direction and Subtractive blending.

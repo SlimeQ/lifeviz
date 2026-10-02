@@ -43,6 +43,18 @@ public partial class LayerEditorWindow
                 ?? throw new InvalidOperationException($"AutoClip control missing: {label}");
             if (checkbox.IsChecked != true) throw new InvalidOperationException($"AutoClip checkbox binding failed: {label}");
         }
+        var tempoSync = Descendants(root).OfType<CheckBox>().SingleOrDefault(item => Equals(item.Content, "Sync to beat"))
+            ?? throw new InvalidOperationException("Tempo Sync control missing for AutoClip.");
+        if (!model.SupportsTempoSync || tempoSync.IsVisible != true) throw new InvalidOperationException("Tempo Sync group hidden for AutoClip.");
+        tempoSync.IsChecked = true;
+        if (!model.TempoSyncEnabled) throw new InvalidOperationException("Sync to beat binding failed.");
+        var loopBpmText = Descendants(root).OfType<TextBox>().Single(item => item.GetBindingExpression(TextBox.TextProperty)?.ParentBinding.Path.Path == "TempoLoopBpmText");
+        loopBpmText.SetCurrentValue(TextBox.TextProperty, "128.5");
+        loopBpmText.GetBindingExpression(TextBox.TextProperty)!.UpdateSource();
+        if (Math.Abs(model.TempoLoopBpm - 128.5) > 1e-9) throw new InvalidOperationException("Loop BPM input binding failed.");
+        loopBpmText.SetCurrentValue(TextBox.TextProperty, "");
+        loopBpmText.GetBindingExpression(TextBox.TextProperty)!.UpdateSource();
+        if (model.TempoLoopBpm != 0) throw new InvalidOperationException("Blank loop BPM must inherit the scene default.");
         var groupText = Descendants(root).OfType<TextBox>().Single(item => item.GetBindingExpression(TextBox.TextProperty)?.ParentBinding.Path.Path == "VisibilityGroup");
         groupText.SetCurrentValue(TextBox.TextProperty, "edited group");
         groupText.GetBindingExpression(TextBox.TextProperty)!.UpdateSource();
@@ -122,6 +134,20 @@ public partial class LayerEditorWindow
         CommitAutoClipFileList(model);
         AutoClipFileList.SelectAll();
         if (!File.Exists(original[0].FilePath)) throw new InvalidOperationException("Playlist edit must not remove media from disk.");
+
+        // Bulk loop-BPM tagging: one action tags every selected file; clearing one
+        // restores its inheritance without touching the others.
+        if (!AutoClipTagLoopBpmButton.IsEnabled) throw new InvalidOperationException("Loop BPM tagging disabled with files selected.");
+        AutoClipLoopBpmBox.Text = "128";
+        AutoClipTagLoopBpm_Click(AutoClipTagLoopBpmButton, new RoutedEventArgs());
+        if (original.Any(file => Math.Abs(file.LoopBpm - 128) > 1e-9 || file.LoopBpmLabel != "128 BPM"))
+            throw new InvalidOperationException("Tag Selected did not tag every selected file.");
+        AutoClipFileList.SelectedItems.Clear();
+        AutoClipFileList.SelectedItems.Add(original[0]);
+        AutoClipClearLoopBpm_Click(AutoClipClearLoopBpmButton, new RoutedEventArgs());
+        if (original[0].LoopBpm != 0 || original.Skip(1).Any(file => Math.Abs(file.LoopBpm - 128) > 1e-9))
+            throw new InvalidOperationException("Use Layer BPM must only clear the selected file's tag.");
+        AutoClipFileList.SelectAll();
     }
 
     private static System.Collections.Generic.IEnumerable<DependencyObject> Descendants(DependencyObject root)

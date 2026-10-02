@@ -13,6 +13,7 @@
         WindowStyle="None"
         SizeChanged="MainWindow_OnSizeChanged"
         PreviewMouseMove="WindowChrome_OnPreviewMouseMove"
+        KeyDown="MainWindow_OnKeyDown"
         PreviewMouseLeftButtonUp="WindowChrome_OnPreviewMouseLeftButtonUp"
         WindowStartupLocation="CenterScreen">
     <Window.TaskbarItemInfo>
@@ -487,8 +488,25 @@
                                   IsCheckable="True"
                                   Click="VideoDecodeFpsItem_Click" />
                     </MenuItem>
+                    <MenuItem Header="Loop Frame Cache"
+                              x:Name="LoopCacheMenu"
+                              SubmenuOpened="LoopCacheMenu_OnSubmenuOpened"
+                              ToolTip="RAM budget for fully decoded tempo-synced loops. Loops that do not fit are streamed instead.">
+                        <MenuItem x:Name="LoopCacheUsageItem" Header="In use: 0.0 GB" IsEnabled="False" />
+                        <Separator />
+                        <MenuItem Header="Off (always stream)" Tag="0" IsCheckable="True" Click="LoopCacheItem_Click" />
+                        <MenuItem x:Name="LoopCacheAutoItem" Header="Auto" Tag="-1" IsCheckable="True" Click="LoopCacheItem_Click" />
+                        <MenuItem Header="2 GB" Tag="2" IsCheckable="True" Click="LoopCacheItem_Click" />
+                        <MenuItem Header="4 GB" Tag="4" IsCheckable="True" Click="LoopCacheItem_Click" />
+                        <MenuItem Header="8 GB" Tag="8" IsCheckable="True" Click="LoopCacheItem_Click" />
+                        <MenuItem Header="16 GB" Tag="16" IsCheckable="True" Click="LoopCacheItem_Click" />
+                        <MenuItem Header="32 GB" Tag="32" IsCheckable="True" Click="LoopCacheItem_Click" />
+                    </MenuItem>
                 </MenuItem>
-                <MenuItem Header="Animation BPM" StaysOpenOnClick="True">
+                <MenuItem Header="Animation BPM"
+                          StaysOpenOnClick="True"
+                          SubmenuOpened="AnimationBpmMenu_OnSubmenuOpened"
+                          SubmenuClosed="AnimationBpmMenu_OnSubmenuClosed">
                     <StackPanel Margin="8,4" Width="220">
                         <DockPanel>
                             <TextBlock Text="BPM:" DockPanel.Dock="Left"/>
@@ -510,6 +528,46 @@
                                   Margin="0,6,0,0"
                                   Checked="AnimationAudioSync_OnChecked"
                                   Unchecked="AnimationAudioSync_OnChecked"/>
+                        <TextBlock x:Name="DetectedTempoText"
+                                   Text="Detected: no audio input"
+                                   Margin="0,6,0,0"
+                                   Opacity="0.75"/>
+                        <DockPanel Margin="0,6,0,0"
+                                   ToolTip="Detected tempos are folded into this one-octave range, so a 70 BPM half-time reading and a 140 BPM reading resolve the same way.">
+                            <TextBlock Text="Detect range:"
+                                       DockPanel.Dock="Left"
+                                       VerticalAlignment="Center"/>
+                            <ComboBox x:Name="TempoRangeComboBox"
+                                      Margin="8,0,0,0"
+                                      SelectionChanged="TempoRangeComboBox_OnSelectionChanged">
+                                <ComboBoxItem Content="70-140 BPM" Tag="70"/>
+                                <ComboBoxItem Content="80-160 BPM" Tag="80"/>
+                                <ComboBoxItem Content="90-180 BPM" Tag="90"/>
+                                <ComboBoxItem Content="100-200 BPM" Tag="100"/>
+                            </ComboBox>
+                        </DockPanel>
+                        <Separator Margin="0,8,0,6"/>
+                        <DockPanel ToolTip="The tempo this scene's video loops were made at. A loop's length in beats is its duration at this tempo. Layers and AutoClip files can override it in the Scene Editor.">
+                            <TextBlock Text="Video loop BPM:" DockPanel.Dock="Left"/>
+                            <TextBlock x:Name="SceneLoopBpmValueText"
+                                       Text="140"
+                                       DockPanel.Dock="Right"
+                                       FontWeight="Bold"/>
+                            <Slider x:Name="SceneLoopBpmSlider"
+                                    Minimum="60"
+                                    Maximum="200"
+                                    Value="140"
+                                    SmallChange="1"
+                                    LargeChange="5"
+                                    IsSnapToTickEnabled="True"
+                                    TickFrequency="1"
+                                    Margin="8,0"
+                                    ValueChanged="SceneLoopBpmSlider_OnValueChanged"/>
+                        </DockPanel>
+                        <Button Content="Resync Downbeat (B)"
+                                Margin="0,6,0,0"
+                                Click="ResyncDownbeat_Click"
+                                ToolTip="Mark the nearest beat as beat 1 of the bar so bar-length loops and AutoClip switches line up with the music. Press B on the downbeat."/>
                     </StackPanel>
                 </MenuItem>
                 <MenuItem Header="FPS Modulation" StaysOpenOnClick="True">

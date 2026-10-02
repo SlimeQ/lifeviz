@@ -1,5 +1,33 @@
 # Build & Install
 
+## Validate beat tracking
+
+```powershell
+dotnet build -c Release
+dotnet bin/Release/net9.0-windows/lifeviz.dll --smoke-test beat-tracking
+dotnet bin/Release/net9.0-windows/lifeviz.dll --smoke-test beat-tracking-file "C:\path\to\track.flac"
+```
+
+`beat-tracking` runs `BeatTracker` + `BeatClock` against synthetic drums: four-on-the-floor at 100–174 BPM, 70 BPM half-time, a 174 BPM breakbeat, ±12 ms jitter, a 124→140 BPM change, and a 4 s dropout. It requires tempo within 0.5–0.7 BPM, phase error under 10 ms, a forward-only clock, and a continuous manual clock when the BPM changes. `beat-tracking-file` is a diagnostic for real tracks (any FFmpeg-readable audio or video). It logs tempo, confidence and lock every 5 s (set `LIFEVIZ_BEAT_LOG_INTERVAL` to change this) and prints a summary with first-lock time, tempo jumps and estimate jitter; compare it against the track's known tempo. The release build's FFmpeg bundle step needs `artifacts/ffmpeg/ffmpeg-9.0.1-essentials_build.zip`. In a fresh git worktree, copy it from the main checkout if the upstream download URL is unavailable; the SHA-256 check still applies. See [Beat Clock and Tempo Tracking](Beat-Clock.md).
+
+## Validate tempo-synced video loops
+
+```powershell
+dotnet build -c Release
+dotnet bin/Release/net9.0-windows/lifeviz.dll --smoke-test tempo-sync
+dotnet bin/Release/net9.0-windows/lifeviz.dll --smoke-test tempo-sync-app
+dotnet bin/Release/net9.0-windows/lifeviz.dll --smoke-test tempo-sync-loops "C:\path\to\loop-folder"
+```
+
+`tempo-sync` generates lossless loops whose pixel colour encodes the frame index. It asserts:
+- exact frames for streamed and cached playback, direct and CPU scaling, 24/28 fps, loop wraps and a backwards downbeat resync;
+- live following of 150/95 BPM clocks (at most 2 frames behind, a single decoder);
+- cache accounting and eviction;
+- AutoClip switches landing on bar lines;
+- layer-config persistence.
+
+`tempo-sync-app` checks a synced File layer inside a real `MainWindow`: beat-clock adapter, resync, scene persistence and switching off. `tempo-sync-loops` is a diagnostic over a folder of real loops: streaming versus cached, frames per second, longest hold, cache size. The AutoClip editor bindings for **Sync to beat**, the loop-BPM box and bulk **Tag Selected** are covered by `autoclip-takeover`, which needs the one-second fixture described in [AutoClip takeover regression](#autoclip-takeover-regression). See [Tempo-Synced Video Loops](Tempo-Synced-Video.md).
+
 ## Validate Fluid and Life controls
 
 ```powershell

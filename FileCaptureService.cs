@@ -19,7 +19,7 @@ using YoutubeExplode.Videos.Streams;
 
 namespace lifeviz;
 
-internal sealed class FileCaptureService : IDisposable
+internal sealed partial class FileCaptureService : IDisposable
 {
     private const int VideoProbeConcurrency = 2;
     private const int VideoProbeTimeoutMilliseconds = 15_000;
@@ -459,6 +459,8 @@ internal sealed class FileCaptureService : IDisposable
         {
             ApplyPerformanceSettingsToSession(session);
         }
+
+        ApplySettingsToTempoLayers();
     }
 
     internal int GetVideoDecodeFpsLimitForSmoke() => _videoDecodeFpsLimit;
@@ -568,6 +570,8 @@ internal sealed class FileCaptureService : IDisposable
         {
             ApplyOfflineRenderSettingsToSession(session);
         }
+
+        ApplySettingsToTempoLayers();
     }
 
     public void SetOfflineRenderTime(double timeSeconds)
@@ -609,6 +613,8 @@ internal sealed class FileCaptureService : IDisposable
         {
             ApplyOfflineRenderSettingsToSession(session);
         }
+
+        ApplySettingsToTempoLayers();
     }
 
     private void ApplyMasterAudioSettingsToSession(object session)
@@ -1385,6 +1391,7 @@ internal sealed class FileCaptureService : IDisposable
 
     public void Clear()
     {
+        DisposeTempoLayers();
         List<FileSession> sessions;
         lock (_lock)
         {
@@ -1666,7 +1673,7 @@ internal sealed class FileCaptureService : IDisposable
         }
     }
 
-    private sealed class VideoSession : FileSession
+    private sealed partial class VideoSession : FileSession, IAutoClipPlayback
     {
         internal readonly struct VideoProbeInfo
         {
@@ -4229,7 +4236,7 @@ internal sealed class FileCaptureService : IDisposable
             };
         }
 
-        private static string BuildPreferredVideoDecoderInputArg(string? preferredDecoder)
+        internal static string BuildPreferredVideoDecoderInputArg(string? preferredDecoder)
         {
             // Probe text is external input, so decoder arguments stay on an
             // explicit allowlist instead of interpolating the reported codec.
@@ -4897,8 +4904,10 @@ internal sealed class FileCaptureService : IDisposable
         private readonly Stopwatch _clock = Stopwatch.StartNew();
         private readonly int _offlineSeed = Random.Shared.Next();
         private Random _random = new();
-        private VideoSession? _current;
-        private VideoSession? _handoffOutgoing;
+        private IAutoClipPlayback? _current;
+        private IAutoClipPlayback? _handoffOutgoing;
+        private Func<string, TempoSyncSettings>? _tempoSync;
+        private (int Width, int Height, FitMode Fit)? _tempoPrefetchTarget;
         private string? _handoffOutgoingPath;
         private PendingClipRequest? _pendingClip;
         private FileCaptureFrame? _lastFrame;
@@ -5095,6 +5104,57 @@ internal sealed class FileCaptureService : IDisposable
             }
         }
 
+        /// <summary>
+        /// Tempo sync: <paramref name="resolver"/> gives each file's loop settings, or
+        /// null for ordinary real-time playback. Synced clips pick frames from the beat
+        /// clock, and clip/delay ends snap to bar lines. Switching modes restarts the
+        /// schedule; per-file changes apply from the next clip.
+        /// </summary>
+        public void SetTempoSync(Func<string, TempoSyncSettings>? resolver)
+        {
+            lock (_stateLock)
+            {
+                bool changed = (_tempoSync != null) != (resolver != null);
+                _tempoSync = resolver;
+                _tempoPrefetchTarget = null;
+                if (changed && !_disposed)
+                {
+                    ResetSchedule();
+                }
+            }
+        }
+
+        public bool IsTempoSynced => _tempoSync != null;
+
+        private double SnapPhaseSecondsToBars(double durationSeconds)
+        {
+            ITempoClock? clock = _tempoSync != null ? TempoClock : null;
+            return clock == null
+                ? durationSeconds
+                : TempoLoopMath.SecondsUntilBarAlignedEnd(clock.BeatPosition, clock.Bpm, durationSeconds);
+        }
+
+        private void PrefetchTempoLoops(int targetWidth, int targetHeight, FitMode fitMode)
+        {
+            Func<string, TempoSyncSettings>? resolver = _tempoSync;
+            if (resolver == null || _tempoPrefetchTarget == (targetWidth, targetHeight, fitMode))
+            {
+                return;
+            }
+
+            _tempoPrefetchTarget = (targetWidth, targetHeight, fitMode);
+            string[] paths;
+            lock (_pathsLock)
+            {
+                paths = _paths.ToArray();
+            }
+
+            foreach (string path in paths)
+            {
+                BeatLoopPlayer.Prefetch(path, resolver(path), targetWidth, targetHeight, fitMode);
+            }
+        }
+
         public void ResetSequence()
         {
             lock (_stateLock)
@@ -5113,6 +5173,7 @@ internal sealed class FileCaptureService : IDisposable
 
         private FileCaptureFrame? CaptureFrameCore(int targetWidth, int targetHeight, FitMode fitMode, bool includeSource)
         {
+            PrefetchTempoLoops(targetWidth, targetHeight, fitMode);
             double now = GetTimelineSeconds();
             EnsurePhase(now);
             if (_offlineRenderEnabled && _phase == Phase.Preparing)
@@ -5140,7 +5201,7 @@ internal sealed class FileCaptureService : IDisposable
                 return outgoingFrame;
             }
 
-            VideoSession current = _current;
+            IAutoClipPlayback current = _current;
             bool wasAwaitingInitialFrame = _phaseAwaitingFirstFrame;
             bool holdPreparedSuccessor = wasAwaitingInitialFrame &&
                                          _handoffPendingCompletion &&
@@ -5389,7 +5450,7 @@ internal sealed class FileCaptureService : IDisposable
                 SettleResumeWarmupHold(liveNow);
                 bool saveVisibleHandoffOwner = _handoffPendingCompletion &&
                                                _handoffOutgoing != null;
-                VideoSession? savedSession = saveVisibleHandoffOwner
+                IAutoClipPlayback? savedSession = saveVisibleHandoffOwner
                     ? _handoffOutgoing
                     : _current;
                 _savedLivePhase = saveVisibleHandoffOwner ? Phase.Playing : _phase;
@@ -5512,7 +5573,7 @@ internal sealed class FileCaptureService : IDisposable
 
         public int MixLiveAudioSamples(Span<float> destination)
         {
-            VideoSession? audioSession;
+            IAutoClipPlayback? audioSession;
             lock (_stateLock)
             {
                 if (_offlineRenderEnabled)
@@ -5732,7 +5793,7 @@ internal sealed class FileCaptureService : IDisposable
                 _lastFramePath = null;
                 _phase = Phase.Delaying;
                 _phaseStartSeconds = now;
-                _phaseEndSeconds = now + delay;
+                _phaseEndSeconds = now + SnapPhaseSecondsToBars(delay);
                 return;
             }
 
@@ -5953,6 +6014,15 @@ internal sealed class FileCaptureService : IDisposable
                 startSeconds = Math.Max(0, pending.ExplicitStartSeconds.Value);
                 clipSeconds = Math.Max(0.05, pending.RequestedClipSeconds);
             }
+            else if (_tempoSync != null)
+            {
+                // Synced clips take their frames from the beat clock, so there is no
+                // source window to choose. Whole-file mode plays exactly one loop.
+                startSeconds = 0;
+                clipSeconds = pending.PlayWholeFile
+                    ? GetTempoLoopSeconds(pending.Path, probe.Value)
+                    : pending.RequestedClipSeconds;
+            }
             else if (pending.PlayWholeFile && double.IsFinite(probe.Value.DurationSeconds) && probe.Value.DurationSeconds > 0)
             {
                 // Whole-file mode preserves the actual end rather than reserving
@@ -6002,13 +6072,23 @@ internal sealed class FileCaptureService : IDisposable
                 duration,
                 elapsed,
                 allowSeamlessHandoff);
-            var session = new VideoSession(
-                path,
-                loopPlayback: decoderPlan.LoopPlayback,
-                cachedProbe: probe,
-                maxDecodeDurationSeconds: decoderPlan.MaxDecodeDurationSeconds,
-                ownerControlsLivePlaybackActivation: true);
-            session.SetInitialPlaybackOffsetSeconds(startSeconds);
+            IAutoClipPlayback session;
+            if (_tempoSync != null)
+            {
+                session = new BeatLoopClip(path, _tempoSync(path));
+            }
+            else
+            {
+                var videoSession = new VideoSession(
+                    path,
+                    loopPlayback: decoderPlan.LoopPlayback,
+                    cachedProbe: probe,
+                    maxDecodeDurationSeconds: decoderPlan.MaxDecodeDurationSeconds,
+                    ownerControlsLivePlaybackActivation: true);
+                videoSession.SetInitialPlaybackOffsetSeconds(startSeconds);
+                session = videoSession;
+            }
+
             session.SetMasterAudio(_masterAudioEnabled, _masterAudioVolume);
             session.SetLiveAudioAnalysisEnabled(_liveAudioAnalysisEnabled);
             session.SetAudioVolume(_audioVolume);
@@ -6087,7 +6167,7 @@ internal sealed class FileCaptureService : IDisposable
                 return false;
             }
             _phaseStartSeconds = now - elapsed;
-            _phaseEndSeconds = now + Math.Max(0.05, duration - elapsed - visibleQueueAge);
+            _phaseEndSeconds = now + SnapPhaseSecondsToBars(Math.Max(0.05, duration - elapsed - visibleQueueAge));
             _phaseAwaitingFirstFrame = false;
             _pendingPhaseDurationSeconds = 0;
             _pendingPhaseElapsedSeconds = 0;
@@ -6116,6 +6196,16 @@ internal sealed class FileCaptureService : IDisposable
             return (
                 loopSelectedFile,
                 remaining + handoffAllowance + DecoderLifetimeGraceSeconds);
+        }
+
+        private double GetTempoLoopSeconds(string path, VideoSession.VideoProbeInfo probe)
+        {
+            TempoSyncSettings settings = _tempoSync!(path);
+            double frameRate = probe.FrameRate > 0 ? probe.FrameRate : 30;
+            int frames = Math.Max(1, (int)Math.Round(probe.DurationSeconds * frameRate));
+            int beats = TempoLoopMath.ResolveLoopBeats(frames, frameRate, settings.LoopBpm, settings.LoopBeatsOverride);
+            double bpm = TempoClock?.Bpm ?? TempoSyncSettings.NormalizeBpm(settings.LoopBpm);
+            return beats * 60.0 / Math.Clamp(bpm, 10, 400);
         }
 
         internal double GetTimelineSecondsForSmoke() => GetTimelineSeconds();
@@ -6351,7 +6441,7 @@ internal sealed class FileCaptureService : IDisposable
             FitMode fitMode,
             bool includeSource)
         {
-            VideoSession? outgoing = _handoffOutgoing;
+            IAutoClipPlayback? outgoing = _handoffOutgoing;
             if (outgoing == null)
             {
                 return _lastFrame;
@@ -6389,7 +6479,7 @@ internal sealed class FileCaptureService : IDisposable
 
         private void MoveCurrentToHandoffOutgoing(double switchNotBeforeSeconds)
         {
-            VideoSession? outgoing = _current;
+            IAutoClipPlayback? outgoing = _current;
             if (outgoing == null)
             {
                 return;
@@ -6441,7 +6531,7 @@ internal sealed class FileCaptureService : IDisposable
 
         private void DisposeHandoffOutgoing(bool background)
         {
-            VideoSession? outgoing = _handoffOutgoing;
+            IAutoClipPlayback? outgoing = _handoffOutgoing;
             _handoffOutgoing = null;
             _handoffOutgoingPath = null;
             Volatile.Write(ref _smokeHandoffPromotionNotBeforeTimestamp, 0);
@@ -6463,7 +6553,7 @@ internal sealed class FileCaptureService : IDisposable
 
         private void DisposeCurrent(bool background)
         {
-            VideoSession? previous = _current;
+            IAutoClipPlayback? previous = _current;
             _current = null;
             _currentHandoffContinuationSeconds = 0;
             if (previous == null)

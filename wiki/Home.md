@@ -4,6 +4,10 @@ Welcome to the documentation hub for LifeViz, a minimalist Windows 11 WPF experi
 
 ## Pages
 
+- [Beat Clock and Tempo Tracking](Beat-Clock.md)
+
+- [Tempo-Synced Video Loops](Tempo-Synced-Video.md)
+
 - [Simulation Audio Response](Audio-Response.md)
 
 - [Particle Erosion, Ripple Field, Chromatic Memory, and Contour Current](More-Simulations.md)

@@ -245,6 +245,18 @@ public partial class MainWindow : Window
     private double _currentFps = DefaultFps;
     private double _currentSimulationTargetFps = DefaultFps;
     private double _animationBpm = DefaultAnimationBpm;
+    // Musical clocks advanced once per render tick. The audio clock follows the
+    // detected tempo/phase (falling back to the manual BPM until it locks); the
+    // manual clock free-runs at Animation BPM. Both only ever move forward.
+    private readonly BeatClock _audioBeatClock = new();
+    private readonly BeatClock _manualBeatClock = new();
+    private double _tempoRangeMinBpm = BeatTracker.DefaultMinBpm;
+    // Tempo-synced video loops: the scene's assumed loop BPM, the RAM cache budget
+    // (-1 = auto), and the render-tick time the beat clocks were last advanced to.
+    private const double LoopCacheBudgetAuto = -1;
+    private double _sceneLoopBpm = TempoSyncSettings.DefaultLoopBpm;
+    private double _loopCacheBudgetGb = LoopCacheBudgetAuto;
+    private double _beatClockNow;
     private double _captureThresholdMin = 0.35;
     private double _captureThresholdMax = 0.75;
     private bool _invertThreshold;
@@ -360,6 +372,7 @@ public partial class MainWindow : Window
     public MainWindow()
     {
         Logger.Initialize();
+        FileCaptureService.TempoClock = new SceneTempoClock(this);
         _engine = new GpuSimulationBackend();
         _inlineSourceCompositor = new CpuSourceCompositor(this);
         _inlineGpuSourceCompositor = new GpuSourceCompositor(this);
@@ -1102,6 +1115,7 @@ public partial class MainWindow : Window
             }
         }
 
+        SyncLoopCacheMenu();
         if (VideoDecodeFpsMenu == null)
         {
             return;
@@ -3823,6 +3837,7 @@ public partial class MainWindow : Window
             _lastRenderTime = now;
         }
         RecordFrameGapHistory(frameGapMs > 0 ? frameGapMs : dt * 1000.0, dt);
+        UpdateBeatClocks(now);
 
         // --- FPS Modulation ---
         if (_fpsOscillationEnabled)
@@ -3830,7 +3845,7 @@ public partial class MainWindow : Window
             double bpm = _oscillationBpm;
             if (_audioSyncEnabled && HasReactiveAudioInput())
             {
-                bpm = _audioBeatDetector.CurrentBpm;
+                bpm = _audioBeatClock.Bpm;
             }
 
             // Clamp BPM to reasonable range to avoid crazy frequencies
@@ -3840,15 +3855,8 @@ public partial class MainWindow : Window
             
             if (_audioSyncEnabled && HasReactiveAudioInput())
             {
-                 // Sync phase to beat: Peak at beat.
-                 // Sin wave peaks at 0.25 (PI/2).
-                 // So we want Phase = 0.25 when TimeSinceBeat = 0.
-                 double timeSinceBeat = (GetReactiveAudioNow() - _audioBeatDetector.LastBeatTime).TotalSeconds;
-                 
-                 // Handle potentially large numbers or negative drift
-                 if (timeSinceBeat < 0) timeSinceBeat = 0;
-
-                 _oscillationPhase = (timeSinceBeat * frequency + 0.25) % 1.0;
+                 // Sync phase to the beat clock: the sine peaks (phase 0.25) on each beat.
+                 _oscillationPhase = (BeatClock.Fraction(_audioBeatClock.GetPosition(now)) + 0.25) % 1.0;
             }
             else
             {
@@ -5238,6 +5246,7 @@ public partial class MainWindow : Window
 
             _offlineAnimationTimeSeconds = animationStart;
             _isOfflineRendering = true;
+            ResetBeatClocks(animationStart);
             StartRecording(offlineRender: true, fpsOverride: outputFps);
             started = _isRecording && _recordingSession != null;
             if (!started)
@@ -5528,7 +5537,8 @@ public partial class MainWindow : Window
             }
             else if (source.Type == CaptureSource.SourceType.File &&
                      !string.IsNullOrWhiteSpace(source.FilePath) &&
-                     IsVideoSource(source))
+                     IsVideoSource(source) &&
+                     !IsTempoSyncedFileLayer(source))
             {
                 _fileCapture.MixOfflineVideoAudioFrame(source.FilePath, mix);
             }
@@ -5590,7 +5600,8 @@ public partial class MainWindow : Window
             }
             else if (source.Type == CaptureSource.SourceType.File &&
                      !string.IsNullOrWhiteSpace(source.FilePath) &&
-                     IsVideoSource(source))
+                     IsVideoSource(source) &&
+                     !IsTempoSyncedFileLayer(source))
             {
                 mixed = _fileCapture.MixLiveVideoAudioSamples(source.FilePath, mix);
             }
@@ -6248,6 +6259,14 @@ public partial class MainWindow : Window
         if (AnimationAudioSyncCheckBox != null)
         {
             AnimationAudioSyncCheckBox.IsChecked = _animationAudioSyncEnabled;
+        }
+        SyncTempoRangeComboBox();
+        if (SceneLoopBpmSlider != null && SceneLoopBpmValueText != null)
+        {
+            _suppressSceneLoopBpmEvents = true;
+            SceneLoopBpmSlider.Value = Math.Clamp(_sceneLoopBpm, SceneLoopBpmSlider.Minimum, SceneLoopBpmSlider.Maximum);
+            _suppressSceneLoopBpmEvents = false;
+            SceneLoopBpmValueText.Text = $"{_sceneLoopBpm:0.#}";
         }
 
         if (FpsOscillationCheckBox != null)
@@ -7328,6 +7347,36 @@ public partial class MainWindow : Window
         MenuItem? videoSeekItem = null;
         MenuItem? autoClipFadeItem = null;
         MenuItem? autoClipLoopItem = null;
+        MenuItem? tempoSyncItem = null;
+        MenuItem? tempoSyncInfoItem = null;
+        bool tempoSynced = source.TempoSyncEnabled && SupportsTempoSync(source);
+        if (SupportsTempoSync(source))
+        {
+            tempoSyncItem = new MenuItem
+            {
+                Header = "Sync to Beat",
+                IsCheckable = true,
+                IsChecked = source.TempoSyncEnabled,
+                ToolTip = "Play this loop locked to the beat clock (Animation BPM or the detected tempo) instead of real time."
+            };
+            tempoSyncItem.Click += (_, _) =>
+            {
+                SetSourceTempoSync(source, !source.TempoSyncEnabled);
+                RebuildSourcesMenu();
+            };
+            if (tempoSynced)
+            {
+                string loopBpm = $"{ResolveTempoSyncSettings(source, null).LoopBpm:0.#} BPM";
+                tempoSyncInfoItem = new MenuItem
+                {
+                    Header = source.Type == CaptureSource.SourceType.File
+                        ? _fileCapture.DescribeTempoLayer(source.Id) ?? $"Tempo sync: loops authored at {loopBpm}"
+                        : $"Tempo sync: loops authored at {loopBpm} (per-file tags in the Scene Editor)",
+                    IsEnabled = false
+                };
+            }
+        }
+
         if (isVideoLayer)
         {
             restartVideoItem = new MenuItem
@@ -7388,7 +7437,7 @@ public partial class MainWindow : Window
                 };
             }
 
-            if (source.Type != CaptureSource.SourceType.AutoClip)
+            if (source.Type != CaptureSource.SourceType.AutoClip && !tempoSynced)
             {
                 bool hasPlaybackState = TryGetSourceVideoPlaybackState(source, out var playbackState);
                 videoPlaybackItem = new MenuItem
@@ -7448,6 +7497,16 @@ public partial class MainWindow : Window
                 videoSeekItem.Items.Add(videoSeekSlider);
             }
 
+            if (tempoSynced)
+            {
+                // Beat-synced loops are silent and clock-driven: no transport or audio.
+                if (source.Type == CaptureSource.SourceType.File)
+                {
+                    restartVideoItem = null;
+                }
+            }
+            else
+            {
             videoAudioItem = new MenuItem
             {
                 Header = "Play Audio",
@@ -7493,6 +7552,7 @@ public partial class MainWindow : Window
             };
             videoAudioVolumeItem.Items.Add(videoAudioVolumeValueItem);
             videoAudioVolumeItem.Items.Add(videoAudioVolumeSlider);
+            }
         }
 
         MenuItem? renameItem = null;
@@ -7764,6 +7824,14 @@ public partial class MainWindow : Window
         {
             sourceItem.Items.Add(autoClipLoopItem);
         }
+        if (tempoSyncItem != null)
+        {
+            sourceItem.Items.Add(tempoSyncItem);
+        }
+        if (tempoSyncInfoItem != null)
+        {
+            sourceItem.Items.Add(tempoSyncInfoItem);
+        }
         if (videoPlaybackItem != null)
         {
             sourceItem.Items.Add(videoPlaybackItem);
@@ -7998,47 +8066,208 @@ public partial class MainWindow : Window
         _ => 1.0
     };
 
+    private void UpdateBeatClocks(double now)
+    {
+        _beatClockNow = now;
+        double analysisNow = _isOfflineRendering
+            ? _offlineAnimationTimeSeconds
+            : AudioBeatDetector.LiveAnalysisSeconds;
+        double manualBpm = _animationBpm > 0 ? _animationBpm : DefaultAnimationBpm;
+        _manualBeatClock.Update(now, manualBpm, null, analysisNow);
+        BeatEstimate? estimate = HasReactiveAudioInput() ? _audioBeatDetector.BeatEstimate : null;
+        _audioBeatClock.Update(now, manualBpm, estimate, analysisNow);
+    }
+
+    private void ResetBeatClocks(double now)
+    {
+        _audioBeatClock.Reset(now);
+        _manualBeatClock.Reset(now);
+    }
+
+    private BeatClock GetAnimationBeatClock(out bool audioRequested)
+    {
+        audioRequested = _animationAudioSyncEnabled && HasReactiveAudioInput();
+        return audioRequested ? _audioBeatClock : _manualBeatClock;
+    }
+
+    /// <summary>Video loops follow the same clock as layer animations, bar-aligned.</summary>
+    private sealed class SceneTempoClock : ITempoClock
+    {
+        private readonly MainWindow _owner;
+
+        public SceneTempoClock(MainWindow owner) => _owner = owner;
+
+        public double BeatPosition => _owner.GetAnimationBeatClock(out _).GetBarAlignedPosition(_owner._beatClockNow);
+        public double Bpm => _owner.GetAnimationBeatClock(out _).Bpm;
+    }
+
+    private void ResyncDownbeat()
+    {
+        _audioBeatClock.ResyncDownbeat();
+        _manualBeatClock.ResyncDownbeat();
+        Logger.Info("Downbeat resynced: the nearest beat is now beat 1 of the bar.");
+    }
+
+    /// <summary>Loop BPM precedence: AutoClip per-file tag, then the layer's, then the scene's.</summary>
+    private TempoSyncSettings ResolveTempoSyncSettings(CaptureSource source, string? path)
+    {
+        double bpm = 0;
+        if (path != null &&
+            source.AutoClipVideoOverrides.TryGetValue(path, out var fileOverride) &&
+            fileOverride.LoopBpm > 0)
+        {
+            bpm = fileOverride.LoopBpm;
+        }
+
+        if (bpm <= 0 && source.TempoLoopBpm > 0)
+        {
+            bpm = source.TempoLoopBpm;
+        }
+
+        return new TempoSyncSettings(TempoSyncSettings.NormalizeBpm(bpm > 0 ? bpm : _sceneLoopBpm));
+    }
+
+    private static bool SupportsTempoSync(CaptureSource source) =>
+        source.Type == CaptureSource.SourceType.AutoClip ||
+        (source.Type == CaptureSource.SourceType.File &&
+         !string.IsNullOrWhiteSpace(source.FilePath) &&
+         FileCaptureService.SupportsTempoSyncPath(source.FilePath));
+
+    private void ApplySourceTempoSync(CaptureSource source)
+    {
+        if (source.Type == CaptureSource.SourceType.AutoClip)
+        {
+            source.AutoClip?.SetTempoSync(source.TempoSyncEnabled
+                ? path => ResolveTempoSyncSettings(source, path)
+                : null);
+        }
+        else if (SupportsTempoSync(source))
+        {
+            if (source.TempoSyncEnabled)
+            {
+                // The layer's own player is created on its next capture.
+                ReleaseUnusedRealtimeSession(source.FilePath!);
+            }
+            else if (_fileCapture.IsTempoLayerActive(source.Id))
+            {
+                // Back to ordinary playback: restore the shared real-time session and
+                // this layer's audio and pause state on it.
+                _fileCapture.ReleaseTempoLayer(source.Id);
+                _fileCapture.TryGetOrAdd(source.FilePath!, out _, out _);
+                ApplySourceVideoAudioState(source);
+                ApplySourceDecodeActivation();
+            }
+        }
+    }
+
+    private void ApplyTempoSyncToAllSources()
+    {
+        foreach (var source in EnumerateSources(_sources))
+        {
+            ApplySourceTempoSync(source);
+        }
+    }
+
+    private bool IsTempoSyncedFileLayer(CaptureSource source) =>
+        source.Type == CaptureSource.SourceType.File && source.TempoSyncEnabled && SupportsTempoSync(source);
+
+    /// <summary>
+    /// Real-time file sessions are shared by path. Once every File layer on a path is
+    /// synced (each has its own beat-loop player), nothing reads the shared session, so
+    /// release its decoder. It is recreated when an unsynced layer needs it again.
+    /// </summary>
+    private void ReleaseUnusedRealtimeSession(string path)
+    {
+        if (!_fileCapture.HasSession(path))
+        {
+            return;
+        }
+
+        bool needed = EnumerateSources(_sources).Any(candidate =>
+            candidate.Type == CaptureSource.SourceType.File &&
+            !string.IsNullOrWhiteSpace(candidate.FilePath) &&
+            string.Equals(candidate.FilePath, path, StringComparison.OrdinalIgnoreCase) &&
+            !IsTempoSyncedFileLayer(candidate));
+        if (!needed)
+        {
+            _fileCapture.Remove(path);
+        }
+    }
+
+    private FileCaptureService.FileCaptureFrame? CaptureFileLayerFrame(CaptureSource source, int width, int height, bool includeSource)
+    {
+        if (IsTempoSyncedFileLayer(source))
+        {
+            ReleaseUnusedRealtimeSession(source.FilePath!);
+            return _fileCapture.CaptureTempoLayerFrame(
+                source.Id,
+                source.FilePath!,
+                ResolveTempoSyncSettings(source, null),
+                width,
+                height,
+                source.FitMode,
+                includeSource);
+        }
+
+        if (_fileCapture.IsTempoLayerActive(source.Id))
+        {
+            _fileCapture.ReleaseTempoLayer(source.Id);
+        }
+
+        return _fileCapture.CaptureFrame(source.FilePath!, width, height, source.FitMode, includeSource);
+    }
+
+    private const long BackgroundBakeLoopCacheBytes = 2L * 1024 * 1024 * 1024;
+
+    private void ApplyLoopCacheBudget()
+    {
+        long bytes = _loopCacheBudgetGb < 0
+            ? FileCaptureService.LoopFrameCache.DefaultBudgetBytes()
+            : (long)(_loopCacheBudgetGb * 1024 * 1024 * 1024);
+        if (BackgroundBakeWorker.IsWorker)
+        {
+            // The bake runs beside the editor's own cache; never let it double RAM use.
+            bytes = Math.Min(bytes, BackgroundBakeLoopCacheBytes);
+        }
+
+        FileCaptureService.LoopFrameCache.SetBudgetBytes(bytes);
+    }
+
+    private void SetSourceTempoSync(CaptureSource source, bool enabled)
+    {
+        source.TempoSyncEnabled = enabled;
+        ApplySourceTempoSync(source);
+        source.LastFrame = null;
+        RenderFrame();
+        SaveConfig();
+        NotifyLayerEditorSourcesChanged();
+    }
+
+    internal void UpdateTempoSyncFromEditor(Guid sourceId, bool enabled, double loopBpm)
+    {
+        RunWithoutLayerEditorRefresh(() =>
+        {
+            CaptureSource? source = FindSourceById(sourceId);
+            if (source == null || !SupportsTempoSync(source))
+            {
+                return;
+            }
+
+            source.TempoSyncEnabled = enabled;
+            source.TempoLoopBpm = loopBpm > 0 ? TempoSyncSettings.NormalizeBpm(loopBpm) : 0;
+            ApplySourceTempoSync(source);
+            RenderFrame();
+            SaveConfig();
+            RebuildSourcesMenu();
+        });
+    }
+
     private bool TryGetAnimationBeatTiming(double timeSeconds, out double beatDuration, out double beatsElapsed, out bool beatAligned)
     {
-        double bpm = _animationBpm > 0 ? _animationBpm : DefaultAnimationBpm;
-        bool audioRequested = _animationAudioSyncEnabled && HasReactiveAudioInput();
-        double effectiveBpm = bpm;
-        if (audioRequested)
-        {
-            double detectedBpm = _audioBeatDetector.CurrentBpm;
-            if (!double.IsNaN(detectedBpm) && !double.IsInfinity(detectedBpm) && detectedBpm > 0)
-            {
-                effectiveBpm = detectedBpm;
-            }
-        }
-
-        effectiveBpm = Math.Clamp(effectiveBpm, 10, 300);
-        beatDuration = 60.0 / effectiveBpm;
-        if (beatDuration <= 0.000001)
-        {
-            beatsElapsed = 0;
-            beatAligned = false;
-            return false;
-        }
-
-        beatAligned = audioRequested &&
-                      _audioBeatDetector.LastBeatTime != DateTime.MinValue &&
-                      _audioBeatDetector.BeatCount > 0;
-
-        if (beatAligned)
-        {
-            double timeSinceBeat = (GetReactiveAudioNow() - _audioBeatDetector.LastBeatTime).TotalSeconds;
-            if (timeSinceBeat < 0)
-            {
-                timeSinceBeat = 0;
-            }
-
-            long beatIndex = Math.Max(0, _audioBeatDetector.BeatCount - 1);
-            beatsElapsed = beatIndex + (timeSinceBeat / beatDuration);
-            return true;
-        }
-
-        beatsElapsed = timeSeconds / beatDuration;
+        BeatClock clock = GetAnimationBeatClock(out bool audioRequested);
+        beatDuration = 60.0 / Math.Clamp(clock.Bpm, 10, 300);
+        beatsElapsed = clock.GetPosition(timeSeconds);
+        beatAligned = audioRequested && clock.AudioLocked;
         return true;
     }
 
@@ -8329,6 +8558,11 @@ public partial class MainWindow : Window
             ApplySourceVideoAudioState(source);
             restarted = true;
         }
+        else if (IsTempoSyncedFileLayer(source))
+        {
+            // Beat-locked: the loop's phase comes from the beat clock, not a decoder.
+            restarted = true;
+        }
         else if (source.Type == CaptureSource.SourceType.File &&
                  !string.IsNullOrWhiteSpace(source.FilePath) &&
                  IsVideoFileSourcePath(source.FilePath))
@@ -8385,7 +8619,7 @@ public partial class MainWindow : Window
             return;
         }
 
-        if (!string.IsNullOrWhiteSpace(source.FilePath))
+        if (!string.IsNullOrWhiteSpace(source.FilePath) && !IsTempoSyncedFileLayer(source))
         {
             _fileCapture.SetVideoAudioVolume(source.FilePath, source.VideoAudioVolume);
             if (!_fileCapture.SetVideoAudioEnabled(source.FilePath, source.VideoAudioEnabled))
@@ -8416,7 +8650,7 @@ public partial class MainWindow : Window
     private bool TryGetSourceVideoPlaybackState(CaptureSource source, out FileCaptureService.VideoPlaybackState playbackState)
     {
         playbackState = default;
-        if (!IsVideoSource(source))
+        if (!IsVideoSource(source) || IsTempoSyncedFileLayer(source))
         {
             return false;
         }
@@ -8535,7 +8769,7 @@ public partial class MainWindow : Window
             source.AutoClip.SetPlaybackPaused(decoderPaused);
             applied = true;
         }
-        else if (!string.IsNullOrWhiteSpace(source.FilePath))
+        else if (!string.IsNullOrWhiteSpace(source.FilePath) && !IsTempoSyncedFileLayer(source))
         {
             applied = _fileCapture.SetVideoPaused(source.FilePath, decoderPaused);
         }
@@ -8631,7 +8865,7 @@ public partial class MainWindow : Window
         {
             source.AutoClip?.SetPlaybackPaused(paused);
         }
-        else if (!string.IsNullOrWhiteSpace(source.FilePath))
+        else if (!string.IsNullOrWhiteSpace(source.FilePath) && !IsTempoSyncedFileLayer(source))
         {
             _fileCapture.SetVideoPaused(source.FilePath, paused);
         }
@@ -8656,7 +8890,7 @@ public partial class MainWindow : Window
             source.VideoSequence.SeekNormalized(clamped);
             applied = true;
         }
-        else if (!string.IsNullOrWhiteSpace(source.FilePath))
+        else if (!string.IsNullOrWhiteSpace(source.FilePath) && !IsTempoSyncedFileLayer(source))
         {
             applied = _fileCapture.SeekVideo(source.FilePath, clamped);
         }
@@ -9030,7 +9264,8 @@ public partial class MainWindow : Window
                 BlendMode = string.IsNullOrWhiteSpace(config.BlendMode) ? "Inherit" : config.BlendMode,
                 KeyMode = string.IsNullOrWhiteSpace(config.KeyMode) ? "Inherit" : config.KeyMode,
                 KeyColorHex = string.IsNullOrWhiteSpace(config.KeyColor) ? "#000000" : config.KeyColor,
-                KeyTolerance = config.KeyTolerance
+                KeyTolerance = config.KeyTolerance,
+                LoopBpm = config.LoopBpm
             };
             source.AutoClipVideoOverrides[config.FilePath] = BuildAutoClipVideoOverride(model, source);
         }
@@ -9065,7 +9300,8 @@ public partial class MainWindow : Window
             KeyColorR = r,
             KeyColorG = g,
             KeyColorB = b,
-            KeyTolerance = Math.Clamp(model.KeyTolerance, 0, 1)
+            KeyTolerance = Math.Clamp(model.KeyTolerance, 0, 1),
+            LoopBpm = model.LoopBpm > 0 ? TempoSyncSettings.NormalizeBpm(model.LoopBpm) : 0
         };
     }
 
@@ -9771,6 +10007,7 @@ public partial class MainWindow : Window
         }
         else if (source.Type == CaptureSource.SourceType.File && source.FilePath != null)
         {
+            _fileCapture.ReleaseTempoLayer(source.Id);
             _fileCapture.Remove(source.FilePath);
         }
     }
@@ -11378,7 +11615,7 @@ public partial class MainWindow : Window
                 {
                     var referenceEngine = GetReferenceSimulationEngine();
                     long fileCaptureStamp = BeginProfileStamp();
-                    var fileFrame = _fileCapture.CaptureFrame(source.FilePath, referenceEngine.Columns, referenceEngine.Rows, source.FitMode, includeSource: includeNativeSource);
+                    var fileFrame = CaptureFileLayerFrame(source, referenceEngine.Columns, referenceEngine.Rows, includeNativeSource);
                     EndProfileStamp("capture_file_frame_ms", fileCaptureStamp);
                     if (fileFrame.HasValue)
                     {
@@ -11505,7 +11742,9 @@ public partial class MainWindow : Window
                 if (source.Type == CaptureSource.SourceType.File)
                 {
                     if (!string.IsNullOrWhiteSpace(source.FilePath) &&
-                        _fileCapture.GetState(source.FilePath) == FileCaptureService.FileCaptureState.Pending)
+                        (IsTempoSyncedFileLayer(source)
+                            ? _fileCapture.GetTempoLayerState(source.Id)
+                            : _fileCapture.GetState(source.FilePath)) == FileCaptureService.FileCaptureState.Pending)
                     {
                         continue;
                     }
@@ -11966,6 +12205,168 @@ public partial class MainWindow : Window
             AnimationBpmValueText.Text = $"{_animationBpm:F0}";
         }
         SaveConfig();
+    }
+
+    private static readonly double[] TempoRangeMinOptions = { 70, 80, 90, 100 };
+
+    private static double NormalizeTempoRangeMin(double value) =>
+        TempoRangeMinOptions.OrderBy(option => Math.Abs(option - value)).First();
+
+    private bool _suppressTempoRangeEvents;
+    private DispatcherTimer? _detectedTempoTimer;
+
+    private void SyncTempoRangeComboBox()
+    {
+        if (TempoRangeComboBox == null)
+        {
+            return;
+        }
+
+        _suppressTempoRangeEvents = true;
+        try
+        {
+            TempoRangeComboBox.SelectedItem = TempoRangeComboBox.Items
+                .OfType<ComboBoxItem>()
+                .FirstOrDefault(item => item.Tag is string tag &&
+                                        double.TryParse(tag, NumberStyles.Float, CultureInfo.InvariantCulture, out double min) &&
+                                        Math.Abs(min - _tempoRangeMinBpm) < 0.5);
+        }
+        finally
+        {
+            _suppressTempoRangeEvents = false;
+        }
+    }
+
+    private void TempoRangeComboBox_OnSelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (_suppressTempoRangeEvents ||
+            TempoRangeComboBox?.SelectedItem is not ComboBoxItem { Tag: string tag } ||
+            !double.TryParse(tag, NumberStyles.Float, CultureInfo.InvariantCulture, out double min))
+        {
+            return;
+        }
+
+        _tempoRangeMinBpm = NormalizeTempoRangeMin(min);
+        _audioBeatDetector.TempoRangeMinBpm = _tempoRangeMinBpm;
+        SaveConfig();
+    }
+
+    private bool _suppressSceneLoopBpmEvents;
+
+    private void SceneLoopBpmSlider_OnValueChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
+    {
+        if (_suppressSceneLoopBpmEvents)
+        {
+            return;
+        }
+
+        _sceneLoopBpm = TempoSyncSettings.NormalizeBpm(Math.Round(e.NewValue));
+        if (SceneLoopBpmValueText != null)
+        {
+            SceneLoopBpmValueText.Text = $"{_sceneLoopBpm:0.#}";
+        }
+
+        // File layers snapshot their settings; AutoClips read them per clip.
+        ApplyTempoSyncToAllSources();
+        SaveConfig();
+    }
+
+    private void ResyncDownbeat_Click(object sender, RoutedEventArgs e) => ResyncDownbeat();
+
+    private void MainWindow_OnKeyDown(object sender, KeyEventArgs e)
+    {
+        if (e.Key == Key.B &&
+            Keyboard.Modifiers == ModifierKeys.None &&
+            e.OriginalSource is not System.Windows.Controls.Primitives.TextBoxBase)
+        {
+            ResyncDownbeat();
+            e.Handled = true;
+        }
+    }
+
+    private void SyncLoopCacheMenu()
+    {
+        if (LoopCacheMenu == null)
+        {
+            return;
+        }
+
+        if (LoopCacheAutoItem != null)
+        {
+            double autoGb = FileCaptureService.LoopFrameCache.DefaultBudgetBytes() / (1024.0 * 1024 * 1024);
+            LoopCacheAutoItem.Header = $"Auto ({autoGb:0.#} GB, a quarter of RAM)";
+        }
+
+        foreach (var item in LoopCacheMenu.Items.OfType<MenuItem>())
+        {
+            if (item.Tag is string tag &&
+                double.TryParse(tag, NumberStyles.Float, CultureInfo.InvariantCulture, out double gb))
+            {
+                item.IsChecked = _loopCacheBudgetGb < 0 ? gb < 0 : Math.Abs(gb - _loopCacheBudgetGb) < 0.001;
+            }
+        }
+    }
+
+    private void LoopCacheMenu_OnSubmenuOpened(object sender, RoutedEventArgs e)
+    {
+        SyncLoopCacheMenu();
+        if (LoopCacheUsageItem != null)
+        {
+            const double gib = 1024.0 * 1024 * 1024;
+            LoopCacheUsageItem.Header =
+                $"In use: {FileCaptureService.LoopFrameCache.UsedBytes / gib:0.0} of {FileCaptureService.LoopFrameCache.BudgetBytes / gib:0.#} GB " +
+                $"({FileCaptureService.LoopFrameCache.CompleteEntryCount} loops)";
+        }
+    }
+
+    private void LoopCacheItem_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is not MenuItem { Tag: string tag } ||
+            !double.TryParse(tag, NumberStyles.Float, CultureInfo.InvariantCulture, out double gb))
+        {
+            return;
+        }
+
+        _loopCacheBudgetGb = gb < 0 ? LoopCacheBudgetAuto : gb;
+        ApplyLoopCacheBudget();
+        SyncLoopCacheMenu();
+        SaveConfig();
+    }
+
+    private void AnimationBpmMenu_OnSubmenuOpened(object sender, RoutedEventArgs e)
+    {
+        UpdateDetectedTempoText();
+        _detectedTempoTimer ??= new DispatcherTimer(TimeSpan.FromMilliseconds(250), DispatcherPriority.Background,
+            (_, _) => UpdateDetectedTempoText(), Dispatcher);
+        _detectedTempoTimer.Start();
+    }
+
+    private void AnimationBpmMenu_OnSubmenuClosed(object sender, RoutedEventArgs e) => _detectedTempoTimer?.Stop();
+
+    private void UpdateDetectedTempoText()
+    {
+        if (DetectedTempoText != null)
+        {
+            DetectedTempoText.Text = DescribeDetectedTempo();
+        }
+    }
+
+    private string DescribeDetectedTempo()
+    {
+        if (!HasReactiveAudioInput())
+        {
+            return "Detected: no audio input";
+        }
+
+        BeatEstimate estimate = _audioBeatDetector.BeatEstimate;
+        if (estimate.Bpm <= 0)
+        {
+            return "Detected: listening...";
+        }
+
+        return estimate.Locked
+            ? $"Detected: {estimate.Bpm:F1} BPM (locked)"
+            : $"Detected: {estimate.Bpm:F1} BPM (holding)";
     }
 
     private void AnimationAudioSync_OnChecked(object sender, RoutedEventArgs e)
@@ -13677,6 +14078,7 @@ public partial class MainWindow : Window
         public byte KeyColorG { get; set; }
         public byte KeyColorB { get; set; }
         public double KeyTolerance { get; set; } = DefaultKeyTolerance;
+        public double LoopBpm { get; set; }
     }
 
     private void UpdateDisplaySurface(bool force = false)
@@ -17042,43 +17444,19 @@ public partial class MainWindow : Window
                 }
                 case AnimationType.BeatShake:
                 {
-                    double baseBpm = _animationBpm > 0 ? _animationBpm : DefaultAnimationBpm;
-                    bool audioRequested = _animationAudioSyncEnabled && HasReactiveAudioInput();
-                    bool beatAligned = audioRequested &&
-                                       _audioBeatDetector.LastBeatTime != DateTime.MinValue &&
-                                       _audioBeatDetector.BeatCount > 0;
-                    double detectedBpm = audioRequested ? _audioBeatDetector.CurrentBpm : baseBpm;
-                    if (double.IsNaN(detectedBpm) || double.IsInfinity(detectedBpm) || detectedBpm <= 0)
+                    if (!TryGetAnimationBeatTiming(timeSeconds, out double shakeBeatDuration, out double shakeBeats, out _))
                     {
-                        detectedBpm = baseBpm;
+                        break;
                     }
 
-                    double shakeBpm = Math.Clamp(detectedBpm, 10, 300);
-                    double shakeBeatDuration = 60.0 / shakeBpm;
                     double shakeWindow = shakeBeatDuration * AnimationBeatShakeWindowBeats;
                     if (shakeBeatDuration <= 0.000001 || shakeWindow <= 0.000001)
                     {
                         break;
                     }
 
-                    double timeSinceBeat;
-                    long beatSeed;
-                    if (beatAligned)
-                    {
-                        timeSinceBeat = (GetReactiveAudioNow() - _audioBeatDetector.LastBeatTime).TotalSeconds;
-                        beatSeed = _audioBeatDetector.LastBeatTime.Ticks;
-                    }
-                    else
-                    {
-                        timeSinceBeat = timeSeconds % shakeBeatDuration;
-                        beatSeed = (long)(timeSeconds / shakeBeatDuration);
-                    }
-
-                    if (timeSinceBeat < 0)
-                    {
-                        timeSinceBeat = 0;
-                    }
-
+                    double timeSinceBeat = BeatClock.Fraction(shakeBeats) * shakeBeatDuration;
+                    long beatSeed = (long)Math.Floor(shakeBeats);
                     if (timeSinceBeat >= shakeWindow)
                     {
                         break;
@@ -17908,7 +18286,7 @@ public partial class MainWindow : Window
                         : IsVideoStackAudioSelection(_selectedAudioDeviceId)
                             ? "Video Stack"
                             : "Device";
-                    reactiveStats = $"\nReactive: {deviceState} | InGain x{_audioInputGain:0.00} | FPS x{_audioReactiveFpsMultiplier:0.00} (min {_audioReactiveFpsMinPercent * 100.0:0}%) | Opacity {_effectiveLifeOpacity:0.00} | Beats: {_audioBeatDetector.BeatCount} | Seeds L:{_audioReactiveLevelSeedBurstsLastStep} B:{_audioReactiveBeatSeedBurstsLastStep}";
+                    reactiveStats = $"\nReactive: {deviceState} | InGain x{_audioInputGain:0.00} | FPS x{_audioReactiveFpsMultiplier:0.00} (min {_audioReactiveFpsMinPercent * 100.0:0}%) | Opacity {_effectiveLifeOpacity:0.00} | Onsets: {_audioBeatDetector.BeatCount} | Tempo {_audioBeatClock.Bpm:F1}{(_audioBeatClock.AudioLocked ? " locked" : "")} | Seeds L:{_audioReactiveLevelSeedBurstsLastStep} B:{_audioReactiveBeatSeedBurstsLastStep}";
                 }
 
                 FpsText.Text = $"Present {_presentationDisplayFps:0.0} fps (target {_currentFpsFromConfig:0.0}) | Loop {_renderDisplayFps:0.0} fps | Sim {_simulationDisplayFps:0.0} sps (target {_currentSimulationTargetFps:0.0}) | Steps/frame {_lastSimulationStepsThisFrame}{pacingStatsText}{stageStatsText}{audioStats}{reactiveStats}";
@@ -19377,6 +19755,11 @@ public partial class MainWindow : Window
                 _animationBpm = Math.Clamp(config.AnimationBpm, 10, 300);
             }
             _animationAudioSyncEnabled = config.AnimationAudioSyncEnabled;
+            _tempoRangeMinBpm = NormalizeTempoRangeMin(config.TempoRangeMinBpm);
+            _sceneLoopBpm = TempoSyncSettings.NormalizeBpm(config.LoopBpm);
+            _loopCacheBudgetGb = config.LoopCacheBudgetGb < 0 ? LoopCacheBudgetAuto : Math.Clamp(config.LoopCacheBudgetGb, 0, 256);
+            ApplyLoopCacheBudget();
+            _audioBeatDetector.TempoRangeMinBpm = _tempoRangeMinBpm;
             if (!string.IsNullOrWhiteSpace(config.RecordingQuality) &&
                 Enum.TryParse<RecordingQuality>(config.RecordingQuality, true, out var recordingQuality))
             {
@@ -19660,6 +20043,9 @@ public partial class MainWindow : Window
             InvertComposite = _invertComposite,
             ShowFps = _showFps,
             AnimationBpm = _animationBpm,
+            TempoRangeMinBpm = _tempoRangeMinBpm,
+            LoopBpm = _sceneLoopBpm,
+            LoopCacheBudgetGb = _loopCacheBudgetGb,
             AnimationAudioSyncEnabled = _animationAudioSyncEnabled,
             RecordingQuality = _recordingQuality.ToString(),
             RecordingOutputFolder = _recordingOutputFolder,
@@ -20110,6 +20496,8 @@ public partial class MainWindow : Window
                 AutoClipMaxDelaySeconds = source.AutoClipMaxDelaySeconds,
                 AutoClipFadeSeconds = source.AutoClipFadeSeconds,
                 AutoClipLoopSelectedFile = source.AutoClipLoopSelectedFile,
+                TempoSyncEnabled = source.TempoSyncEnabled,
+                TempoLoopBpm = source.TempoLoopBpm,
                 AutoClipVideoOverrides = source.AutoClipVideoOverrides.Select(pair => new AppConfig.AutoClipVideoOverrideConfig
                 {
                     FilePath = pair.Key,
@@ -20121,7 +20509,8 @@ public partial class MainWindow : Window
                         null => "Inherit"
                     },
                     KeyColor = FormatHexColor(pair.Value.KeyColorR, pair.Value.KeyColorG, pair.Value.KeyColorB),
-                    KeyTolerance = pair.Value.KeyTolerance
+                    KeyTolerance = pair.Value.KeyTolerance,
+                    LoopBpm = pair.Value.LoopBpm
                 }).ToList()
             };
 
@@ -20273,7 +20662,11 @@ public partial class MainWindow : Window
                 AutoClipMinDelaySeconds = source.AutoClipMinDelaySeconds,
                 AutoClipMaxDelaySeconds = source.AutoClipMaxDelaySeconds,
                 AutoClipFadeSeconds = source.AutoClipFadeSeconds,
-                AutoClipLoopSelectedFile = source.AutoClipLoopSelectedFile
+                AutoClipLoopSelectedFile = source.AutoClipLoopSelectedFile,
+                SupportsTempoSync = SupportsTempoSync(source),
+                TempoSyncEnabled = source.TempoSyncEnabled,
+                TempoLoopBpm = source.TempoLoopBpm,
+                SceneLoopBpm = _sceneLoopBpm
             };
 
             if (TryGetSourceVideoPlaybackState(source, out var playbackState))
@@ -20310,6 +20703,7 @@ public partial class MainWindow : Window
                         };
                         item.KeyColorHex = FormatHexColor(fileOverride.KeyColorR, fileOverride.KeyColorG, fileOverride.KeyColorB);
                         item.KeyTolerance = fileOverride.KeyTolerance;
+                        item.LoopBpm = fileOverride.LoopBpm;
                     }
                     model.AutoClipVideoOverrides.Add(item);
                 }
@@ -20622,6 +21016,8 @@ public partial class MainWindow : Window
         source.AutoClipStartWithDelay = model.AutoClipStartWithDelay;
         source.AutoClipPlayInOrder = model.AutoClipPlayInOrder;
         source.AutoClipPlayWholeFile = model.AutoClipPlayWholeFile;
+        source.TempoSyncEnabled = model.TempoSyncEnabled;
+        source.TempoLoopBpm = model.TempoLoopBpm > 0 ? TempoSyncSettings.NormalizeBpm(model.TempoLoopBpm) : 0;
         source.VideoAudioEnabled = model.VideoAudioEnabled;
         source.VideoAudioVolume = Math.Clamp(model.VideoAudioVolume, 0, 1);
         source.Mirror = model.Mirror;
@@ -20663,6 +21059,8 @@ public partial class MainWindow : Window
             source.FilePaths.AddRange(paths);
             source.SetDisplayName(source.AutoClip.DisplayName);
         }
+
+        ApplySourceTempoSync(source);
 
         if (source.Type == CaptureSource.SourceType.Group || source.Type == CaptureSource.SourceType.SimGroup)
         {
@@ -21019,6 +21417,8 @@ public partial class MainWindow : Window
         source.AutoClipPlayWholeFile = config.AutoClipPlayWholeFile;
         source.AutoClipFadeSeconds = Math.Clamp(config.AutoClipFadeSeconds, 0, 10);
         source.AutoClipLoopSelectedFile = config.AutoClipLoopSelectedFile;
+        source.TempoSyncEnabled = config.TempoSyncEnabled;
+        source.TempoLoopBpm = config.TempoLoopBpm > 0 ? TempoSyncSettings.NormalizeBpm(config.TempoLoopBpm) : 0;
         source.VideoAudioEnabled = config.VideoAudioEnabled;
         source.VideoAudioVolume = Math.Clamp(config.VideoAudioVolume, 0, 1);
         source.Mirror = config.Mirror;
@@ -21041,6 +21441,7 @@ public partial class MainWindow : Window
         {
             SyncAutoClipVideoOverrides(source, config.AutoClipVideoOverrides);
         }
+        ApplySourceTempoSync(source);
 
         source.SimulationLayers.Clear();
         if (source.Type == CaptureSource.SourceType.SimGroup && config.SimulationLayers.Count > 0)
@@ -21118,6 +21519,9 @@ public partial class MainWindow : Window
         public bool ShowFps { get; set; }
         public double AnimationBpm { get; set; } = DefaultAnimationBpm;
         public bool AnimationAudioSyncEnabled { get; set; }
+        public double TempoRangeMinBpm { get; set; } = BeatTracker.DefaultMinBpm;
+        public double LoopBpm { get; set; } = TempoSyncSettings.DefaultLoopBpm;
+        public double LoopCacheBudgetGb { get; set; } = LoopCacheBudgetAuto;
         public string RecordingQuality { get; set; } = global::lifeviz.RecordingQuality.High.ToString();
         public string? RecordingOutputFolder { get; set; }
         public int Height { get; set; } = DefaultRows;
@@ -21236,6 +21640,8 @@ public partial class MainWindow : Window
             public double AutoClipMaxDelaySeconds { get; set; }
             public double AutoClipFadeSeconds { get; set; }
             public bool AutoClipLoopSelectedFile { get; set; }
+            public bool TempoSyncEnabled { get; set; }
+            public double TempoLoopBpm { get; set; }
             public List<AutoClipVideoOverrideConfig> AutoClipVideoOverrides { get; set; } = new();
             public bool Mirror { get; set; }
             public bool KeyEnabled { get; set; }
@@ -21253,6 +21659,7 @@ public partial class MainWindow : Window
             public string? KeyMode { get; set; } = "Inherit";
             public string? KeyColor { get; set; } = "#000000";
             public double KeyTolerance { get; set; } = DefaultKeyTolerance;
+            public double LoopBpm { get; set; }
         }
 
         public sealed class AnimationConfig
@@ -21446,6 +21853,8 @@ public partial class MainWindow : Window
         public double AutoClipMaxDelaySeconds { get; set; }
         public double AutoClipFadeSeconds { get; set; }
         public bool AutoClipLoopSelectedFile { get; set; }
+        public bool TempoSyncEnabled { get; set; }
+        public double TempoLoopBpm { get; set; }
         public bool Mirror { get; set; }
         public bool KeyEnabled { get; set; }
         public double KeyTolerance { get; set; } = DefaultKeyTolerance;
