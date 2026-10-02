@@ -30,7 +30,14 @@ internal static class Logger
         LogEncoding.GetByteCount(DiskLimitMarker) + NewLineByteCount;
     private static LogSession? _session;
 
-    public static void Initialize()
+    private const int KeptPreviousSessionLogs = 3;
+
+    /// <summary>
+    /// Starts session logging. The desktop app keeps its previous session logs (lifeviz.1-3.log)
+    /// so a crash or forced close leaves evidence; test runs write lifeviz-test.log instead so they
+    /// never displace a real session's log.
+    /// </summary>
+    public static void Initialize(bool testRun = false)
     {
         lock (Sync)
         {
@@ -39,6 +46,7 @@ internal static class Logger
                 return;
             }
 
+            _testRun = testRun;
             StreamWriter? writer = null;
             BlockingCollection<string>? queue = null;
             LogSession? session = null;
@@ -332,6 +340,28 @@ internal static class Logger
         }
     }
 
+    private static bool _testRun;
+
+    internal static void RotateSessionLogs(string directory)
+    {
+        string current = Path.Combine(directory, "lifeviz.log");
+        if (!File.Exists(current)) return;
+        try
+        {
+            // Another running LifeViz still owns the log; leave the history alone (opening below fails too).
+            using (new FileStream(current, FileMode.Open, FileAccess.Read, FileShare.None)) { }
+            for (int i = KeptPreviousSessionLogs - 1; i >= 1; i--)
+            {
+                string older = Path.Combine(directory, $"lifeviz.{i}.log");
+                if (File.Exists(older)) File.Move(older, Path.Combine(directory, $"lifeviz.{i + 1}.log"), overwrite: true);
+            }
+            File.Move(current, Path.Combine(directory, "lifeviz.1.log"), overwrite: true);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+        }
+    }
+
     private static void DisableFileLogging(LogSession session, Exception ex)
     {
         CloseWriter(session);
@@ -353,7 +383,8 @@ internal static class Logger
             Directory.CreateDirectory(directory);
             string path = BackgroundBakeWorker.IsWorker
                 ? Path.Combine(BackgroundBakeWorker.DirectoryPath!, "worker.log")
-                : Path.Combine(directory, "lifeviz.log");
+                : Path.Combine(directory, _testRun ? "lifeviz-test.log" : "lifeviz.log");
+            if (!BackgroundBakeWorker.IsWorker && !_testRun) RotateSessionLogs(directory);
             stream = new FileStream(
                 path,
                 FileMode.Create,

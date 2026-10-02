@@ -1,4 +1,9 @@
 using System;
+using System.Buffers;
+using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
+using System.Runtime.Intrinsics;
+using System.Runtime.Intrinsics.X86;
 
 namespace lifeviz;
 
@@ -371,6 +376,294 @@ internal static class ImageFit
         r = (byte)Math.Round(sumR / samples);
         a = (byte)Math.Round(sumA / samples);
         return true;
+    }
+
+    /// <summary>
+    /// Whole-frame equivalent of calling <see cref="TrySampleMappedBgraSupersampled"/> (mirror: false) at every
+    /// destination pixel center, producing byte-identical output. The fit mapping is separable, so the 2x2
+    /// supersample taps (indices + bilinear weights) are computed once per column and once per row instead of
+    /// once per pixel, which removes the per-sample mapping/floor/clamp work that dominated CPU capture paths.
+    /// When <paramref name="opaque"/> is true alpha is forced to 255 (unmapped pixels become opaque black);
+    /// otherwise sampled alpha is written and unmapped pixels become transparent black.
+    /// </summary>
+    public static void ResampleBgraSupersampled(byte[] source, int sourceWidth, int sourceHeight, FitMapping mapping,
+        byte[] destination, int destWidth, int destHeight, bool opaque, bool parallel)
+    {
+        if (destWidth <= 0 || destHeight <= 0)
+        {
+            return;
+        }
+
+        if (sourceWidth <= 0 || sourceHeight <= 0 || source.Length < sourceWidth * sourceHeight * 4)
+        {
+            // Degenerate source: every mapped tap reads black. Keep the reference sampler for exact parity.
+            ResampleBgraSupersampledReference(source, sourceWidth, sourceHeight, mapping, destination, destWidth, destHeight, opaque);
+            return;
+        }
+
+        var columnTaps = ArrayPool<SupersampleTap>.Shared.Rent(destWidth * 2);
+        var rowTaps = ArrayPool<SupersampleTap>.Shared.Rent(destHeight * 2);
+        try
+        {
+            for (int col = 0; col < destWidth; col++)
+            {
+                columnTaps[col * 2] = BuildTap(mapping, horizontal: true, col + 0.5 - 0.25, sourceWidth, 4);
+                columnTaps[(col * 2) + 1] = BuildTap(mapping, horizontal: true, col + 0.5 + 0.25, sourceWidth, 4);
+            }
+
+            int sourceStride = sourceWidth * 4;
+            for (int row = 0; row < destHeight; row++)
+            {
+                rowTaps[row * 2] = BuildTap(mapping, horizontal: false, row + 0.5 - 0.25, sourceHeight, sourceStride);
+                rowTaps[(row * 2) + 1] = BuildTap(mapping, horizontal: false, row + 0.5 + 0.25, sourceHeight, sourceStride);
+            }
+
+            void ResampleRow(int row)
+            {
+                var rowTap0 = rowTaps[row * 2];
+                var rowTap1 = rowTaps[(row * 2) + 1];
+                int destIndex = row * destWidth * 4;
+                if (Avx2.IsSupported)
+                {
+                    ResampleRowAvx2(source, columnTaps, rowTap0, rowTap1, destination, destIndex, destWidth, opaque);
+                    return;
+                }
+
+                for (int col = 0; col < destWidth; col++, destIndex += 4)
+                {
+                    var colTap0 = columnTaps[col * 2];
+                    var colTap1 = columnTaps[(col * 2) + 1];
+                    double sumB = 0, sumG = 0, sumR = 0, sumA = 0;
+                    int samples = 0;
+
+                    // Tap order matches the reference sampler (y-major, then x) so double sums round identically.
+                    if (rowTap0.Valid)
+                    {
+                        if (colTap0.Valid) { AccumulateTap(source, rowTap0, colTap0, opaque, ref sumB, ref sumG, ref sumR, ref sumA); samples++; }
+                        if (colTap1.Valid) { AccumulateTap(source, rowTap0, colTap1, opaque, ref sumB, ref sumG, ref sumR, ref sumA); samples++; }
+                    }
+
+                    if (rowTap1.Valid)
+                    {
+                        if (colTap0.Valid) { AccumulateTap(source, rowTap1, colTap0, opaque, ref sumB, ref sumG, ref sumR, ref sumA); samples++; }
+                        if (colTap1.Valid) { AccumulateTap(source, rowTap1, colTap1, opaque, ref sumB, ref sumG, ref sumR, ref sumA); samples++; }
+                    }
+
+                    if (samples == 0)
+                    {
+                        destination[destIndex] = 0;
+                        destination[destIndex + 1] = 0;
+                        destination[destIndex + 2] = 0;
+                        destination[destIndex + 3] = opaque ? (byte)255 : (byte)0;
+                        continue;
+                    }
+
+                    destination[destIndex] = (byte)Math.Round(sumB / samples);
+                    destination[destIndex + 1] = (byte)Math.Round(sumG / samples);
+                    destination[destIndex + 2] = (byte)Math.Round(sumR / samples);
+                    destination[destIndex + 3] = opaque ? (byte)255 : (byte)Math.Round(sumA / samples);
+                }
+            }
+
+            if (parallel)
+            {
+                Parallel.For(0, destHeight, ResampleRow);
+            }
+            else
+            {
+                for (int row = 0; row < destHeight; row++)
+                {
+                    ResampleRow(row);
+                }
+            }
+        }
+        finally
+        {
+            ArrayPool<SupersampleTap>.Shared.Return(columnTaps);
+            ArrayPool<SupersampleTap>.Shared.Return(rowTaps);
+        }
+    }
+
+    internal static void ResampleBgraSupersampledReference(byte[] source, int sourceWidth, int sourceHeight, FitMapping mapping,
+        byte[] destination, int destWidth, int destHeight, bool opaque)
+    {
+        for (int row = 0; row < destHeight; row++)
+        {
+            for (int col = 0; col < destWidth; col++)
+            {
+                int destIndex = ((row * destWidth) + col) * 4;
+                bool mapped = TrySampleMappedBgraSupersampled(source, sourceWidth, sourceHeight, mapping,
+                    col + 0.5, row + 0.5, mirror: false, out byte b, out byte g, out byte r, out byte a);
+                destination[destIndex] = b;
+                destination[destIndex + 1] = g;
+                destination[destIndex + 2] = r;
+                destination[destIndex + 3] = opaque ? (byte)255 : mapped ? a : (byte)0;
+            }
+        }
+    }
+
+    private readonly struct SupersampleTap
+    {
+        public SupersampleTap(int offset0, int offset1, double fraction)
+        {
+            Valid = true;
+            Offset0 = offset0;
+            Offset1 = offset1;
+            Fraction = fraction;
+        }
+
+        public bool Valid { get; }
+        public int Offset0 { get; }
+        public int Offset1 { get; }
+        public double Fraction { get; }
+    }
+
+    // Per-axis split of TryMapSamplePoint + SampleBgraBilinear; `scale` turns the texel index into a byte offset.
+    private static SupersampleTap BuildTap(FitMapping mapping, bool horizontal, double dest, int sourceExtent, int scale)
+    {
+        double offset = horizontal ? mapping.OffsetX : mapping.OffsetY;
+        double mapScale = horizontal ? mapping.ScaleX : mapping.ScaleY;
+        double scaledExtent = horizontal ? mapping.ScaledWidth : mapping.ScaledHeight;
+        int mappedExtent = horizontal ? mapping.SourceWidth : mapping.SourceHeight;
+        double src;
+        switch (mapping.Mode)
+        {
+            case FitMode.Fit:
+            {
+                double inside = dest - offset;
+                if (inside < 0 || inside >= scaledExtent)
+                {
+                    return default;
+                }
+
+                src = (inside / mapScale) - 0.5;
+                break;
+            }
+            case FitMode.Fill:
+                src = ((dest + offset) / mapScale) - 0.5;
+                break;
+            case FitMode.Center:
+            {
+                double inside = dest - offset;
+                if (inside < 0 || inside >= mappedExtent)
+                {
+                    return default;
+                }
+
+                src = inside - 0.5;
+                break;
+            }
+            case FitMode.Tile:
+                src = PositiveMod(dest, mappedExtent) - 0.5;
+                break;
+            case FitMode.Stretch:
+            default:
+                src = (dest * mapScale) - 0.5;
+                break;
+        }
+
+        double clamped = Math.Clamp(src, 0, sourceExtent - 1);
+        int i0 = ClampToInt((int)Math.Floor(clamped), 0, sourceExtent - 1);
+        int i1 = ClampToInt(i0 + 1, 0, sourceExtent - 1);
+        double fraction = Math.Clamp(clamped - i0, 0, 1);
+        return new SupersampleTap(i0 * scale, i1 * scale, fraction);
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static void AccumulateTap(byte[] source, SupersampleTap rowTap, SupersampleTap colTap, bool opaque,
+        ref double sumB, ref double sumG, ref double sumR, ref double sumA)
+    {
+        int i00 = rowTap.Offset0 + colTap.Offset0;
+        int i10 = rowTap.Offset0 + colTap.Offset1;
+        int i01 = rowTap.Offset1 + colTap.Offset0;
+        int i11 = rowTap.Offset1 + colTap.Offset1;
+        double fx = colTap.Fraction;
+        double fy = rowTap.Fraction;
+        sumB += Math.Round(Bilerp(source[i00], source[i10], source[i01], source[i11], fx, fy));
+        sumG += Math.Round(Bilerp(source[i00 + 1], source[i10 + 1], source[i01 + 1], source[i11 + 1], fx, fy));
+        sumR += Math.Round(Bilerp(source[i00 + 2], source[i10 + 2], source[i01 + 2], source[i11 + 2], fx, fy));
+        if (!opaque)
+        {
+            sumA += Math.Round(Bilerp(source[i00 + 3], source[i10 + 3], source[i01 + 3], source[i11 + 3], fx, fy));
+        }
+    }
+
+    // Vector form of the scalar row loop: the four BGRA channels ride in one Vector256<double>, using the same
+    // IEEE add/sub/mul/div sequence and round-half-to-even as the scalar path (no FMA), so output stays identical.
+    private static void ResampleRowAvx2(byte[] source, SupersampleTap[] columnTaps, SupersampleTap rowTap0, SupersampleTap rowTap1,
+        byte[] destination, int destIndex, int destWidth, bool opaque)
+    {
+        ref byte sourceRef = ref MemoryMarshal.GetArrayDataReference(source);
+        for (int col = 0; col < destWidth; col++, destIndex += 4)
+        {
+            var colTap0 = columnTaps[col * 2];
+            var colTap1 = columnTaps[(col * 2) + 1];
+            var sum = Vector256<double>.Zero;
+            int samples = 0;
+
+            if (rowTap0.Valid)
+            {
+                if (colTap0.Valid) { sum += SampleTapAvx2(ref sourceRef, rowTap0, colTap0); samples++; }
+                if (colTap1.Valid) { sum += SampleTapAvx2(ref sourceRef, rowTap0, colTap1); samples++; }
+            }
+
+            if (rowTap1.Valid)
+            {
+                if (colTap0.Valid) { sum += SampleTapAvx2(ref sourceRef, rowTap1, colTap0); samples++; }
+                if (colTap1.Valid) { sum += SampleTapAvx2(ref sourceRef, rowTap1, colTap1); samples++; }
+            }
+
+            uint packed;
+            if (samples == 0)
+            {
+                packed = 0;
+            }
+            else
+            {
+                var average = Avx.RoundToNearestInteger(sum / Vector256.Create((double)samples));
+                var ints = Avx.ConvertToVector128Int32WithTruncation(average);
+                var shorts = Sse2.PackSignedSaturate(ints, ints);
+                packed = Sse2.PackUnsignedSaturate(shorts, shorts).AsUInt32().ToScalar();
+            }
+
+            if (opaque)
+            {
+                packed |= 0xFF000000u;
+            }
+
+            Unsafe.WriteUnaligned(ref destination[destIndex], packed);
+        }
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static Vector256<double> SampleTapAvx2(ref byte sourceRef, SupersampleTap rowTap, SupersampleTap colTap)
+    {
+        var p00 = LoadBgraAsDouble(ref sourceRef, rowTap.Offset0 + colTap.Offset0);
+        var p10 = LoadBgraAsDouble(ref sourceRef, rowTap.Offset0 + colTap.Offset1);
+        var p01 = LoadBgraAsDouble(ref sourceRef, rowTap.Offset1 + colTap.Offset0);
+        var p11 = LoadBgraAsDouble(ref sourceRef, rowTap.Offset1 + colTap.Offset1);
+        var fx = Vector256.Create(colTap.Fraction);
+        var fy = Vector256.Create(rowTap.Fraction);
+        var top = p00 + ((p10 - p00) * fx);
+        var bottom = p01 + ((p11 - p01) * fx);
+        return Avx.RoundToNearestInteger(top + ((bottom - top) * fy));
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static Vector256<double> LoadBgraAsDouble(ref byte sourceRef, int offset)
+    {
+        // Offsets come from clamped taps and the caller verified source.Length >= width * height * 4.
+        uint pixel = Unsafe.ReadUnaligned<uint>(ref Unsafe.Add(ref sourceRef, offset));
+        return Avx.ConvertToVector256Double(Sse41.ConvertToVector128Int32(Vector128.CreateScalarUnsafe(pixel).AsByte()));
+    }
+
+    // Same expression order as SampleBgraBilinear's Lerp so results are bit-identical.
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static double Bilerp(double p00, double p10, double p01, double p11, double fx, double fy)
+    {
+        double top = p00 + ((p10 - p00) * fx);
+        double bottom = p01 + ((p11 - p01) * fx);
+        return top + ((bottom - top) * fy);
     }
 
     private static int PositiveMod(int value, int modulo) => modulo <= 0 ? 0 : (value % modulo + modulo) % modulo;

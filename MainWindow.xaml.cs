@@ -268,6 +268,7 @@ public partial class MainWindow : Window
     private bool _configLoadBlocked;
     private bool _configWriteFailed;
     private bool _configConflict;
+    private bool _configLoadAttempted;
     private string? _configSaveError;
     private readonly DispatcherTimer _configSaveTimer;
     private readonly object _configWriteSync = new();
@@ -354,6 +355,8 @@ public partial class MainWindow : Window
     private Point _chromeResizeStartScreen;
     private Rect _chromeResizeStartBounds;
     private readonly bool _startupRecoveryTriggered;
+    private readonly string? _previousSessionReport;
+    private readonly UiStallWatchdog? _uiStallWatchdog;
     private readonly CpuSourceCompositor _inlineSourceCompositor;
     private readonly GpuSourceCompositor _inlineGpuSourceCompositor;
     private readonly GpuSimulationGroupCompositor _gpuSimulationGroupCompositor;
@@ -373,6 +376,11 @@ public partial class MainWindow : Window
     {
         Logger.Initialize();
         FileCaptureService.TempoClock = new SceneTempoClock(this);
+        if (!App.IsSmokeTestMode && !App.IsDiagnosticTestMode && !BackgroundBakeWorker.IsWorker)
+        {
+            _previousSessionReport = SessionHealth.BeginSession(AppVersionInfo.DisplayVersion);
+            _uiStallWatchdog = new UiStallWatchdog(Dispatcher);
+        }
         _engine = new GpuSimulationBackend();
         _inlineSourceCompositor = new CpuSourceCompositor(this);
         _inlineGpuSourceCompositor = new GpuSourceCompositor(this);
@@ -416,6 +424,11 @@ public partial class MainWindow : Window
             _lastClientSize = new Size(Root.ActualWidth, Root.ActualHeight);
             UpdateChromeUi();
             MarkStartupComplete();
+            if (_previousSessionReport != null)
+            {
+                Logger.Warn(_previousSessionReport.Replace('\n', ' '));
+                ShowSceneNotice(_previousSessionReport, "LifeViz closed unexpectedly");
+            }
             Logger.Info(App.IsSmokeTestMode
                 ? "Main window loaded in smoke test mode."
                 : "Main window loaded and visualizer initialized.");
@@ -513,6 +526,8 @@ public partial class MainWindow : Window
             DisableHighResolutionTimer();
         });
         RunShutdownStep("configuration flush", FlushPendingConfigSave);
+        _uiStallWatchdog?.Dispose();
+        SessionHealth.EndSession();
 
         Logger.Shutdown();
     }
@@ -6187,6 +6202,7 @@ public partial class MainWindow : Window
     {
         SceneSaveStatusMenuItem.Header = SceneSaveStatus;
         SceneSaveStatusMenuItem.ToolTip = SceneSaveError;
+        UpdateForgetMissingInputsMenuItem();
         if (PassthroughMenuItem != null)
         {
             PassthroughMenuItem.IsChecked = _passthroughEnabled;
@@ -6636,7 +6652,11 @@ public partial class MainWindow : Window
             Header = "Remove All Sources",
             IsEnabled = _sources.Count > 0
         };
-        clearItem.Click += (_, _) => ClearSources();
+        clearItem.Click += (_, _) =>
+        {
+            _missingSources.Clear();
+            ClearSources();
+        };
         SourcesMenu.Items.Add(clearItem);
 
         NotifyLayerEditorSourcesChanged();
@@ -11789,6 +11809,9 @@ public partial class MainWindow : Window
 
         if (removed is { Count: > 0 })
         {
+            // Automatic detaches (closed window, lost webcam, failed media) are not the user
+            // deleting a layer: keep them in the saved scene so they return on a later launch.
+            PreserveAutomaticallyRemovedSources(sources, removed);
             foreach (var source in removed)
             {
                 sources.Remove(source);
@@ -12696,6 +12719,7 @@ public partial class MainWindow : Window
             CaptureSource.SourceType.File => "capture_file_fresh_frame_ratio",
             CaptureSource.SourceType.VideoSequence => "capture_sequence_fresh_frame_ratio",
             CaptureSource.SourceType.AutoClip => "capture_autoclip_fresh_frame_ratio",
+            CaptureSource.SourceType.ProjectM => "capture_projectm_fresh_frame_ratio",
             _ => string.Empty
         };
 
@@ -19874,12 +19898,14 @@ public partial class MainWindow : Window
             configLoaded = false;
             migrateLegacyEmptyScene = false;
             _configLoadBlocked = true;
-            ReportScenePersistenceIssue($"Your saved scene could not be fully loaded. Autosave is paused to protect it. Use the layer editor to export any new work or recover a backup. {ex.Message}");
+            ReportScenePersistenceIssue($"Your saved scene could not be fully loaded. Autosave is paused to protect it; this session's changes are kept in a recovery file you can load with Recover... in the Scene Editor. {ex.Message}");
         }
         finally
         {
             // Allow saves after the first load attempt so startup events don't clobber existing config.
             _configReady = !_configLoadBlocked;
+            _configLoadAttempted = true;
+            NotifyNewerSceneRecoveryFile();
             if (clearedLegacyGlobalSimulationConfig ||
                 (configLoaded && configSchemaUpgradeNeeded && !migrateLegacyEmptyScene))
             {
@@ -19977,7 +20003,14 @@ public partial class MainWindow : Window
     private void SaveConfig()
     {
         if (BackgroundBakeWorker.IsWorker) return;
-        if (!_configReady || _isShuttingDown || _configLoadBlocked)
+        if (_isShuttingDown) return;
+        if (IsAutosaveBlocked)
+        {
+            // config.json stays protected, but the live scene is still written to a
+            // recovery file so a long session's work can never silently evaporate.
+            if (!_configLoadAttempted) return;
+        }
+        else if (!_configReady)
         {
             return;
         }
@@ -19991,7 +20024,18 @@ public partial class MainWindow : Window
     private void ConfigSaveTimer_Tick(object? sender, EventArgs e)
     {
         _configSaveTimer.Stop();
-        if (!_configReady || _isShuttingDown || _configLoadBlocked || _configConflict)
+        if (_isShuttingDown) return;
+        if (IsAutosaveBlocked)
+        {
+            if (_configSaveDirty && _configLoadAttempted)
+            {
+                _configSaveDirty = false;
+                QueueBlockedSceneRecoveryWrite();
+            }
+            return;
+        }
+
+        if (!_configReady)
         {
             return;
         }
@@ -20089,7 +20133,7 @@ public partial class MainWindow : Window
             Fullscreen = _isFullscreen,
             AspectRatioLocked = _aspectRatioLocked,
             LockedAspectRatio = _lockedAspectRatio,
-            Sources = BuildSourceConfigs()
+            Sources = BuildSourceConfigsWithMissingInputs()
         };
 
         return JsonSerializer.Serialize(config, ConfigJsonOptions);
@@ -20224,7 +20268,12 @@ public partial class MainWindow : Window
         TimeSpan timeout = TimeSpan.FromSeconds(5);
         var stopwatch = Stopwatch.StartNew();
         _configSaveTimer.Stop();
-        if (_configReady && _configSaveDirty)
+        if (IsAutosaveBlocked && _configLoadAttempted)
+        {
+            _configSaveDirty = false;
+            WriteBlockedSceneRecoveryNow();
+        }
+        else if (_configReady && _configSaveDirty)
         {
             try
             {
@@ -20457,9 +20506,13 @@ public partial class MainWindow : Window
 
     private List<AppConfig.SourceConfig> BuildSourceConfigs() => BuildSourceConfigs(_sources);
 
-    private List<AppConfig.SourceConfig> BuildSourceConfigs(List<CaptureSource> sources)
+    private List<AppConfig.SourceConfig> BuildSourceConfigs(List<CaptureSource> sources) =>
+        BuildSourceConfigs(sources, parent: null, includeMissingInputs: false);
+
+    private List<AppConfig.SourceConfig> BuildSourceConfigs(List<CaptureSource> sources, CaptureSource? parent, bool includeMissingInputs)
     {
         var configs = new List<AppConfig.SourceConfig>(sources.Count);
+        if (includeMissingInputs) AppendMissingSourceConfigs(configs, parent, sources, after: null);
         foreach (var source in sources)
         {
             var config = new AppConfig.SourceConfig
@@ -20519,9 +20572,9 @@ public partial class MainWindow : Window
                 config.FilePaths = new List<string>(source.FilePaths);
             }
 
-            if (source.Type == CaptureSource.SourceType.Group && source.Children.Count > 0)
+            if (source.Type == CaptureSource.SourceType.Group && (source.Children.Count > 0 || includeMissingInputs))
             {
-                config.Children = BuildSourceConfigs(source.Children);
+                config.Children = BuildSourceConfigs(source.Children, source, includeMissingInputs);
             }
 
             if (source.Type == CaptureSource.SourceType.SimGroup && source.SimulationLayers.Count > 0)
@@ -20530,6 +20583,7 @@ public partial class MainWindow : Window
             }
 
             configs.Add(config);
+            if (includeMissingInputs) AppendMissingSourceConfigs(configs, parent, sources, after: source);
         }
 
         return configs;
@@ -21231,6 +21285,7 @@ public partial class MainWindow : Window
         var windows = _windowCapture.EnumerateWindows(_windowHandle);
         var webcams = _webcamCapture.EnumerateCameras();
         RestoreSourceList(configs, _sources, windows, webcams);
+        ReportMissingInputsAfterRestore();
         ApplySourceDecodeActivation();
         if (EnumerateSources(_sources).Any(source => source.Type == CaptureSource.SourceType.SimGroup))
         {
@@ -21254,14 +21309,15 @@ public partial class MainWindow : Window
     }
 
     private void RestoreSourceList(IReadOnlyList<AppConfig.SourceConfig> configs, List<CaptureSource> targetList,
-        IReadOnlyList<WindowHandleInfo> windows, IReadOnlyList<WebcamCaptureService.CameraInfo> webcams)
+        IReadOnlyList<WindowHandleInfo> windows, IReadOnlyList<WebcamCaptureService.CameraInfo> webcams,
+        CaptureSource? parent = null)
     {
         foreach (var config in configs)
         {
             if (!Enum.TryParse<CaptureSource.SourceType>(config.Type, true, out var type))
             {
                 _configLoadBlocked = true;
-                ReportScenePersistenceIssue($"The scene contains an unsupported source type ({config.Type}). Autosave is paused to preserve the original scene.");
+                ReportScenePersistenceIssue($"The scene contains an unsupported source type ({config.Type}). Autosave is paused to preserve the original scene; this session's changes are kept in a recovery file you can load with Recover... in the Scene Editor.");
                 continue;
             }
 
@@ -21383,8 +21439,9 @@ public partial class MainWindow : Window
 
             if (restored == null)
             {
-                _configLoadBlocked = true;
-                ReportScenePersistenceIssue("Some saved inputs are unavailable. Autosave is paused so missing layers cannot be erased from the saved scene. Reconnect the inputs and restart, or export a separate scene from the layer editor.");
+                // Keep the saved layer verbatim and write it back on every autosave, so a
+                // missing file/window/webcam never has to pause autosave for the session.
+                PreserveMissingSource(parent, targetList.LastOrDefault(), config);
                 continue;
             }
 
@@ -21393,7 +21450,7 @@ public partial class MainWindow : Window
 
             if (type == CaptureSource.SourceType.Group && config.Children.Count > 0)
             {
-                RestoreSourceList(config.Children, restored.Children, windows, webcams);
+                RestoreSourceList(config.Children, restored.Children, windows, webcams, restored);
             }
         }
     }

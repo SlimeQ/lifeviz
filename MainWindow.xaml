@@ -27,6 +27,10 @@
                          Opened="RootContextMenu_OnOpened"
                          Closed="RootContextMenu_OnClosed">
                 <MenuItem x:Name="SceneSaveStatusMenuItem" Header="Autosave" IsEnabled="False" />
+                <MenuItem x:Name="ForgetMissingInputsMenuItem"
+                          Header="Forget Missing Inputs..."
+                          Visibility="Collapsed"
+                          Click="ForgetMissingInputs_Click" />
                 <Separator />
                 <MenuItem x:Name="PauseMenuItem"
                           Header="Pause Simulation"

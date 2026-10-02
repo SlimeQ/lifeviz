@@ -115,6 +115,7 @@ Validation:
 ```powershell
 dotnet build -c Release
 dotnet bin/Release/net9.0-windows/lifeviz.dll --smoke-test projectm
+# includes a live check that preset loads/switches never block the frame loop (>= 250 ms fails)
 ./tests/Test-ProjectM.ps1
 ```
 
@@ -171,11 +172,11 @@ The bundled FFmpeg exposes the `libvpx` VP8 decoder and `libvpx-vp9` decoder for
 
 ### Bundled FFmpeg
 
-`Prepare-Ffmpeg.ps1` runs automatically before normal builds, including the ClickOnce publish used by `Publish-Installer.ps1`, `install.ps1`, `deploy.ps1`, and `Publish-GitHubRelease.ps1`. Run `./Prepare-Ffmpeg.ps1` directly to prefetch or repair the bundle. It downloads the pinned Gyan FFmpeg 9.0.1 Windows x64 static essentials ZIP, verifies its SHA-256, and stages only `ffmpeg.exe`, `LICENSE`, and `README.txt` under ignored `artifacts/ffmpeg/runtime/`. The archive stays in `artifacts/ffmpeg/`; a corrupt archive fails the build with a removal/retry instruction. Each build checks staged files against the verified archive and repairs missing/modified files without rewriting unchanged files.
+`Prepare-Ffmpeg.ps1` runs automatically before normal builds, including the ClickOnce publish used by `Publish-Installer.ps1`, `install.ps1`, `deploy.ps1`, and `Publish-GitHubRelease.ps1`. Run `./Prepare-Ffmpeg.ps1` directly to prefetch or repair the bundle. It downloads the pinned Gyan FFmpeg 9.0.1 Windows x64 static essentials ZIP from Gyan's permanent GitHub release mirror (`GyanD/codexffmpeg`), falling back to gyan.dev, verifies its SHA-256, and stages only `ffmpeg.exe`, `LICENSE`, and `README.txt` under ignored `artifacts/ffmpeg/runtime/`. The archive stays in `artifacts/ffmpeg/`; a corrupt archive fails the build with a removal/retry instruction. Each build checks staged files against the verified archive and repairs missing/modified files without rewriting unchanged files.
 
 MSBuild includes these three files as content under `ffmpeg/` in build output, ordinary publish output, and the versioned ClickOnce application directory and manifest. `Publish-Installer.ps1` rejects missing or mismatched FFmpeg payloads before either standalone installer is bundled. Installation simply copies this payload, including the upstream GPLv3 license and README with source revision, build configuration, and library versions. FFmpeg runs as a separate process. It is not installed globally or added to PATH. The bundled binary is Windows x64, matching the standalone installer, and includes `libx264`, FFV1, and `libvpx` support.
 
-To update FFmpeg, change the version and independently verified upstream SHA-256 together in `Prepare-Ffmpeg.ps1`, build/publish, and run `dotnet bin\Release\net9.0-windows\lifeviz.dll --smoke-test ffmpeg-bundle`. This test clears PATH, asserts application-relative resolution, and runs real recording encode/decode round trips plus child-process lifecycle/cleanup checks. Run it against the versioned published application too when changing packaging. Build a transferable installer without installing locally with `./install.ps1 -BundleInstaller -NoRun`; the result is `artifacts/local-install/lifeviz_installer.exe`.
+To update FFmpeg, change the version and independently verified upstream SHA-256 together in `Prepare-Ffmpeg.ps1` (gyan.dev removes superseded builds from its `/packages` path, so the GitHub release mirror is tried first and a 404 from gyan.dev alone does not fail the build), build/publish, and run `dotnet bin\Release\net9.0-windows\lifeviz.dll --smoke-test ffmpeg-bundle`. This test clears PATH, asserts application-relative resolution, and runs real recording encode/decode round trips plus child-process lifecycle/cleanup checks. Run it against the versioned published application too when changing packaging. Build a transferable installer without installing locally with `./install.ps1 -BundleInstaller -NoRun`; the result is `artifacts/local-install/lifeviz_installer.exe`.
 
 ### Repairing old installs through updates
 
@@ -478,7 +479,10 @@ dotnet build lifeviz.csproj -c Release
 dotnet bin/Release/net9.0-windows/lifeviz.dll --smoke-test scene-persistence
 dotnet bin/Release/net9.0-windows/lifeviz.dll --smoke-test config-save-coalescing
 dotnet bin/Release/net9.0-windows/lifeviz.dll --smoke-test render-failure-cleanup
+dotnet bin/Release/net9.0-windows/lifeviz.dll --smoke-test session-health
 ```
+
+The persistence smoke also covers missing-input preservation (positions, nesting, neighbour edits, group deletion, mid-session detaches, **Forget Missing Inputs**) and the recovery file written while autosave is paused. `session-health` covers unexpected-exit reports, session-log rotation and the UI freeze watchdog in an isolated temp folder; see [Logs and Crash Reports](Logs-and-Crash-Reports.md). Smoke and diagnostic runs log to `%APPDATA%\lifeviz\logs\lifeviz-test.log`, not the desktop app's `lifeviz.log`.
 
 The persistence smoke uses a unique temporary directory and leaves failed fixtures for diagnosis. It also writes `smoke-scene-recovery-editor.png` beside the test executable for layout inspection. It verifies real locked-file retry, backups/corruption/conflict behavior, and an in-flight save during shutdown without overwriting the user's scene. See [Scene Saving & Recovery](Scene-Saving-and-Recovery.md). Changes take effect in builds/installers containing this code; existing installed releases retain their previous behavior.
 
@@ -491,3 +495,4 @@ dotnet bin/Release/net9.0-windows/lifeviz.dll --smoke-test group-transparency
 ```
 
 The isolated blending smoke exercises both compositors, all 64 simulation/group blend combinations, shared inputs, ordered clipping, stacked groups over successive frames, more than eight outputs, empty/disabled groups, editor live/draft controls, and scene roundtrips. It writes `smoke-simulation-blending-editor.png` beside the executable for visual inspection. No saved user scene is loaded or modified. The group-transparency smoke checks the resolved group alpha and its subsequent Normal blend over the input stack separately.
+

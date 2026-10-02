@@ -21,7 +21,11 @@ internal sealed partial class ProjectMSettingsWindow
     private readonly Stopwatch _previewClock = Stopwatch.StartNew();
     private readonly float[] _previewPcm = new float[1024];
     private Action<float[]>? _previewAudio;
-    private ProjectMRenderer? _previewRenderer;
+    // Preview loads and frames run on their own render thread, so auditioning presets (which
+    // compile shaders for 0.5-2 s each) never freezes the dialog or the live output behind it.
+    private ProjectMRenderWorker? _previewWorker;
+    private bool _previewLoading;
+    private long _previewToken;
     private WriteableBitmap? _previewBitmap;
     private string? _previewPath;
     private bool _previewNeedsLoad, _previewFailed, _previewClosed;
@@ -53,7 +57,7 @@ internal sealed partial class ProjectMSettingsWindow
         {
             _previewClosed = true;
             _previewTimer.Stop();
-            _previewRenderer?.Dispose(); _previewRenderer = null;
+            _previewWorker?.Dispose(); _previewWorker = null;
             _previewImage.Source = null; _previewBitmap = null; _previewAudio = null;
         };
         return new ScrollViewer { Content = panel, VerticalScrollBarVisibility = ScrollBarVisibility.Auto, HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled };
@@ -98,14 +102,17 @@ internal sealed partial class ProjectMSettingsWindow
             if (_previewNeedsLoad)
             {
                 // Fresh context removes feedback/audio history from the previous audition.
-                _previewRenderer?.Dispose(); _previewRenderer = null;
-                _previewRenderer = new ProjectMRenderer();
-                _previewTime = 0;
-                string? error = _previewRenderer.Load(_previewPath, 0, 0, true);
-                if (error != null) throw new InvalidOperationException(error);
-                _previewNeedsLoad = false;
+                _previewWorker?.Dispose();
+                _previewWorker = new ProjectMRenderWorker("LifeViz projectM preview");
+                _previewWorker.RequestLoad(1, _previewPath, 0, 0, true);
+                _previewTime = 0; _previewToken = 0;
+                _previewNeedsLoad = false; _previewLoading = true;
+                _previewStatus.Text = "Loading preview…";
+                return;
             }
-            else _previewTime += delta;
+
+            if (!ProcessPreviewResults() || _previewLoading) return;
+            _previewTime += delta;
             if (_previewDemo.IsChecked == true)
             {
                 double pulse = Math.Exp(-(_previewTime % 0.5) * 12);
@@ -117,18 +124,49 @@ internal sealed partial class ProjectMSettingsWindow
                 }
             }
             else { Array.Clear(_previewPcm); _previewAudio?.Invoke(_previewPcm); }
-            byte[] pixels = _previewRenderer!.Render(PreviewWidth, PreviewHeight, _previewTime, _previewPcm);
-            _previewBitmap ??= new WriteableBitmap(PreviewWidth, PreviewHeight, 96, 96, PixelFormats.Bgra32, null);
-            _previewBitmap.WritePixels(new Int32Rect(0, 0, PreviewWidth, PreviewHeight), pixels, PreviewWidth * 4, 0);
-            _previewImage.Source = _previewBitmap; _previewFrames++;
+            _previewWorker!.RequestRender(PreviewWidth, PreviewHeight, _previewTime, _previewPcm);
             _previewStatus.Text = _previewDemo.IsChecked == true ? "Demo beat · silent audition" : "LifeViz Audio Source · silence if no input";
         }
         catch (Exception ex)
         {
-            _previewFailed = true; _previewImage.Source = null;
-            _previewStatus.Text = $"Preview unavailable: {ex.Message}";
-            _previewRenderer?.Dispose(); _previewRenderer = null;
-            Logger.Warn($"projectM preset preview failed for {_previewPath}: {ex.Message}");
+            FailPreview(ex.Message);
         }
+    }
+
+    // Applies finished work from the preview render thread. Returns false once the preview failed.
+    private bool ProcessPreviewResults()
+    {
+        var worker = _previewWorker;
+        if (worker == null || _previewClosed || _previewFailed) return !_previewFailed;
+        if (_previewLoading)
+        {
+            var result = worker.TakeLoadResult();
+            if (result == null)
+            {
+                if (worker.FatalError is string fatal) { FailPreview(fatal); return false; }
+                return true;
+            }
+            if (result.Error != null) { FailPreview(result.Error); return false; }
+            _previewLoading = false;
+        }
+
+        byte[]? pixels = worker.AcquireLatest(out int width, out int height, out long token);
+        if (token != _previewToken && pixels != null && width == PreviewWidth && height == PreviewHeight)
+        {
+            _previewToken = token;
+            _previewBitmap ??= new WriteableBitmap(PreviewWidth, PreviewHeight, 96, 96, PixelFormats.Bgra32, null);
+            _previewBitmap.WritePixels(new Int32Rect(0, 0, PreviewWidth, PreviewHeight), pixels, PreviewWidth * 4, 0);
+            _previewImage.Source = _previewBitmap; _previewFrames++;
+        }
+        if (worker.FatalError is string failed) { FailPreview(failed); return false; }
+        return true;
+    }
+
+    private void FailPreview(string message)
+    {
+        _previewFailed = true; _previewLoading = false; _previewImage.Source = null;
+        _previewStatus.Text = $"Preview unavailable: {message}";
+        _previewWorker?.Dispose(); _previewWorker = null;
+        Logger.Warn($"projectM preset preview failed for {_previewPath}: {message}");
     }
 }

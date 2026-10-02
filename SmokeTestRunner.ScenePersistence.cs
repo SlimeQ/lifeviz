@@ -24,7 +24,7 @@ internal static partial class SmokeTestRunner
                 RunSceneFileStoreChecks(directory);
                 window = new MainWindow();
                 window.RunScenePersistenceChecks(directory);
-                Console.WriteLine("Scene persistence smoke passed: atomic replacement, backups, corruption recovery, conflict protection, retry, empty scene, protected load, future schema protection, draft recovery, project import, shutdown snapshot.");
+                Console.WriteLine("Scene persistence smoke passed: atomic replacement, backups, corruption recovery, conflict protection, retry, empty scene, missing-input preservation, blocked-autosave recovery file, protected load, future schema protection, draft recovery, project import, shutdown snapshot.");
             }
             catch (Exception ex) { failure = ex; Console.WriteLine(ex); }
             finally

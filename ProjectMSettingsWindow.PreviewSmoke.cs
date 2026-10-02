@@ -20,14 +20,18 @@ internal sealed partial class ProjectMSettingsWindow
         void Advance(int frames = 20)
         {
             double start = Math.Max(_previewClock.Elapsed.TotalSeconds, _previewLastTick) + 0.25;
-            for (int frame = 0; frame < frames; frame++) TickPreview(start + frame / 15.0);
+            for (int frame = 0; frame < frames; frame++)
+            {
+                TickPreview(start + frame / 15.0);
+                SettlePreviewForSmoke();
+            }
         }
         string original = JsonSerializer.Serialize(Result);
         string first = Result.Presets[0], second = Result.Presets[1];
         _library.SelectedItem = first;
         long framesBefore = _previewFrames;
         TickPreview(_previewSelectedAt + 0.05);
-        Check(_previewFrames == framesBefore, "Preview selection debounce was bypassed.");
+        Check(_previewFrames == framesBefore && _previewWorker == null, "Preview selection debounce was bypassed.");
         Advance();
         Check(_previewImage.Source != null && !_previewFailed, $"Library preview failed: {_previewStatus.Text}");
         byte[] pixels = Snapshot(); Advance();
@@ -65,11 +69,22 @@ internal sealed partial class ProjectMSettingsWindow
         Logger.Info("projectM picker preview passed: selection, animation, debounce, pause, audio, imports, failure recovery and draft isolation.");
     }
 
+    // The preview renders on its own thread; wait for it to finish the requested work, then apply it
+    // exactly as the next dispatcher tick would.
+    private void SettlePreviewForSmoke()
+    {
+        var worker = _previewWorker;
+        if (worker == null || _previewPaused.IsChecked == true) return;
+        var deadline = DateTime.UtcNow.AddSeconds(15);
+        while (!worker.IsIdle && worker.FatalError == null && DateTime.UtcNow < deadline) System.Threading.Thread.Sleep(2);
+        ProcessPreviewResults();
+    }
+
     internal void ValidatePreviewClosedForSmoke()
     {
         long frames = _previewFrames;
         TickPreview(_previewLastTick + 1);
-        if (!_previewClosed || _previewRenderer != null || _previewTimer.IsEnabled || _previewFrames != frames)
+        if (!_previewClosed || _previewWorker != null || _previewTimer.IsEnabled || _previewFrames != frames)
             throw new InvalidOperationException("Closing the preset picker did not release preview resources.");
     }
 
@@ -80,8 +95,14 @@ internal sealed partial class ProjectMSettingsWindow
         SelectPreview(Result.Presets[0]);
         long frames = _previewFrames;
         var frame = new DispatcherFrame();
-        var timeout = new DispatcherTimer(DispatcherPriority.Background) { Interval = TimeSpan.FromSeconds(1) };
-        timeout.Tick += (_, _) => { timeout.Stop(); frame.Continue = false; };
+        var started = DateTime.UtcNow;
+        // Loads now run off the UI thread, so poll until frames arrive instead of assuming one second.
+        var timeout = new DispatcherTimer(DispatcherPriority.Background) { Interval = TimeSpan.FromMilliseconds(100) };
+        timeout.Tick += (_, _) =>
+        {
+            if (_previewFrames <= frames + 2 && DateTime.UtcNow - started < TimeSpan.FromSeconds(15)) return;
+            timeout.Stop(); frame.Continue = false;
+        };
         timeout.Start();
         try { Dispatcher.PushFrame(frame); }
         finally { timeout.Stop(); }

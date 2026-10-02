@@ -27,6 +27,17 @@ public partial class App : Application
 
     public App()
     {
+        // Background-thread failures terminate the process; make sure the reason reaches the log.
+        AppDomain.CurrentDomain.UnhandledException += (_, args) =>
+        {
+            Logger.Error($"Fatal unhandled exception (terminating={args.IsTerminating}).", args.ExceptionObject as Exception);
+            if (args.IsTerminating) Logger.Shutdown();
+        };
+        TaskScheduler.UnobservedTaskException += (_, args) =>
+        {
+            Logger.Warn($"Unobserved background task failure: {args.Exception.GetBaseException().Message}");
+            args.SetObserved();
+        };
         DispatcherUnhandledException += (_, args) =>
         {
             if (IsRenderThreadFailure(args.Exception))

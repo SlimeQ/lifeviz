@@ -1,15 +1,15 @@
 using System;
 using System.IO;
 using System.Runtime.InteropServices;
-using System.Windows.Interop;
 
 namespace lifeviz;
 
-// Thread-affine, private GL context. Only the owning render/UI thread touches native state.
-// BGRA readback at the scene resolution enters the existing CPU/GPU source compositor.
+// Thread-affine, private GL context. Only the thread that created the renderer touches native
+// state (live playback and previews use ProjectMRenderWorker's dedicated thread). BGRA readback
+// at the scene resolution enters the existing CPU/GPU source compositor.
 internal sealed class ProjectMRenderer : IDisposable
 {
-    private HwndSource? _window;
+    private IntPtr _window;
     private IntPtr _dc, _context, _instance;
     private uint _fbo, _texture;
     private int _width, _height;
@@ -29,11 +29,10 @@ internal sealed class ProjectMRenderer : IDisposable
         try
         {
             if (!Environment.Is64BitProcess) throw new NotSupportedException("projectM requires the Windows x64 build.");
-            _window = new HwndSource(new HwndSourceParameters("LifeViz projectM renderer")
-            {
-                Width = 1, Height = 1, WindowStyle = unchecked((int)0x80000000), WindowClassStyle = 0x20
-            });
-            _dc = GetDC(_window.Handle);
+            // A plain hidden Win32 window (not a WPF HwndSource) so the renderer can live on a
+            // worker thread without its own WPF dispatcher.
+            _window = CreateHiddenWindow();
+            _dc = GetDC(_window);
             var format = new PixelFormatDescriptor
             {
                 Size = (ushort)Marshal.SizeOf<PixelFormatDescriptor>(), Version = 1,
@@ -158,9 +157,61 @@ internal sealed class ProjectMRenderer : IDisposable
             if (wglGetCurrentContext() == _context) wglMakeCurrent(IntPtr.Zero, IntPtr.Zero);
             wglDeleteContext(_context); _context = IntPtr.Zero;
         }
-        if (_dc != IntPtr.Zero && _window != null) ReleaseDC(_window.Handle, _dc);
-        _dc = IntPtr.Zero; _window?.Dispose(); _window = null;
+        if (_dc != IntPtr.Zero && _window != IntPtr.Zero) ReleaseDC(_window, _dc);
+        _dc = IntPtr.Zero;
+        if (_window != IntPtr.Zero) DestroyWindow(_window);
+        _window = IntPtr.Zero;
     }
+
+    private static readonly object WindowClassLock = new();
+    private static ushort _windowClass;
+    private const string WindowClassName = "LifeVizProjectMRenderer";
+
+    private static IntPtr CreateHiddenWindow()
+    {
+        IntPtr module = GetModuleHandle(null);
+        lock (WindowClassLock)
+        {
+            if (_windowClass == 0)
+            {
+                var windowClass = new WndClassEx
+                {
+                    Size = (uint)Marshal.SizeOf<WndClassEx>(),
+                    Style = 0x20, // CS_OWNDC keeps the pixel format's DC stable for the context.
+                    WndProc = GetProcAddress(GetModuleHandle("user32.dll"), "DefWindowProcW"),
+                    Instance = module,
+                    ClassName = WindowClassName
+                };
+                _windowClass = RegisterClassEx(ref windowClass);
+                if (_windowClass == 0) throw new InvalidOperationException($"Could not register the projectM window class ({Marshal.GetLastWin32Error()}).");
+            }
+        }
+
+        IntPtr window = CreateWindowEx(0, WindowClassName, "LifeViz projectM renderer", unchecked((int)0x80000000),
+            0, 0, 1, 1, IntPtr.Zero, IntPtr.Zero, module, IntPtr.Zero);
+        if (window == IntPtr.Zero) throw new InvalidOperationException($"Could not create the projectM render window ({Marshal.GetLastWin32Error()}).");
+        return window;
+    }
+
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    private struct WndClassEx
+    {
+        public uint Size, Style;
+        public IntPtr WndProc;
+        public int ClassExtra, WindowExtra;
+        public IntPtr Instance, Icon, Cursor, Background;
+        public string? MenuName;
+        public string ClassName;
+        public IntPtr SmallIcon;
+    }
+
+    [DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Unicode)] private static extern ushort RegisterClassEx(ref WndClassEx windowClass);
+    [DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    private static extern IntPtr CreateWindowEx(int exStyle, string className, string windowName, int style, int x, int y, int width, int height,
+        IntPtr parent, IntPtr menu, IntPtr instance, IntPtr param);
+    [DllImport("user32.dll")] private static extern bool DestroyWindow(IntPtr window);
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode)] private static extern IntPtr GetModuleHandle(string? name);
+    [DllImport("kernel32.dll", CharSet = CharSet.Ansi)] private static extern IntPtr GetProcAddress(IntPtr module, string name);
 
     private static T GetGl<T>(string name) where T : Delegate
     {

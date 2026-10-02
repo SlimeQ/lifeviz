@@ -6719,43 +6719,8 @@ internal sealed partial class FileCaptureService : IDisposable
                     }
 
                     var mapping = ImageFit.GetMapping(fitMode, sourceWidth, sourceHeight, targetWidth, targetHeight);
-
-                    void DownscaleRow(int row)
-                    {
-                        int destRowOffset = row * destStride;
-
-                        for (int col = 0; col < targetWidth; col++)
-                        {
-                            int destIndex = destRowOffset + (col * 4);
-                            if (ImageFit.TrySampleMappedBgraSupersampled(source, sourceWidth, sourceHeight, mapping,
-                                col + 0.5, row + 0.5, mirror: false,
-                                out destination[destIndex],
-                                out destination[destIndex + 1],
-                                out destination[destIndex + 2],
-                                out destination[destIndex + 3]))
-                            {
-                            }
-                            else
-                            {
-                                destination[destIndex] = 0;
-                                destination[destIndex + 1] = 0;
-                                destination[destIndex + 2] = 0;
-                                destination[destIndex + 3] = 0;
-                            }
-                        }
-                    }
-
-                    int totalPixels = targetWidth * targetHeight;
-                    if (totalPixels < parallelDownscalePixelThreshold)
-                    {
-                        for (int row = 0; row < targetHeight; row++)
-                        {
-                            DownscaleRow(row);
-                        }
-                        return;
-                    }
-
-                    Parallel.For(0, targetHeight, DownscaleRow);
+                    ImageFit.ResampleBgraSupersampled(source, sourceWidth, sourceHeight, mapping, destination, targetWidth, targetHeight,
+                        opaque: false, parallel: targetWidth * targetHeight >= parallelDownscalePixelThreshold);
                 }
             }
             
