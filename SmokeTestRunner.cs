@@ -168,6 +168,8 @@ internal static partial class SmokeTestRunner
                 "tempo-sync" => TempoSyncSmoke.Run(),
                 "tempo-sync-loops" => TempoSyncSmoke.RunRealLoops(explicitSmokePath),
                 "tempo-sync-app" => RunTempoSyncAppSmokeTest(),
+                "tempo-sync-file" => TempoSyncSmoke.RunFileLayer(explicitSmokePath),
+                "profile-current-scene-tempo" => RunCurrentSceneProfileSmokeVariant("tempo-sync-files", visibleWindow: true, forcedRows: null, fullscreen: false),
                 "simulation-controls" => RunDatamoshSmokeTest(controls: true),
                 "audio-response" => RunDatamoshSmokeTest(audioResponse: true),
                 "audio-response-editor" => RunPixelSortEditorRoundTripSmokeTest(audioResponse: true),

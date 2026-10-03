@@ -189,7 +189,7 @@ internal sealed partial class FileCaptureService
         }
 
         player.UpdateSettings(settings);
-        return player.CaptureFrame(targetWidth, targetHeight, fitMode, includeSource);
+        return player.CaptureFrameSafely(targetWidth, targetHeight, fitMode, includeSource);
     }
 
     /// <summary>Disposes a layer's synced player (sync turned off, layer removed).</summary>
@@ -300,7 +300,7 @@ internal sealed partial class FileCaptureService
 
         public FileCaptureState State => _player.State;
         public FileCaptureFrame? CaptureFrame(int targetWidth, int targetHeight, FitMode fitMode, bool includeSource) =>
-            _player.CaptureFrame(targetWidth, targetHeight, fitMode, includeSource);
+            _player.CaptureFrameSafely(targetWidth, targetHeight, fitMode, includeSource);
         public void PrimeLiveFramePipeline(int targetWidth, int targetHeight, FitMode fitMode, bool includeSource) =>
             _player.Prime(targetWidth, targetHeight, fitMode);
         public bool ConsumeEnded() => false;
@@ -345,11 +345,20 @@ internal sealed partial class FileCaptureService
         private const int MaxDirectProcessWidth = 1920;
         private const int MaxDirectProcessHeight = 1080;
         private const double OfflineFrameWaitSeconds = 20.0;
+        // Long files are not loops: exact frame counting would read the whole file and
+        // the loop-boundary handover is irrelevant, so both are skipped.
+        private const double LongSourceSeconds = 120.0;
+        private const double DecoderStartupTimeoutSeconds = 10.0;
+        private const double MaxRestartCooldownSeconds = 15.0;
+        // Hard ceiling on live loop decoders process-wide (including ones still being
+        // torn down). A slow machine must degrade to lagging playback, never to an
+        // ever-growing pile of FFmpeg processes.
+        private const int MaxLiveDecoders = 16;
 
         private readonly object _sync = new();
         private readonly string _path;
         private readonly Task<VideoSession.VideoProbeInfo?> _probeTask;
-        private readonly Task<int> _frameCountTask;
+        private Task<int>? _frameCountTask;
         private readonly Stopwatch _fallbackClock = Stopwatch.StartNew();
         private TempoSyncSettings _settings;
         private VideoSession.VideoProbeInfo? _probe;
@@ -367,6 +376,7 @@ internal sealed partial class FileCaptureService
         private bool _cacheDeclined;
         private LoopStreamDecoder? _decoder;
         private long _lastRestartTimestamp;
+        private int _consecutiveRestarts;
 
         private byte[]? _displayedBuffer;
         private long _displayedAbsoluteFrame = long.MinValue;
@@ -382,7 +392,30 @@ internal sealed partial class FileCaptureService
             _path = path;
             _settings = settings;
             _probeTask = GetVideoProbeAsync(path);
-            _frameCountTask = GetLoopFrameCountAsync(path);
+        }
+
+        private bool IsLongSource => _probe?.DurationSeconds > LongSourceSeconds;
+
+        /// <summary>
+        /// <see cref="CaptureFrame"/> for the render thread: an unexpected failure marks
+        /// this player failed (callers fall back) instead of escaping into the frame loop.
+        /// </summary>
+        public FileCaptureFrame? CaptureFrameSafely(int targetWidth, int targetHeight, FitMode fitMode, bool includeSource)
+        {
+            try
+            {
+                return CaptureFrame(targetWidth, targetHeight, fitMode, includeSource);
+            }
+            catch (Exception ex)
+            {
+                lock (_sync)
+                {
+                    Logger.Error($"Tempo-synced playback of {Path.GetFileName(_path)} failed; disabling it for this layer.", ex);
+                    Fail(ex.Message);
+                }
+
+                return null;
+            }
         }
 
         /// <summary>
@@ -401,7 +434,22 @@ internal sealed partial class FileCaptureService
                 using var player = new BeatLoopPlayer(path, settings);
                 try
                 {
-                    await Task.WhenAll(player._probeTask, player._frameCountTask).ConfigureAwait(false);
+                    await player._probeTask.ConfigureAwait(false);
+                    Task<int>? countTask;
+                    lock (player._sync)
+                    {
+                        if (!player.TryResolveMetadataNoLock() || player.IsLongSource)
+                        {
+                            return;
+                        }
+
+                        countTask = player._frameCountTask;
+                    }
+
+                    if (countTask != null)
+                    {
+                        await countTask.ConfigureAwait(false);
+                    }
                 }
                 catch
                 {
@@ -410,7 +458,6 @@ internal sealed partial class FileCaptureService
 
                 lock (player._sync)
                 {
-                    player._frameCountExact = false;
                     if (!player.TryResolveMetadataNoLock())
                     {
                         return;
@@ -636,7 +683,9 @@ internal sealed partial class FileCaptureService
         {
             try
             {
-                Task.WaitAll(new Task[] { _probeTask, _frameCountTask }, TimeSpan.FromSeconds(OfflineFrameWaitSeconds));
+                _probeTask.Wait(TimeSpan.FromSeconds(OfflineFrameWaitSeconds));
+                TryResolveMetadataNoLock();
+                _frameCountTask?.Wait(TimeSpan.FromSeconds(OfflineFrameWaitSeconds));
             }
             catch
             {
@@ -705,9 +754,17 @@ internal sealed partial class FileCaptureService
                 _probe = probe;
                 double frameRate = probe.Value.FrameRate > 0 ? probe.Value.FrameRate : 30;
                 _frameCount = Math.Max(1, (int)Math.Round(probe.Value.DurationSeconds * frameRate));
+                if (IsLongSource)
+                {
+                    _frameCountExact = true;
+                }
+                else
+                {
+                    _frameCountTask = GetLoopFrameCountAsync(_path);
+                }
             }
 
-            if (!_frameCountExact && _frameCountTask.IsCompleted)
+            if (!_frameCountExact && _frameCountTask is { IsCompleted: true })
             {
                 _frameCountExact = true;
                 int exact = _frameCountTask.IsCompletedSuccessfully ? _frameCountTask.Result : 0;
@@ -835,29 +892,54 @@ internal sealed partial class FileCaptureService
             }
 
             double frameRate = _probe?.FrameRate > 0 ? _probe.Value.FrameRate : 30;
+            double sinceRestart = Stopwatch.GetElapsedTime(_lastRestartTimestamp).TotalSeconds;
+            if (sinceRestart > MaxRestartCooldownSeconds)
+            {
+                _consecutiveRestarts = 0;
+            }
+
             LoopStreamDecoder? decoder = _decoder;
             if (decoder != null)
             {
                 string? error = decoder.Error;
-                bool cooled = _offline || Stopwatch.GetElapsedTime(_lastRestartTimestamp).TotalSeconds > 0.75;
-                // The decoder only moves forward. The beat clock does too, except on a
-                // downbeat resync, which shows up as a target behind the newest one this
-                // decoder was asked for and needs a seek; so does falling far behind.
+                bool started = decoder.HasProducedFrame;
+                // Restarting cannot make a decoder faster, so repeated restarts back off
+                // exponentially (0.75 s doubling to 15 s): a machine that cannot keep up
+                // shows lagging playback with occasional catch-up jumps.
+                double cooldown = Math.Min(MaxRestartCooldownSeconds, 0.75 * Math.Pow(2, _consecutiveRestarts));
+                bool cooled = _offline || sinceRestart > cooldown;
+                // The beat clock only moves backwards on a downbeat resync, which shows up
+                // as a target behind the newest one this decoder was asked for.
                 bool jumpedBack = target < decoder.HighestRequestedFrameNumber - 1;
-                bool behind = target - decoder.NextFrameNumber > Math.Max(8, frameRate * 0.75);
-                if (!jumpedBack && !((error != null || behind) && cooled))
+                // A seek into a long-GOP file can take seconds before its first frame;
+                // that warm-up is not "behind". Only a decoder producing frames is.
+                bool behind = started && target - decoder.NextFrameNumber > Math.Max(8, frameRate * 1.5);
+                bool stalled = !started && sinceRestart > DecoderStartupTimeoutSeconds;
+                bool restart = jumpedBack || ((error != null || behind || stalled) && cooled);
+                if (!restart)
                 {
                     decoder.Request(target);
                     return;
                 }
 
-                if (error != null && _displayedBuffer == null)
+                if ((error != null || stalled) && _displayedBuffer == null && !jumpedBack)
                 {
-                    Fail(error);
+                    Fail(error ?? "the decoder produced no frames");
+                    return;
+                }
+
+                if (!_offline && LoopStreamDecoder.LiveCount >= MaxLiveDecoders)
+                {
+                    decoder.Request(target);
                     return;
                 }
 
                 DisposeDecoderNoLock();
+                _consecutiveRestarts++;
+            }
+            else if (!_offline && LoopStreamDecoder.LiveCount >= MaxLiveDecoders)
+            {
+                return;
             }
 
             // Start slightly ahead of the beat so decoder warm-up does not leave it
@@ -872,7 +954,8 @@ internal sealed partial class FileCaptureService
                 key.Height,
                 start,
                 _frameCount,
-                _lowContentionMode);
+                _lowContentionMode,
+                spawnLoopEarly: !IsLongSource);
             _decoder.Request(target);
             _lastRestartTimestamp = Stopwatch.GetTimestamp();
         }
@@ -930,6 +1013,12 @@ internal sealed partial class FileCaptureService
         private volatile string? _error;
         private readonly long _startTimestamp = Stopwatch.GetTimestamp();
         private static int _startedCount;
+        private static int _liveCount;
+        private readonly bool _spawnLoopEarly;
+        private int _released;
+
+        /// <summary>Decoders started and not yet fully torn down (their processes may still exist).</summary>
+        internal static int LiveCount => Volatile.Read(ref _liveCount);
 
         /// <summary>Total decoders started in this process (smokes use it to catch restart loops).</summary>
         internal static int StartedCount => Volatile.Read(ref _startedCount);
@@ -943,8 +1032,11 @@ internal sealed partial class FileCaptureService
             int height,
             long startFrameNumber,
             int frameCount,
-            bool lowContentionMode)
+            bool lowContentionMode,
+            bool spawnLoopEarly = true)
         {
+            _spawnLoopEarly = spawnLoopEarly;
+            Interlocked.Increment(ref _liveCount);
             _displayName = displayName;
             _frameBytes = width * height * 4;
             _frameCount = Math.Max(1, frameCount);
@@ -971,6 +1063,11 @@ internal sealed partial class FileCaptureService
         }
 
         public double AgeSeconds => Stopwatch.GetElapsedTime(_startTimestamp).TotalSeconds;
+
+        public bool HasProducedFrame
+        {
+            get { lock (_sync) return _firstFrameSeconds >= 0; }
+        }
 
         public long NextFrameNumber
         {
@@ -1089,9 +1186,11 @@ internal sealed partial class FileCaptureService
         {
             try
             {
+                // Loops pre-spawn the from-zero process so the wrap has no stall. Long
+                // files only reach it after hours, so they start it at that point.
                 Process? seeked = seekedArguments != null ? StartProcess(seekedArguments, lowContentionMode) : null;
-                Process? looped = StartProcess(loopArguments, lowContentionMode);
-                if (looped == null || (seekedArguments != null && seeked == null))
+                Process? looped = seeked == null || _spawnLoopEarly ? StartProcess(loopArguments, lowContentionMode) : null;
+                if ((seekedArguments != null && seeked == null) || (seeked == null && looped == null))
                 {
                     return;
                 }
@@ -1108,9 +1207,11 @@ internal sealed partial class FileCaptureService
                     }
 
                     FfmpegProcessManager.Shared.TerminateAndDispose(seeked, TimeSpan.FromMilliseconds(250));
+                    looped ??= StartProcess(loopArguments, lowContentionMode);
+                    if (looped == null) return;
                 }
 
-                ReadFrames(looped.StandardOutput.BaseStream, endOfStreamIsError: true);
+                ReadFrames(looped!.StandardOutput.BaseStream, endOfStreamIsError: true);
             }
             catch (Exception ex)
             {
@@ -1206,12 +1307,23 @@ internal sealed partial class FileCaptureService
                 Monitor.PulseAll(_sync);
             }
 
+            // Kill every process first, then reap: sequential kill-and-wait made each
+            // discarded decoder hold the single disposal thread for up to a second.
+            foreach (Process process in processes)
+            {
+                try { process.Kill(entireProcessTree: true); } catch { }
+            }
+
             foreach (Process process in processes)
             {
                 FfmpegProcessManager.Shared.TerminateAndDispose(process, TimeSpan.FromMilliseconds(500));
             }
 
             _cts.Dispose();
+            if (Interlocked.Exchange(ref _released, 1) == 0)
+            {
+                Interlocked.Decrement(ref _liveCount);
+            }
         }
     }
 

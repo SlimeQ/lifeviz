@@ -26,7 +26,7 @@ dotnet bin/Release/net9.0-windows/lifeviz.dll --smoke-test tempo-sync-loops "C:\
 - AutoClip switches landing on bar lines;
 - layer-config persistence.
 
-`tempo-sync-app` checks a synced File layer inside a real `MainWindow`: beat-clock adapter, resync, scene persistence and switching off. `tempo-sync-loops` is a diagnostic over a folder of real loops: streaming versus cached, frames per second, longest hold, cache size. The AutoClip editor bindings for **Sync to beat**, the loop-BPM box and bulk **Tag Selected** are covered by `autoclip-takeover`, which needs the one-second fixture described in [AutoClip takeover regression](#autoclip-takeover-regression). See [Tempo-Synced Video Loops](Tempo-Synced-Video.md).
+`tempo-sync` also includes the overload regression (bounded decoder restarts and live processes). `tempo-sync-file <video>` and `profile-current-scene-tempo` are diagnostics for long or heavy files and for your saved scene; current-scene smokes never write the user's `config.json`. `tempo-sync-app` checks a synced File layer inside a real `MainWindow`: beat-clock adapter, resync, scene persistence and switching off. `tempo-sync-loops` is a diagnostic over a folder of real loops: streaming versus cached, frames per second, longest hold, cache size. The AutoClip editor bindings for **Sync to beat**, the loop-BPM box and bulk **Tag Selected** are covered by `autoclip-takeover`, which needs the one-second fixture described in [AutoClip takeover regression](#autoclip-takeover-regression). See [Tempo-Synced Video Loops](Tempo-Synced-Video.md).
 
 ## Validate Fluid and Life controls
 

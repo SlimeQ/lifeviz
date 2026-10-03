@@ -1246,6 +1246,14 @@ public partial class MainWindow : Window
         {
             case "baseline":
                 break;
+            case "tempo-sync-files":
+                // Applied directly (no SaveConfig): this variant runs on the user's scene.
+                foreach (var source in EnumerateSources(_sources).Where(source => source.Type == CaptureSource.SourceType.File && SupportsTempoSync(source)).ToList())
+                {
+                    source.TempoSyncEnabled = true;
+                    ApplySourceTempoSync(source);
+                }
+                break;
             case "no-audio":
                 ClearAudioDeviceSelection();
                 _audioSyncEnabled = false;
@@ -8188,8 +8196,15 @@ public partial class MainWindow : Window
         }
     }
 
+    /// <summary>
+    /// True while a File layer plays beat-synced. A layer whose synced player failed
+    /// falls back to ordinary playback (and its transport/audio) until sync is toggled.
+    /// </summary>
     private bool IsTempoSyncedFileLayer(CaptureSource source) =>
-        source.Type == CaptureSource.SourceType.File && source.TempoSyncEnabled && SupportsTempoSync(source);
+        source.Type == CaptureSource.SourceType.File &&
+        source.TempoSyncEnabled &&
+        SupportsTempoSync(source) &&
+        _fileCapture.GetTempoLayerState(source.Id) != FileCaptureService.FileCaptureState.Error;
 
     /// <summary>
     /// Real-time file sessions are shared by path. Once every File layer on a path is
@@ -8229,7 +8244,8 @@ public partial class MainWindow : Window
                 includeSource);
         }
 
-        if (_fileCapture.IsTempoLayerActive(source.Id))
+        // Keep a failed synced player (it marks the fallback) until sync is turned off.
+        if (!source.TempoSyncEnabled && _fileCapture.IsTempoLayerActive(source.Id))
         {
             _fileCapture.ReleaseTempoLayer(source.Id);
         }
@@ -20141,6 +20157,11 @@ public partial class MainWindow : Window
 
     private void QueueConfigWrite(string json)
     {
+        // Current-scene smokes load the user's real config.json; their variants mutate the
+        // scene for measurement and must never be written back over it (by autosave or
+        // the shutdown flush).
+        if (App.IsSmokeTestMode && App.LoadUserConfigInSmokeTest) return;
+
         if (BackgroundBakeWorker.IsWorker) return;
         lock (_configWriteSync)
         {

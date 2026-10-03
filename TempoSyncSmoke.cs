@@ -83,6 +83,9 @@ internal static class TempoSyncSmoke
             FileCaptureService.LoopFrameCache.SetBudgetBytes(64L * 1024 * 1024);
             Expect(RunLiveFollow(loop24, clock, 48, bpm: 95, out string liveCached), $"live cached playback follows a slower clock: {liveCached}");
 
+            FileCaptureService.LoopFrameCache.SetBudgetBytes(0);
+            Expect(RunOverloadStress(directory, clock, out string stress), $"an overloaded decoder backs off instead of restarting in a loop: {stress}");
+
             Expect(RunAutoClipBarSnap(loop24, loop28, clock, out string autoClip), $"AutoClip clip boundaries land on bar lines: {autoClip}");
             Expect(RunLayerConfigRoundTrip(loop24, out string persistence), $"tempo settings survive the layer config file: {persistence}");
         }
@@ -144,6 +147,58 @@ internal static class TempoSyncSmoke
     /// 60 BPM (2 beats, so it plays twice as fast). Each must show its own exact frame,
     /// and releasing one must leave the other playing.
     /// </summary>
+    /// <summary>
+    /// Regression for the restart storm: a 1080p60 file with a single keyframe (so every
+    /// seek decodes from the start) driven ~25x faster than it can decode. The player must
+    /// back off (few decoder starts, a bounded number alive) and keep showing frames.
+    /// </summary>
+    private static bool RunOverloadStress(string directory, FakeClock clock, out string summary)
+    {
+        string heavy = Path.Combine(directory, "heavy-1080p60-onekey.mp4");
+        if (!File.Exists(heavy))
+        {
+            var psi = new ProcessStartInfo("ffmpeg") { UseShellExecute = false, CreateNoWindow = true, RedirectStandardError = true };
+            foreach (string arg in new[] { "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i", "testsrc2=size=1920x1080:rate=60:duration=15",
+                         "-c:v", "libx264", "-preset", "ultrafast", "-g", "900", "-pix_fmt", "yuv420p", heavy })
+            {
+                psi.ArgumentList.Add(arg);
+            }
+
+            using Process process = FfmpegProcessManager.Shared.Start(psi);
+            process.StandardError.ReadToEnd();
+            process.WaitForExit();
+        }
+
+        using var service = new FileCaptureService();
+        Guid layer = Guid.NewGuid();
+        var settings = new TempoSyncSettings(120); // 15 s at 120 BPM = 30 beats
+        clock.Bpm = 3000;                           // 25x: needs ~1500 decoded fps
+        int startsBefore = FileCaptureService.LoopStreamDecoder.StartedCount;
+        int peakLive = 0;
+        int changes = 0;
+        long lastToken = -1;
+        var stopwatch = Stopwatch.StartNew();
+        while (stopwatch.Elapsed.TotalSeconds < 10)
+        {
+            clock.BeatPosition = stopwatch.Elapsed.TotalSeconds * clock.Bpm / 60.0;
+            var frame = service.CaptureTempoLayerFrame(layer, heavy, settings, 1920, 1080, FitMode.Fill);
+            if (frame.HasValue && frame.Value.FrameToken != lastToken)
+            {
+                lastToken = frame.Value.FrameToken;
+                changes++;
+            }
+
+            peakLive = Math.Max(peakLive, FileCaptureService.LoopStreamDecoder.LiveCount);
+            Thread.Sleep(16);
+        }
+
+        clock.Bpm = 120;
+        int starts = FileCaptureService.LoopStreamDecoder.StartedCount - startsBefore;
+        summary = $"{starts} decoder starts in 10 s, peak {peakLive} alive, {changes} frames shown";
+        // Without backoff this restarts every 0.75 s (13+ starts) and piles up decoders.
+        return starts <= 6 && peakLive <= 3 && changes > 10;
+    }
+
     private static bool RunSharedFileLayers(string path, FakeClock clock, out string summary)
     {
         using var service = new FileCaptureService();
@@ -340,6 +395,67 @@ internal static class TempoSyncSmoke
         }
 
         return 0;
+    }
+
+    /// <summary>
+    /// Diagnostic for one synced File layer on any video (including long non-loop
+    /// files): live capture at 1280x720 while a fake clock runs at 140 BPM. Logs frames,
+    /// longest hold, decoder starts and live FFmpeg processes, so restart storms show up.
+    /// </summary>
+    public static int RunFileLayer(string? path, double seconds = 20)
+    {
+        if (string.IsNullOrWhiteSpace(path) || !File.Exists(path))
+        {
+            Logger.Error($"tempo-sync-file needs a video path (got '{path}').");
+            return 1;
+        }
+
+        var clock = new FakeClock { Bpm = double.TryParse(Environment.GetEnvironmentVariable("LIFEVIZ_TEMPO_BPM"), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out double bpm) ? bpm : 140, BeatPosition = 0 };
+        FileCaptureService.TempoClock = clock;
+        try
+        {
+            using var service = new FileCaptureService();
+            Guid layer = Guid.NewGuid();
+            int decodersBefore = FileCaptureService.LoopStreamDecoder.StartedCount;
+            var stopwatch = Stopwatch.StartNew();
+            long lastToken = -1;
+            int changes = 0;
+            double firstFrame = -1;
+            double lastChange = 0;
+            double longestHold = 0;
+            int maxFfmpeg = 0;
+            double nextSample = 0;
+            while (stopwatch.Elapsed.TotalSeconds < seconds)
+            {
+                double now = stopwatch.Elapsed.TotalSeconds;
+                clock.BeatPosition = now * clock.Bpm / 60.0;
+                var frame = service.CaptureTempoLayerFrame(layer, path, new TempoSyncSettings(140), 1280, 720, FitMode.Fill);
+                if (frame.HasValue && frame.Value.FrameToken != lastToken)
+                {
+                    if (firstFrame < 0) firstFrame = now;
+                    else longestHold = Math.Max(longestHold, now - lastChange);
+                    lastToken = frame.Value.FrameToken;
+                    lastChange = now;
+                    changes++;
+                }
+
+                if (now >= nextSample)
+                {
+                    maxFfmpeg = Math.Max(maxFfmpeg, Process.GetProcessesByName("ffmpeg").Length);
+                    nextSample = now + 0.5;
+                }
+
+                Thread.Sleep(16);
+            }
+
+            int decoders = FileCaptureService.LoopStreamDecoder.StartedCount - decodersBefore;
+            Logger.Info($"Tempo file layer {Path.GetFileName(path)}: first frame {firstFrame:0.00}s, {changes / Math.Max(0.001, seconds - Math.Max(0, firstFrame)):0.0} new frames/s, longest hold {longestHold * 1000:0} ms, {decoders} decoder start(s), peak {maxFfmpeg} ffmpeg processes; {service.DescribeTempoLayer(layer)}");
+            return 0;
+        }
+        finally
+        {
+            FileCaptureService.TempoClock = null;
+        }
     }
 
     private static bool RunLayerConfigRoundTrip(string loopPath, out string summary)

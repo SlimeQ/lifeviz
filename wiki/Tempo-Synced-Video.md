@@ -53,6 +53,12 @@ The menu shows current use. The setting is saved with the scene.
 - **Streaming:** without the cache, or when a loop doesn't fit, a forward-only decoder runs FFmpeg **without real-time pacing**. It only pulls a frame when the beat needs it, so the pipe's backpressure sets the decode speed.
   - **Starting mid-loop:** decoding begins with a seeked one-pass process for the rest of that loop iteration, and a looping process from frame 0 (spawned at the same time) takes over at the boundary. FFmpeg's `-stream_loop` wraps a seeked input back near the seek point rather than frame 0, so the two are never combined.
   - **When it restarts:** the decoder only restarts, with a frame-accurate seek, when the beat target jumps backwards (a downbeat resync) or falls more than about 0.75 s behind.
+- **Slow machines and long files:**
+  - A decoder that can't keep up is never restarted in a tight loop. Its warm-up (seeking into a long-GOP file can take seconds) doesn't count as falling behind.
+  - "Behind" means more than 1.5 s of frames behind. Restarts back off from 0.75 s, doubling up to 15 s, so an overloaded layer lags and occasionally jumps forward instead of thrashing.
+  - At most 16 loop decoders can be alive process-wide, counting ones still being torn down.
+  - Files longer than 2 minutes skip the exact frame count, which would read the whole file, and start the loop-wrap process only when it's needed.
+  - If a synced File layer's player fails, the layer falls back to ordinary playback until Sync to Beat is toggled.
 - **Background bakes** run in their own process, so they cache at most 2 GB to avoid doubling the editor's RAM use.
 
 ### Memory and decode budget, measured
@@ -74,4 +80,7 @@ Exports drive the beat clock from the render timeline, and the clocks reset when
   - AutoClip switches landing on bar lines;
   - layer-config persistence.
 - `--smoke-test tempo-sync-app` runs a File layer through a real `MainWindow`. It checks the window's beat-clock adapter, a downbeat resync, scene persistence, and switching sync off.
+- `--smoke-test tempo-sync` also includes an overload check: a single-keyframe 1080p60 file driven about 25x too fast must start at most 6 decoders in 10 s, never have more than 3 alive, and keep showing frames.
+- `--smoke-test tempo-sync-file <video>` runs one synced File layer live. It reports first-frame time, frame rate, longest hold, decoder starts and peak FFmpeg processes. Set `LIFEVIZ_TEMPO_BPM` to overdrive the clock and simulate a slower machine.
+- `--smoke-test profile-current-scene-tempo` profiles your saved scene with every video File layer synced. Like the other current-scene smokes it never writes `config.json`.
 - `--smoke-test tempo-sync-loops <folder>` is a diagnostic over real loops: streaming versus cached, frames per second, longest hold, cache size and heap growth.
