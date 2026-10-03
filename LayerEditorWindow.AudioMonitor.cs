@@ -96,6 +96,9 @@ public partial class LayerEditorWindow
         MonitorHit.Opacity = 0.15 + 0.85 * _audioMonitorHit;
         _audioMonitorHit *= 0.7;
 
+        MonitorGainText.Text = snapshot.AutoGain || Math.Abs(snapshot.GainDb) > 0.05
+            ? $"{snapshot.GainDb:+0;-0}dB{(snapshot.AutoGain ? " A" : "")}"
+            : string.Empty;
         MonitorMeters.Visibility = snapshot.HasInput ? Visibility.Visible : Visibility.Hidden;
         MonitorInputText.Visibility = snapshot.HasInput ? Visibility.Collapsed : Visibility.Visible;
     }

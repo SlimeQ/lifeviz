@@ -131,24 +131,39 @@
                               Header="Level -> Seeder"
                               IsCheckable="True"
                               Click="AudioReactiveLevelSeed_OnChecked" />
-                    <MenuItem Header="Input Gain" StaysOpenOnClick="True">
-                        <DockPanel Margin="8,4" Width="220">
-                            <TextBlock Text="Gain:" DockPanel.Dock="Left"/>
-                            <TextBlock x:Name="AudioInputGainText"
-                                       Text="1.0x"
-                                       DockPanel.Dock="Right"
-                                       FontWeight="Bold"/>
-                            <Slider x:Name="AudioInputGainSlider"
-                                    Minimum="0"
-                                    Maximum="2"
-                                    Value="1"
-                                    TickFrequency="0.05"
-                                    IsSnapToTickEnabled="True"
-                                    SmallChange="0.05"
-                                    LargeChange="0.25"
-                                    Margin="8,0"
-                                    ValueChanged="AudioInputGainSlider_OnValueChanged"/>
-                        </DockPanel>
+                    <MenuItem Header="Input Gain"
+                              StaysOpenOnClick="True"
+                              SubmenuOpened="AudioInputGainMenu_OnSubmenuOpened"
+                              SubmenuClosed="AudioInputGainMenu_OnSubmenuClosed">
+                        <StackPanel Margin="8,4" Width="300">
+                            <DockPanel>
+                                <TextBlock Text="Gain:" DockPanel.Dock="Left"/>
+                                <TextBlock x:Name="AudioInputGainText"
+                                           Text="1.0x"
+                                           DockPanel.Dock="Right"
+                                           FontWeight="Bold"/>
+                                <Slider x:Name="AudioInputGainSlider"
+                                        Minimum="0"
+                                        Maximum="8"
+                                        Value="1"
+                                        TickFrequency="0.05"
+                                        IsSnapToTickEnabled="True"
+                                        SmallChange="0.05"
+                                        LargeChange="0.5"
+                                        Margin="8,0"
+                                        ValueChanged="AudioInputGainSlider_OnValueChanged"/>
+                            </DockPanel>
+                            <CheckBox x:Name="AudioAutoGainCheckBox"
+                                      Content="Auto gain (room mic)"
+                                      Margin="0,8,0,0"
+                                      Checked="AudioAutoGain_OnChanged"
+                                      Unchecked="AudioAutoGain_OnChanged"
+                                      ToolTip="Continuously boosts or trims the selected audio source so its loud passages reach the level of music played directly into LifeViz (up to +36 dB). Use it when listening to a room through a microphone. Applies on top of the manual gain; silence below about -66 dBFS is not boosted."/>
+                            <TextBlock x:Name="AudioAutoGainText"
+                                       Text="Auto gain off"
+                                       Margin="0,4,0,0"
+                                       Opacity="0.75"/>
+                        </StackPanel>
                     </MenuItem>
                     <MenuItem Header="Energy Gain" StaysOpenOnClick="True">
                         <DockPanel Margin="8,4" Width="220">

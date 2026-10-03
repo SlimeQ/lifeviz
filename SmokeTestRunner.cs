@@ -164,6 +164,7 @@ internal static partial class SmokeTestRunner
                 "datamosh" => RunDatamoshSmokeTest(),
                 "audio-capture" => AudioResponseSmoke.RunCapture(),
                 "beat-tracking" => BeatTrackingSmoke.Run(),
+                "audio-auto-gain" => AudioAutoGainSmoke.Run(),
                 "beat-tracking-file" => BeatTrackingSmoke.RunFile(explicitSmokePath),
                 "tempo-sync" => TempoSyncSmoke.Run(),
                 "tempo-sync-loops" => TempoSyncSmoke.RunRealLoops(explicitSmokePath),

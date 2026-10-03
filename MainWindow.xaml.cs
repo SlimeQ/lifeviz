@@ -71,7 +71,7 @@ public partial class MainWindow : Window
     private const double DefaultAudioInputGain = 1.0;
     private const double DefaultAudioOutputGain = 1.0;
     private const double MinAudioInputGain = 0.0;
-    private const double MaxAudioInputGain = 2.0;
+    private const double MaxAudioInputGain = 8.0;
     private const int AudioDebugHistorySeconds = 30;
     private const int AudioDebugHistorySampleRate = 120;
     private const int AudioDebugHistorySize = AudioDebugHistorySeconds * AudioDebugHistorySampleRate;
@@ -327,6 +327,8 @@ public partial class MainWindow : Window
     private double _audioInputGainCapture = DefaultAudioInputGain;
     private double _audioInputGainRender = DefaultAudioOutputGain;
     private double _audioInputGain = DefaultAudioInputGain;
+    private bool _audioAutoGainEnabled;
+    private DispatcherTimer? _audioGainMenuTimer;
     private double _audioReactiveEnergyGain = DefaultAudioReactiveEnergyGain;
     private double _audioReactiveFpsBoost = DefaultAudioReactiveFpsBoost;
     private double _audioReactiveFpsMinPercent = DefaultAudioReactiveFpsMinPercent;
@@ -8138,7 +8140,9 @@ public partial class MainWindow : Window
         long Onsets,
         double Bpm,
         string TempoState,
-        double BarPosition);
+        double BarPosition,
+        double GainDb = 0,
+        bool AutoGain = false);
 
     private int _audioMonitorViewers;
 
@@ -8170,7 +8174,9 @@ public partial class MainWindow : Window
             _audioBeatDetector.BeatCount,
             clock.Bpm,
             state,
-            clock.GetBarAlignedPosition(_beatClockNow));
+            clock.GetBarAlignedPosition(_beatClockNow),
+            20 * Math.Log10(Math.Max(_audioBeatDetector.EffectiveInputGain, 1e-6)),
+            _audioAutoGainEnabled);
     }
 
     private void ResyncDownbeat()
@@ -18375,7 +18381,7 @@ public partial class MainWindow : Window
                         : IsVideoStackAudioSelection(_selectedAudioDeviceId)
                             ? "Video Stack"
                             : "Device";
-                    reactiveStats = $"\nReactive: {deviceState} | InGain x{_audioInputGain:0.00} | FPS x{_audioReactiveFpsMultiplier:0.00} (min {_audioReactiveFpsMinPercent * 100.0:0}%) | Opacity {_effectiveLifeOpacity:0.00} | Onsets: {_audioBeatDetector.BeatCount} | Tempo {_audioBeatClock.Bpm:F1}{(_audioBeatClock.AudioLocked ? " locked" : "")} | Seeds L:{_audioReactiveLevelSeedBurstsLastStep} B:{_audioReactiveBeatSeedBurstsLastStep}";
+                    reactiveStats = $"\nReactive: {deviceState} | InGain x{_audioBeatDetector.EffectiveInputGain:0.00}{(_audioAutoGainEnabled ? " auto" : "")} | FPS x{_audioReactiveFpsMultiplier:0.00} (min {_audioReactiveFpsMinPercent * 100.0:0}%) | Opacity {_effectiveLifeOpacity:0.00} | Onsets: {_audioBeatDetector.BeatCount} | Tempo {_audioBeatClock.Bpm:F1}{(_audioBeatClock.AudioLocked ? " locked" : "")} | Seeds L:{_audioReactiveLevelSeedBurstsLastStep} B:{_audioReactiveBeatSeedBurstsLastStep}";
                 }
 
                 FpsText.Text = $"Present {_presentationDisplayFps:0.0} fps (target {_currentFpsFromConfig:0.0}) | Loop {_renderDisplayFps:0.0} fps | Sim {_simulationDisplayFps:0.0} sps (target {_currentSimulationTargetFps:0.0}) | Steps/frame {_lastSimulationStepsThisFrame}{pacingStatsText}{stageStatsText}{audioStats}{reactiveStats}";
@@ -19618,9 +19624,42 @@ public partial class MainWindow : Window
                 : IsOutputAudioSelection(_selectedAudioDeviceId)
                     ? "Output"
                     : "Input";
-            AudioInputGainText.Text = $"{_audioInputGain:0.00}x ({sourceLabel})";
+            AudioInputGainText.Text = $"{_audioInputGain:0.00}x {FormatGainDb(_audioInputGain)} ({sourceLabel})";
+        }
+
+        if (AudioAutoGainCheckBox != null && AudioAutoGainCheckBox.IsChecked != _audioAutoGainEnabled)
+        {
+            AudioAutoGainCheckBox.IsChecked = _audioAutoGainEnabled;
+        }
+
+        if (AudioAutoGainText != null)
+        {
+            AudioAutoGainText.Text = _audioAutoGainEnabled
+                ? $"Auto gain now {_audioBeatDetector.AutoGainDb:+0.0;-0.0} dB, total {FormatGainDb(_audioBeatDetector.EffectiveInputGain)}"
+                : "Auto gain off";
         }
     }
+
+    private static string FormatGainDb(double gain) =>
+        gain <= 0.0001 ? "(muted)" : $"({20 * Math.Log10(gain):+0.0;-0.0} dB)";
+
+    private void AudioAutoGain_OnChanged(object sender, RoutedEventArgs e)
+    {
+        _audioAutoGainEnabled = AudioAutoGainCheckBox?.IsChecked == true;
+        _audioBeatDetector.AutoGainEnabled = _audioAutoGainEnabled;
+        UpdateAudioInputGainUi();
+        SaveConfig();
+    }
+
+    private void AudioInputGainMenu_OnSubmenuOpened(object sender, RoutedEventArgs e)
+    {
+        UpdateAudioInputGainUi();
+        _audioGainMenuTimer ??= new DispatcherTimer(TimeSpan.FromMilliseconds(250), DispatcherPriority.Background,
+            (_, _) => UpdateAudioInputGainUi(), Dispatcher);
+        _audioGainMenuTimer.Start();
+    }
+
+    private void AudioInputGainMenu_OnSubmenuClosed(object sender, RoutedEventArgs e) => _audioGainMenuTimer?.Stop();
 
     private void AudioInputGainSlider_OnValueChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
     {
@@ -19883,6 +19922,8 @@ public partial class MainWindow : Window
             _audioReactiveLevelSeedEnabled = config.AudioReactiveLevelSeedEnabled;
             _audioInputGainCapture = Math.Clamp(config.AudioInputGainCapture, MinAudioInputGain, MaxAudioInputGain);
             _audioInputGainRender = Math.Clamp(config.AudioInputGainRender, MinAudioInputGain, MaxAudioInputGain);
+            _audioAutoGainEnabled = config.AudioAutoGainEnabled;
+            _audioBeatDetector.AutoGainEnabled = _audioAutoGainEnabled;
             _audioReactiveEnergyGain = Math.Clamp(config.AudioReactiveEnergyGain, 1, 48);
             _audioReactiveFpsBoost = Math.Clamp(config.AudioReactiveFpsBoost, 0, 2);
             _audioReactiveFpsMinPercent = Math.Clamp(config.AudioReactiveFpsMinPercent, 0, 1);
@@ -20173,6 +20214,7 @@ public partial class MainWindow : Window
             AudioInputGain = _audioInputGainCapture,
             AudioInputGainCapture = _audioInputGainCapture,
             AudioInputGainRender = _audioInputGainRender,
+            AudioAutoGainEnabled = _audioAutoGainEnabled,
             AudioReactiveEnergyGain = _audioReactiveEnergyGain,
             AudioReactiveFpsBoost = _audioReactiveFpsBoost,
             AudioReactiveFpsMinPercent = _audioReactiveFpsMinPercent,
@@ -21668,6 +21710,7 @@ public partial class MainWindow : Window
         public double AudioInputGain { get; set; } = DefaultAudioInputGain;
         public double AudioInputGainCapture { get; set; } = DefaultAudioInputGain;
         public double AudioInputGainRender { get; set; } = DefaultAudioOutputGain;
+        public bool AudioAutoGainEnabled { get; set; }
         public double AudioReactiveEnergyGain { get; set; } = DefaultAudioReactiveEnergyGain;
         public double AudioReactiveFpsBoost { get; set; } = DefaultAudioReactiveFpsBoost;
         public double AudioReactiveFpsMinPercent { get; set; } = DefaultAudioReactiveFpsMinPercent;

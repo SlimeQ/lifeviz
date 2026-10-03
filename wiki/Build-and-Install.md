@@ -10,6 +10,19 @@ dotnet bin/Release/net9.0-windows/lifeviz.dll --smoke-test beat-tracking-file "C
 
 `beat-tracking` runs `BeatTracker` + `BeatClock` against synthetic drums: four-on-the-floor at 100–174 BPM, 70 BPM half-time, a 174 BPM breakbeat, ±12 ms jitter, a 124→140 BPM change, and a 4 s dropout. It requires tempo within 0.5–0.7 BPM, phase error under 10 ms, a forward-only clock, and a continuous manual clock when the BPM changes. `beat-tracking-file` is a diagnostic for real tracks (any FFmpeg-readable audio or video). It logs tempo, confidence and lock every 5 s (set `LIFEVIZ_BEAT_LOG_INTERVAL` to change this) and prints a summary with first-lock time, tempo jumps and estimate jitter; compare it against the track's known tempo. The release build's FFmpeg bundle step needs `artifacts/ffmpeg/ffmpeg-9.0.1-essentials_build.zip`. In a fresh git worktree, copy it from the main checkout if the upstream download URL is unavailable; the SHA-256 check still applies. See [Beat Clock and Tempo Tracking](Beat-Clock.md).
 
+## Validate auto gain
+
+```powershell
+dotnet bin/Release/net9.0-windows/lifeviz.dll --smoke-test audio-auto-gain
+```
+
+Synthetic 124 BPM music checks:
+- **Quiet mic:** a copy 34 dB quieter, with Auto gain on, reaches the same level and band readings and the same tempo as the loud reference.
+- **No boost:** without Auto gain, that quiet copy reads clearly weaker.
+- **Loud input:** a loud input is left nearly alone.
+- **Sudden blast:** a blast drops the gain by more than 25 dB within 0.5 s.
+- **Silence:** silence holds the gain.
+
 ## Validate tempo-synced video loops
 
 ```powershell

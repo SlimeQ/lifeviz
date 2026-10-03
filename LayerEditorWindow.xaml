@@ -501,6 +501,8 @@
                                     <Border x:Name="MonitorHighBar" Width="0" HorizontalAlignment="Left" Background="#5DA9E9" CornerRadius="2" />
                                 </Border>
                             </StackPanel>
+                            <TextBlock x:Name="MonitorGainText" Text="" Foreground="#9A9A9A" FontSize="10" VerticalAlignment="Center"
+                                       ToolTip="Total input gain applied before analysis (manual Input Gain x Auto gain). Audio Reactivity -> Input Gain in App Controls." />
                         </StackPanel>
                         <TextBlock x:Name="MonitorInputText" Text="no audio input selected" Foreground="#9A9A9A" FontSize="10" VerticalAlignment="Center" Visibility="Collapsed" />
                     </Grid>

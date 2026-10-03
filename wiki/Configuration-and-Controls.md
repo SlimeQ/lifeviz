@@ -114,7 +114,13 @@ Configuration is per Windows user at `%APPDATA%\lifeviz\config.json`. If a user 
 - Frame pacing note: the render loop still throttles while the root context menu is open and while the window is inside the native move/resize loop, but cadence is now explicitly reset after those interactions so temporary throttling does not persist after the menu closes or a drag ends.
 - **Audio Reactivity** - configurable audio-driven simulation control (uses the selected **Audio Source** feed). The menu includes:
   - *Enable Global Seeders* master toggle.
-  - *Input Gain* (0.00x-2.00x, snapped in 0.05x steps) to amplify or trim incoming signal before beat/energy analysis; the app remembers separate gain values for input-device mode vs output-device mode.
+  - *Input Gain* (0.00x-8.00x, +18 dB, snapped in 0.05x steps; shown in dB) to amplify or trim incoming signal before beat/energy/band analysis and the MilkDrop PCM. The app remembers separate gain values for input-device mode vs output-device mode.
+  - *Auto gain (room mic)*, in the same submenu, is for running off a microphone in a room where you aren't playing the music.
+    - It continuously boosts or trims the selected audio source so loud passages land around -6 dBFS, the level mastered music reaches on loopback, which is what reactive mappings, Level and the band meters are tuned for.
+    - It works on top of the manual gain, within -12 to +36 dB.
+    - It cuts quickly (about 0.15 s) when the room gets louder, and raises gain slowly (about 3 s, following an 8 s level memory).
+    - It holds when the input falls below about -66 dBFS, so silence and breaks are not pumped into hiss.
+    - The submenu shows the live auto and total gain while it is open. The Scene Editor monitor shows the total, with "A" when auto gain is on. The setting is saved with the scene.
   - *Level -> Seeder* with `Max Level Seeds` (continuously injects patterns as loudness rises, making reactivity obvious even without strong beat detection).
   - *Beat -> Seeder* with `Seeds Per Beat`, `Seed Cooldown`, and `Seed Pattern` (Glider, R-pentomino, Random Burst) to inject patterns on detected beat edges.
   - Reactivity controls are disabled when no audio device is selected.

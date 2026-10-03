@@ -35,7 +35,7 @@ internal sealed partial class AudioBeatDetector : IDisposable
     }
 
     private const double MinInputGain = 0.0;
-    private const double MaxInputGain = 2.0;
+    private const double MaxInputGain = 8.0;
     private const int AudioDebugHistorySeconds = 30;
     private const int AudioDebugHistorySampleRate = 120;
     private const int WaveformHistorySize = AudioDebugHistorySeconds * AudioDebugHistorySampleRate;
@@ -148,6 +148,64 @@ internal sealed partial class AudioBeatDetector : IDisposable
     {
         get => _inputGain;
         set => _inputGain = Math.Clamp(value, MinInputGain, MaxInputGain);
+    }
+
+    // Auto gain (for room microphones): steers the loud-passage level of the input
+    // toward what mastered music produces on loopback, the level reactive mappings are
+    // tuned for. It drops quickly when the signal gets louder, rises slowly, and holds
+    // when the input is below a noise gate so silence is not pumped up into hiss.
+    private const double AutoGainTargetDb = -6.0;
+    private const double AutoGainMinDb = -12.0;
+    private const double AutoGainMaxDb = 36.0;
+    private const double AutoGainGateRms = 0.0005; // -66 dBFS after manual gain
+    private const double AutoGainEnvelopeAttackSeconds = 0.05;
+    private const double AutoGainEnvelopeReleaseSeconds = 8.0;
+    private const double AutoGainFallSeconds = 0.15;
+    private const double AutoGainRiseSeconds = 3.0;
+    private volatile bool _autoGainEnabled;
+    private double _autoGainEnvelope;
+    private double _autoGainDb;
+
+    public bool AutoGainEnabled
+    {
+        get => _autoGainEnabled;
+        set => _autoGainEnabled = value;
+    }
+
+    /// <summary>Current automatic gain in dB (0 when Auto Gain is off).</summary>
+    public double AutoGainDb => _autoGainEnabled ? Volatile.Read(ref _autoGainDb) : 0;
+
+    /// <summary>Manual input gain times the automatic gain, as applied to analysis.</summary>
+    public double EffectiveInputGain => _inputGain * Math.Pow(10, AutoGainDb / 20.0);
+
+    private double ApplyAutoGain(ReadOnlySpan<float> samples, double manualGain)
+    {
+        if (!_autoGainEnabled || samples.Length == 0)
+        {
+            return manualGain;
+        }
+
+        double sum = 0;
+        for (int i = 0; i < samples.Length; i++)
+        {
+            sum += samples[i] * (double)samples[i];
+        }
+
+        double rms = Math.Sqrt(sum / samples.Length) * manualGain;
+        double dt = samples.Length / (double)Math.Max(1, _sampleRate);
+        double gainDb = _autoGainDb;
+        if (rms >= AutoGainGateRms)
+        {
+            double envelopeSeconds = rms > _autoGainEnvelope ? AutoGainEnvelopeAttackSeconds : AutoGainEnvelopeReleaseSeconds;
+            _autoGainEnvelope += (rms - _autoGainEnvelope) * (1 - Math.Exp(-dt / envelopeSeconds));
+            double envelopeDb = 20 * Math.Log10(Math.Max(_autoGainEnvelope, 1e-9));
+            double desiredDb = Math.Clamp(AutoGainTargetDb - envelopeDb, AutoGainMinDb, AutoGainMaxDb);
+            double seconds = desiredDb < gainDb ? AutoGainFallSeconds : AutoGainRiseSeconds;
+            gainDb += (desiredDb - gainDb) * (1 - Math.Exp(-dt / seconds));
+            Volatile.Write(ref _autoGainDb, gainDb);
+        }
+
+        return manualGain * Math.Pow(10, gainDb / 20.0);
     }
 
     private uint _sampleRate = 48000;
@@ -573,6 +631,8 @@ internal sealed partial class AudioBeatDetector : IDisposable
         _energyHistory.Clear();
         _beatTimestamps.Clear();
         _beatTracker.Reset();
+        _autoGainEnvelope = 0;
+        Volatile.Write(ref _autoGainDb, 0);
         _localEnergyAverage = 0;
         _detectedBpm = 120;
         LastBeatTime = DateTime.MinValue;
@@ -668,7 +728,7 @@ internal sealed partial class AudioBeatDetector : IDisposable
         Volatile.Write(ref _lastPcmTimestamp, System.Diagnostics.Stopwatch.GetTimestamp());
         bool enableSpectrumAnalysis = _enableSpectrumAnalysis;
         bool enableDebugHistory = _enableDebugHistory;
-        double inputGain = _inputGain;
+        double inputGain = ApplyAutoGain(samples, _inputGain);
         CaptureProjectMPcm(samples, inputGain);
         double totalEnergy = 0;
         double totalAbsolute = 0;
