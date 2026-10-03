@@ -8129,6 +8129,50 @@ public partial class MainWindow : Window
         public double Bpm => _owner.GetAnimationBeatClock(out _).Bpm;
     }
 
+    internal readonly record struct AudioMonitorSnapshot(
+        bool HasInput,
+        double Level,
+        double Low,
+        double Mid,
+        double High,
+        long Onsets,
+        double Bpm,
+        string TempoState,
+        double BarPosition);
+
+    private int _audioMonitorViewers;
+
+    /// <summary>The Scene Editor's live readout registers here so band analysis runs while it is open.</summary>
+    internal void SetAudioMonitorVisible(bool visible)
+    {
+        _audioMonitorViewers = Math.Max(0, _audioMonitorViewers + (visible ? 1 : -1));
+        UpdateAudioAnalysisRequirements();
+    }
+
+    /// <summary>What the beat clock and reactive mappings see right now.</summary>
+    internal AudioMonitorSnapshot GetAudioMonitorSnapshot()
+    {
+        bool hasInput = HasReactiveAudioInput();
+        BeatClock clock = GetAnimationBeatClock(out bool audioRequested);
+        string state = !_animationAudioSyncEnabled
+            ? "manual"
+            : !hasInput
+                ? "no input"
+                : clock.AudioLocked
+                    ? "locked"
+                    : _audioBeatDetector.BeatEstimate.Bpm > 0 ? "holding" : "listening";
+        return new AudioMonitorSnapshot(
+            hasInput,
+            GetReactiveInputValue(SimulationReactiveInput.Level),
+            GetReactiveInputValue(SimulationReactiveInput.Bass),
+            GetReactiveInputValue(SimulationReactiveInput.Mid),
+            GetReactiveInputValue(SimulationReactiveInput.High),
+            _audioBeatDetector.BeatCount,
+            clock.Bpm,
+            state,
+            clock.GetBarAlignedPosition(_beatClockNow));
+    }
+
     private void ResyncDownbeat()
     {
         _audioBeatClock.ResyncDownbeat();
@@ -10949,6 +10993,11 @@ public partial class MainWindow : Window
     private bool NeedsAudioSpectrumAnalysis()
     {
         if (_showFps)
+        {
+            return true;
+        }
+
+        if (_audioMonitorViewers > 0)
         {
             return true;
         }

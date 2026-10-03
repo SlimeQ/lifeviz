@@ -58,6 +58,11 @@ Select a **Sim Group** in the Scene Editor and click **Add Datamosh Layer** besi
 
 Feedback 0 gives clean input on the next simulation step. Displacement requires retained feedback to be visible. The existing right-click **Randomize** command clears Datamosh history while also randomizing other simulations. Enabling/disabling or changing opacity retains history; removing/recreating the layer or changing simulation dimensions resets it. Saves retain settings and mappings, not frame history. See [Datamosh](Datamosh.md) for a setup recipe and rendering behavior.
 
+The Scene Editor header has a live **tempo and audio monitor** next to the title, so you can check the music side while the output window is on another screen.
+- **Top row:** the beat clock's BPM and its source. *manual* means the Animation BPM slider; *locked*, *holding* or *listening* means it's following the detected tempo with Sync to Audio BPM. Four dots show the beat in the bar (amber is beat 1; press **B** in the main window to resync), and a red dot flashes on each detected hit (onset).
+- **Bottom row:** **Lvl / Lo / Mid / Hi** meters showing the exact Level, Low, Mid and High values reactive mappings receive, with a short peak hold. It reads *no audio input selected* when there is no Audio Source.
+- **Cost:** while the editor is open it keeps band analysis running.
+
 **New Project** sits beside **Load...** and **Save...** in the Scene Editor. After confirmation it immediately replaces the applied scene with the starter video and one Life Sim, resets project render settings, and restarts the demo—even with Live Mode off. Recording-folder and other machine preferences remain unchanged. The previous applied scene is checkpointed in **Recover...**; an unapplied editor draft is preserved separately before reset. Existing named exports are not overwritten. Startup only selects the demo when the existing startup fallback rules apply; saved user scenes, including deliberately empty ones, keep loading normally.
 
 **Update to Latest Release...** can repair an older installation missing FFmpeg, including on a guest account. It downloads a complete installer, validates the new bundled FFmpeg before replacing the app, and preserves settings/scenes. Running the latest installer manually under the affected account provides the same repair if the old app cannot open.

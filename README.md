@@ -2,6 +2,8 @@
 
 ## Tempo-synced video loops
 
+**Scene Editor monitor:** the editor header shows the live beat clock (BPM, lock state, beat-in-bar dots, hit flash) and the Level/Low/Mid/High values your reactive mappings receive, so you can see what the audio is doing while the output is on another screen.
+
 File (video/GIF) and AutoClip layers have a **Sync to Beat** option. Make loops at any tempo, then tag them:
 - a scene **Video loop BPM** (in the Animation BPM menu);
 - a per-layer BPM in the Scene Editor's **Tempo Sync** group;

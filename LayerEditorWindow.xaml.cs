@@ -54,6 +54,7 @@ public partial class LayerEditorWindow : Window
         };
         _videoTransportTimer.Start();
         Closed += (_, _) => _videoTransportTimer.Stop();
+        InitializeAudioMonitor();
     }
 
     public void PrepareForOwnerShutdown()

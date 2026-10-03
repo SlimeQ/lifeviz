@@ -455,6 +455,57 @@
                        FontWeight="Bold"
                        DockPanel.Dock="Left"
                        VerticalAlignment="Center" />
+            <Border DockPanel.Dock="Left"
+                    Margin="16,0,0,0"
+                    Padding="8,3"
+                    VerticalAlignment="Center"
+                    Background="#1C1C1C"
+                    BorderBrush="#333333"
+                    BorderThickness="1"
+                    CornerRadius="4">
+                <StackPanel>
+                    <StackPanel Orientation="Horizontal"
+                                ToolTip="Beat clock driving BPM animations and Sync to Beat loops. manual = Animation BPM slider; locked/holding/listening = following the detected tempo (Sync to Audio BPM). Dots show the beat in the bar; amber is beat 1 (press B in the main window to resync).">
+                        <TextBlock x:Name="MonitorTempoText" Text="140.0 BPM" FontWeight="Bold" FontSize="12" Width="66" VerticalAlignment="Center" />
+                        <TextBlock x:Name="MonitorTempoState" Text="manual" Foreground="#9A9A9A" FontSize="11" Width="56" VerticalAlignment="Center" />
+                        <Ellipse x:Name="MonitorBeat1" Width="9" Height="9" Margin="0,0,3,0" Fill="#3A3A3A" VerticalAlignment="Center" />
+                        <Ellipse x:Name="MonitorBeat2" Width="9" Height="9" Margin="0,0,3,0" Fill="#3A3A3A" VerticalAlignment="Center" />
+                        <Ellipse x:Name="MonitorBeat3" Width="9" Height="9" Margin="0,0,3,0" Fill="#3A3A3A" VerticalAlignment="Center" />
+                        <Ellipse x:Name="MonitorBeat4" Width="9" Height="9" Margin="0,0,10,0" Fill="#3A3A3A" VerticalAlignment="Center" />
+                        <Ellipse x:Name="MonitorHit" Width="9" Height="9" Fill="#FF5E5E" Opacity="0.15" VerticalAlignment="Center"
+                                 ToolTip="Flashes on each detected hit (onset). Beat -> Seeder and MilkDrop beat changes use these." />
+                    </StackPanel>
+                    <Grid Margin="0,3,0,0">
+                        <StackPanel x:Name="MonitorMeters" Orientation="Horizontal">
+                            <StackPanel Orientation="Horizontal" Margin="0,0,6,0" ToolTip="Level input to reactive mappings (fast peak-followed loudness).">
+                                <TextBlock Text="Lvl" Foreground="#9A9A9A" FontSize="10" Margin="0,0,3,0" VerticalAlignment="Center" />
+                                <Border Width="28" Height="6" Background="#2C2C2C" CornerRadius="2" VerticalAlignment="Center">
+                                    <Border x:Name="MonitorLevelBar" Width="0" HorizontalAlignment="Left" Background="#5DA9E9" CornerRadius="2" />
+                                </Border>
+                            </StackPanel>
+                            <StackPanel Orientation="Horizontal" Margin="0,0,6,0" ToolTip="Low band input to reactive mappings (bass, under 250 Hz).">
+                                <TextBlock Text="Lo" Foreground="#9A9A9A" FontSize="10" Margin="0,0,3,0" VerticalAlignment="Center" />
+                                <Border Width="28" Height="6" Background="#2C2C2C" CornerRadius="2" VerticalAlignment="Center">
+                                    <Border x:Name="MonitorLowBar" Width="0" HorizontalAlignment="Left" Background="#5DA9E9" CornerRadius="2" />
+                                </Border>
+                            </StackPanel>
+                            <StackPanel Orientation="Horizontal" Margin="0,0,6,0" ToolTip="Mid band input to reactive mappings (250 Hz to 2 kHz).">
+                                <TextBlock Text="Mid" Foreground="#9A9A9A" FontSize="10" Margin="0,0,3,0" VerticalAlignment="Center" />
+                                <Border Width="28" Height="6" Background="#2C2C2C" CornerRadius="2" VerticalAlignment="Center">
+                                    <Border x:Name="MonitorMidBar" Width="0" HorizontalAlignment="Left" Background="#5DA9E9" CornerRadius="2" />
+                                </Border>
+                            </StackPanel>
+                            <StackPanel Orientation="Horizontal" Margin="0,0,6,0" ToolTip="High band input to reactive mappings (2 kHz to 8 kHz).">
+                                <TextBlock Text="Hi" Foreground="#9A9A9A" FontSize="10" Margin="0,0,3,0" VerticalAlignment="Center" />
+                                <Border Width="28" Height="6" Background="#2C2C2C" CornerRadius="2" VerticalAlignment="Center">
+                                    <Border x:Name="MonitorHighBar" Width="0" HorizontalAlignment="Left" Background="#5DA9E9" CornerRadius="2" />
+                                </Border>
+                            </StackPanel>
+                        </StackPanel>
+                        <TextBlock x:Name="MonitorInputText" Text="no audio input selected" Foreground="#9A9A9A" FontSize="10" VerticalAlignment="Center" Visibility="Collapsed" />
+                    </Grid>
+                </StackPanel>
+            </Border>
             <WrapPanel Orientation="Horizontal" DockPanel.Dock="Right">
                 <CheckBox Content="Master Audio"
                           IsChecked="{Binding SourceAudioMasterEnabled}"

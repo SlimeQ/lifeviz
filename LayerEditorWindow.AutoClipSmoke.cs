@@ -70,6 +70,10 @@ public partial class LayerEditorWindow
             if (model.FilePaths[0] != first) throw new InvalidOperationException("Playlist reorder did not restore order.");
         }
         ValidateAutoClipMultiSelectionForSmoke(model);
+        UpdateAudioMonitor();
+        if (!MonitorTempoText.Text.EndsWith(" BPM", StringComparison.Ordinal) || string.IsNullOrWhiteSpace(MonitorTempoState.Text) ||
+            MonitorInputText.Visibility != Visibility.Visible)
+            throw new InvalidOperationException("Header tempo/audio monitor did not populate.");
         root.UpdateLayout();
         void SaveSnapshot(string path)
         {
@@ -81,6 +85,15 @@ public partial class LayerEditorWindow
             encoder.Save(output);
         }
         SaveSnapshot(imagePath);
+        // Active-state render of the header monitor (beat 2 of the bar, a hit, mid-level meters).
+        _audioMonitorTimer?.Stop();
+        UpdateAudioMonitor(new MainWindow.AudioMonitorSnapshot(true, 0.8, 0.95, 0.5, 0.3, 1, 126.4, "locked", 5.2));
+        UpdateAudioMonitor(new MainWindow.AudioMonitorSnapshot(true, 0.8, 0.95, 0.5, 0.3, 2, 126.4, "locked", 5.2));
+        if (MonitorMeters.Visibility != Visibility.Visible || MonitorLowBar.Width <= MonitorHighBar.Width || MonitorBeat2.Fill == MonitorBeat1.Fill)
+            throw new InvalidOperationException("Header monitor did not show active audio state.");
+        root.UpdateLayout();
+        SaveSnapshot(Path.ChangeExtension(imagePath, "monitor.png"));
+        _audioMonitorTimer?.Start();
         var scroll = Descendants(root).OfType<ScrollViewer>().Single(view => view.Content is StackPanel panel && ReferenceEquals(panel.DataContext, model));
         if (scroll.ScrollableHeight <= 0) throw new InvalidOperationException("Selected-layer controls must scroll at normal window size.");
         scroll.ScrollToVerticalOffset(420);
