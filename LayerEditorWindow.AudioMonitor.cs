@@ -23,6 +23,25 @@ public partial class LayerEditorWindow
     private long _audioMonitorLastOnsets = -1;
     private double _audioMonitorHit;
     private readonly double[] _audioMonitorPeaks = new double[4];
+    private bool _updatingMonitorGain;
+
+    private void MonitorGainSlider_ValueChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
+    {
+        if (_updatingMonitorGain || !IsLoaded)
+        {
+            return;
+        }
+
+        // Input gain is an app setting, not part of the scene draft: apply immediately.
+        _owner.SetAudioInputGain(MainWindow.SliderDbToAudioInputGain(e.NewValue));
+        MonitorGainText.Text = $"{_owner.AudioInputGainValue * 100:0}%";
+    }
+
+    private void MonitorGainSlider_MouseDoubleClick(object sender, System.Windows.Input.MouseButtonEventArgs e)
+    {
+        MonitorGainSlider.Value = 0;
+        e.Handled = true;
+    }
 
     private void InitializeAudioMonitor()
     {
@@ -96,9 +115,18 @@ public partial class LayerEditorWindow
         MonitorHit.Opacity = 0.15 + 0.85 * _audioMonitorHit;
         _audioMonitorHit *= 0.7;
 
-        MonitorGainText.Text = snapshot.AutoGain || Math.Abs(snapshot.GainDb) > 0.05
-            ? $"{snapshot.GainDb:+0;-0}dB{(snapshot.AutoGain ? " A" : "")}"
-            : string.Empty;
+        // Follow gain changes made elsewhere, but never fight the user mid-drag.
+        double sliderDb = MainWindow.AudioInputGainToSliderDb(snapshot.ManualGain);
+        if (!MonitorGainSlider.IsMouseCaptureWithin && Math.Abs(MonitorGainSlider.Value - sliderDb) > 0.26)
+        {
+            _updatingMonitorGain = true;
+            MonitorGainSlider.Value = sliderDb;
+            _updatingMonitorGain = false;
+        }
+
+        MonitorGainText.Text = snapshot.AutoGain
+            ? $"{snapshot.ManualGain * 100:0}% +auto {snapshot.GainDb - 20 * Math.Log10(Math.Max(snapshot.ManualGain, 1e-6)):+0;-0}dB"
+            : $"{snapshot.ManualGain * 100:0}%";
         MonitorMeters.Visibility = snapshot.HasInput ? Visibility.Visible : Visibility.Hidden;
         MonitorInputText.Visibility = snapshot.HasInput ? Visibility.Collapsed : Visibility.Visible;
     }

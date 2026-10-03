@@ -143,13 +143,13 @@
                                            DockPanel.Dock="Right"
                                            FontWeight="Bold"/>
                                 <Slider x:Name="AudioInputGainSlider"
-                                        Minimum="0"
-                                        Maximum="8"
-                                        Value="1"
-                                        TickFrequency="0.05"
+                                        Minimum="-20"
+                                        Maximum="30"
+                                        Value="0"
+                                        TickFrequency="0.5"
                                         IsSnapToTickEnabled="True"
-                                        SmallChange="0.05"
-                                        LargeChange="0.5"
+                                        SmallChange="0.5"
+                                        LargeChange="3"
                                         Margin="8,0"
                                         ValueChanged="AudioInputGainSlider_OnValueChanged"/>
                             </DockPanel>

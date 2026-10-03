@@ -88,11 +88,22 @@ public partial class LayerEditorWindow
         // Active-state render of the header monitor (beat 2 of the bar, a hit, mid-level meters).
         _audioMonitorTimer?.Stop();
         UpdateAudioMonitor(new MainWindow.AudioMonitorSnapshot(true, 0.8, 0.95, 0.5, 0.3, 1, 126.4, "locked", 5.2));
-        UpdateAudioMonitor(new MainWindow.AudioMonitorSnapshot(true, 0.8, 0.95, 0.5, 0.3, 2, 126.4, "locked", 5.2));
+        UpdateAudioMonitor(new MainWindow.AudioMonitorSnapshot(true, 0.8, 0.95, 0.5, 0.3, 2, 126.4, "locked", 5.2, 20 * Math.Log10(4), false, 4));
+        if (Math.Abs(MonitorGainSlider.Value - 12) > 0.26 || MonitorGainText.Text != "400%")
+            throw new InvalidOperationException($"Monitor gain slider did not follow a 4x gain ({MonitorGainSlider.Value:F2} dB, '{MonitorGainText.Text}').");
         if (MonitorMeters.Visibility != Visibility.Visible || MonitorLowBar.Width <= MonitorHighBar.Width || MonitorBeat2.Fill == MonitorBeat1.Fill)
             throw new InvalidOperationException("Header monitor did not show active audio state.");
         root.UpdateLayout();
         SaveSnapshot(Path.ChangeExtension(imagePath, "monitor.png"));
+        // The header slider drives the app's input gain directly (+6 dB = 200%), and back.
+        double originalGain = _owner.AudioInputGainValue;
+        MonitorGainSlider.Value = 6;
+        if (Math.Abs(_owner.AudioInputGainValue - Math.Pow(10, 6 / 20.0)) > 0.001)
+            throw new InvalidOperationException($"Monitor gain slider did not set input gain ({_owner.AudioInputGainValue:F3}).");
+        MonitorGainSlider.Value = 30;
+        if (Math.Abs(_owner.AudioInputGainValue - Math.Pow(10, 30 / 20.0)) > 0.01)
+            throw new InvalidOperationException("Monitor gain slider did not reach its +30 dB headroom.");
+        _owner.SetAudioInputGain(originalGain);
         _audioMonitorTimer?.Start();
         var scroll = Descendants(root).OfType<ScrollViewer>().Single(view => view.Content is StackPanel panel && ReferenceEquals(panel.DataContext, model));
         if (scroll.ScrollableHeight <= 0) throw new InvalidOperationException("Selected-layer controls must scroll at normal window size.");

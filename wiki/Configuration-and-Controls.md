@@ -60,6 +60,7 @@ Feedback 0 gives clean input on the next simulation step. Displacement requires 
 
 The Scene Editor header has a live **tempo and audio monitor** next to the title, so you can check the music side while the output window is on another screen.
 - **Top row:** the beat clock's BPM and its source. *manual* means the Animation BPM slider; *locked*, *holding* or *listening* means it's following the detected tempo with Sync to Audio BPM. Four dots show the beat in the bar (amber is beat 1; press **B** in the main window to resync), and a red dot flashes on each detected hit (onset).
+- **Gain slider:** a third row adjusts **Input Gain** directly (10% to about 3200%, -20 to +30 dB; double-click for 100%). It applies immediately, like the context-menu slider it stays in sync with. When Auto gain is on, the readout adds the current auto boost, for example `250% +auto +12dB`.
 - **Bottom row:** **Lvl / Lo / Mid / Hi** meters showing the exact Level, Low, Mid and High values reactive mappings receive, with a short peak hold. It reads *no audio input selected* when there is no Audio Source.
 - **Cost:** while the editor is open it keeps band analysis running.
 
@@ -114,7 +115,7 @@ Configuration is per Windows user at `%APPDATA%\lifeviz\config.json`. If a user 
 - Frame pacing note: the render loop still throttles while the root context menu is open and while the window is inside the native move/resize loop, but cadence is now explicitly reset after those interactions so temporary throttling does not persist after the menu closes or a drag ends.
 - **Audio Reactivity** - configurable audio-driven simulation control (uses the selected **Audio Source** feed). The menu includes:
   - *Enable Global Seeders* master toggle.
-  - *Input Gain* (0.00x-8.00x, +18 dB, snapped in 0.05x steps; shown in dB) to amplify or trim incoming signal before beat/energy/band analysis and the MilkDrop PCM. The app remembers separate gain values for input-device mode vs output-device mode.
+  - *Input Gain* (10% to about 3200%, i.e. -20 to +30 dB, on a dB slider in 0.5 dB steps so small trims and big boosts are both easy; 0 dB = 100%) to amplify or trim incoming signal before beat/energy/band analysis and the MilkDrop PCM. The app remembers separate gain values for input-device mode vs output-device mode.
   - *Auto gain (room mic)*, in the same submenu, is for running off a microphone in a room where you aren't playing the music.
     - It continuously boosts or trims the selected audio source so loud passages land around -6 dBFS, the level mastered music reaches on loopback, which is what reactive mappings, Level and the band meters are tuned for.
     - It works on top of the manual gain, within -12 to +36 dB.

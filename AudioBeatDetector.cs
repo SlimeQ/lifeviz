@@ -35,7 +35,7 @@ internal sealed partial class AudioBeatDetector : IDisposable
     }
 
     private const double MinInputGain = 0.0;
-    private const double MaxInputGain = 8.0;
+    private const double MaxInputGain = 32.0;
     private const int AudioDebugHistorySeconds = 30;
     private const int AudioDebugHistorySampleRate = 120;
     private const int WaveformHistorySize = AudioDebugHistorySeconds * AudioDebugHistorySampleRate;

@@ -501,11 +501,26 @@
                                     <Border x:Name="MonitorHighBar" Width="0" HorizontalAlignment="Left" Background="#5DA9E9" CornerRadius="2" />
                                 </Border>
                             </StackPanel>
-                            <TextBlock x:Name="MonitorGainText" Text="" Foreground="#9A9A9A" FontSize="10" VerticalAlignment="Center"
-                                       ToolTip="Total input gain applied before analysis (manual Input Gain x Auto gain). Audio Reactivity -> Input Gain in App Controls." />
                         </StackPanel>
                         <TextBlock x:Name="MonitorInputText" Text="no audio input selected" Foreground="#9A9A9A" FontSize="10" VerticalAlignment="Center" Visibility="Collapsed" />
                     </Grid>
+                    <DockPanel Margin="0,3,0,0"
+                               ToolTip="Input Gain for the selected Audio Source, applied before all analysis: 10% to about 3200% (-20 to +30 dB). Double-click the slider for 100%. Auto gain (room mic) is under App Controls -> Audio Reactivity -> Input Gain and adds on top.">
+                        <TextBlock Text="Gain" Foreground="#9A9A9A" FontSize="10" Margin="0,0,4,0" VerticalAlignment="Center" DockPanel.Dock="Left" />
+                        <TextBlock x:Name="MonitorGainText" Text="100%" FontSize="10" Width="78" Margin="4,0,0,0" VerticalAlignment="Center" DockPanel.Dock="Right" />
+                        <Slider x:Name="MonitorGainSlider"
+                                Minimum="-20"
+                                Maximum="30"
+                                Value="0"
+                                TickFrequency="0.5"
+                                IsSnapToTickEnabled="True"
+                                SmallChange="0.5"
+                                LargeChange="3"
+                                Width="104"
+                                VerticalAlignment="Center"
+                                ValueChanged="MonitorGainSlider_ValueChanged"
+                                MouseDoubleClick="MonitorGainSlider_MouseDoubleClick" />
+                    </DockPanel>
                 </StackPanel>
             </Border>
             <WrapPanel Orientation="Horizontal" DockPanel.Dock="Right">

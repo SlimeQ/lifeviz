@@ -71,7 +71,11 @@ public partial class MainWindow : Window
     private const double DefaultAudioInputGain = 1.0;
     private const double DefaultAudioOutputGain = 1.0;
     private const double MinAudioInputGain = 0.0;
-    private const double MaxAudioInputGain = 8.0;
+    private const double MaxAudioInputGain = 32.0;
+    // Gain sliders work in dB so both small trims and big room-mic boosts are easy to
+    // reach: -20 dB (10%) to +30 dB (about 3200%), 0 dB = 100%.
+    internal const double MinAudioInputGainSliderDb = -20.0;
+    internal const double MaxAudioInputGainSliderDb = 30.0;
     private const int AudioDebugHistorySeconds = 30;
     private const int AudioDebugHistorySampleRate = 120;
     private const int AudioDebugHistorySize = AudioDebugHistorySeconds * AudioDebugHistorySampleRate;
@@ -328,6 +332,7 @@ public partial class MainWindow : Window
     private double _audioInputGainRender = DefaultAudioOutputGain;
     private double _audioInputGain = DefaultAudioInputGain;
     private bool _audioAutoGainEnabled;
+    private bool _suppressAudioInputGainSliderEvents;
     private DispatcherTimer? _audioGainMenuTimer;
     private double _audioReactiveEnergyGain = DefaultAudioReactiveEnergyGain;
     private double _audioReactiveFpsBoost = DefaultAudioReactiveFpsBoost;
@@ -8142,7 +8147,8 @@ public partial class MainWindow : Window
         string TempoState,
         double BarPosition,
         double GainDb = 0,
-        bool AutoGain = false);
+        bool AutoGain = false,
+        double ManualGain = 1);
 
     private int _audioMonitorViewers;
 
@@ -8176,7 +8182,8 @@ public partial class MainWindow : Window
             state,
             clock.GetBarAlignedPosition(_beatClockNow),
             20 * Math.Log10(Math.Max(_audioBeatDetector.EffectiveInputGain, 1e-6)),
-            _audioAutoGainEnabled);
+            _audioAutoGainEnabled,
+            _audioInputGain);
     }
 
     private void ResyncDownbeat()
@@ -19612,9 +19619,13 @@ public partial class MainWindow : Window
 
     private void UpdateAudioInputGainUi()
     {
-        if (AudioInputGainSlider != null && Math.Abs(AudioInputGainSlider.Value - _audioInputGain) > 0.0001)
+        double sliderDb = AudioInputGainToSliderDb(_audioInputGain);
+        if (AudioInputGainSlider != null && Math.Abs(AudioInputGainSlider.Value - sliderDb) > 0.26)
         {
-            AudioInputGainSlider.Value = _audioInputGain;
+            // Programmatic sync must not round the stored gain to the slider's 0.5 dB steps.
+            _suppressAudioInputGainSliderEvents = true;
+            AudioInputGainSlider.Value = sliderDb;
+            _suppressAudioInputGainSliderEvents = false;
         }
 
         if (AudioInputGainText != null)
@@ -19624,7 +19635,7 @@ public partial class MainWindow : Window
                 : IsOutputAudioSelection(_selectedAudioDeviceId)
                     ? "Output"
                     : "Input";
-            AudioInputGainText.Text = $"{_audioInputGain:0.00}x {FormatGainDb(_audioInputGain)} ({sourceLabel})";
+            AudioInputGainText.Text = $"{_audioInputGain * 100:0}% {FormatGainDb(_audioInputGain)} ({sourceLabel})";
         }
 
         if (AudioAutoGainCheckBox != null && AudioAutoGainCheckBox.IsChecked != _audioAutoGainEnabled)
@@ -19661,9 +19672,27 @@ public partial class MainWindow : Window
 
     private void AudioInputGainMenu_OnSubmenuClosed(object sender, RoutedEventArgs e) => _audioGainMenuTimer?.Stop();
 
+    internal static double AudioInputGainToSliderDb(double gain) =>
+        Math.Clamp(20 * Math.Log10(Math.Max(gain, 1e-6)), MinAudioInputGainSliderDb, MaxAudioInputGainSliderDb);
+
+    internal static double SliderDbToAudioInputGain(double db) => Math.Pow(10, db / 20.0);
+
+    internal double AudioInputGainValue => _audioInputGain;
+
     private void AudioInputGainSlider_OnValueChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
     {
-        _audioInputGain = Math.Clamp(e.NewValue, MinAudioInputGain, MaxAudioInputGain);
+        if (_suppressAudioInputGainSliderEvents)
+        {
+            return;
+        }
+
+        SetAudioInputGain(SliderDbToAudioInputGain(e.NewValue));
+    }
+
+    /// <summary>Sets the manual input gain for the current Audio Source kind (also used by the Scene Editor monitor).</summary>
+    internal void SetAudioInputGain(double gain)
+    {
+        _audioInputGain = Math.Clamp(gain, MinAudioInputGain, MaxAudioInputGain);
         if (IsOutputAudioSelection(_selectedAudioDeviceId))
         {
             _audioInputGainRender = _audioInputGain;
