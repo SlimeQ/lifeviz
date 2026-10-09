@@ -110,6 +110,7 @@ internal static partial class SmokeTestRunner
             exitCode = target.ToLowerInvariant() switch
             {
                 "offline-recording" => RunOfflineRecordingSmokeTest(),
+                "movie-playlist" => RunMoviePlaylistSmokeTest(),
                 "offline-render" => RunOfflineRenderSmokeTest(),
                 "background-bake" => RunBackgroundBakeSmokeTest(),
                 "profile-240" => RunFrameProfileSmokeTest(240, "smoke-mainloop-240p"),

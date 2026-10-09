@@ -18,9 +18,14 @@ Welcome to the documentation hub for LifeViz, a minimalist Windows 11 WPF experi
 
 - [MilkDrop / projectM Layers](MilkDrop-projectM.md)
 
+- [Android Player Plan (proposed)](Android-Player-Plan.md)
+- [Outdoor ARM Player Plan (proposed)](Outdoor-ARM-Player-Plan.md)
+
 - [Audio-reactive Datamosh](Datamosh.md)
 
 - [AutoClip takeovers and playlists](AutoClip-Takeovers.md)
+
+- [Movie Playlists and Subtitles](Movie-Playlists.md)
 
 - [Rendering Pipeline](Rendering-Pipeline.md)
 - [Background Baking](Background-Baking.md)

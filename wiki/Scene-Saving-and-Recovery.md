@@ -1,5 +1,7 @@
 # Scene Saving and Recovery
 
+Movie Playlist sources optionally resume using a stable movie-entry ID and timestamp stored with the scene. Autosave snapshots and shutdown capture the running position; Scene Editor Save captures all live playlists, including unselected layers. Named exports resume from their last saved bookmark and are not rewritten during subsequent playback. Resume defaults off; absent bookmarks start at the first entry at zero. Background bakes always start the playlist at its beginning. See [Movie Playlists](Movie-Playlists.md#resume-and-saved-projects).
+
 LifeViz autosaves the applied scene to `%APPDATA%\lifeviz\config.json`. A graphics failure must not turn resource cleanup into an empty saved scene. Shutdown captures a complete scene snapshot before closing the editor, stopping recording, or disposing source sessions, then prevents further scene snapshots during teardown. The background writer drains that immutable snapshot after media cleanup.
 
 ## Autosave and failure handling

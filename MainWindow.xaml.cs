@@ -5557,7 +5557,7 @@ public partial class MainWindow : Window
                 continue;
             }
 
-            if (source.Type == CaptureSource.SourceType.VideoSequence)
+            if (source.IsSequenceVideo)
             {
                 source.VideoSequence?.MixOfflineAudioFrame(mix);
             }
@@ -5620,7 +5620,7 @@ public partial class MainWindow : Window
             }
 
             int mixed = 0;
-            if (source.Type == CaptureSource.SourceType.VideoSequence)
+            if (source.IsSequenceVideo)
             {
                 mixed = source.VideoSequence?.MixLiveAudioSamples(mix) ?? 0;
             }
@@ -6642,6 +6642,7 @@ public partial class MainWindow : Window
         SourcesMenu.Items.Add(BuildAddWebcamMenuItem(null));
         SourcesMenu.Items.Add(BuildAddFileMenuItem(null));
         SourcesMenu.Items.Add(BuildAddYoutubeMenuItem(null));
+        SourcesMenu.Items.Add(BuildAddMoviePlaylistMenuItem(null));
         SourcesMenu.Items.Add(BuildAddVideoSequenceMenuItem(null));
         SourcesMenu.Items.Add(BuildAddAutoClipMenuItem(null));
         SourcesMenu.Items.Add(new Separator());
@@ -7335,6 +7336,7 @@ public partial class MainWindow : Window
             sourceItem.Items.Add(BuildAddWebcamMenuItem(source));
             sourceItem.Items.Add(BuildAddFileMenuItem(source));
             sourceItem.Items.Add(BuildAddYoutubeMenuItem(source));
+            sourceItem.Items.Add(BuildAddMoviePlaylistMenuItem(source));
             sourceItem.Items.Add(BuildAddVideoSequenceMenuItem(source));
             sourceItem.Items.Add(BuildAddAutoClipMenuItem(source));
             sourceItem.Items.Add(new Separator());
@@ -7416,7 +7418,7 @@ public partial class MainWindow : Window
         {
             restartVideoItem = new MenuItem
             {
-                Header = source.Type == CaptureSource.SourceType.VideoSequence ? "Restart Sequence" : "Restart Video"
+                Header = source.IsSequenceVideo ? "Restart Sequence" : "Restart Video"
             };
             restartVideoItem.Click += (_, _) => RestartVideoSource(source);
 
@@ -7910,6 +7912,7 @@ public partial class MainWindow : Window
             CaptureSource.SourceType.File => $"{prefix}File: {source.DisplayName}",
             CaptureSource.SourceType.ProjectM => $"{prefix}MilkDrop / projectM ({source.ProjectM.Presets.Count} presets)",
             CaptureSource.SourceType.ColorPlane => $"{prefix}Color Plane: {FormatHexColor(source.ColorPlaneR, source.ColorPlaneG, source.ColorPlaneB)}",
+            CaptureSource.SourceType.MoviePlaylist => $"{prefix}Movie Playlist: {source.DisplayName}",
             CaptureSource.SourceType.VideoSequence => $"{prefix}Video Sequence: {source.DisplayName}",
             CaptureSource.SourceType.AutoClip => $"{prefix}AutoClip: {source.DisplayName}",
             CaptureSource.SourceType.Group => $"{prefix}Group: {source.DisplayName}",
@@ -8639,7 +8642,7 @@ public partial class MainWindow : Window
     private void RestartVideoSource(CaptureSource source)
     {
         bool restarted = false;
-        if (source.Type == CaptureSource.SourceType.VideoSequence && source.VideoSequence != null)
+        if (source.IsSequenceVideo && source.VideoSequence != null)
         {
             source.VideoSequence.Restart();
             ApplySourceVideoAudioState(source);
@@ -8683,7 +8686,7 @@ public partial class MainWindow : Window
         FileCaptureService.IsVideoPath(path) || path.StartsWith("youtube:", StringComparison.OrdinalIgnoreCase);
 
     private bool IsVideoSource(CaptureSource source) =>
-        source.Type == CaptureSource.SourceType.VideoSequence ||
+        source.IsSequenceVideo ||
         source.Type == CaptureSource.SourceType.AutoClip ||
         (source.Type == CaptureSource.SourceType.File &&
          !string.IsNullOrWhiteSpace(source.FilePath) &&
@@ -8696,7 +8699,7 @@ public partial class MainWindow : Window
             return;
         }
 
-        if (source.Type == CaptureSource.SourceType.VideoSequence)
+        if (source.IsSequenceVideo)
         {
             source.VideoSequence?.SetAudioMaster(_sourceAudioMasterEnabled, _sourceAudioMasterVolume);
             source.VideoSequence?.SetAudioVolume(source.VideoAudioVolume);
@@ -8729,7 +8732,7 @@ public partial class MainWindow : Window
 
         foreach (var source in EnumerateSources(_sources))
         {
-            if (source.Type == CaptureSource.SourceType.VideoSequence)
+            if (source.IsSequenceVideo)
             {
                 source.VideoSequence?.SetAudioMaster(_sourceAudioMasterEnabled, _sourceAudioMasterVolume);
             }
@@ -8748,7 +8751,7 @@ public partial class MainWindow : Window
             return false;
         }
 
-        if (source.Type == CaptureSource.SourceType.VideoSequence)
+        if (source.IsSequenceVideo)
         {
             return source.VideoSequence?.TryGetPlaybackState(out playbackState) == true;
         }
@@ -8842,7 +8845,7 @@ public partial class MainWindow : Window
                              _mediaPlaybackSuspendedForMinimize ||
                              _mediaPlaybackSuspendedForPower;
         bool applied;
-        if (source.Type == CaptureSource.SourceType.VideoSequence)
+        if (source.IsSequenceVideo)
         {
             if (source.VideoSequence == null)
             {
@@ -8950,7 +8953,7 @@ public partial class MainWindow : Window
                       source.VideoPlaybackPaused ||
                       _mediaPlaybackSuspendedForMinimize ||
                       _mediaPlaybackSuspendedForPower;
-        if (source.Type == CaptureSource.SourceType.VideoSequence)
+        if (source.IsSequenceVideo)
         {
             source.VideoSequence?.SetPlaybackPaused(paused);
         }
@@ -8973,7 +8976,7 @@ public partial class MainWindow : Window
 
         double clamped = Math.Clamp(normalizedPosition, 0, 1);
         bool applied;
-        if (source.Type == CaptureSource.SourceType.VideoSequence)
+        if (source.IsSequenceVideo)
         {
             if (source.VideoSequence == null)
             {
@@ -10085,7 +10088,7 @@ public partial class MainWindow : Window
         {
             _windowCapture.RemoveCache(source.Window.Handle);
         }
-        else if (source.Type == CaptureSource.SourceType.VideoSequence)
+        else if (source.IsSequenceVideo)
         {
             source.DisposeVideoSequence();
         }
@@ -11665,9 +11668,15 @@ public partial class MainWindow : Window
                         }
                     }
                 }
-                else if (source.Type == CaptureSource.SourceType.VideoSequence && source.VideoSequence != null)
+                else if (source.IsSequenceVideo && source.VideoSequence != null)
                 {
                     var referenceEngine = GetReferenceSimulationEngine();
+                    if (source.Type == CaptureSource.SourceType.MoviePlaylist && source.FilePaths.Count == 0)
+                    {
+                        source.LastFrame = null;
+                        source.HasError = false;
+                        continue;
+                    }
                     long sequenceCaptureStamp = BeginProfileStamp();
                     var sequenceFrame = source.VideoSequence.CaptureFrame(referenceEngine.Columns, referenceEngine.Rows, source.FitMode, includeSource: includeNativeSource);
                     EndProfileStamp("capture_sequence_frame_ms", sequenceCaptureStamp);
@@ -11788,7 +11797,7 @@ public partial class MainWindow : Window
                     }
                 }
 
-                if (source.Type == CaptureSource.SourceType.VideoSequence)
+                if (source.IsSequenceVideo)
                 {
                     if (source.VideoSequence?.State == FileCaptureService.FileCaptureState.Pending)
                     {
@@ -11860,9 +11869,9 @@ public partial class MainWindow : Window
                 }
 
                 bool isAsyncMedia = source.Type == CaptureSource.SourceType.File ||
-                                    source.Type == CaptureSource.SourceType.VideoSequence ||
+                                    source.IsSequenceVideo ||
                                     source.Type == CaptureSource.SourceType.AutoClip;
-                if (isAsyncMedia && (source.FirstFrameReceived || _isOfflineRendering))
+                if (isAsyncMedia && (source.FirstFrameReceived || _isOfflineRendering || source.Type == CaptureSource.SourceType.MoviePlaylist))
                 {
                     if (!source.HasError)
                     {
@@ -11914,7 +11923,7 @@ public partial class MainWindow : Window
             return false;
         }
 
-        if (source.Type == CaptureSource.SourceType.VideoSequence)
+        if (source.IsSequenceVideo)
         {
             return false;
         }
@@ -20659,6 +20668,7 @@ public partial class MainWindow : Window
             var config = new AppConfig.SourceConfig
             {
                 Type = source.Type.ToString(),
+                MoviePlaylist = SnapshotMoviePlaylist(source),
                 ProjectM = source.ProjectM.Clone(),
                 Enabled = source.Enabled,
                 WindowTitle = source.Window?.Title,
@@ -20708,7 +20718,7 @@ public partial class MainWindow : Window
                 }).ToList()
             };
 
-            if ((source.Type == CaptureSource.SourceType.VideoSequence || source.Type == CaptureSource.SourceType.AutoClip) && source.FilePaths.Count > 0)
+            if ((source.IsSequenceVideo || source.Type == CaptureSource.SourceType.AutoClip) && source.FilePaths.Count > 0)
             {
                 config.FilePaths = new List<string>(source.FilePaths);
             }
@@ -20812,6 +20822,7 @@ public partial class MainWindow : Window
             var model = new LayerEditorSource
             {
                 Id = source.Id,
+                MoviePlaylist = SnapshotMoviePlaylist(source) ?? new(),
                 Kind = source.Type switch
                 {
                     CaptureSource.SourceType.Window => LayerEditorSourceKind.Window,
@@ -20819,6 +20830,7 @@ public partial class MainWindow : Window
                     CaptureSource.SourceType.File => LayerEditorSourceKind.File,
                     CaptureSource.SourceType.ColorPlane => LayerEditorSourceKind.ColorPlane,
                     CaptureSource.SourceType.ProjectM => LayerEditorSourceKind.ProjectM,
+                    CaptureSource.SourceType.MoviePlaylist => LayerEditorSourceKind.MoviePlaylist,
                     CaptureSource.SourceType.VideoSequence => LayerEditorSourceKind.VideoSequence,
                     CaptureSource.SourceType.AutoClip => LayerEditorSourceKind.AutoClip,
                     CaptureSource.SourceType.Group => LayerEditorSourceKind.Group,
@@ -20871,7 +20883,7 @@ public partial class MainWindow : Window
                 model.VideoPlaybackDurationSeconds = playbackState.DurationSeconds;
             }
 
-            if (source.Type == CaptureSource.SourceType.VideoSequence && source.FilePaths.Count > 0)
+            if (source.IsSequenceVideo && source.FilePaths.Count > 0)
             {
                 model.FilePaths.AddRange(source.FilePaths);
             }
@@ -20903,6 +20915,10 @@ public partial class MainWindow : Window
                     model.AutoClipVideoOverrides.Add(item);
                 }
             }
+
+            if (model.IsMoviePlaylist)
+                model.SelectedMovie = model.MoviePlaylist.Movies.FirstOrDefault(movie => movie.Id == model.MoviePlaylist.BookmarkMovieId)
+                    ?? model.MoviePlaylist.Movies.FirstOrDefault();
 
             foreach (var animation in source.Animations)
             {
@@ -21102,6 +21118,9 @@ public partial class MainWindow : Window
                     : CaptureSource.CreateColorPlane(0, 0, 0, string.IsNullOrWhiteSpace(model.DisplayName) ? null : model.DisplayName);
             }
 
+            case LayerEditorSourceKind.MoviePlaylist:
+                return CaptureSource.CreateMoviePlaylist(model.MoviePlaylist, _fileCapture);
+
             case LayerEditorSourceKind.VideoSequence:
             {
                 var sequencePaths = model.FilePaths.Count > 0
@@ -21207,6 +21226,7 @@ public partial class MainWindow : Window
         source.Opacity = Math.Clamp(model.Opacity, 0, 1);
         source.Scale = Math.Clamp(model.Scale, MinLayerScale, MaxLayerScale);
         source.VisibilityGroup = (model.VisibilityGroup ?? string.Empty).Trim();
+        if (source.Type == CaptureSource.SourceType.MoviePlaylist) ApplyMoviePlaylistSettings(source, model.MoviePlaylist);
         source.AutoClipTakeover = model.AutoClipTakeover;
         source.AutoClipStartWithDelay = model.AutoClipStartWithDelay;
         source.AutoClipPlayInOrder = model.AutoClipPlayInOrder;
@@ -21543,6 +21563,10 @@ public partial class MainWindow : Window
                     }
                     break;
 
+                case CaptureSource.SourceType.MoviePlaylist:
+                    restored = CaptureSource.CreateMoviePlaylist(config.MoviePlaylist ?? new(), _fileCapture);
+                    break;
+
                 case CaptureSource.SourceType.VideoSequence:
                     var sequencePaths = config.FilePaths != null && config.FilePaths.Count > 0
                         ? config.FilePaths
@@ -21827,6 +21851,7 @@ public partial class MainWindow : Window
             public double Opacity { get; set; } = 1.0;
             public double Scale { get; set; } = 1.0;
             public string VisibilityGroup { get; set; } = string.Empty;
+            public MoviePlaylistSettings? MoviePlaylist { get; set; }
             public bool AutoClipTakeover { get; set; }
             public bool AutoClipStartWithDelay { get; set; }
             public bool AutoClipPlayInOrder { get; set; }
@@ -21932,6 +21957,7 @@ public partial class MainWindow : Window
             File,
             ColorPlane,
             VideoSequence,
+            MoviePlaylist,
             AutoClip,
             Group,
             SimGroup,
@@ -22016,6 +22042,7 @@ public partial class MainWindow : Window
         public ProjectMPlayback? ProjectMPlayback { get; set; }
         public Guid Id { get; } = Guid.NewGuid();
         public SourceType Type { get; }
+        public bool IsSequenceVideo => Type is SourceType.VideoSequence or SourceType.MoviePlaylist;
         public WindowHandleInfo? Window { get; set; }
         public string? WebcamId { get; }
         public string? FilePath { get; private set; }
@@ -22039,6 +22066,7 @@ public partial class MainWindow : Window
         public double Opacity { get; set; } = 1.0;
         public double Scale { get; set; } = 1.0;
         public string VisibilityGroup { get; set; } = string.Empty;
+        public MoviePlaylistSettings MoviePlaylist { get; set; } = new();
         public bool AutoClipTakeover { get; set; }
         public bool AutoClipStartWithDelay { get; set; }
         public bool AutoClipPlayInOrder { get; set; }
@@ -22196,7 +22224,7 @@ public partial class MainWindow : Window
                     return Math.Max(0.05, FileWidth.Value / (double)FileHeight.Value);
                 }
 
-                if ((Type == SourceType.VideoSequence || Type == SourceType.AutoClip) && FileWidth.HasValue && FileHeight.HasValue && FileHeight > 0)
+                if ((Type == SourceType.VideoSequence || Type == SourceType.MoviePlaylist || Type == SourceType.AutoClip) && FileWidth.HasValue && FileHeight.HasValue && FileHeight > 0)
                 {
                     return Math.Max(0.05, FileWidth.Value / (double)FileHeight.Value);
                 }
@@ -22214,6 +22242,7 @@ public partial class MainWindow : Window
             SourceType.Window => Window?.Width,
             SourceType.File => FileWidth,
             SourceType.ColorPlane => null,
+            SourceType.MoviePlaylist => FileWidth,
             SourceType.VideoSequence => FileWidth,
             SourceType.AutoClip => FileWidth,
             SourceType.Group => Children.Count > 0 ? Children[0].FallbackWidth : null,
@@ -22226,6 +22255,7 @@ public partial class MainWindow : Window
             SourceType.Window => Window?.Height,
             SourceType.File => FileHeight,
             SourceType.ColorPlane => null,
+            SourceType.MoviePlaylist => FileHeight,
             SourceType.VideoSequence => FileHeight,
             SourceType.AutoClip => FileHeight,
             SourceType.Group => Children.Count > 0 ? Children[0].FallbackHeight : null,

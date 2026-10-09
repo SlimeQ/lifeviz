@@ -905,6 +905,15 @@ internal sealed partial class FileCaptureService : IDisposable
         return true;
     }
 
+    internal VideoSequenceSession CreateMoviePlaylist(MoviePlaylistSettings settings)
+    {
+        var session = new VideoSequenceSession(settings.Movies.Select(movie => movie.FilePath).ToArray(), settings);
+        ApplyMasterAudioSettingsToSession(session);
+        ApplyLiveAudioAnalysisSettingsToSession(session);
+        ApplyPerformanceSettingsToSession(session);
+        return session;
+    }
+
     public bool TryCreateAutoClip(
         IReadOnlyList<string>? paths,
         double minClipSeconds,
@@ -1683,7 +1692,8 @@ internal sealed partial class FileCaptureService : IDisposable
                 double durationSeconds,
                 string? codecName = null,
                 bool hasAlpha = false,
-                double frameRate = 0)
+                double frameRate = 0,
+                string[]? subtitleCodecs = null)
             {
                 Width = width;
                 Height = height;
@@ -1691,6 +1701,7 @@ internal sealed partial class FileCaptureService : IDisposable
                 CodecName = codecName ?? string.Empty;
                 HasAlpha = hasAlpha;
                 FrameRate = double.IsFinite(frameRate) && frameRate > 0 ? frameRate : 0;
+                SubtitleCodecs = subtitleCodecs ?? Array.Empty<string>();
             }
 
             public int Width { get; }
@@ -1699,6 +1710,7 @@ internal sealed partial class FileCaptureService : IDisposable
             public string CodecName { get; }
             public bool HasAlpha { get; }
             public double FrameRate { get; }
+            public string[] SubtitleCodecs { get; }
         }
 
         public readonly struct ResolvedPlayback
@@ -1714,6 +1726,14 @@ internal sealed partial class FileCaptureService : IDisposable
         }
 
         private readonly bool _loopPlayback;
+        private string? _subtitlePath;
+        private int? _subtitleTrack;
+        internal void ConfigureSubtitles(string? path, int? track)
+        {
+            _subtitlePath = path;
+            _subtitleTrack = track;
+        }
+        internal bool HasSubtitles => _subtitlePath != null;
         private readonly double? _maxDecodeDurationSeconds;
         private readonly bool _ownerControlsLivePlaybackActivation;
         private readonly FileSourceKind _sourceKind;
@@ -2875,6 +2895,14 @@ internal sealed partial class FileCaptureService : IDisposable
                 args += BuildPreferredVideoDecoderInputArg(_preferredVideoDecoder);
                 args += $" -i \"{url}\"{BuildDecodeDurationOutputArg()} -map 0:v:0 -an -sn -dn";
                 string videoFilter = BuildVideoOutputFilter(produceExactTargetFrames, processOutputFitMode, processWidth, processHeight);
+                if (_subtitlePath != null)
+                {
+                    // Input seeking resets PTS. Restore movie time for subtitle lookup,
+                    // then restore output time before FPS conversion and realtime pacing.
+                    string subtitleFilter = MoviePlaylistSettings.BuildSubtitleFilter(_subtitlePath, _subtitleTrack,
+                        startOffsetSeconds > 0.05 ? startOffsetSeconds : 0);
+                    videoFilter = subtitleFilter + (string.IsNullOrEmpty(videoFilter) ? "" : "," + videoFilter);
+                }
                 if (!string.IsNullOrWhiteSpace(videoFilter))
                 {
                     args += $" -vf \"{videoFilter}\"";
@@ -2970,7 +2998,12 @@ internal sealed partial class FileCaptureService : IDisposable
                             // duration. A known non-zero exit is surfaced as an
                             // error; otherwise orderly/just-about-to-exit EOF ends
                             // the live stream normally.
-                            if (exited &&
+                            if (_subtitlePath != null && framesRead == 0)
+                            {
+                                _hasError = true;
+                                _errorMessage = "FFmpeg subtitle decode produced no frames.";
+                            }
+                            else if (exited &&
                                 TryGetProcessExitCode(process, out int exitCode) &&
                                 exitCode != 0)
                             {
@@ -4361,7 +4394,8 @@ internal sealed partial class FileCaptureService : IDisposable
                     height > 0)
                 {
                     (string codecName, bool hasAlpha, double frameRate) = ParsePrimaryVideoStreamMetadata(output);
-                    return new VideoProbeInfo(width, height, durationSeconds, codecName, hasAlpha, frameRate);
+                    return new VideoProbeInfo(width, height, durationSeconds, codecName, hasAlpha, frameRate,
+                        MoviePlaylistSettings.ParseSubtitleCodecs(output));
                 }
             }
             catch (Exception ex)
@@ -4405,13 +4439,94 @@ internal sealed partial class FileCaptureService : IDisposable
         private long _offlineProbeDeadlineTimestamp;
         private bool _offlineProbeBudgetExhausted;
         private FileCaptureFrame? _lastFrame;
+        private MoviePlaylistSettings? _playlist;
+        private double _pendingStartSeconds;
+        public string SubtitleStatus { get; private set; } = string.Empty;
             
-        public VideoSequenceSession(IReadOnlyList<string> paths)
+        public VideoSequenceSession(IReadOnlyList<string> paths, MoviePlaylistSettings? playlist = null)
         {
             _paths = new List<string>(paths);
             _displayName = BuildDisplayName(_paths);
             _index = 0;
-            ScheduleProbe(_index);
+            _playlist = playlist?.Clone();
+            if (_playlist?.ResumePlayback == true)
+            {
+                int bookmarked = _playlist.Movies.ToList().FindIndex(movie => movie.Id == _playlist.BookmarkMovieId);
+                if (bookmarked >= 0)
+                {
+                    _index = bookmarked;
+                    _pendingStartSeconds = MoviePlaylistSettings.NormalizeSeconds(_playlist.BookmarkSeconds);
+                }
+            }
+            if (_paths.Count > 0) ScheduleProbe(_index);
+        }
+
+        public (Guid movieId, double seconds) GetBookmark()
+        {
+            lock (_lock)
+            {
+                int index = _pendingAdvanceIndex >= 0 ? _pendingAdvanceIndex : _index;
+                Guid id = _playlist?.Movies.ElementAtOrDefault(index)?.Id ?? Guid.Empty;
+                double seconds = _current?.TryGetPlaybackState(out var state) == true ? state.PositionSeconds : _pendingStartSeconds;
+                return (id, seconds);
+            }
+        }
+
+        public void UpdatePlaylist(MoviePlaylistSettings settings)
+        {
+            lock (_lock)
+            {
+                var bookmark = GetBookmark();
+                var oldMovie = _playlist?.Movies.FirstOrDefault(movie => movie.Id == bookmark.movieId);
+                var next = settings.Clone();
+                if (next.Movies.Any(movie => movie.Id == Guid.Empty) || next.Movies.Select(movie => movie.Id).Distinct().Count() != next.Movies.Count)
+                    throw new InvalidDataException("Playlist movies must have unique IDs.");
+                int index = next.Movies.ToList().FindIndex(movie => movie.Id == bookmark.movieId);
+                var newMovie = next.Movies.ElementAtOrDefault(index);
+                bool keepDecoder = oldMovie != null && newMovie != null &&
+                    oldMovie.FilePath == newMovie.FilePath && oldMovie.SubtitleMode == newMovie.SubtitleMode &&
+                    oldMovie.SubtitlePath == newMovie.SubtitlePath && oldMovie.SubtitleTrack == newMovie.SubtitleTrack;
+                _playlist = next;
+                _paths.Clear();
+                _paths.AddRange(next.Movies.Select(movie => movie.FilePath));
+                _index = index >= 0 ? index : Math.Min(_index, Math.Max(0, _paths.Count - 1));
+                if (keepDecoder && _current != null) return;
+                RetireCurrent();
+                _lastFrame = null;
+                _pendingAdvanceTask = null;
+                _pendingAdvanceIndex = -1;
+                _hasError = false;
+                _errorStreak = 0;
+                _pendingStartSeconds = index >= 0 ? bookmark.seconds : 0;
+                if (_paths.Count > 0) ScheduleProbe(_index);
+            }
+        }
+
+        public bool JumpToMovie(Guid movieId, double seconds)
+        {
+            lock (_lock)
+            {
+                int index = _playlist?.Movies.ToList().FindIndex(movie => movie.Id == movieId) ?? -1;
+                if (index < 0) return false;
+                RetireCurrent();
+                _lastFrame = null;
+                _index = index;
+                _hasError = false;
+                _errorStreak = 0;
+                _pendingStartSeconds = MoviePlaylistSettings.NormalizeSeconds(seconds);
+                ScheduleProbe(index);
+                return true;
+            }
+        }
+
+        private void RetireCurrent()
+        {
+            if (_current != null)
+            {
+                _current.RequestRetirement();
+                MediaDisposalQueue.Enqueue(_current, "movie playlist decoder");
+            }
+            _current = null;
         }
             
                     public IReadOnlyList<string> Paths => _paths;
@@ -4484,6 +4599,15 @@ internal sealed partial class FileCaptureService : IDisposable
             
                         if (current.State == FileCaptureState.Error)
                         {
+                            if (_playlist != null && current.HasSubtitles)
+                            {
+                                current.TryGetPlaybackState(out var position);
+                                current.ConfigureSubtitles(null, null);
+                                current.SeekNormalized(position.NormalizedPosition);
+                                SubtitleStatus = "Subtitle decode failed; playing without subtitles";
+                                Logger.Warn($"Retrying movie without subtitles: {_paths[_index]}");
+                                return frame ?? _lastFrame;
+                            }
                             if (!BeginAdvance(isError: true))
                             {
                                 Logger.Warn($"All videos in sequence failed: {_displayName}");
@@ -4510,7 +4634,9 @@ internal sealed partial class FileCaptureService : IDisposable
             _current?.Dispose();
             _current = null;
             _index = 0;
-            ScheduleProbe(_index);
+            _pendingStartSeconds = 0;
+            _lastFrame = null;
+            if (_paths.Count > 0) ScheduleProbe(_index);
         }
 
         public void SetAudioEnabled(bool enabled)
@@ -4655,6 +4781,7 @@ internal sealed partial class FileCaptureService : IDisposable
                 previous = _current;
                 _current = null;
                 nextIndex = (_index + 1) % _paths.Count;
+                _pendingStartSeconds = 0;
             }
             ScheduleProbe(nextIndex);
 
@@ -4711,9 +4838,11 @@ internal sealed partial class FileCaptureService : IDisposable
                         var nextSession = CreateSequenceVideoSession(
                             _paths[pendingIndex],
                             probe.Value,
-                            _playbackPaused);
+                            _playbackPaused,
+                            pendingIndex);
                         _current = nextSession;
                         _index = pendingIndex;
+                        _pendingStartSeconds = 0;
                     }
                     _hasError = false;
                     _offlineProbeDeadlineTimestamp = 0;
@@ -4729,6 +4858,7 @@ internal sealed partial class FileCaptureService : IDisposable
                     return;
                 }
 
+                _pendingStartSeconds = 0;
                 ScheduleProbe((pendingIndex + 1) % _paths.Count);
             }
         }
@@ -4820,9 +4950,37 @@ internal sealed partial class FileCaptureService : IDisposable
         private VideoSession CreateSequenceVideoSession(
             string path,
             VideoSession.VideoProbeInfo probe,
-            bool playbackPaused)
+            bool playbackPaused,
+            int movieIndex)
         {
             var session = new VideoSession(path, loopPlayback: false, probe);
+            if (_playlist != null)
+            {
+                var movie = _playlist.Movies[movieIndex];
+                SubtitleStatus = "Subtitles off";
+                if (movie.SubtitleMode == "Srt")
+                {
+                    if (!string.IsNullOrWhiteSpace(movie.SubtitlePath) && File.Exists(movie.SubtitlePath))
+                    {
+                        session.ConfigureSubtitles(movie.SubtitlePath, null);
+                        SubtitleStatus = "SRT: " + System.IO.Path.GetFileName(movie.SubtitlePath);
+                    }
+                    else SubtitleStatus = "SRT file missing; playing without subtitles";
+                }
+                else if (movie.SubtitleMode == "Embedded")
+                {
+                    string? codec = probe.SubtitleCodecs.ElementAtOrDefault(movie.SubtitleTrack);
+                    if (codec != null && MoviePlaylistSettings.IsTextSubtitle(codec))
+                    {
+                        session.ConfigureSubtitles(path, movie.SubtitleTrack);
+                        SubtitleStatus = $"Embedded subtitle track {movie.SubtitleTrack}";
+                    }
+                    else SubtitleStatus = codec == null ? "No embedded subtitle at this track" : "Bitmap subtitles require an external SRT";
+                }
+                // Keep seeks just before EOF so the non-looping decoder can publish
+                // a frame before advancing, rather than normalize back to time zero.
+                session.SetInitialPlaybackOffsetSeconds(Math.Min(_pendingStartSeconds, Math.Max(0, probe.DurationSeconds - 0.1)));
+            }
             session.SetMasterAudio(_masterAudioEnabled, _masterAudioVolume);
             session.SetLiveAudioAnalysisEnabled(_liveAudioAnalysisEnabled);
             session.SetAudioVolume(_audioVolume);

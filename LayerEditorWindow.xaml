@@ -606,6 +606,7 @@
                         <Button Content="MilkDrop" Click="AddRootProjectM_Click" />
                         <Button Content="YouTube" Click="AddRootYoutube_Click" />
                         <Button Content="Sequence" Click="AddRootSequence_Click" />
+                        <Button Content="Movie Playlist" Click="AddRootMoviePlaylist_Click" />
                         <Button Content="AutoClip" Click="AddRootAutoClip_Click" />
                     </WrapPanel>
 
@@ -622,6 +623,7 @@
                         <Button Content="MilkDrop" Click="AddChildProjectM_Click" />
                         <Button Content="YouTube" Click="AddChildYoutube_Click" />
                         <Button Content="Sequence" Click="AddChildSequence_Click" />
+                        <Button Content="Movie Playlist" Click="AddChildMoviePlaylist_Click" />
                         <Button Content="AutoClip" Click="AddChildAutoClip_Click" />
                     </WrapPanel>
 
@@ -1021,6 +1023,54 @@
                                                            Text="Playback follows Animation BPM, or the detected tempo when Sync to Audio BPM is on. AutoClip tags in the file list override this per file. Clip and delay ends snap to bar lines. Synced loops play without audio; frames are cached in RAM within the Loop Frame Cache budget, otherwise streamed." />
                                             </StackPanel>
                                         </GroupBox>
+
+                                        <GroupBox Header="Movie Playlist"
+                                                  Margin="0,0,0,10"
+                                                  Visibility="{Binding IsMoviePlaylist, Converter={StaticResource BoolToVisibility}}">
+                                            <StackPanel Margin="8">
+                                                <TextBlock Text="Plays every movie in list order, then loops. Select a movie to set its subtitles or jump to a time."
+                                                           TextWrapping="Wrap" Foreground="#C8C8C8" Margin="0,0,0,8" />
+                                                <ListBox ItemsSource="{Binding MoviePlaylist.Movies}" SelectedItem="{Binding SelectedMovie}"
+                                                         DisplayMemberPath="DisplayName" Height="150" ToolTip="Movies play from top to bottom. Duplicate entries are allowed." />
+                                                <WrapPanel Margin="0,6,0,6">
+                                                    <Button Content="Add Movies..." Click="MovieAdd_Click" />
+                                                    <Button Content="Remove" Click="MovieRemove_Click" />
+                                                    <Button Content="Move Up" Click="MovieMoveUp_Click" />
+                                                    <Button Content="Move Down" Click="MovieMoveDown_Click" />
+                                                </WrapPanel>
+                                                <CheckBox Content="Resume playback when project reopens" IsChecked="{Binding MoviePlaylist.ResumePlayback}"
+                                                          Checked="MovieOptions_Changed" Unchecked="MovieOptions_Changed" Margin="0,0,0,8"
+                                                          ToolTip="Restores the movie and time captured when this project was saved. App shutdown also saves the current position." />
+                                                <GroupBox Header="Selected Movie" DataContext="{Binding SelectedMovie}">
+                                                    <StackPanel Margin="8">
+                                                        <TextBlock Text="{Binding FilePath}" TextWrapping="Wrap" Foreground="#C8C8C8" Margin="0,0,0,6" />
+                                                        <WrapPanel>
+                                                            <TextBlock Text="Subtitles" VerticalAlignment="Center" Margin="0,0,8,6" />
+                                                            <ComboBox ItemsSource="{Binding SubtitleModes}" SelectedValue="{Binding SubtitleMode}"
+                                                                      SelectedValuePath="Value" DisplayMemberPath="Label" Width="180" Margin="0,0,8,6"
+                                                                      SelectionChanged="MovieOptions_Changed" />
+                                                            <TextBlock Text="Embedded track (0 = first)" VerticalAlignment="Center" Margin="0,0,8,6" />
+                                                            <TextBox Text="{Binding SubtitleTrack}" Width="48" Margin="0,0,0,6" LostFocus="MovieOptions_Changed" />
+                                                        </WrapPanel>
+                                                        <WrapPanel>
+                                                            <Button Content="Choose SRT..." Click="MovieSrt_Click" />
+                                                            <TextBlock Text="{Binding SubtitlePath}" TextWrapping="Wrap" MaxWidth="340" Foreground="#C8C8C8" />
+                                                        </WrapPanel>
+                                                        <TextBlock Text="Embedded text subtitles supported. Bitmap tracks (PGS/DVD) need an external SRT."
+                                                                   TextWrapping="Wrap" Foreground="#AFAFAF" Margin="0,4,0,0" />
+                                                    </StackPanel>
+                                                </GroupBox>
+                                                <WrapPanel Margin="0,8,0,6">
+                                                    <TextBlock Text="Jump to" VerticalAlignment="Center" Margin="0,0,8,6" />
+                                                    <TextBox Text="{Binding MovieJumpTime, UpdateSourceTrigger=PropertyChanged}" Width="105" Margin="0,0,8,6"
+                                                             KeyDown="MovieJump_KeyDown" ToolTip="Seconds, MM:SS, or HH:MM:SS" />
+                                                    <Button Content="Play from here" Click="MovieJump_Click" />
+                                                    <Button Content="Use Current Position" Click="MovieUseCurrent_Click" />
+                                                </WrapPanel>
+                                                <TextBlock Text="{Binding CurrentMovieLabel}" Foreground="#C8C8C8" TextWrapping="Wrap" />
+                                            </StackPanel>
+                                        </GroupBox>
+
                                         <GroupBox Header="AutoClip Settings"
                                                   Margin="0,8,0,8"
                                                   Visibility="{Binding IsAutoClip, Converter={StaticResource BoolToVisibility}}">

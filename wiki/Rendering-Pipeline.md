@@ -1,5 +1,11 @@
 # Rendering Pipeline
 
+## Movie playlist decoding and subtitles
+
+Movie Playlist sources reuse the full-file video sequence decoder, advancing at EOF and looping in authored order. Each entry has a stable ID for duplicate paths, navigation, and resume bookmarks. Only the current movie is lazily probed through the shared bounded metadata cache; probe metadata now also includes subtitle codecs. Reorder and inactive-entry edits retain the current decoder and clock. Active subtitle edits reopen at the same media time, and explicit jumps retire the previous decoder through the managed disposal queue.
+
+Embedded text tracks and external SRTs use FFmpeg's libass subtitles filter. Input seeking resets frame timestamps, so the filter chain temporarily adds the seek offset for caption lookup, then removes it before FPS conversion and realtime pacing. Captions enter the decoded BGRA frame before sizing and source compositing, making them part of CPU/GPU presentation, simulations, and render output. The movie's fit, transforms, alpha, and blend settings apply to its captions. Subtitle filtering adds CPU work and loads the chosen subtitle track on decoder startup; it does not transcode or cache movie files. Bitmap subtitle tracks need an external SRT. Missing/unsupported captions leave playback available with a status message; subtitle decode failure retries without captions. Bakes start at the first movie at zero; interactive reopening may use the saved entry/time bookmark. See [Movie Playlists](Movie-Playlists.md).
+
 ## Fluid response and Life control corrections
 
 Fluid's output displacement now uses `Flow * (0.7 + 6.1 * Flow)`: approximately the previous 1.55 multiplier at the 45% default, zero transport at zero Flow, and 6.8 at full Flow. The completed velocity field stores prior Swirl/Flow in its spare channels. On the next force pass, positive Flow changes and absolute Swirl changes add a bounded curl impulse before pressure projection. There are no new textures or solver passes; steady forcing remains unchanged. The preset no longer reduces Persistence while increasing Flow.

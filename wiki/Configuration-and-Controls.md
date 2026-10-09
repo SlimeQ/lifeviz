@@ -1,5 +1,9 @@
 # Configuration & Controls
 
+## Movie Playlist layers
+
+The right-click **Sources** menu and group submenus include **Add Movie Playlist**. The Scene Editor also offers **Movie Playlist** under Add Root/Add Child. Its settings provide Add Movies, Remove, Move Up/Down, per-movie embedded text/SRT/Off subtitles, a zero-based embedded track number, Choose SRT, optional resume on reopen, and a movie/time jump field accepting seconds, MM:SS, or HH:MM:SS. Use Current Position selects the playing entry and copies its timestamp. The layer plays complete movies in authored order and loops; the usual video transport and source-audio controls apply. Navigation requires Live Mode, while list/subtitle edits support draft Apply. See [Movie Playlists](Movie-Playlists.md) for save semantics and subtitle format limits.
+
 ## Fluid and Life control feedback
 
 Reactive mapping rows show **Input → Response → Live output** four times per second in Live Mode. Response includes the input window and attack/release; Live output is the final effective setting after all mappings and clamping. Missing audio, disabled groups, unapplied drafts, mode-incompatible mappings, and inputs at their maximum are identified explicitly. These readouts do not alter or save authored values.

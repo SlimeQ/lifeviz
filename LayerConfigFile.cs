@@ -173,6 +173,7 @@ internal sealed class LayerConfigFile
         var config = new LayerConfigSource
         {
             Type = source.Kind.ToString(),
+            MoviePlaylist = source.IsMoviePlaylist ? source.MoviePlaylist.Clone() : null,
             ProjectM = source.ProjectM.Clone(),
             Enabled = source.Enabled,
             WindowTitle = source.WindowTitle,
@@ -332,6 +333,7 @@ internal sealed class LayerConfigFile
             Opacity = Math.Clamp(config.Opacity, 0, 1),
             Scale = Math.Clamp(config.Scale, 0.1, 4.0),
             VisibilityGroup = (config.VisibilityGroup ?? string.Empty).Trim(),
+            MoviePlaylist = config.MoviePlaylist?.Clone() ?? new(),
             AutoClipTakeover = config.AutoClipTakeover,
             AutoClipStartWithDelay = config.AutoClipStartWithDelay,
             AutoClipPlayInOrder = config.AutoClipPlayInOrder,
@@ -720,6 +722,7 @@ internal sealed class LayerConfigSource
     public double Opacity { get; set; } = 1.0;
     public double Scale { get; set; } = 1.0;
     public string VisibilityGroup { get; set; } = string.Empty;
+    public MoviePlaylistSettings? MoviePlaylist { get; set; }
     public bool AutoClipTakeover { get; set; }
     public bool AutoClipStartWithDelay { get; set; }
     public bool AutoClipPlayInOrder { get; set; }

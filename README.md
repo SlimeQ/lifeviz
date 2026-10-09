@@ -1,5 +1,7 @@
 # LifeViz
 
+**Movie Playlist** layers play full movies in an editable order and loop the entire list. Each movie can use an embedded text subtitle track, an external SRT, or no captions; matching sidecar SRTs are picked up when adding movies. Select an entry and enter a timestamp to jump directly to that movie. Optional resume restores the movie and time captured on project Save or app shutdown. See [Movie Playlists](wiki/Movie-Playlists.md). After a Release build, run `dotnet bin/Release/net9.0-windows/lifeviz.dll --smoke-test movie-playlist` to validate playback, captions, navigation, persistence, and editor controls.
+
 ## Tempo-synced video loops
 
 **Room-mic mode:** Input Gain now goes from 10% to about 3200% (+30 dB) on a dB slider, also right in the Scene Editor monitor. Audio Reactivity → Input Gain adds **Auto gain (room mic)**, which keeps a microphone's level where mastered music sits (up to +36 dB). It cuts quickly when the room gets loud and doesn't pump up silence. The Scene Editor monitor shows the gain in use. Validate with `--smoke-test audio-auto-gain`.
@@ -62,6 +64,10 @@ The MilkDrop preset picker includes an animated preview for library and playlist
 The engine is tracked in the pinned `Native/projectm` Git submodule. Initialize it with `git submodule update --init --recursive`; Windows builds now require Visual Studio 2022's **Desktop development with C++** tools and CMake in addition to .NET 9. `Prepare-ProjectM.ps1` runs automatically during builds or can be run directly to prefetch/build the bundle; use `-Rebuild` to repair generated files. It builds the unmodified engine, verifies the upstream preset archive, and packages the assets, corresponding source and notices. `Publish-Installer.ps1` also verifies these files. Details: [Build & Install](wiki/Build-and-Install.md#bundled-projectm).
 
 Validate with `dotnet build -c Release`, `dotnet bin/Release/net9.0-windows/lifeviz.dll --smoke-test projectm`, and `./tests/Test-ProjectM.ps1`. The last command runs a real two-second background bake and checks its 60 decoded frames; pass `-ExecutablePath <lifeviz.exe>` to test a published build. These checks keep artifacts under the build output and `artifacts/projectm-bake-*`.
+
+An [Android Player Plan](wiki/Android-Player-Plan.md) explores unattended playback on Android projectors/TVs, with Windows scene authoring, a shared C# playback core, and new Android graphics/media adapters. It describes device qualification, code boundaries, and staged release gates; no Android build is implemented yet.
+
+An [Outdoor ARM Player Plan](wiki/Outdoor-ARM-Player-Plan.md) proposes a headless Linux/ARM runtime for prepared projects, offline drive import, live audio reactivity, and weatherproof battery operation. This is a design proposal with an under-$300 hardware target; the player and hardware feasibility are not yet implemented or validated.
 
 **Audio-reactive Datamosh** is available in the Scene Editor: select a Sim Group and choose **Add Datamosh Layer**. Feedback retains previous frames, Displacement smears them in blocks, and Block Size controls the patch size. New layers map Low audio to feedback and Mid audio to displacement; choose a hardware input/output or **Video Stack (Silent)** under Audio Source. Settings persist in autosaves and version 12 scene projects. See [Datamosh](wiki/Datamosh.md). After `dotnet build -c Debug`, validate with `dotnet bin/Debug/net9.0-windows/lifeviz.dll --smoke-test datamosh`, `--smoke-test datamosh-editor`, and `--smoke-test datamosh-transparency` (same executable).
 

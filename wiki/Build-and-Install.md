@@ -485,6 +485,15 @@ dotnet bin/Release/net9.0-windows/lifeviz.dll --smoke-test render-failure-cleanu
 
 `render-failure-cleanup` checks fatal HRESULT classification (including wrapped exceptions) and idempotent cleanup of initialized rendering resources. It does not induce a real driver/standby fault or exercise the native Retry dialog. For a running old version stuck in rendering-error popups, use the latest standalone `lifeviz_installer.exe` from GitHub Releases rather than relying on that process's updater UI. Keep `%APPDATA%\lifeviz\logs\render-failure-last.log` when reporting a repeat after installing the recovery update.
 
+## Validate movie playlists
+
+```powershell
+dotnet build -c Release
+dotnet bin/Release/net9.0-windows/lifeviz.dll --smoke-test movie-playlist
+```
+
+This isolated smoke creates a four-second movie with audio and embedded text captions plus an external SRT. It verifies ordered looping, duplicate entries, subtitle pixels and seek timing, filenames containing punctuation, resume on/off, pause, editing continuity, project/autosave persistence, missing captions, empty/repopulated playlists, and draft editor controls. It prints the temporary artifact directory containing `playlist-editor.png`. The user's saved scene is not loaded or modified. Subtitle playback uses the existing bundled FFmpeg/libass runtime; no new installation step is needed. See [Movie Playlists](Movie-Playlists.md).
+
 ## Validate scene persistence
 
 ```powershell

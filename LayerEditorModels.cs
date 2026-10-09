@@ -15,6 +15,7 @@ internal enum LayerEditorSourceKind
     File,
     ColorPlane,
     VideoSequence,
+    MoviePlaylist,
     AutoClip,
     Group,
     SimGroup,
@@ -591,6 +592,7 @@ internal sealed class LayerEditorSource : LayerEditorNotify
                 OnPropertyChanged(nameof(SupportsKeying));
                 OnPropertyChanged(nameof(IsVideo));
                 OnPropertyChanged(nameof(IsAutoClip));
+                OnPropertyChanged(nameof(IsMoviePlaylist));
                 OnPropertyChanged(nameof(SupportsVideoTransport));
                 OnPropertyChanged(nameof(KindLabel));
                 OnPropertyChanged(nameof(DisplayLabel));
@@ -1000,11 +1002,21 @@ internal sealed class LayerEditorSource : LayerEditorNotify
     public bool IsColorPlane => Kind == LayerEditorSourceKind.ColorPlane;
     public bool CanDriveAspect => !IsColorPlane && !IsProjectM &&
                                   (!IsGroup || Children.Count == 0 || Children.Any(child => child.CanDriveAspect));
+    public MoviePlaylistSettings MoviePlaylist { get; set; } = new();
+    private MoviePlaylistEntry? _selectedMovie;
+    public MoviePlaylistEntry? SelectedMovie { get => _selectedMovie; set => SetField(ref _selectedMovie, value); }
+    private string _movieJumpTime = "00:00:00";
+    public string MovieJumpTime { get => _movieJumpTime; set => SetField(ref _movieJumpTime, value); }
+    private string _currentMovieLabel = "Preparing playlist";
+    public string CurrentMovieLabel { get => _currentMovieLabel; set => SetField(ref _currentMovieLabel, value); }
+    public bool IsMoviePlaylist => Kind == LayerEditorSourceKind.MoviePlaylist;
+    public void NotifyMoviePlaylistChanged() => OnPropertyChanged(nameof(Details));
     public bool IsAutoClip => Kind == LayerEditorSourceKind.AutoClip;
     public bool IsNormalBlend => string.Equals(BlendMode, "Normal", StringComparison.OrdinalIgnoreCase);
     public bool SupportsKeying => IsNormalBlend && !IsColorPlane;
     public bool IsVideo =>
         Kind == LayerEditorSourceKind.VideoSequence ||
+        Kind == LayerEditorSourceKind.MoviePlaylist ||
         Kind == LayerEditorSourceKind.AutoClip ||
         Kind == LayerEditorSourceKind.Youtube ||
         (Kind == LayerEditorSourceKind.File && !string.IsNullOrWhiteSpace(FilePath) &&
@@ -1021,6 +1033,7 @@ internal sealed class LayerEditorSource : LayerEditorNotify
         LayerEditorSourceKind.ColorPlane => "Color Plane",
         LayerEditorSourceKind.ProjectM => "MilkDrop / projectM",
         LayerEditorSourceKind.Youtube => "YouTube",
+        LayerEditorSourceKind.MoviePlaylist => "Movie Playlist",
         LayerEditorSourceKind.VideoSequence => "Video Sequence",
         LayerEditorSourceKind.AutoClip => "AutoClip",
         LayerEditorSourceKind.Group => "Group",
@@ -1041,6 +1054,7 @@ internal sealed class LayerEditorSource : LayerEditorNotify
         LayerEditorSourceKind.ProjectM => $"{ProjectM.Presets.Count} presets | {ProjectM.Order} | {ProjectM.Advance}",
         LayerEditorSourceKind.ColorPlane => string.IsNullOrWhiteSpace(ColorHex) ? "Solid color" : ColorHex,
         LayerEditorSourceKind.Youtube => string.IsNullOrWhiteSpace(FilePath) ? "YouTube source" : FilePath,
+        LayerEditorSourceKind.MoviePlaylist => $"{MoviePlaylist.Movies.Count} movies · loops in order",
         LayerEditorSourceKind.VideoSequence => FilePaths.Count > 0 ? $"{FilePaths.Count} files" : "Video sequence",
         LayerEditorSourceKind.AutoClip => $"{AutoClipVideoPaths.Count} video{(AutoClipVideoPaths.Count == 1 ? string.Empty : "s")}",
         LayerEditorSourceKind.Group => "Layer group",

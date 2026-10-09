@@ -749,6 +749,7 @@ public partial class LayerEditorWindow : Window
             return;
         }
 
+        if (source.IsMoviePlaylist) RefreshMoviePlaylistTransport(source);
         if (!_owner.TryGetSourceVideoPlaybackState(source.Id, out var playbackState))
         {
             return;
@@ -867,6 +868,7 @@ public partial class LayerEditorWindow : Window
 
         try
         {
+            RefreshMovieBookmarksForSave();
             var projectSettings = _pendingProjectSettings ?? _owner.GetProjectSettingsForEditor();
             var config = LayerConfigFile.FromEditorSources(
                 _viewModel.Sources,
@@ -2469,6 +2471,10 @@ public partial class LayerEditorWindow : Window
                 return true;
             }
 
+            case LayerEditorSourceKind.MoviePlaylist:
+                _owner.AddMoviePlaylistFromEditor(parentId);
+                return true;
+
             case LayerEditorSourceKind.VideoSequence:
             {
                 var paths = PromptForSequence();
@@ -2636,6 +2642,9 @@ public partial class LayerEditorWindow : Window
                     KeyTolerance = 0.1
                 };
             }
+
+            case LayerEditorSourceKind.MoviePlaylist:
+                return new LayerEditorSource { Id = Guid.NewGuid(), Kind = kind, DisplayName = "Movie Playlist", BlendMode = "Normal", FitMode = "Fit", VideoAudioEnabled = true };
 
             case LayerEditorSourceKind.VideoSequence:
             {
