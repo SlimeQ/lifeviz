@@ -778,7 +778,7 @@
                                             <TextBlock Text="{Binding MovieScrubTimeLabel}" Foreground="#C8C8C8" HorizontalAlignment="Right" />
                                         </StackPanel>
                                         <TextBlock Text="{Binding CurrentMovieLabel}" Foreground="#C8C8C8" TextWrapping="Wrap" Margin="0,4,0,12" />
-                                        <TextBlock Text="Playlist order and subtitles" Foreground="#C8C8C8" Margin="0,0,0,4" />
+                                        <TextBlock Text="Playlist order, audio, and subtitles" Foreground="#C8C8C8" Margin="0,0,0,4" />
                                         <ListBox ItemsSource="{Binding MoviePlaylist.Movies}" SelectedItem="{Binding SelectedMovie}"
                                                  DisplayMemberPath="DisplayName" Height="150" MouseDoubleClick="MovieList_DoubleClick" SelectionChanged="MovieList_SelectionChanged"
                                                  ToolTip="Movies play from top to bottom. Double-click a movie to switch playback. Duplicate entries are allowed." />
@@ -794,6 +794,18 @@
                                         <GroupBox Header="Selected Movie" DataContext="{Binding SelectedMovie}">
                                             <StackPanel Margin="8">
                                                 <TextBlock Text="{Binding FilePath}" TextWrapping="Wrap" Foreground="#C8C8C8" Margin="0,0,0,6" />
+                                                <TextBlock Text="Audio track" Margin="0,0,0,4" />
+                                                <ComboBox ItemsSource="{Binding AudioTracks}" SelectedValue="{Binding AudioTrack, Mode=OneWay}"
+                                                          SelectedValuePath="Index" HorizontalAlignment="Stretch"
+                                                          DropDownOpened="MovieAudioTrack_DropDownOpened" DropDownClosed="MovieAudioTrack_DropDownClosed"
+                                                          PreviewKeyDown="MovieAudioTrack_KeyDown" PreviewKeyUp="MovieAudioTrack_KeyUp"
+                                                          LostKeyboardFocus="MovieAudioTrack_LostKeyboardFocus"
+                                                          ToolTip="Choose this movie's audio language or commentary track. Keeps playback position and play/pause state.">
+                                                    <ComboBox.ItemTemplate>
+                                                        <DataTemplate><TextBlock Text="{Binding Label}" TextTrimming="CharacterEllipsis" ToolTip="{Binding Label}" /></DataTemplate>
+                                                    </ComboBox.ItemTemplate>
+                                                </ComboBox>
+                                                <TextBlock Text="{Binding AudioTrackStatus}" Foreground="#AFAFAF" TextWrapping="Wrap" Margin="0,4,0,8" />
                                                 <WrapPanel>
                                                     <TextBlock Text="Subtitles" VerticalAlignment="Center" Margin="0,0,8,6" />
                                                     <ComboBox ItemsSource="{Binding SubtitleModes}" SelectedValue="{Binding SubtitleMode}"
@@ -810,7 +822,7 @@
                                                 </ComboBox>
                                                 <WrapPanel Margin="0,4,0,4">
                                                     <TextBlock Text="{Binding EmbeddedSubtitleStatus}" Foreground="#AFAFAF" VerticalAlignment="Center" TextWrapping="Wrap" MaxWidth="330" Margin="0,0,8,4" />
-                                                    <Button Content="Refresh tracks" Click="MovieSubtitleRefresh_Click" />
+                                                    <Button Content="Refresh tracks" Click="MovieTracksRefresh_Click" />
                                                 </WrapPanel>
                                                 <WrapPanel>
                                                     <Button Content="Choose SRT..." Click="MovieSrt_Click" />

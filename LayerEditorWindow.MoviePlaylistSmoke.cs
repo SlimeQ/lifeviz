@@ -40,7 +40,7 @@ public partial class LayerEditorWindow
         MovieMoveDown_Click(button, new RoutedEventArgs());
         if (model.MoviePlaylist.Movies[1] != selected) throw new InvalidOperationException("Draft reorder failed.");
         MovieMoveUp_Click(button, new RoutedEventArgs());
-        LoadMovieSubtitleTracksAsync(selected!).GetAwaiter().GetResult();
+        LoadMovieTracksAsync(selected!).GetAwaiter().GetResult();
         var tracks = selected!.EmbeddedSubtitleTracks;
         if (tracks.Length != 2 || !tracks[0].Label.Contains("English SDH") || !tracks[0].Label.Contains("English") ||
             !tracks[0].IsDefault || tracks[1].Language != "fra" || !tracks[1].IsForced || !tracks[1].Label.Contains("French signs"))
@@ -52,6 +52,18 @@ public partial class LayerEditorWindow
         _suppressLiveUpdates = false;
         MovieSubtitleTrack_SelectionChanged(subtitleTracks, new SelectionChangedEventArgs(ComboBox.SelectionChangedEvent, Array.Empty<object>(), new object[] { tracks[1] }));
         if (selected.SubtitleTrack != 1) throw new InvalidOperationException("Selecting a labelled subtitle track did not apply its ordinal.");
+        var audioTracks = Descendants(playlistGroup).OfType<ComboBox>().Single(item =>
+            item.GetBindingExpression(ItemsControl.ItemsSourceProperty)?.ParentBinding.Path.Path == "AudioTracks");
+        if (audioTracks.Items.Count != 2 || !selected.AudioTracks[0].Label.Contains("Italian dub") ||
+            !selected.AudioTracks[0].Label.Contains("Italian") || !selected.AudioTracks[0].IsDefault ||
+            !selected.AudioTracks[1].Label.Contains("Original English") || !selected.AudioTracks[1].Label.Contains("English"))
+            throw new InvalidOperationException("Audio listing lost language, title, or default metadata.");
+        int originalAudioTrack = selected.AudioTrack;
+        audioTracks.SelectedIndex = 1;
+        if (selected.AudioTrack != originalAudioTrack) throw new InvalidOperationException("Audio rebinding unexpectedly changed the saved selection.");
+        MovieAudioTrack_DropDownOpened(audioTracks, EventArgs.Empty);
+        MovieAudioTrack_DropDownClosed(audioTracks, EventArgs.Empty);
+        if (selected.AudioTrack != 1) throw new InvalidOperationException("Draft audio selection did not apply its ordinal.");
 
         _suppressLiveUpdates = true;
         _viewModel.LiveMode = true;
@@ -74,6 +86,25 @@ public partial class LayerEditorWindow
         nextFrame();
         RefreshSelectedVideoTransportState();
         if (!model.VideoPlaybackPaused || Math.Abs(model.MovieScrubSeconds - 1.5) > 0.15) throw new InvalidOperationException("Scrubbing failed to seek or preserve pause.");
+        // Change the active entry's track through the real picker while paused.
+        model.SelectedMovie = model.PlayingMovie;
+        LoadMovieTracksAsync(model.SelectedMovie!).GetAwaiter().GetResult();
+        root.UpdateLayout();
+        var audioMovie = model.SelectedMovie!;
+        var beforeAudioChange = audioMovie.AudioTrack;
+        MovieAudioTrack_DropDownOpened(audioTracks, EventArgs.Empty);
+        audioTracks.SelectedIndex = beforeAudioChange == 0 ? 1 : 0;
+        MovieAudioTrack_DropDownClosed(audioTracks, EventArgs.Empty);
+        nextFrame();
+        RefreshSelectedVideoTransportState();
+        if (audioMovie.AudioTrack == beforeAudioChange || !model.VideoPlaybackPaused || Math.Abs(model.MovieScrubSeconds - 1.5) > 0.15)
+            throw new InvalidOperationException("Live audio picker reset playback or failed to change the track.");
+        MovieAudioTrack_DropDownOpened(audioTracks, EventArgs.Empty);
+        audioTracks.SelectedIndex = beforeAudioChange;
+        MovieAudioTrack_DropDownClosed(audioTracks, EventArgs.Empty);
+        nextFrame();
+        model.SelectedMovie = selected;
+        root.UpdateLayout();
         _owner.TryGetMoviePlaylistState(model.Id, out var selectedId, out double selectedTime, out _);
         // Exercise deferred bindings after leaving/reselecting the scene tree row,
         // then a transient programmatic dropdown selection during panel refresh.

@@ -13,22 +13,43 @@ internal sealed class MoviePlaylistEntry : LayerEditorNotify
     private string _subtitleMode = "Embedded";
     private string? _subtitlePath;
     private int _subtitleTrack;
+    private int _audioTrack;
     public Guid Id { get; set; } = Guid.NewGuid();
     public string FilePath { get; set; } = string.Empty;
     public string SubtitleMode { get => _subtitleMode; set => SetField(ref _subtitleMode, value); }
     public string? SubtitlePath { get => _subtitlePath; set => SetField(ref _subtitlePath, value); }
     public int SubtitleTrack { get => _subtitleTrack; set => SetField(ref _subtitleTrack, Math.Max(0, value)); }
+    public int AudioTrack
+    {
+        get => _audioTrack;
+        set { SetField(ref _audioTrack, Math.Max(0, value)); OnPropertyChanged(nameof(AudioTrackStatus)); }
+    }
     [JsonIgnore] public string DisplayName => Path.GetFileName(FilePath);
     public override string ToString() => DisplayName;
     [JsonIgnore] public LayerEditorOption[] SubtitleModes => Modes;
     [JsonIgnore] public MovieSubtitleTrack[] EmbeddedSubtitleTracks { get; private set; } = Array.Empty<MovieSubtitleTrack>();
     [JsonIgnore] public string EmbeddedSubtitleStatus { get; private set; } = "Reading embedded subtitle tracks...";
-    [JsonIgnore] public bool SubtitleTracksLoaded { get; private set; }
-    [JsonIgnore] public bool SubtitleTracksLoading { get; set; }
+    [JsonIgnore] public bool MovieTracksLoaded { get; private set; }
+    [JsonIgnore] public bool MovieTracksLoading { get; set; }
+    [JsonIgnore] public MovieAudioTrack[] AudioTracks { get; private set; } = Array.Empty<MovieAudioTrack>();
+    private bool _audioTracksLoaded;
+    private string _audioMetadataStatus = "Reading audio tracks...";
+    [JsonIgnore] public string AudioTrackStatus => !_audioTracksLoaded ? _audioMetadataStatus :
+        AudioTracks.Length == 0 ? "No audio tracks in this movie." :
+        AudioTrack >= AudioTracks.Length ? "Saved audio track unavailable; playback uses the first track." : $"{AudioTracks.Length} audio track(s).";
+    internal void SetAudioTracks(MovieAudioTrack[]? tracks)
+    {
+        AudioTracks = tracks ?? Array.Empty<MovieAudioTrack>();
+        _audioTracksLoaded = tracks != null;
+        _audioMetadataStatus = "Could not read audio tracks. Check the file path and refresh tracks to retry.";
+        OnPropertyChanged(nameof(AudioTracks));
+        OnPropertyChanged(nameof(AudioTrack));
+        OnPropertyChanged(nameof(AudioTrackStatus));
+    }
     internal void SetSubtitleTracks(MovieSubtitleTrack[]? tracks)
     {
         EmbeddedSubtitleTracks = tracks ?? Array.Empty<MovieSubtitleTrack>();
-        SubtitleTracksLoaded = tracks != null;
+        MovieTracksLoaded = tracks != null;
         EmbeddedSubtitleStatus = tracks == null ? "Could not read movie metadata. Check the file path and retry." :
             tracks.Length == 0 ? "No embedded subtitle tracks. Choose an external SRT or Off." :
             $"{tracks.Length} embedded subtitle track(s).";
@@ -38,7 +59,15 @@ internal sealed class MoviePlaylistEntry : LayerEditorNotify
     }
     private static readonly LayerEditorOption[] Modes = {
         new("Embedded", "Embedded text track"), new("Srt", "External SRT"), new("Off", "Off") };
-    public MoviePlaylistEntry Clone() => new() { Id = Id, FilePath = FilePath, SubtitleMode = SubtitleMode, SubtitlePath = SubtitlePath, SubtitleTrack = SubtitleTrack };
+    public MoviePlaylistEntry Clone() => new() { Id = Id, FilePath = FilePath, SubtitleMode = SubtitleMode, SubtitlePath = SubtitlePath, SubtitleTrack = SubtitleTrack, AudioTrack = AudioTrack };
+}
+
+internal sealed record MovieAudioTrack(int Index, int StreamIndex, string Codec, string Language, string Title, bool IsDefault, string Channels)
+{
+    public override string ToString() => Label;
+    public string Label => $"{Index + 1}. {MoviePlaylistSettings.TrackLanguageLabel(Language)}" +
+        (string.IsNullOrWhiteSpace(Title) ? "" : $" — {Title}") +
+        $" ({Codec}" + (string.IsNullOrWhiteSpace(Channels) ? "" : $", {Channels}") + (IsDefault ? ", default" : "") + ")";
 }
 
 internal sealed record MovieSubtitleTrack(int Index, int StreamIndex, string Codec, string Language, string Title, bool IsDefault, bool IsForced)
@@ -48,10 +77,7 @@ internal sealed record MovieSubtitleTrack(int Index, int StreamIndex, string Cod
     {
         get
         {
-            string language = string.IsNullOrWhiteSpace(Language) || Language == "und" ? "Unknown language" : Language;
-            var culture = CultureInfo.GetCultures(CultureTypes.NeutralCultures).FirstOrDefault(c =>
-                !string.IsNullOrEmpty(c.Name) && (c.ThreeLetterISOLanguageName == Language || c.TwoLetterISOLanguageName == Language));
-            if (culture != null) language = culture.EnglishName;
+            string language = MoviePlaylistSettings.TrackLanguageLabel(Language);
             string details = Codec + (IsDefault ? ", default" : "") + (IsForced ? ", forced" : "") +
                 (MoviePlaylistSettings.IsTextSubtitle(Codec) ? "" : ", bitmap/unsupported — use SRT");
             return $"{Index + 1}. {language}" + (string.IsNullOrWhiteSpace(Title) ? "" : $" — {Title}") + $" ({details})";
@@ -113,6 +139,34 @@ internal sealed class MoviePlaylistSettings : LayerEditorNotify
                 subtitle.Groups["codec"].Value, subtitle.Groups["language"].Value,
                 title.Groups["title"].Value.Trim(), stream.Value.Contains("(default)", StringComparison.Ordinal),
                 stream.Value.Contains("(forced)", StringComparison.Ordinal)));
+        }
+        return tracks.ToArray();
+    }
+    internal static string TrackLanguageLabel(string language)
+    {
+        var culture = CultureInfo.GetCultures(CultureTypes.NeutralCultures).FirstOrDefault(c =>
+            !string.IsNullOrEmpty(c.Name) && (c.ThreeLetterISOLanguageName == language || c.TwoLetterISOLanguageName == language));
+        return culture?.EnglishName ?? (string.IsNullOrWhiteSpace(language) || language == "und" ? "Unknown language" : language);
+    }
+
+    internal static MovieAudioTrack[] ParseAudioTracks(string output)
+    {
+        var streams = Regex.Matches(output, @"(?m)^[ \t]*Stream #0:[^\r\n]*");
+        var tracks = new Collection<MovieAudioTrack>();
+        for (int i = 0; i < streams.Count; i++)
+        {
+            var stream = streams[i];
+            var audio = Regex.Match(stream.Value,
+                @"Stream #0:(?<stream>\d+)(?:\[[^\]\r\n]*\])?(?:\((?<language>[^)\r\n]*)\))?[^\r\n]*?\bAudio:\s*(?<codec>[A-Za-z0-9_]+)");
+            if (!audio.Success) continue;
+            int end = i + 1 < streams.Count ? streams[i + 1].Index : output.Length;
+            string block = output.Substring(stream.Index, end - stream.Index);
+            var title = Regex.Match(block, @"(?m)^[ \t]*title[ \t]*:[ \t]*(?<title>[^\r\n]+)", RegexOptions.IgnoreCase);
+            if (!title.Success) title = Regex.Match(block, @"(?m)^[ \t]*handler_name[ \t]*:[ \t]*(?<title>[^\r\n]+)", RegexOptions.IgnoreCase);
+            var channels = Regex.Match(stream.Value, @"\d+ Hz,\s*(?<channels>[^,\r\n]+)");
+            tracks.Add(new MovieAudioTrack(tracks.Count, int.Parse(audio.Groups["stream"].Value, CultureInfo.InvariantCulture),
+                audio.Groups["codec"].Value, audio.Groups["language"].Value, title.Groups["title"].Value.Trim(),
+                stream.Value.Contains("(default)", StringComparison.Ordinal), channels.Groups["channels"].Value.Trim()));
         }
         return tracks.ToArray();
     }

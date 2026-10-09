@@ -18,7 +18,10 @@ internal static partial class SmokeTestRunner
         var info = new ProcessStartInfo { FileName = "ffmpeg", CreateNoWindow = true, RedirectStandardError = true };
         foreach (string arg in new[] { "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i", "color=c=black:s=320x180:r=10:d=4",
                      "-f", "lavfi", "-i", "sine=frequency=440:duration=4", "-i", srt,
-                     "-map", "0:v", "-map", "1:a", "-map", "2:s", "-map", "2:s", "-c:v", "libx264", "-preset", "ultrafast", "-c:a", "aac", "-c:s", "srt",
+                     "-f", "lavfi", "-i", "sine=frequency=880:duration=4",
+                     "-map", "0:v", "-map", "1:a", "-map", "3:a", "-map", "2:s", "-map", "2:s", "-c:v", "libx264", "-preset", "ultrafast", "-c:a", "aac", "-c:s", "srt",
+                     "-metadata:s:a:0", "language=ita", "-metadata:s:a:0", "title=Italian dub", "-disposition:a:0", "default",
+                     "-metadata:s:a:1", "language=eng", "-metadata:s:a:1", "title=Original English", "-disposition:a:1", "0",
                      "-metadata:s:s:0", "language=eng", "-metadata:s:s:0", "title=English SDH", "-disposition:s:0", "default",
                      "-metadata:s:s:1", "language=fra", "-metadata:s:s:1", "title=French signs", "-disposition:s:1", "forced", "-t", "4", video })
             info.ArgumentList.Add(arg);
@@ -39,7 +42,7 @@ internal static partial class SmokeTestRunner
             {
                 window = new MainWindow();
                 window.RunMoviePlaylistChecks(video, srt, directory);
-                Console.WriteLine("Movie playlist smoke passed: ordered loop, duplicate entries, text/SRT captions, punctuation paths, seek timing, pause, resume on/off, edits, missing inputs, project/autosave persistence, draft controls and empty playlist.");
+                Console.WriteLine("Movie playlist smoke passed: labelled audio/subtitle tracks, selected-track PCM, ordered loop, duplicate entries, text/SRT captions, punctuation paths, seek timing, pause, resume on/off, edits, missing inputs, project/autosave persistence, draft controls and empty playlist.");
             }
             catch (Exception ex) { failure = ex; Console.WriteLine(ex); }
             finally { window?.ShutdownResources(); app.Shutdown(failure == null ? 0 : 1); }

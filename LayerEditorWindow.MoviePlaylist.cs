@@ -15,34 +15,82 @@ public partial class LayerEditorWindow
     private Guid? _movieSelectionStartId;
     private LayerEditorSource? _movieScrubSource;
     private Guid _movieScrubId;
-    private bool _loadingSubtitleChoices;
+    private bool _loadingMovieTrackChoices;
+    private LayerEditorSource? _movieAudioSelectionSource;
+    private MoviePlaylistEntry? _movieAudioSelectionEntry;
+    private int _movieAudioSelectionStartIndex;
 
     private async void MovieList_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
-        if (sender is ListBox { SelectedItem: MoviePlaylistEntry movie }) await LoadMovieSubtitleTracksAsync(movie);
+        if (sender is ListBox { SelectedItem: MoviePlaylistEntry movie }) await LoadMovieTracksAsync(movie);
     }
 
-    private async void MovieSubtitleRefresh_Click(object sender, RoutedEventArgs e)
+    private async void MovieTracksRefresh_Click(object sender, RoutedEventArgs e)
     {
-        if (_viewModel.SelectedSource?.SelectedMovie is { } movie) await LoadMovieSubtitleTracksAsync(movie, force: true);
+        if (_viewModel.SelectedSource?.SelectedMovie is { } movie) await LoadMovieTracksAsync(movie, force: true);
     }
 
-    private async Task LoadMovieSubtitleTracksAsync(MoviePlaylistEntry movie, bool force = false)
+    private async Task LoadMovieTracksAsync(MoviePlaylistEntry movie, bool force = false)
     {
-        if (movie.SubtitleTracksLoading || (movie.SubtitleTracksLoaded && !force)) return;
-        movie.SubtitleTracksLoading = true;
+        if (movie.MovieTracksLoading || (movie.MovieTracksLoaded && !force)) return;
+        movie.MovieTracksLoading = true;
         MovieSubtitleTrack[]? tracks = null;
-        try { tracks = await FileCaptureService.GetMovieSubtitleTracksAsync(movie.FilePath); }
-        catch (Exception ex) { Logger.Warn($"Could not load subtitle tracks for {movie.DisplayName}: {ex.Message}"); }
-        finally { movie.SubtitleTracksLoading = false; }
-        _loadingSubtitleChoices = true;
-        try { movie.SetSubtitleTracks(tracks); }
-        finally { _loadingSubtitleChoices = false; }
+        MovieAudioTrack[]? audioTracks = null;
+        try
+        {
+            tracks = await FileCaptureService.GetMovieSubtitleTracksAsync(movie.FilePath);
+            audioTracks = await FileCaptureService.GetMovieAudioTracksAsync(movie.FilePath);
+        }
+        catch (Exception ex) { Logger.Warn($"Could not load movie tracks for {movie.DisplayName}: {ex.Message}"); }
+        finally { movie.MovieTracksLoading = false; }
+        _loadingMovieTrackChoices = true;
+        try { movie.SetSubtitleTracks(tracks); movie.SetAudioTracks(audioTracks); }
+        finally { _loadingMovieTrackChoices = false; }
+    }
+
+    private void MovieAudioTrack_DropDownOpened(object sender, EventArgs e) => BeginMovieAudioSelection(sender);
+    private void BeginMovieAudioSelection(object sender)
+    {
+        if (_movieAudioSelectionEntry != null || _loadingMovieTrackChoices || _suppressLiveUpdates ||
+            sender is not ComboBox { DataContext: MoviePlaylistEntry movie } ||
+            _viewModel.SelectedSource is not { IsMoviePlaylist: true } source || !ReferenceEquals(source.SelectedMovie, movie)) return;
+        _movieAudioSelectionSource = source;
+        _movieAudioSelectionEntry = movie;
+        _movieAudioSelectionStartIndex = movie.AudioTrack;
+    }
+
+    private void MovieAudioTrack_DropDownClosed(object sender, EventArgs e)
+    {
+        var source = _movieAudioSelectionSource;
+        var movie = _movieAudioSelectionEntry;
+        _movieAudioSelectionSource = null;
+        _movieAudioSelectionEntry = null;
+        if (_loadingMovieTrackChoices || _suppressLiveUpdates || source == null || movie == null ||
+            !ReferenceEquals(source, _viewModel.SelectedSource) || !ReferenceEquals(movie, source.SelectedMovie) ||
+            sender is not ComboBox { DataContext: MoviePlaylistEntry context, SelectedItem: MovieAudioTrack track } ||
+            !ReferenceEquals(context, movie) || !movie.AudioTracks.Contains(track) || track.Index == _movieAudioSelectionStartIndex) return;
+        movie.AudioTrack = track.Index;
+        CommitMoviePlaylist(source);
+    }
+
+    private void MovieAudioTrack_KeyDown(object sender, KeyEventArgs e)
+    {
+        if (sender is ComboBox { IsDropDownOpen: false } && IsMovieScrubKey(e.Key)) BeginMovieAudioSelection(sender);
+    }
+    private void MovieAudioTrack_KeyUp(object sender, KeyEventArgs e)
+    {
+        if (sender is ComboBox { IsDropDownOpen: false } && IsMovieScrubKey(e.Key)) MovieAudioTrack_DropDownClosed(sender, EventArgs.Empty);
+    }
+    private void MovieAudioTrack_LostKeyboardFocus(object sender, KeyboardFocusChangedEventArgs e)
+    {
+        if (sender is not ComboBox { IsDropDownOpen: false }) return;
+        _movieAudioSelectionSource = null;
+        _movieAudioSelectionEntry = null;
     }
 
     private void MovieSubtitleTrack_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
-        if (_loadingSubtitleChoices || _suppressLiveUpdates || sender is not ComboBox { SelectedItem: MovieSubtitleTrack track } ||
+        if (_loadingMovieTrackChoices || _suppressLiveUpdates || sender is not ComboBox { SelectedItem: MovieSubtitleTrack track } ||
             _viewModel.SelectedSource is not { SelectedMovie: not null } source) return;
         if (source.SelectedMovie.SubtitleTrack == track.Index) return;
         source.SelectedMovie.SubtitleTrack = track.Index;
@@ -220,7 +268,7 @@ public partial class LayerEditorWindow
 
     private void MovieOptions_Changed(object sender, EventArgs e)
     {
-        if (_suppressLiveUpdates || _loadingSubtitleChoices) return;
+        if (_suppressLiveUpdates || _loadingMovieTrackChoices) return;
         var source = _viewModel?.SelectedSource;
         if (source?.IsMoviePlaylist == true) CommitMoviePlaylist(source);
     }

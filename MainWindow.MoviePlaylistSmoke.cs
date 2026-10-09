@@ -13,7 +13,7 @@ public partial class MainWindow
     internal void RunMoviePlaylistChecks(string video, string srt, string directory)
     {
         static void Require(bool value, string message) => SmokeTestRunner.RequireSceneCheck(value, message);
-        var first = new MoviePlaylistEntry { FilePath = video };
+        var first = new MoviePlaylistEntry { FilePath = video, AudioTrack = 1 };
         var second = new MoviePlaylistEntry { FilePath = video, SubtitleMode = "Srt", SubtitlePath = srt };
         var settings = new MoviePlaylistSettings { ResumePlayback = true, BookmarkMovieId = second.Id, BookmarkSeconds = 1.25 };
         settings.Movies.Add(first);
@@ -46,6 +46,72 @@ public partial class MainWindow
         Require(HasCaption(NextFrame()), "External SRT was missing after a seek (or its punctuation path was misescaped).");
         Require(session.JumpToMovie(first.Id, 2.25), "Could not select embedded subtitles.");
         Require(HasCaption(NextFrame()) && session.SubtitleStatus.Contains("Embedded"), "Embedded subtitles were missing after a seek.");
+        RequireAudioFrequency(880);
+        Require(session.AudioStatus.Contains("Original English"), "Playback status did not identify the selected audio track.");
+
+        void RequireAudioFrequency(double frequency)
+        {
+            session.SetAudioMaster(true, 1);
+            session.SetAudioEnabled(true);
+            var samples = new float[4800];
+            Require(session.MixOfflineAudioFrame(samples), "Selected movie audio could not be decoded.");
+            RequirePcmFrequency(samples, frequency);
+            session.SetAudioMaster(false, 0);
+        }
+
+        void RequirePcmFrequency(float[] samples, double frequency)
+        {
+            static double Power(float[] pcm, double hz)
+            {
+                double real = 0, imaginary = 0;
+                for (int i = 0; i < pcm.Length; i++)
+                {
+                    double phase = 2 * Math.PI * hz * i / 48000;
+                    real += pcm[i] * Math.Cos(phase);
+                    imaginary += pcm[i] * Math.Sin(phase);
+                }
+                return real * real + imaginary * imaginary;
+            }
+            Require(Power(samples, frequency) > 10 && Power(samples, frequency) > Power(samples, frequency == 880 ? 440 : 880) * 20,
+                "Decoded PCM came from the wrong audio track.");
+        }
+
+        session.SetPlaybackPaused(true);
+        var audioBookmark = session.GetBookmark();
+        var audioEdit = settings.Clone();
+        audioEdit.Movies[0].AudioTrack = 0;
+        ApplyMoviePlaylistSettings(source, audioEdit);
+        NextFrame();
+        Require(session.TryGetPlaybackState(out var audioState) && audioState.IsPaused &&
+            session.GetBookmark().movieId == audioBookmark.movieId && Math.Abs(session.GetBookmark().seconds - audioBookmark.seconds) < 0.001,
+            "Changing audio track reset the movie, time, or pause state.");
+        session.SetPlaybackPaused(false);
+        RequireAudioFrequency(440);
+        ApplyMoviePlaylistSettings(source, settings);
+        NextFrame();
+        RequireAudioFrequency(880);
+
+        // Exercise the real live PCM decoder in analysis-only mode, without a speaker device.
+        foreach (int track in new[] { 0, 1 })
+        {
+            var liveSettings = new MoviePlaylistSettings();
+            liveSettings.Movies.Add(new MoviePlaylistEntry { FilePath = video, SubtitleMode = "Off", AudioTrack = track });
+            using var live = new FileCaptureService.VideoSequenceSession(new[] { video }, liveSettings);
+            live.SetLiveAudioAnalysisEnabled(true);
+            live.SetAudioMaster(true, 1);
+            live.SetAudioEnabled(true);
+            var pcm = new float[4800];
+            int count = 0;
+            var clock = Stopwatch.StartNew();
+            while (count < pcm.Length && clock.Elapsed.TotalSeconds < 15)
+            {
+                live.CaptureFrame(320, 180, FitMode.Fit, true);
+                count += live.MixLiveAudioSamples(pcm.AsSpan(count));
+                Thread.Sleep(10);
+            }
+            Require(count == pcm.Length, "Live selected-track audio analysis did not publish PCM.");
+            RequirePcmFrequency(pcm, track == 0 ? 440 : 880);
+        }
 
         var running = session.GetBookmark();
         var reordered = settings.Clone();
@@ -56,12 +122,15 @@ public partial class MainWindow
         session.SetPlaybackPaused(true);
         double paused = session.GetBookmark().seconds;
         NextFrame();
-        Require(Math.Abs(session.GetBookmark().seconds - paused) < 0.001, "Paused playlist advanced its media clock.");
+        Require(Math.Abs(session.GetBookmark().seconds - paused) < 0.001,
+            $"Paused playlist advanced its media clock: before={paused:R}, after={session.GetBookmark().seconds:R}.");
         session.SetPlaybackPaused(false);
 
         var snapshot = BuildSourceConfigs(new List<CaptureSource> { source }).Single();
         Require(snapshot.MoviePlaylist!.BookmarkMovieId == first.Id && snapshot.MoviePlaylist.BookmarkSeconds >= 2.25, "Autosave lost the running bookmark.");
         var saved = JsonSerializer.Deserialize<AppConfig.SourceConfig>(JsonSerializer.Serialize(snapshot))!;
+        Require(saved.MoviePlaylist!.Movies.Single(movie => movie.Id == first.Id).AudioTrack == 1,
+            "Application autosave lost the audio track selection.");
         var loaded = new List<CaptureSource>();
         RestoreSourceList(new[] { saved }, loaded, Array.Empty<WindowHandleInfo>(), Array.Empty<WebcamCaptureService.CameraInfo>());
         try
@@ -77,6 +146,9 @@ public partial class MainWindow
         var restoredModel = LayerConfigFile.Parse(JsonSerializer.Serialize(project)).ToEditorSources().Single(item => item.IsMoviePlaylist);
         Require(restoredModel.IsMoviePlaylist && restoredModel.MoviePlaylist.Movies.Select(movie => movie.Id).SequenceEqual(reordered.Movies.Select(movie => movie.Id)),
             "Project export/import lost movie order or identity.");
+        Require(restoredModel.MoviePlaylist.Movies.Single(movie => movie.Id == first.Id).AudioTrack == 1 &&
+            restoredModel.MoviePlaylist.Movies.Single(movie => movie.Id == second.Id).AudioTrack == 0,
+            "Project export/import lost independent per-entry audio choices.");
         using (var reopened = new FileCaptureService.VideoSequenceSession(session.Paths, restoredModel.MoviePlaylist))
             Require(reopened.GetBookmark().movieId == first.Id && reopened.GetBookmark().seconds >= 2.25, "Project reopen lost the saved bookmark.");
         var noResume = restoredModel.MoviePlaylist.Clone();
@@ -152,6 +224,15 @@ public partial class MainWindow
         ApplyMoviePlaylistSettings(source, missing);
         session.JumpToMovie(second.Id, 2.25);
         Require(!HasCaption(NextFrame()), "Subtitles Off still rendered captions.");
+        var missingAudio = reordered.Clone();
+        missingAudio.Movies.Single(movie => movie.Id == first.Id).AudioTrack = 99;
+        ApplyMoviePlaylistSettings(source, missingAudio);
+        session.JumpToMovie(first.Id, 2.25);
+        NextFrame();
+        Require(session.AudioStatus.Contains("unavailable"), "Missing saved audio track did not report its fallback.");
+        RequireAudioFrequency(440);
+        session.JumpToMovie(second.Id, 2.25);
+        NextFrame();
 
         var removed = settings.Clone();
         removed.Movies.RemoveAt(1); // Remove the active entry while its movie is playing.

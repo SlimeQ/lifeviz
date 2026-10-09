@@ -87,6 +87,12 @@ internal sealed partial class FileCaptureService : IDisposable
         return probe?.SubtitleTracks;
     }
 
+    internal static async Task<MovieAudioTrack[]?> GetMovieAudioTracksAsync(string path)
+    {
+        var probe = await GetVideoProbeAsync(path).ConfigureAwait(false);
+        return probe?.AudioTracks;
+    }
+
     private static Task<VideoSession.VideoProbeInfo?> GetVideoProbeAsync(string path)
     {
         if (string.IsNullOrWhiteSpace(path))
@@ -1699,7 +1705,8 @@ internal sealed partial class FileCaptureService : IDisposable
                 string? codecName = null,
                 bool hasAlpha = false,
                 double frameRate = 0,
-                MovieSubtitleTrack[]? subtitleTracks = null)
+                MovieSubtitleTrack[]? subtitleTracks = null,
+                MovieAudioTrack[]? audioTracks = null)
             {
                 Width = width;
                 Height = height;
@@ -1708,6 +1715,7 @@ internal sealed partial class FileCaptureService : IDisposable
                 HasAlpha = hasAlpha;
                 FrameRate = double.IsFinite(frameRate) && frameRate > 0 ? frameRate : 0;
                 SubtitleTracks = subtitleTracks ?? Array.Empty<MovieSubtitleTrack>();
+                AudioTracks = audioTracks ?? Array.Empty<MovieAudioTrack>();
             }
 
             public int Width { get; }
@@ -1717,6 +1725,7 @@ internal sealed partial class FileCaptureService : IDisposable
             public bool HasAlpha { get; }
             public double FrameRate { get; }
             public MovieSubtitleTrack[] SubtitleTracks { get; }
+            public MovieAudioTrack[] AudioTracks { get; }
         }
 
         public readonly struct ResolvedPlayback
@@ -1734,6 +1743,8 @@ internal sealed partial class FileCaptureService : IDisposable
         private readonly bool _loopPlayback;
         private string? _subtitlePath;
         private int? _subtitleTrack;
+        private int _audioTrack;
+        internal void ConfigureAudioTrack(int track) => _audioTrack = Math.Max(0, track);
         internal void ConfigureSubtitles(string? path, int? track)
         {
             _subtitlePath = path;
@@ -2787,7 +2798,7 @@ internal sealed partial class FileCaptureService : IDisposable
             args += $" -i \"{playbackUrl}\"{BuildDecodeDurationOutputArg()}";
             // stream_loop restarts source timestamps. Rebase PCM timestamps to the emitted
             // sample count so the raw output muxer never receives non-monotonic DTS values.
-            args += " -map 0:a:0? -vn -af \"asetpts=N/SR/TB\" -ac 1 -ar 48000 -acodec pcm_f32le -f f32le -";
+            args += $" -map 0:a:{_audioTrack}? -vn -af \"asetpts=N/SR/TB\" -ac 1 -ar 48000 -acodec pcm_f32le -f f32le -";
 
             Process? process = null;
             bool published = false;
@@ -3796,7 +3807,7 @@ internal sealed partial class FileCaptureService : IDisposable
                 args += " -stream_loop -1";
             }
             args += $" -i \"{playbackUrl}\"{BuildDecodeDurationOutputArg()}";
-            args += " -map 0:a:0 -vn";
+            args += $" -map 0:a:{_audioTrack} -vn";
             // Audio starts only after the resumed video generation publishes its
             // first fresh frame. Pace the independently-seeking decoder from its
             // first output and rebase after a short device/pipe stall instead of
@@ -4408,7 +4419,7 @@ internal sealed partial class FileCaptureService : IDisposable
                 {
                     (string codecName, bool hasAlpha, double frameRate) = ParsePrimaryVideoStreamMetadata(output);
                     return new VideoProbeInfo(width, height, durationSeconds, codecName, hasAlpha, frameRate,
-                        MoviePlaylistSettings.ParseSubtitleTracks(output));
+                        MoviePlaylistSettings.ParseSubtitleTracks(output), MoviePlaylistSettings.ParseAudioTracks(output));
                 }
             }
             catch (Exception ex)
@@ -4455,6 +4466,7 @@ internal sealed partial class FileCaptureService : IDisposable
         private MoviePlaylistSettings? _playlist;
         private double _pendingStartSeconds;
         public string SubtitleStatus { get; private set; } = string.Empty;
+        public string AudioStatus { get; private set; } = string.Empty;
             
         public VideoSequenceSession(IReadOnlyList<string> paths, MoviePlaylistSettings? playlist = null)
         {
@@ -4498,7 +4510,8 @@ internal sealed partial class FileCaptureService : IDisposable
                 var newMovie = next.Movies.ElementAtOrDefault(index);
                 bool keepDecoder = oldMovie != null && newMovie != null &&
                     oldMovie.FilePath == newMovie.FilePath && oldMovie.SubtitleMode == newMovie.SubtitleMode &&
-                    oldMovie.SubtitlePath == newMovie.SubtitlePath && oldMovie.SubtitleTrack == newMovie.SubtitleTrack;
+                    oldMovie.SubtitlePath == newMovie.SubtitlePath && oldMovie.SubtitleTrack == newMovie.SubtitleTrack &&
+                    oldMovie.AudioTrack == newMovie.AudioTrack;
                 _playlist = next;
                 _paths.Clear();
                 _paths.AddRange(next.Movies.Select(movie => movie.FilePath));
@@ -4604,7 +4617,10 @@ internal sealed partial class FileCaptureService : IDisposable
                             _errorStreak = 0;
                         }
 
-                        if (current.ConsumeEnded())
+                        // A stopped decoder may already have reached EOF while its
+                        // queued frames were still being consumed. Hold the selected
+                        // movie while paused; resuming restarts at the held position.
+                        if (!_playbackPaused && current.ConsumeEnded())
                         {
                             BeginAdvance(isError: false);
                             return frame ?? _lastFrame;
@@ -4971,6 +4987,10 @@ internal sealed partial class FileCaptureService : IDisposable
             {
                 session.EnablePausedPreview();
                 var movie = _playlist.Movies[movieIndex];
+                int audioTrack = movie.AudioTrack < probe.AudioTracks.Length ? movie.AudioTrack : 0;
+                session.ConfigureAudioTrack(audioTrack);
+                AudioStatus = probe.AudioTracks.Length == 0 ? "No audio tracks" :
+                    "Audio: " + probe.AudioTracks[audioTrack].Label + (audioTrack != movie.AudioTrack ? " — saved track unavailable; using first track" : "");
                 SubtitleStatus = "Subtitles off";
                 if (movie.SubtitleMode == "Srt")
                 {

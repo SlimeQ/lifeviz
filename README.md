@@ -1,5 +1,7 @@
 # LifeViz
 
+Movie Playlist entries now offer a labelled **Audio track** selector under Selected Movie. Pick the language or commentary track using its title, codec, channels, and default flag. Each entry saves its own choice; live switching preserves the movie, playback time, and pause state. The selected track also feeds Video Stack audio analysis and background bakes.
+
 Update confirmation, ready, and error dialogs opened through the Scene Editor's App Controls belong to the editor, so they appear on its monitor. Updates initiated from the main window keep their dialogs there.
 
 **Movie Playlist** layers play full movies in an editable order and loop the entire list. A dedicated player offers a full-width scrub bar, elapsed/total time, Play/Pause, Previous/Next movie, and a Now playing dropdown that switches movies immediately. Embedded subtitle tracks are listed by language, title, codec, and default/forced flags; external SRTs and Off are also supported, and matching sidecar SRTs are picked up when adding movies. Optional resume restores the movie and time captured on project Save or app shutdown. See [Movie Playlists](wiki/Movie-Playlists.md). After a Release build, run `dotnet bin/Release/net9.0-windows/lifeviz.dll --smoke-test movie-playlist` to validate playback, captions, navigation, persistence, and editor controls.
