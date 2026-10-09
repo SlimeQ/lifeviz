@@ -2664,11 +2664,15 @@ internal sealed partial class FileCaptureService : IDisposable
                 : null;
 
             int decodeFps = _offlineRenderEnabled ? _offlineRenderFps : _videoDecodeFpsLimit;
+            // Captions temporarily change PTS. A defined CFR lets the restoring
+            // filter recover seconds without guessing the input time base.
+            if (HasSubtitles && decodeFps <= 0)
+                decodeFps = _sourceFrameRate > 0 ? (int)Math.Clamp(Math.Ceiling(_sourceFrameRate), 1, 1000) : 30;
             return BuildVideoOutputFilterPlan(
                 _offlineRenderEnabled,
                 decodeFps,
                 directFilter,
-                paceLiveOutput: true,
+                paceLiveOutput: !HasSubtitles,
                 sourceFrameRate: _sourceFrameRate);
         }
 
@@ -3029,11 +3033,19 @@ internal sealed partial class FileCaptureService : IDisposable
                 double subtitleSeekSeconds = startOffsetSeconds > 0.05 ? startOffsetSeconds : 0;
                 if (_subtitlePath != null)
                 {
-                    // Keep cadence, geometry and realtime pacing on the movie's
-                    // original clock. Only caption lookup uses the adjustable clock.
+                    // Caption lookup borrows its clock between cadence and final
+                    // pacing. Restore movie seconds before pacing the output.
                     string subtitleFilter = MoviePlaylistSettings.BuildSubtitleFilter(_subtitlePath, _subtitleTrack,
                         subtitleSeekSeconds, subtitleDelayAtStartup);
                     videoFilter = (string.IsNullOrEmpty(videoFilter) ? "" : videoFilter + ",") + subtitleFilter;
+                    if (!_offlineRenderEnabled)
+                    {
+                        // Finish expensive caption/pixel conversion before pacing.
+                        // A brief render/pipe stall must catch up to movie time,
+                        // rather than permanently rebase video away from audio.
+                        // The bounded live queue drops obsolete catch-up frames.
+                        videoFilter += ",format=bgra,realtime=limit=86400";
+                    }
                 }
                 if (!string.IsNullOrWhiteSpace(videoFilter))
                 {

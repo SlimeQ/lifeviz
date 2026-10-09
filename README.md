@@ -1,5 +1,7 @@
 # LifeViz
 
+Subtitle-enabled movie playback now keeps a stable movie clock through brief rendering/pipe stalls. Caption rendering and BGRA conversion finish before final pacing; late frames catch up instead of permanently moving video behind audio. Regression checks use actual encoded movie-frame numbers at 23.976 fps with a saved +84-second subtitle offset, repeated video-only decoder stalls, live nudges, and PCM audio.
+
 Movie Playlist subtitle timing is saved per movie. **Earlier/Later 0.1 s** buttons beside the player nudge the playing movie during playback; hold to repeat. Selected Movie also provides 1-second nudges, an exact signed offset, and Reset timing. Positive offsets show captions later, negative offsets earlier. Live timing updates keep the movie and audio decoders running, preserving the clock and pause state; SRT files remain unchanged.
 
 Movie Playlist entries now offer a labelled **Audio track** selector under Selected Movie. Pick the language or commentary track using its title, codec, channels, and default flag. Each entry saves its own choice; live switching preserves the movie, playback time, and pause state. The selected track also feeds Video Stack audio analysis and background bakes.

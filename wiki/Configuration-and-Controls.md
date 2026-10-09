@@ -4,6 +4,8 @@
 
 ## Movie Playlist layers
 
+Subtitle timing changes keep a stable movie/audio clock through brief rendering stalls. After updating from a version that accumulated playback drift, adjust the subtitle offset again if a large value was compensating for that drift. Existing saved offsets are preserved; the timing control changes caption lookup, not movie speed.
+
 **Subtitle timing:** the player has **Earlier 0.1 s / Later 0.1 s** and **Reset timing** for the movie currently playing. Hold a nudge button to repeat. These controls keep targeting the playing movie even if a different authored entry is selected for editing. Under Selected Movie, **Earlier 1 s / Later 1 s**, Reset timing, and an exact signed offset edit that selected entry (including drafts). Press Enter or leave the exact field to commit; invalid/nonfinite input restores the previous value. Positive seconds delay captions; negative seconds advance them. Timing is independent per playlist entry, applies to SRT and embedded text subtitles, and is saved in the scene/autosave. Old scenes default to zero. Running adjustments preserve the video/audio processes and movie clock; paused adjustments refresh the still while preserving pause/time. Reset changes only timing.
 
 Audio selection applies as soon as a track is selected during a user dropdown or keyboard gesture, before popup-close/focus events. Restarting the movie keeps the chosen audio. Opening/closing the picker without a new choice and editor refreshes leave the saved track alone.

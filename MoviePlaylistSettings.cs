@@ -133,10 +133,9 @@ internal sealed class MoviePlaylistSettings : LayerEditorNotify
         string escaped = path.Replace('\\', '/').Replace("'", "\\'").Replace(":", "\\:");
         escaped = escaped.Replace("\\", "\\\\").Replace("'", "\\'").Replace(",", "\\,").Replace(";", "\\;").Replace("[", "\\[").Replace("]", "\\]");
         string filter = $"subtitles=filename={escaped}" + (track.HasValue ? $":si={track.Value}" : "");
-        // Caption lookup runs after cadence/geometry/pacing on its own clock.
-        // Raw BGRA consumers use frame order, so restore monotonic output PTS
-        // independently of that clock. Nudges cannot change pacing or frame count.
-        return $"setpts@lifeviz_subtitles={BuildSubtitleClockExpression(offsetSeconds, delaySeconds)},{filter},setpts=N";
+        // The fps filter establishes a constant cadence. Restore seconds at that
+        // cadence before final pacing, regardless of the link's timestamp units.
+        return $"setpts@lifeviz_subtitles={BuildSubtitleClockExpression(offsetSeconds, delaySeconds)},{filter},setpts=N/(FRAME_RATE*TB)";
     }
 
     internal static MovieSubtitleTrack[] ParseSubtitleTracks(string output)
