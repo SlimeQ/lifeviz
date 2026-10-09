@@ -50,6 +50,8 @@ Projects contain movie and SRT paths, audio track numbers, subtitle modes/track 
 
 ## Validation
 
+The sync regression also runs with subtitles Off and alternately suspends only its own video or audio decoder. A stereo amplitude ramp encodes the actual PCM sample time, allowing audio drift to be measured rather than inferred from sample counts. The test requires both actual movie frames and PCM to recover to within 250 ms of the movie clock, with prompt PCM delivery and unchanged decoder processes. Negative controls restore the old video reset or independent audio pacing and must fail.
+
 The drift regression generates a lossless 23.976-fps movie with source frame numbers encoded in a corner and PCM audio. It seeks to 84 seconds with a +84-second caption delay, checks several cue boundaries against actual movie-frame time, applies live nudges, and briefly suspends only its isolated video decoder for repeated 300-ms stalls while audio continues. It checks recovery against the movie/audio clock, unchanged decoder processes, and caption timing for SRT and embedded tracks, including uncapped native cadence. Comparing only an advancing wall-clock bookmark would miss a movie that is actually falling behind.
 
 Timing checks also generate a longer live fixture and verify signed SRT/embedded offsets at seeks, paused caption refresh, exact/reset/repeated nudge controls, and independent scene/autosave persistence. Live caption pixels change while movie/audio process IDs remain unchanged, frames and PCM continue arriving, and the movie clock advances with wall time.

@@ -2450,8 +2450,8 @@ internal static partial class SmokeTestRunner
                                     resumedStateAfterActivation.PositionSeconds <=
                                         resumedStateAtActivation.PositionSeconds + 0.5;
 
-        var pacingStall = RunRealtimeDebtRebaseSmoke();
-        bool postStallBurstBounded = pacingStall.ok;
+        var pacingStall = RunRealtimeStallCatchUpSmoke();
+        bool postStallClockRecovered = pacingStall.ok;
 
         detector.BeginExternalInput();
         detector.SetAnalysisRequirements(enableSpectrumAnalysis: true, enableDebugHistory: false);
@@ -2500,7 +2500,7 @@ internal static partial class SmokeTestRunner
         bool resumeGenerationOk = initialPlaybackActivated && pauseApplied && pausedClockHeld &&
                                   resumeApplied && resumeClockHeldBeforePublication &&
                                   resumedFreshFrame.HasValue && resumedClockReleased &&
-                                  postStallBurstBounded;
+                                  postStallClockRecovered;
         bool ok = setupWasNonblocking && mutedIgnored && resumeGenerationOk && recentAudioBounded &&
                   receivedAudio && peakRms > 0.0001 && peakLevel > 0.01 && peakBand > 0.001;
         Logger.Info($"Live video-audio smoke: mutedIgnored={mutedIgnored}, received={receivedAudio}, peakRms={peakRms:F6}, " +
@@ -2509,12 +2509,12 @@ internal static partial class SmokeTestRunner
                     $"initialActivated={initialPlaybackActivated}, pauseApplied={pauseApplied}, pausedClockHeld={pausedClockHeld}, " +
                     $"resumeApplied={resumeApplied}, resumeClockHeld={resumeClockHeldBeforePublication}, " +
                     $"freshResumeFrame={resumedFreshFrame.HasValue}, resumedClockReleased={resumedClockReleased}, " +
-                    $"debtRebaseFrames={pacingStall.framesRead}, debtRebaseSpan={pacingStall.spanSeconds:F3}s, " +
-                    $"debtRebaseWarning={pacingStall.sawResetWarning}, postStallBurstBounded={postStallBurstBounded}, recentAudioBounded={recentAudioBounded}, ok={ok}.");
+                    $"stallCatchUpFrames={pacingStall.framesRead}, stallCatchUpSpan={pacingStall.spanSeconds:F3}s, " +
+                    $"stallResetWarning={pacingStall.sawResetWarning}, postStallClockRecovered={postStallClockRecovered}, recentAudioBounded={recentAudioBounded}, ok={ok}.");
         return ok ? 0 : 1;
     }
 
-    private static (bool ok, int framesRead, double spanSeconds, bool sawResetWarning) RunRealtimeDebtRebaseSmoke()
+    private static (bool ok, int framesRead, double spanSeconds, bool sawResetWarning) RunRealtimeStallCatchUpSmoke()
     {
         const int width = 64;
         const int height = 64;
@@ -2541,10 +2541,7 @@ internal static partial class SmokeTestRunner
             psi.ArgumentList.Add("-i");
             psi.ArgumentList.Add("testsrc2=size=64x64:rate=30");
             psi.ArgumentList.Add("-vf");
-            // Shift PTS backward after four normally paced frames. That creates
-            // the exact negative realtime deadline debt caused by a suspended or
-            // starved live decoder, without depending on OS pipe-buffer capacity.
-            psi.ArgumentList.Add("setpts=if(gte(N\\,4)\\,PTS-0.6/TB\\,PTS),realtime=limit=0.1");
+            psi.ArgumentList.Add(FileCaptureService.BuildVideoOutputFilterPlan(false, 30, null));
             psi.ArgumentList.Add("-filter_threads");
             psi.ArgumentList.Add("1");
             psi.ArgumentList.Add("-frames:v");
@@ -2575,6 +2572,7 @@ internal static partial class SmokeTestRunner
                 }
 
                 long started = Stopwatch.GetTimestamp();
+                MainWindow.StallDecoderForSmoke(process, 300);
                 int framesRead = 0;
                 for (; framesRead < measuredFrames; framesRead++)
                 {
@@ -2590,21 +2588,17 @@ internal static partial class SmokeTestRunner
             }
 
             var result = readTask.GetAwaiter().GetResult();
-            bool resetObserved = SpinWait.SpinUntil(
-                () => Volatile.Read(ref sawResetWarning) != 0,
-                millisecondsTimeout: 500);
-            // With the old two-second discontinuity window these twelve frames are
-            // dumped almost immediately. A three-frame (100 ms at 30 fps) limit
-            // rebases after the injected deadline discontinuity and makes this sample span
-            // normal frame intervals.
+            bool resetObserved = Volatile.Read(ref sawResetWarning) != 0;
+            // The 300 ms video-only stall belongs inside the original 400 ms
+            // movie interval. Rebasing would permanently add the stall to it.
             bool ok = result.framesRead == measuredFrames &&
-                      result.TotalSeconds is >= 0.18 and <= 1.5 &&
-                      resetObserved;
+                      result.TotalSeconds is >= 0.3 and <= 0.65 &&
+                      !resetObserved;
             return (ok, result.framesRead, result.TotalSeconds, resetObserved);
         }
         catch (Exception ex)
         {
-            Logger.Warn($"Realtime debt-rebase smoke failed: {ex.Message}");
+            Logger.Warn($"Realtime stall catch-up smoke failed: {ex.Message}");
             return (false, 0, 0, Volatile.Read(ref sawResetWarning) != 0);
         }
         finally
@@ -2624,7 +2618,7 @@ internal static partial class SmokeTestRunner
         const string directScaleFilter = "scale=160:90";
         const string expectedLiveFilter =
             "fps='if(gt(source_fps,0),min(source_fps,30),30)',scale=160:90";
-        const string pacedFilterSuffix = "realtime=limit=0.1";
+        const string pacedFilterSuffix = "format=bgra,realtime=limit=86400";
         bool realtimeInputSelectionOk =
             !FileCaptureService.ShouldUseInputRealtimeForVideo(
                 offlineRender: false,
@@ -2673,10 +2667,10 @@ internal static partial class SmokeTestRunner
             string.Equals(ordinaryOfflineFilter, $"{directScaleFilter},fps=30", StringComparison.Ordinal) &&
             string.Equals(pacedOfflineFilter, ordinaryOfflineFilter, StringComparison.Ordinal) &&
             string.Equals(unpacedLiveFilter, expectedLiveFilter, StringComparison.Ordinal) &&
-            lowFpsLiveFilter.EndsWith(",realtime=limit=1.5", StringComparison.Ordinal) &&
+            lowFpsLiveFilter.EndsWith("," + pacedFilterSuffix, StringComparison.Ordinal) &&
             string.Equals(
-                FileCaptureService.BuildLiveAudioPacingFilter(),
-                "aresample=48000,asetnsamples=n=1024:p=1,arealtime=limit=0.1",
+                FileCaptureService.BuildLiveAudioOutputFilter(),
+                "aresample=48000,asetnsamples=n=1024:p=1",
                 StringComparison.Ordinal) &&
             Math.Abs(FileCaptureService.ParseVideoFrameRateForSmoke(representativeProbe) - 30) < 0.001 &&
             FileCaptureService.IsExpectedRealtimeResetWarning(

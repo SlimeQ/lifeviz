@@ -529,18 +529,10 @@ internal sealed partial class FileCaptureService : IDisposable
         // and decoder warm-up. It also accumulates read-rate debt while a redirected
         // stdout pipe is blocked, then emits frames as fast as possible to catch up.
         // Pace at the end of the output graph instead so each process anchors on its
-        // first decoded frame. A cadence-relative discontinuity limit bounds later
-        // stalls to roughly three output frames without breaking low-FPS media.
-        // When the live fps filter is active, unknown source rates are normalized to
-        // decodeFps; with no known cadence, retain FFmpeg's conservative default.
-        double effectiveFrameRate = decodeFps > 0
-            ? sourceFrameRate > 0
-                ? Math.Min(sourceFrameRate, decodeFps)
-                : decodeFps
-            : 0;
-        string firstFramePacingFilter = effectiveFrameRate > 0 && double.IsFinite(effectiveFrameRate)
-            ? $"realtime=limit={(3.0 / effectiveFrameRate).ToString("0.######", CultureInfo.InvariantCulture)}"
-            : "realtime";
+        // first decoded frame. Brief stalls must catch up rather than permanently
+        // rebase video away from the movie clock. Convert pixels before pacing;
+        // the bounded live queue discards obsolete catch-up frames.
+        const string firstFramePacingFilter = "format=bgra,realtime=limit=86400";
         return string.IsNullOrWhiteSpace(outputFilter)
             ? firstFramePacingFilter
             : $"{outputFilter},{firstFramePacingFilter}";
@@ -558,13 +550,13 @@ internal sealed partial class FileCaptureService : IDisposable
                line.IndexOf("Parsed_arealtime", StringComparison.OrdinalIgnoreCase) >= 0;
     }
 
-    internal static string BuildLiveAudioPacingFilter()
+    internal static string BuildLiveAudioOutputFilter()
     {
         // Decoder audio packets can legitimately span more than 100 ms at low
         // sample rates. Normalize them to 1024-sample, 48 kHz frames before the
-        // discontinuity guard so normal packet cadence is never mistaken for a
-        // stall while actual resume debt still rebases promptly.
-        return "aresample=48000,asetnsamples=n=1024:p=1,arealtime=limit=0.1";
+        // managed sample scheduler. PCM delivery follows the movie clock instead
+        // of anchoring an independent FFmpeg wall clock after decoder warm-up.
+        return "aresample=48000,asetnsamples=n=1024:p=1";
     }
 
     public void BeginOfflineRender(int fps, double startTimeSeconds)
@@ -3942,7 +3934,17 @@ internal sealed partial class FileCaptureService : IDisposable
                 analysisOnly = _liveAudioAnalysisEnabled;
                 audioGeneration = ++_audioPipelineGeneration;
             }
-            var seekSeconds = GetEstimatedPlaybackOffsetSeconds();
+            double seekSeconds;
+            double audioClockOrigin;
+            lock (_audioLock)
+            {
+                // Keep an unwrapped clock origin so a looping movie crossing its
+                // duration does not confuse sample scheduling.
+                double movieClock = _playbackBaseOffsetSeconds + _playbackClock.Elapsed.TotalSeconds;
+                seekSeconds = NormalizeOffsetNoLock(movieClock);
+                double decoderSeek = seekSeconds > 0.05 ? Math.Round(seekSeconds, 3) : 0;
+                audioClockOrigin = movieClock + decoderSeek - seekSeconds;
+            }
             string args = "-hide_banner -loglevel warning";
             if (seekSeconds > 0.05)
             {
@@ -3956,10 +3958,10 @@ internal sealed partial class FileCaptureService : IDisposable
             args += $" -i \"{playbackUrl}\"{BuildDecodeDurationOutputArg()}";
             args += $" -map 0:a:{_audioTrack} -vn";
             // Audio starts only after the resumed video generation publishes its
-            // first fresh frame. Pace the independently-seeking decoder from its
-            // first output and rebase after a short device/pipe stall instead of
-            // filling or discarding a catch-up burst.
-            args += $" -af \"{BuildLiveAudioPacingFilter()}\"";
+            // first fresh frame. Pace the independently-seeking decoder from
+            // the movie clock in the managed PCM worker. It limits lookahead and
+            // drops stale samples after warm-up or a decoder stall.
+            args += $" -af \"{BuildLiveAudioOutputFilter()}\"";
             args += " -ac 2 -ar 48000 -acodec pcm_s16le -f s16le -";
 
             Process? process = null;
@@ -4005,7 +4007,7 @@ internal sealed partial class FileCaptureService : IDisposable
                 {
                     bufferProvider = new BufferedWaveProvider(new WaveFormat(48000, 16, 2))
                     {
-                        BufferDuration = TimeSpan.FromSeconds(1.5),
+                        BufferDuration = TimeSpan.FromMilliseconds(300),
                         DiscardOnBufferOverflow = true
                     };
                     output = new WaveOutEvent
@@ -4043,7 +4045,7 @@ internal sealed partial class FileCaptureService : IDisposable
                         published = true;
                         output?.Play();
                         _audioDecodeTask = RunBackgroundLongRunning(
-                            () => AudioDecodeWorker(process, audioToken, () => Volatile.Read(ref fatalAudioError) != 0),
+                            () => AudioDecodeWorker(process, audioToken, audioClockOrigin, () => Volatile.Read(ref fatalAudioError) != 0),
                             "LifeViz.AudioDecode");
                     }
                 }
@@ -4150,21 +4152,46 @@ internal sealed partial class FileCaptureService : IDisposable
             return offsetSeconds;
         }
 
-        private void AudioDecodeWorker(Process process, CancellationToken token, Func<bool> hasFatalError)
+        private void AudioDecodeWorker(Process process, CancellationToken token, double clockOrigin, Func<bool> hasFatalError)
         {
             int exitCode = 0;
             try
             {
                 using var stream = process.StandardOutput.BaseStream;
                 var buffer = new byte[8192];
+                int carriedBytes = 0;
+                long decodedFrames = 0;
+                const int sampleRate = 48000, frameBytes = 4, lookaheadFrames = 5760; // 120 ms, stereo PCM16.
                 while (!token.IsCancellationRequested)
                 {
-                    int read = stream.Read(buffer, 0, buffer.Length);
+                    int read = stream.Read(buffer, carriedBytes, buffer.Length - carriedBytes);
                     if (read <= 0)
                     {
                         break;
                     }
 
+                    int available = carriedBytes + read;
+                    int alignedBytes = available - available % frameBytes;
+                    long firstFrame = decodedFrames;
+                    decodedFrames += alignedBytes / frameBytes;
+                    long dueFrame;
+                    // Read ahead only enough to cover normal output-device latency.
+                    // A decoder resuming late may produce a burst; its obsolete PCM
+                    // must be discarded rather than queued as lasting audio lag.
+                    while (true)
+                    {
+                        lock (_audioLock)
+                        {
+                            if (!ReferenceEquals(_audioDecodeProcess, process) || _isDisposed || _playbackPaused || token.IsCancellationRequested)
+                                return;
+                            double elapsed = _playbackBaseOffsetSeconds + _playbackClock.Elapsed.TotalSeconds - clockOrigin;
+                            dueFrame = Math.Max(0, (long)Math.Floor(elapsed * sampleRate));
+                        }
+                        long ahead = decodedFrames - dueFrame - lookaheadFrames;
+                        if (ahead <= 0) break;
+                        if (token.WaitHandle.WaitOne((int)Math.Clamp(ahead * 1000 / sampleRate, 1, 10))) return;
+                    }
+                    int skipBytes = (int)Math.Clamp(dueFrame - firstFrame, 0, alignedBytes / frameBytes) * frameBytes;
                     BufferedWaveProvider? provider;
                     bool analyzeSilently;
                     lock (_audioLock)
@@ -4175,12 +4202,17 @@ internal sealed partial class FileCaptureService : IDisposable
 
                     if (analyzeSilently)
                     {
-                        AppendLiveAudioAnalysisSamples(buffer.AsSpan(0, read));
+                        AppendLiveAudioAnalysisSamples(buffer.AsSpan(skipBytes, alignedBytes - skipBytes));
                     }
                     else
                     {
-                        provider?.AddSamples(buffer, 0, read);
+                        // A stalled device must not retain a queue of old audio
+                        // while current chunks overflow and get discarded.
+                        if (provider?.BufferedDuration.TotalMilliseconds > 200) provider.ClearBuffer();
+                        provider?.AddSamples(buffer, skipBytes, alignedBytes - skipBytes);
                     }
+                    carriedBytes = available - alignedBytes;
+                    if (carriedBytes > 0) Buffer.BlockCopy(buffer, alignedBytes, buffer, 0, carriedBytes);
                 }
             }
             catch (Exception ex)

@@ -13,6 +13,18 @@ public partial class MainWindow
     private static extern int SuspendSubtitleSmokeProcess(IntPtr handle);
     [DllImport("ntdll.dll", EntryPoint = "NtResumeProcess")]
     private static extern int ResumeSubtitleSmokeProcess(IntPtr handle);
+
+    internal static void StallDecoderForSmoke(Process decoder, int milliseconds)
+    {
+        if (SuspendSubtitleSmokeProcess(decoder.Handle) < 0)
+            throw new InvalidOperationException("Could not suspend the isolated test decoder.");
+        try { Thread.Sleep(milliseconds); }
+        finally
+        {
+            if (ResumeSubtitleSmokeProcess(decoder.Handle) < 0)
+                throw new InvalidOperationException("Could not resume the isolated test decoder.");
+        }
+    }
     private void RunMovieSubtitleTimingChecks(string video, string srt, string directory)
     {
         static void Require(bool value, string message) => SmokeTestRunner.RequireSceneCheck(value, message);
@@ -160,7 +172,7 @@ public partial class MainWindow
         var info = new ProcessStartInfo { FileName = "ffmpeg", CreateNoWindow = true, RedirectStandardError = true };
         foreach (string arg in new[] { "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i",
             "nullsrc=s=160x90:r=24000/1001:d=110,format=gbrp,geq=r='mod(N,256)':g='floor(N/256)':b=0",
-            "-f", "lavfi", "-i", "sine=frequency=880:duration=110", "-i", srt,
+            "-f", "lavfi", "-i", "aevalsrc='t/150|t/150':s=48000:d=110", "-i", srt,
             "-map", "0:v:0", "-map", "1:a:0", "-map", "2:s:0", "-c:v", "ffv1", "-pix_fmt", "bgr0", "-c:a", "pcm_s16le", "-c:s", "srt", video })
             info.ArgumentList.Add(arg);
         using (var process = FfmpegProcessManager.Shared.Start(info))
@@ -170,7 +182,7 @@ public partial class MainWindow
             if (process.ExitCode != 0) throw new InvalidOperationException(errors.GetAwaiter().GetResult());
         }
 
-        foreach (string mode in new[] { "Srt", "Embedded" })
+        foreach (string mode in new[] { "Off", "Srt", "Embedded" })
         {
             var movie = new MoviePlaylistEntry { FilePath = video, SubtitleMode = mode, SubtitlePath = srt, SubtitleDelaySeconds = 84 };
             var settings = new MoviePlaylistSettings { ResumePlayback = true, BookmarkMovieId = movie.Id, BookmarkSeconds = 84 };
@@ -183,13 +195,15 @@ public partial class MainWindow
             var samples = new float[4096];
             var clock = Stopwatch.StartNew();
             int sampleCount = 0, cueChecks = 0, recoveries = 0;
-            double worstDrift = 0, nextStall = 1, recoverAfter = 0.5;
+            double worstDrift = 0, worstAudioDrift = 0, nextStall = 1, recoverAfter = 0.5, lastAudioWall = 0;
             bool warm = false;
             var pipeline = default((long videoGeneration, long audioGeneration, int? videoPid, int? audioPid));
             while (clock.Elapsed.TotalSeconds < 8)
             {
                 var frame = sequence.CaptureFrame(160, 90, FitMode.Fit, true);
-                sampleCount += sequence.MixLiveAudioSamples(samples);
+                Array.Clear(samples);
+                int audioCount = sequence.MixLiveAudioSamples(samples);
+                sampleCount += audioCount;
                 if (frame.HasValue && sequence.TryGetPlaybackState(out var state))
                 {
                     var pixels = frame.Value.OverlayDownscaled;
@@ -202,6 +216,7 @@ public partial class MainWindow
                     }
                     if (warm)
                     {
+                        if (audioCount > 0) lastAudioWall = clock.Elapsed.TotalSeconds;
                         SmokeTestRunner.RequireSceneCheck(sequence.GetSubtitlePipelineStateForSmoke() == pipeline,
                             mode + " large timing edits replaced a running decoder.");
                         double drift = Math.Abs(state.PositionSeconds - movieSeconds);
@@ -210,33 +225,38 @@ public partial class MainWindow
                         {
                             worstDrift = Math.Max(worstDrift, drift);
                             SmokeTestRunner.RequireSceneCheck(drift < 0.25,
-                                $"{mode} subtitle video drifted {drift:F3}s from audio/movie clock after a brief stall.");
+                                $"{mode} video drifted {drift:F3}s from the movie clock after a brief stall.");
+                            SmokeTestRunner.RequireSceneCheck(clock.Elapsed.TotalSeconds - lastAudioWall < 0.15,
+                                mode + " PCM delivery did not recover after an audio decoder stall.");
+                            if (audioCount > 0)
+                            {
+                                // PCM stores source time as a stereo amplitude ramp.
+                                // Check actual samples, not just process IDs or counts.
+                                double audioSeconds = samples[audioCount - 1] * 150;
+                                double audioDrift = Math.Abs(state.PositionSeconds - audioSeconds);
+                                worstAudioDrift = Math.Max(worstAudioDrift, audioDrift);
+                                SmokeTestRunner.RequireSceneCheck(audioDrift < 0.25,
+                                    $"{mode} audio drifted {audioDrift:F3}s from the movie clock after a brief stall.");
+                            }
                             recoveries++;
                         }
                         double subtitleSeconds = movieSeconds - movie.SubtitleDelaySeconds;
                         bool nearEdge = new[] { 0.0, 2, 3, 5, 6, 10 }.Any(edge => Math.Abs(subtitleSeconds - edge) < 0.15);
                         if (!nearEdge)
                         {
-                            bool expected = subtitleSeconds >= 0 && subtitleSeconds < 2 || subtitleSeconds >= 3 && subtitleSeconds < 5 || subtitleSeconds >= 6 && subtitleSeconds < 10;
+                            bool expected = mode != "Off" && (subtitleSeconds >= 0 && subtitleSeconds < 2 || subtitleSeconds >= 3 && subtitleSeconds < 5 || subtitleSeconds >= 6 && subtitleSeconds < 10);
                             bool caption = Enumerable.Range(0, pixels.Length / 4).Any(i => pixels[i * 4] > 100);
                             SmokeTestRunner.RequireSceneCheck(caption == expected, mode + " caption cue diverged from the actual movie frame with +84 s delay.");
                             cueChecks++;
                         }
                         if (clock.Elapsed.TotalSeconds >= nextStall && nextStall < 6)
                         {
-                            // Stall only this test's video decoder. Sleeping just
+                            // Stall only this test's video or audio decoder. Sleeping just
                             // the consumer lets FFmpeg buffer through the stall,
                             // masking the old pacing filter's clock reset.
-                            using (var decoder = Process.GetProcessById(pipeline.videoPid!.Value))
+                            using (var decoder = Process.GetProcessById(nextStall % 2 == 0 ? pipeline.audioPid!.Value : pipeline.videoPid!.Value))
                             {
-                                if (SuspendSubtitleSmokeProcess(decoder.Handle) < 0)
-                                    throw new InvalidOperationException("Could not suspend the isolated subtitle test decoder.");
-                                try { Thread.Sleep(300); }
-                                finally
-                                {
-                                    if (ResumeSubtitleSmokeProcess(decoder.Handle) < 0)
-                                        throw new InvalidOperationException("Could not resume the isolated subtitle test decoder.");
-                                }
+                                StallDecoderForSmoke(decoder, 300);
                             }
                             movie.SubtitleDelaySeconds = nextStall % 2 == 0 ? 84 : 84.1;
                             sequence.UpdatePlaylist(settings);
@@ -249,7 +269,7 @@ public partial class MainWindow
             }
             SmokeTestRunner.RequireSceneCheck(warm && sampleCount > 48000 && cueChecks > 20 && recoveries > 20,
                 mode + " subtitle drift test did not exercise movie frames, captions, PCM and recovery.");
-            Console.WriteLine($"Subtitle drift smoke {mode}: +84 s, fractional {fps:F3} fps, actual-frame drift <= {worstDrift:F3}s after repeated 300 ms video-only stalls, {cueChecks} cue checks, {sampleCount} PCM samples, same decoders.");
+            Console.WriteLine($"Movie drift smoke {mode}: +84 s, fractional {fps:F3} fps, video drift <= {worstDrift:F3}s, PCM drift <= {worstAudioDrift:F3}s after alternating 300 ms video/audio stalls, {cueChecks} cue checks, {sampleCount} PCM samples, same decoders.");
         }
     }
 }
