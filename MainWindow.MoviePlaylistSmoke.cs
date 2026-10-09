@@ -85,7 +85,7 @@ public partial class MainWindow
             Require(reopened.GetBookmark().movieId == second.Id && reopened.GetBookmark().seconds == 0, "Resume off did not start at the beginning of the list.");
 
         var editor = new LayerEditorWindow(this);
-        try { editor.ValidateMoviePlaylistControlsForSmoke(model, Path.Combine(directory, "playlist-editor.png")); }
+        try { editor.ValidateMoviePlaylistControlsForSmoke(model, Path.Combine(directory, "playlist-editor.png"), () => { NextFrame(); }); }
         finally { editor.Close(); }
 
         // Observe actual end-of-file transitions through two complete entries.

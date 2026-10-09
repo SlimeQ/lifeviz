@@ -18,7 +18,9 @@ internal static partial class SmokeTestRunner
         var info = new ProcessStartInfo { FileName = "ffmpeg", CreateNoWindow = true, RedirectStandardError = true };
         foreach (string arg in new[] { "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i", "color=c=black:s=320x180:r=10:d=4",
                      "-f", "lavfi", "-i", "sine=frequency=440:duration=4", "-i", srt,
-                     "-map", "0:v", "-map", "1:a", "-map", "2:s", "-c:v", "libx264", "-preset", "ultrafast", "-c:a", "aac", "-c:s", "srt", "-t", "4", video })
+                     "-map", "0:v", "-map", "1:a", "-map", "2:s", "-map", "2:s", "-c:v", "libx264", "-preset", "ultrafast", "-c:a", "aac", "-c:s", "srt",
+                     "-metadata:s:s:0", "language=eng", "-metadata:s:s:0", "title=English SDH", "-disposition:s:0", "default",
+                     "-metadata:s:s:1", "language=fra", "-metadata:s:s:1", "title=French signs", "-disposition:s:1", "forced", "-t", "4", video })
             info.ArgumentList.Add(arg);
         using (var process = FfmpegProcessManager.Shared.Start(info))
         {

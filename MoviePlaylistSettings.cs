@@ -19,10 +19,44 @@ internal sealed class MoviePlaylistEntry : LayerEditorNotify
     public string? SubtitlePath { get => _subtitlePath; set => SetField(ref _subtitlePath, value); }
     public int SubtitleTrack { get => _subtitleTrack; set => SetField(ref _subtitleTrack, Math.Max(0, value)); }
     [JsonIgnore] public string DisplayName => Path.GetFileName(FilePath);
+    public override string ToString() => DisplayName;
     [JsonIgnore] public LayerEditorOption[] SubtitleModes => Modes;
+    [JsonIgnore] public MovieSubtitleTrack[] EmbeddedSubtitleTracks { get; private set; } = Array.Empty<MovieSubtitleTrack>();
+    [JsonIgnore] public string EmbeddedSubtitleStatus { get; private set; } = "Reading embedded subtitle tracks...";
+    [JsonIgnore] public bool SubtitleTracksLoaded { get; private set; }
+    [JsonIgnore] public bool SubtitleTracksLoading { get; set; }
+    internal void SetSubtitleTracks(MovieSubtitleTrack[]? tracks)
+    {
+        EmbeddedSubtitleTracks = tracks ?? Array.Empty<MovieSubtitleTrack>();
+        SubtitleTracksLoaded = tracks != null;
+        EmbeddedSubtitleStatus = tracks == null ? "Could not read movie metadata. Check the file path and retry." :
+            tracks.Length == 0 ? "No embedded subtitle tracks. Choose an external SRT or Off." :
+            $"{tracks.Length} embedded subtitle track(s).";
+        OnPropertyChanged(nameof(EmbeddedSubtitleTracks));
+        OnPropertyChanged(nameof(SubtitleTrack));
+        OnPropertyChanged(nameof(EmbeddedSubtitleStatus));
+    }
     private static readonly LayerEditorOption[] Modes = {
         new("Embedded", "Embedded text track"), new("Srt", "External SRT"), new("Off", "Off") };
     public MoviePlaylistEntry Clone() => new() { Id = Id, FilePath = FilePath, SubtitleMode = SubtitleMode, SubtitlePath = SubtitlePath, SubtitleTrack = SubtitleTrack };
+}
+
+internal sealed record MovieSubtitleTrack(int Index, int StreamIndex, string Codec, string Language, string Title, bool IsDefault, bool IsForced)
+{
+    public override string ToString() => Label;
+    public string Label
+    {
+        get
+        {
+            string language = string.IsNullOrWhiteSpace(Language) || Language == "und" ? "Unknown language" : Language;
+            var culture = CultureInfo.GetCultures(CultureTypes.NeutralCultures).FirstOrDefault(c =>
+                !string.IsNullOrEmpty(c.Name) && (c.ThreeLetterISOLanguageName == Language || c.TwoLetterISOLanguageName == Language));
+            if (culture != null) language = culture.EnglishName;
+            string details = Codec + (IsDefault ? ", default" : "") + (IsForced ? ", forced" : "") +
+                (MoviePlaylistSettings.IsTextSubtitle(Codec) ? "" : ", bitmap/unsupported — use SRT");
+            return $"{Index + 1}. {language}" + (string.IsNullOrWhiteSpace(Title) ? "" : $" — {Title}") + $" ({details})";
+        }
+    }
 }
 
 internal sealed class MoviePlaylistSettings : LayerEditorNotify
@@ -61,8 +95,26 @@ internal sealed class MoviePlaylistSettings : LayerEditorNotify
         return $"setpts=PTS+{offset}/TB,{filter},setpts=PTS-{offset}/TB";
     }
 
-    internal static string[] ParseSubtitleCodecs(string output) => Regex.Matches(output,
-        @"(?m)^[ \t]*Stream #0:[^\r\n]*?\bSubtitle:\s*([A-Za-z0-9_]+)")
-        .Select(match => match.Groups[1].Value).ToArray();
+    internal static MovieSubtitleTrack[] ParseSubtitleTracks(string output)
+    {
+        var streams = Regex.Matches(output, @"(?m)^[ \t]*Stream #0:[^\r\n]*");
+        var tracks = new Collection<MovieSubtitleTrack>();
+        for (int i = 0; i < streams.Count; i++)
+        {
+            var stream = streams[i];
+            var subtitle = Regex.Match(stream.Value,
+                @"Stream #0:(?<stream>\d+)(?:\[[^\]\r\n]*\])?(?:\((?<language>[^)\r\n]*)\))?[^\r\n]*?\bSubtitle:\s*(?<codec>[A-Za-z0-9_]+)");
+            if (!subtitle.Success) continue;
+            int end = i + 1 < streams.Count ? streams[i + 1].Index : output.Length;
+            string block = output.Substring(stream.Index, end - stream.Index);
+            var title = Regex.Match(block, @"(?m)^[ \t]*title[ \t]*:[ \t]*(?<title>[^\r\n]+)", RegexOptions.IgnoreCase);
+            if (!title.Success) title = Regex.Match(block, @"(?m)^[ \t]*handler_name[ \t]*:[ \t]*(?<title>[^\r\n]+)", RegexOptions.IgnoreCase);
+            tracks.Add(new MovieSubtitleTrack(tracks.Count, int.Parse(subtitle.Groups["stream"].Value, CultureInfo.InvariantCulture),
+                subtitle.Groups["codec"].Value, subtitle.Groups["language"].Value,
+                title.Groups["title"].Value.Trim(), stream.Value.Contains("(default)", StringComparison.Ordinal),
+                stream.Value.Contains("(forced)", StringComparison.Ordinal)));
+        }
+        return tracks.ToArray();
+    }
     internal static bool IsTextSubtitle(string codec) => codec is "subrip" or "srt" or "ass" or "ssa" or "mov_text" or "webvtt" or "text";
 }

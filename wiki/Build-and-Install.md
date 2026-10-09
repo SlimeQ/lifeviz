@@ -492,7 +492,7 @@ dotnet build -c Release
 dotnet bin/Release/net9.0-windows/lifeviz.dll --smoke-test movie-playlist
 ```
 
-This isolated smoke creates a four-second movie with audio and embedded text captions plus an external SRT. It verifies ordered looping, duplicate entries, subtitle pixels and seek timing, filenames containing punctuation, resume on/off, pause, editing continuity, project/autosave persistence, missing captions, empty/repopulated playlists, and draft editor controls. It prints the temporary artifact directory containing `playlist-editor.png`. The user's saved scene is not loaded or modified. Subtitle playback uses the existing bundled FFmpeg/libass runtime; no new installation step is needed. See [Movie Playlists](Movie-Playlists.md).
+This isolated smoke creates a four-second movie with audio, two embedded text tracks with language/title/default/forced metadata, and an external SRT. It verifies ordered looping, duplicate entries, subtitle pixels and seek timing, filenames containing punctuation, resume on/off, pause, editing continuity, project/autosave persistence, missing captions, empty/repopulated playlists, and draft editor controls. Player checks cover scrub preview/seek, paused switching, Previous/Next wrapping, Now playing selection, Play/Pause, and labelled subtitle selection. It prints the temporary artifact directory containing `playlist-editor.png`. The user's saved scene is not loaded or modified. Subtitle playback uses the existing bundled FFmpeg/libass runtime; no new installation step is needed. See [Movie Playlists](Movie-Playlists.md).
 
 ## Validate scene persistence
 
@@ -517,4 +517,4 @@ dotnet bin/Release/net9.0-windows/lifeviz.dll --smoke-test group-transparency
 ```
 
 The isolated blending smoke exercises both compositors, all 64 simulation/group blend combinations, shared inputs, ordered clipping, stacked groups over successive frames, more than eight outputs, empty/disabled groups, editor live/draft controls, and scene roundtrips. It writes `smoke-simulation-blending-editor.png` beside the executable for visual inspection. No saved user scene is loaded or modified. The group-transparency smoke checks the resolved group alpha and its subsequent Normal blend over the input stack separately.
-
+

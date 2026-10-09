@@ -81,6 +81,12 @@ internal sealed partial class FileCaptureService : IDisposable
     private int _offlineRenderFps;
     private double _offlineRenderTimeSeconds;
 
+    internal static async Task<MovieSubtitleTrack[]?> GetMovieSubtitleTracksAsync(string path)
+    {
+        var probe = await GetVideoProbeAsync(path).ConfigureAwait(false);
+        return probe?.SubtitleTracks;
+    }
+
     private static Task<VideoSession.VideoProbeInfo?> GetVideoProbeAsync(string path)
     {
         if (string.IsNullOrWhiteSpace(path))
@@ -1693,7 +1699,7 @@ internal sealed partial class FileCaptureService : IDisposable
                 string? codecName = null,
                 bool hasAlpha = false,
                 double frameRate = 0,
-                string[]? subtitleCodecs = null)
+                MovieSubtitleTrack[]? subtitleTracks = null)
             {
                 Width = width;
                 Height = height;
@@ -1701,7 +1707,7 @@ internal sealed partial class FileCaptureService : IDisposable
                 CodecName = codecName ?? string.Empty;
                 HasAlpha = hasAlpha;
                 FrameRate = double.IsFinite(frameRate) && frameRate > 0 ? frameRate : 0;
-                SubtitleCodecs = subtitleCodecs ?? Array.Empty<string>();
+                SubtitleTracks = subtitleTracks ?? Array.Empty<MovieSubtitleTrack>();
             }
 
             public int Width { get; }
@@ -1710,7 +1716,7 @@ internal sealed partial class FileCaptureService : IDisposable
             public string CodecName { get; }
             public bool HasAlpha { get; }
             public double FrameRate { get; }
-            public string[] SubtitleCodecs { get; }
+            public MovieSubtitleTrack[] SubtitleTracks { get; }
         }
 
         public readonly struct ResolvedPlayback
@@ -1734,6 +1740,8 @@ internal sealed partial class FileCaptureService : IDisposable
             _subtitleTrack = track;
         }
         internal bool HasSubtitles => _subtitlePath != null;
+        private bool _allowPausedPreview;
+        internal void EnablePausedPreview() => _allowPausedPreview = true;
         private readonly double? _maxDecodeDurationSeconds;
         private readonly bool _ownerControlsLivePlaybackActivation;
         private readonly FileSourceKind _sourceKind;
@@ -2869,7 +2877,7 @@ internal sealed partial class FileCaptureService : IDisposable
             SafeKillProcess(process);
         }
 
-        private void FfmpegWorker(string url, CancellationToken token, double startOffsetSeconds, long generation)
+        private void FfmpegWorker(string url, CancellationToken token, double startOffsetSeconds, long generation, bool pausedPreview = false)
         {
             Process? process = null;
             try
@@ -2914,6 +2922,7 @@ internal sealed partial class FileCaptureService : IDisposable
                     // every active video layer.
                     args += " -filter_threads 1";
                 }
+                if (pausedPreview) args += " -frames:v 1";
                 args += $" -f rawvideo -pix_fmt bgra -s {processWidth}x{processHeight} -";
 
                 Logger.Info($"Starting ffmpeg: {args}");
@@ -2935,7 +2944,7 @@ internal sealed partial class FileCaptureService : IDisposable
                     ownsCurrentPipeline = generation == _videoPipelineGeneration &&
                                           !token.IsCancellationRequested &&
                                           !_isDisposed &&
-                                          !_playbackPaused;
+                                          (!_playbackPaused || pausedPreview);
                     if (ownsCurrentPipeline)
                     {
                         _process = process;
@@ -3056,6 +3065,9 @@ internal sealed partial class FileCaptureService : IDisposable
                         readBuffer = AcquireRawFrameBufferNoLock(frameSize);
                         Monitor.PulseAll(_lock);
                     }
+                    // A paused playlist navigation needs one still frame, without
+                    // publishing EOF or advancing its clock/list after the preview.
+                    if (pausedPreview) break;
                 }
             }
             catch (OperationCanceledException) when (token.IsCancellationRequested)
@@ -3395,7 +3407,7 @@ internal sealed partial class FileCaptureService : IDisposable
             string? playbackUrl;
             lock (_videoPipelineLock)
             {
-                if (_isDisposed || _playbackPaused || _workerTask != null)
+                if (_isDisposed || (_playbackPaused && (!_allowPausedPreview || _readyDownscaled != null)) || _workerTask != null)
                 {
                     return;
                 }
@@ -3411,7 +3423,7 @@ internal sealed partial class FileCaptureService : IDisposable
             double startOffsetSeconds;
             lock (_audioLock)
             {
-                if (_playbackPaused)
+                if (_playbackPaused && !_allowPausedPreview)
                 {
                     return;
                 }
@@ -3429,19 +3441,20 @@ internal sealed partial class FileCaptureService : IDisposable
             CancellationToken token = cts.Token;
             lock (_videoPipelineLock)
             {
-                if (_isDisposed || _playbackPaused || _workerTask != null)
+                if (_isDisposed || (_playbackPaused && !_allowPausedPreview) || _workerTask != null)
                 {
                     cts.Dispose();
                     return;
                 }
 
                 long generation = ++_videoPipelineGeneration;
+                bool pausedPreview = _playbackPaused && _allowPausedPreview;
                 Interlocked.Exchange(ref _firstDecodedFrameTimestamp, 0);
                 _cts = cts;
                 try
                 {
                     _workerTask = RunBackgroundLongRunning(
-                        () => FfmpegWorker(playbackUrl, token, startOffsetSeconds, generation),
+                        () => FfmpegWorker(playbackUrl, token, startOffsetSeconds, generation, pausedPreview),
                         "LifeViz.VideoDecode");
                 }
                 catch
@@ -4395,7 +4408,7 @@ internal sealed partial class FileCaptureService : IDisposable
                 {
                     (string codecName, bool hasAlpha, double frameRate) = ParsePrimaryVideoStreamMetadata(output);
                     return new VideoProbeInfo(width, height, durationSeconds, codecName, hasAlpha, frameRate,
-                        MoviePlaylistSettings.ParseSubtitleCodecs(output));
+                        MoviePlaylistSettings.ParseSubtitleTracks(output));
                 }
             }
             catch (Exception ex)
@@ -4956,6 +4969,7 @@ internal sealed partial class FileCaptureService : IDisposable
             var session = new VideoSession(path, loopPlayback: false, probe);
             if (_playlist != null)
             {
+                session.EnablePausedPreview();
                 var movie = _playlist.Movies[movieIndex];
                 SubtitleStatus = "Subtitles off";
                 if (movie.SubtitleMode == "Srt")
@@ -4969,11 +4983,12 @@ internal sealed partial class FileCaptureService : IDisposable
                 }
                 else if (movie.SubtitleMode == "Embedded")
                 {
-                    string? codec = probe.SubtitleCodecs.ElementAtOrDefault(movie.SubtitleTrack);
+                    var embeddedTrack = probe.SubtitleTracks.ElementAtOrDefault(movie.SubtitleTrack);
+                    string? codec = embeddedTrack?.Codec;
                     if (codec != null && MoviePlaylistSettings.IsTextSubtitle(codec))
                     {
                         session.ConfigureSubtitles(path, movie.SubtitleTrack);
-                        SubtitleStatus = $"Embedded subtitle track {movie.SubtitleTrack}";
+                        SubtitleStatus = "Embedded: " + embeddedTrack!.Label;
                     }
                     else SubtitleStatus = codec == null ? "No embedded subtitle at this track" : "Bitmap subtitles require an external SRT";
                 }

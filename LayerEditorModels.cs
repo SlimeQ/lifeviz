@@ -593,6 +593,7 @@ internal sealed class LayerEditorSource : LayerEditorNotify
                 OnPropertyChanged(nameof(IsVideo));
                 OnPropertyChanged(nameof(IsAutoClip));
                 OnPropertyChanged(nameof(IsMoviePlaylist));
+                OnPropertyChanged(nameof(ShowGeneralVideoTransport));
                 OnPropertyChanged(nameof(SupportsVideoTransport));
                 OnPropertyChanged(nameof(KindLabel));
                 OnPropertyChanged(nameof(DisplayLabel));
@@ -909,6 +910,7 @@ internal sealed class LayerEditorSource : LayerEditorNotify
             {
                 OnPropertyChanged(nameof(VideoPlaybackTimeLabel));
                 OnPropertyChanged(nameof(VideoSeekAvailable));
+                OnPropertyChanged(nameof(MovieScrubTimeLabel));
             }
         }
     }
@@ -1005,12 +1007,27 @@ internal sealed class LayerEditorSource : LayerEditorNotify
     public MoviePlaylistSettings MoviePlaylist { get; set; } = new();
     private MoviePlaylistEntry? _selectedMovie;
     public MoviePlaylistEntry? SelectedMovie { get => _selectedMovie; set => SetField(ref _selectedMovie, value); }
+    private MoviePlaylistEntry? _playingMovie;
+    public MoviePlaylistEntry? PlayingMovie { get => _playingMovie; set => SetField(ref _playingMovie, value); }
+    private double _movieScrubSeconds;
+    public double MovieScrubSeconds
+    {
+        get => _movieScrubSeconds;
+        set { if (SetField(ref _movieScrubSeconds, value)) OnPropertyChanged(nameof(MovieScrubTimeLabel)); }
+    }
+    public string MovieScrubTimeLabel => $"{FormatPlaybackTime(MovieScrubSeconds)} / {FormatPlaybackTime(VideoPlaybackDurationSeconds)}";
+    public bool HasMovies => MoviePlaylist.Movies.Count > 0;
     private string _movieJumpTime = "00:00:00";
     public string MovieJumpTime { get => _movieJumpTime; set => SetField(ref _movieJumpTime, value); }
     private string _currentMovieLabel = "Preparing playlist";
     public string CurrentMovieLabel { get => _currentMovieLabel; set => SetField(ref _currentMovieLabel, value); }
     public bool IsMoviePlaylist => Kind == LayerEditorSourceKind.MoviePlaylist;
-    public void NotifyMoviePlaylistChanged() => OnPropertyChanged(nameof(Details));
+    public bool ShowGeneralVideoTransport => !IsMoviePlaylist;
+    public void NotifyMoviePlaylistChanged()
+    {
+        OnPropertyChanged(nameof(Details));
+        OnPropertyChanged(nameof(HasMovies));
+    }
     public bool IsAutoClip => Kind == LayerEditorSourceKind.AutoClip;
     public bool IsNormalBlend => string.Equals(BlendMode, "Normal", StringComparison.OrdinalIgnoreCase);
     public bool SupportsKeying => IsNormalBlend && !IsColorPlane;

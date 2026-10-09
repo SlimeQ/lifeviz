@@ -738,7 +738,7 @@ public partial class LayerEditorWindow : Window
             return;
         }
 
-        if (Mouse.LeftButton == MouseButtonState.Pressed)
+        if (Mouse.LeftButton == MouseButtonState.Pressed || _movieScrubSource != null)
         {
             return;
         }
@@ -761,6 +761,8 @@ public partial class LayerEditorWindow : Window
             source.VideoPlaybackPosition = playbackState.NormalizedPosition;
             source.VideoPlaybackPositionSeconds = playbackState.PositionSeconds;
             source.VideoPlaybackDurationSeconds = playbackState.DurationSeconds;
+            source.VideoPlaybackPaused = playbackState.IsPaused;
+            if (source.IsMoviePlaylist) source.MovieScrubSeconds = playbackState.PositionSeconds;
         }
         finally
         {

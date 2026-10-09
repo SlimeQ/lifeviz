@@ -1,6 +1,6 @@
 # LifeViz
 
-**Movie Playlist** layers play full movies in an editable order and loop the entire list. Each movie can use an embedded text subtitle track, an external SRT, or no captions; matching sidecar SRTs are picked up when adding movies. Select an entry and enter a timestamp to jump directly to that movie. Optional resume restores the movie and time captured on project Save or app shutdown. See [Movie Playlists](wiki/Movie-Playlists.md). After a Release build, run `dotnet bin/Release/net9.0-windows/lifeviz.dll --smoke-test movie-playlist` to validate playback, captions, navigation, persistence, and editor controls.
+**Movie Playlist** layers play full movies in an editable order and loop the entire list. A dedicated player offers a full-width scrub bar, elapsed/total time, Play/Pause, Previous/Next movie, and a Now playing dropdown that switches movies immediately. Embedded subtitle tracks are listed by language, title, codec, and default/forced flags; external SRTs and Off are also supported, and matching sidecar SRTs are picked up when adding movies. Optional resume restores the movie and time captured on project Save or app shutdown. See [Movie Playlists](wiki/Movie-Playlists.md). After a Release build, run `dotnet bin/Release/net9.0-windows/lifeviz.dll --smoke-test movie-playlist` to validate playback, captions, navigation, persistence, and editor controls.
 
 ## Tempo-synced video loops
 
