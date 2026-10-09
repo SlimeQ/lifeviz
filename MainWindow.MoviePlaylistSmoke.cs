@@ -85,8 +85,40 @@ public partial class MainWindow
             Require(reopened.GetBookmark().movieId == second.Id && reopened.GetBookmark().seconds == 0, "Resume off did not start at the beginning of the list.");
 
         var editor = new LayerEditorWindow(this);
-        try { editor.ValidateMoviePlaylistControlsForSmoke(model, Path.Combine(directory, "playlist-editor.png"), () => { NextFrame(); }); }
+        try { editor.ValidateMoviePlaylistControlsForSmoke(model, Path.Combine(directory, "playlist-editor.png"), () => { NextFrame(); }, CheckLayerReorder); }
         finally { editor.Close(); }
+
+        void CheckLayerReorder(LayerEditorWindow activeEditor)
+        {
+            session.JumpToMovie(first.Id, 2.25);
+            NextFrame();
+            UpdateSourceVideoPlaybackPaused(source.Id, true);
+            var before = session.GetBookmark();
+            var otherLayer = CaptureSource.CreateColorPlane(0, 0, 0, "Reorder regression");
+            _sources.Add(otherLayer);
+            var originalEditor = _layerEditorWindow;
+            try
+            {
+                _layerEditorWindow = activeEditor;
+                // Reordering another source rebuilds all live editor models.
+                MoveSource(otherLayer, -1);
+                activeEditor.FlushMoviePlaylistBindingsForSmoke();
+                var after = session.GetBookmark();
+                Require(after.movieId == before.movieId && Math.Abs(after.seconds - before.seconds) < 0.001 && source.VideoPlaybackPaused,
+                    "Moving another layer reset the movie, timestamp, or pause state.");
+                MoveSource(source, -1);
+                activeEditor.FlushMoviePlaylistBindingsForSmoke();
+                after = session.GetBookmark();
+                Require(after.movieId == before.movieId && Math.Abs(after.seconds - before.seconds) < 0.001 && source.VideoPlaybackPaused,
+                    "Moving the playlist layer reset playback.");
+            }
+            finally
+            {
+                _layerEditorWindow = originalEditor;
+                _sources.Remove(otherLayer);
+                UpdateSourceVideoPlaybackPaused(source.Id, false);
+            }
+        }
 
         // Observe actual end-of-file transitions through two complete entries.
         session.Restart();

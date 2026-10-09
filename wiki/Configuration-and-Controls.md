@@ -2,6 +2,8 @@
 
 ## Movie Playlist layers
 
+Selecting/reselecting a Movie Playlist layer, moving any scene layer, and refreshing its controls preserve the current movie, time, and pause state. The Now playing dropdown switches only on a committed user choice (menu close or keyboard navigation), and choosing the current movie does not restart it.
+
 The right-click **Sources** menu and group submenus include **Add Movie Playlist**. The Scene Editor also offers **Movie Playlist** under Add Root/Add Child. Its dedicated player sits above Layer Settings with a full-width scrub bar and elapsed/total time, Play/Pause, Previous/Next movie (wrapping), and a Now playing dropdown that switches movies immediately. Double-clicking an authored list entry also switches playback; selecting it once only edits its settings. Scrubbing previews the target and seeks on release, including keyboard arrows (one second), Page Up/Down (ten seconds), and Home/End. Switching and seeking preserve pause. Add Movies, Remove, Move Up/Down, Choose SRT, and optional resume on reopen remain available. Embedded text/SRT/Off subtitle modes include a real embedded-track listing labelled with language, title, codec, and default/forced flags, with async loading and Refresh tracks. The optional exact timestamp field is under an expander; Use Current Position copies the playing entry/time. Navigation requires Live Mode, while list/subtitle edits support draft Apply. See [Movie Playlists](Movie-Playlists.md) for save semantics and subtitle format limits.
 
 ## Fluid and Life control feedback

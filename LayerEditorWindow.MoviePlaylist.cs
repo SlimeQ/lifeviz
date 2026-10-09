@@ -11,7 +11,8 @@ namespace lifeviz;
 
 public partial class LayerEditorWindow
 {
-    private bool _updatingMoviePlaybackSelection;
+    private LayerEditorSource? _movieSelectionSource;
+    private Guid? _movieSelectionStartId;
     private LayerEditorSource? _movieScrubSource;
     private Guid _movieScrubId;
     private bool _loadingSubtitleChoices;
@@ -48,12 +49,49 @@ public partial class LayerEditorWindow
         CommitMoviePlaylist(source);
     }
 
-    private void MoviePlayback_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    private void MoviePlayback_DropDownOpened(object sender, EventArgs e)
     {
-        if (_updatingMoviePlaybackSelection || !ShouldApplyLive() ||
-            sender is not ComboBox { SelectedItem: MoviePlaylistEntry movie } combo ||
+        BeginMovieSelection(sender);
+    }
+
+    private void BeginMovieSelection(object sender)
+    {
+        if (_movieSelectionSource != null) return;
+        if (!ShouldApplyLive() || sender is not ComboBox combo ||
             ResolveSourceContext(combo) is not { IsMoviePlaylist: true } source) return;
-        StartPlaylistMovie(source, movie);
+        _movieSelectionSource = source;
+        _movieSelectionStartId = (combo.SelectedItem as MoviePlaylistEntry)?.Id;
+    }
+
+    private void MoviePlayback_DropDownClosed(object sender, EventArgs e) => CommitMovieSelection(sender);
+    private void MoviePlayback_KeyDown(object sender, KeyEventArgs e)
+    {
+        if (sender is ComboBox { IsDropDownOpen: false } && IsMovieScrubKey(e.Key)) BeginMovieSelection(sender);
+    }
+    private void MoviePlayback_KeyUp(object sender, KeyEventArgs e)
+    {
+        if (sender is ComboBox { IsDropDownOpen: false } && IsMovieScrubKey(e.Key)) CommitMovieSelection(sender);
+    }
+    private void MoviePlayback_LostKeyboardFocus(object sender, KeyboardFocusChangedEventArgs e)
+    {
+        if (sender is not ComboBox { IsDropDownOpen: false }) return;
+        _movieSelectionSource = null;
+        _movieSelectionStartId = null;
+        RefreshSelectedVideoTransportState();
+    }
+
+    private void CommitMovieSelection(object sender)
+    {
+        var originalSource = _movieSelectionSource;
+        var originalMovieId = _movieSelectionStartId;
+        _movieSelectionSource = null;
+        _movieSelectionStartId = null;
+        if (ShouldApplyLive() && sender is ComboBox { SelectedItem: MoviePlaylistEntry movie } combo &&
+            ResolveSourceContext(combo) is { IsMoviePlaylist: true } source && ReferenceEquals(source, originalSource) &&
+            movie.Id != originalMovieId && source.MoviePlaylist.Movies.Contains(movie) &&
+            _owner.TryGetMoviePlaylistState(source.Id, out var playingId, out _, out _) && movie.Id != playingId)
+            StartPlaylistMovie(source, movie);
+        RefreshSelectedVideoTransportState();
     }
 
     private void StartPlaylistMovie(LayerEditorSource source, MoviePlaylistEntry movie)
@@ -227,15 +265,15 @@ public partial class LayerEditorWindow
     {
         if (!_owner.TryGetMoviePlaylistState(source.Id, out var id, out double seconds, out string label)) return;
         source.CurrentMovieLabel = label;
-        _updatingMoviePlaybackSelection = true;
-        try
+        // Opening/rebinding the layer only synchronizes controls. Navigation is
+        // committed by explicit dropdown/keyboard gestures, never SelectionChanged.
+        if (!ReferenceEquals(_movieSelectionSource, source))
         {
             var playing = source.MoviePlaylist.Movies.FirstOrDefault(movie => movie.Id == id);
             if (source.PlayingMovie?.Id != playing?.Id) source.VideoPlaybackDurationSeconds = 0;
             source.PlayingMovie = playing;
             source.MovieScrubSeconds = seconds;
         }
-        finally { _updatingMoviePlaybackSelection = false; }
         source.MoviePlaylist.BookmarkMovieId = id;
         source.MoviePlaylist.BookmarkSeconds = seconds;
     }

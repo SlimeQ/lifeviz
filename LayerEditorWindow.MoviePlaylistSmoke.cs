@@ -6,12 +6,14 @@ using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
+using System.Windows.Input;
+using System.Windows.Threading;
 
 namespace lifeviz;
 
 public partial class LayerEditorWindow
 {
-    internal void ValidateMoviePlaylistControlsForSmoke(LayerEditorSource model, string imagePath, Action nextFrame)
+    internal void ValidateMoviePlaylistControlsForSmoke(LayerEditorSource model, string imagePath, Action nextFrame, Action<LayerEditorWindow> checkLayerReorder)
     {
         _suppressLiveUpdates = true;
         ShowActivated = false;
@@ -72,6 +74,26 @@ public partial class LayerEditorWindow
         nextFrame();
         RefreshSelectedVideoTransportState();
         if (!model.VideoPlaybackPaused || Math.Abs(model.MovieScrubSeconds - 1.5) > 0.15) throw new InvalidOperationException("Scrubbing failed to seek or preserve pause.");
+        _owner.TryGetMoviePlaylistState(model.Id, out var selectedId, out double selectedTime, out _);
+        // Exercise deferred bindings after leaving/reselecting the scene tree row,
+        // then a transient programmatic dropdown selection during panel refresh.
+        SetSelectedSource(null);
+        root.UpdateLayout();
+        SetSelectedSource(model);
+        root.UpdateLayout();
+        Dispatcher.Invoke(() => { }, DispatcherPriority.ContextIdle);
+        model.PlayingMovie = model.MoviePlaylist.Movies.First(movie => movie.Id != selectedId);
+        root.UpdateLayout();
+        Dispatcher.Invoke(() => { }, DispatcherPriority.ContextIdle);
+        _owner.TryGetMoviePlaylistState(model.Id, out var afterId, out double afterTime, out _);
+        if (afterId != selectedId || Math.Abs(afterTime - selectedTime) > 0.001 || !model.VideoPlaybackPaused)
+            throw new InvalidOperationException("Reselecting/rebinding the playlist layer changed its movie, position, or pause state.");
+        RefreshSelectedVideoTransportState();
+        MoviePlayback_DropDownOpened(playback, EventArgs.Empty);
+        MoviePlayback_DropDownClosed(playback, EventArgs.Empty);
+        _owner.TryGetMoviePlaylistState(model.Id, out afterId, out afterTime, out _);
+        if (afterId != selectedId || Math.Abs(afterTime - selectedTime) > 0.001)
+            throw new InvalidOperationException("Opening/closing Now playing without a new choice restarted playback.");
         var next = Descendants(playlistGroup).OfType<Button>().Single(item => Equals(item.Content, "Next movie"));
         MovieStep_Click(next, new RoutedEventArgs());
         nextFrame();
@@ -82,10 +104,20 @@ public partial class LayerEditorWindow
         nextFrame();
         RefreshSelectedVideoTransportState();
         if (model.PlayingMovie?.Id != playingBefore?.Id) throw new InvalidOperationException("Previous movie did not wrap back.");
+        MoviePlayback_DropDownOpened(playback, EventArgs.Empty);
         playback.SelectedItem = model.MoviePlaylist.Movies.First(movie => movie.Id != playingBefore!.Id);
+        MoviePlayback_DropDownClosed(playback, EventArgs.Empty);
         nextFrame();
         RefreshSelectedVideoTransportState();
         if (model.PlayingMovie?.Id == playingBefore?.Id) throw new InvalidOperationException("Now playing selector did not switch playback.");
+        var key = new KeyEventArgs(Keyboard.PrimaryDevice, PresentationSource.FromVisual(playback), 0, Key.Up);
+        MoviePlayback_KeyDown(playback, key);
+        playback.SelectedItem = playingBefore;
+        MoviePlayback_KeyDown(playback, key);
+        MoviePlayback_KeyUp(playback, key);
+        nextFrame();
+        RefreshSelectedVideoTransportState();
+        if (model.PlayingMovie?.Id != playingBefore?.Id) throw new InvalidOperationException("Keyboard movie selection failed.");
         VideoPlayPause_Click(playPause, new RoutedEventArgs());
         if (model.VideoPlaybackPaused || !Equals(playPause.Content, "Pause")) throw new InvalidOperationException("Playlist player failed to resume.");
         var scroll = Descendants(root).OfType<ScrollViewer>().Single(view => view.Content is StackPanel panel && ReferenceEquals(panel.DataContext, model));
@@ -100,6 +132,16 @@ public partial class LayerEditorWindow
         encoder.Frames.Add(BitmapFrame.Create(bitmap));
         using var output = File.Create(imagePath);
         encoder.Save(output);
+        checkLayerReorder(this);
         Close();
+    }
+
+    internal void FlushMoviePlaylistBindingsForSmoke()
+    {
+        UpdateLayout();
+        Dispatcher.Invoke(() => { }, DispatcherPriority.ContextIdle);
+        RefreshSelectedVideoTransportState();
+        UpdateLayout();
+        Dispatcher.Invoke(() => { }, DispatcherPriority.ContextIdle);
     }
 }

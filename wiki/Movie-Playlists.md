@@ -4,6 +4,8 @@ Use a **Movie Playlist** source for a continuous run of full movies in a fixed o
 
 ## Authoring and navigation
 
+Selecting or reselecting the playlist layer in the Scene Editor preserves playback position and pause. Moving the playlist or any other layer also preserves playback. Control refreshes never switch or restart a movie. The Now playing dropdown commits a different movie when you choose it and close the menu, or release a navigation key while the menu is closed. Choosing the already playing movie leaves its position unchanged; use Restart Sequence or double-click the authored entry for an explicit restart.
+
 1. Open the Scene Editor and click **Movie Playlist** under Add Root or Add Child (inside a layer Group). You can also use **Sources → Add Movie Playlist** in the right-click menu, including inside groups.
 2. Select the new layer and use **Add Movies...**. Files append in the order returned by the file picker; use **Move Up / Move Down** to author the exact order. **Remove** removes the selected entry, keeping the file on disk. Duplicate movies are allowed as independent entries with their own subtitle settings.
 3. Use the player at the top of the playlist panel: **Play/Pause**, **Previous movie**, **Next movie**, and **Now playing**. Choosing a movie in Now playing switches immediately to its beginning. Previous/Next wrap around the list, and double-clicking a movie in the authored list also switches playback. The authored list selection stays independent of Now playing, so selecting an entry for subtitle editing does not interrupt playback.

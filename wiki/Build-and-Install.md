@@ -487,6 +487,8 @@ dotnet bin/Release/net9.0-windows/lifeviz.dll --smoke-test render-failure-cleanu
 
 ## Validate movie playlists
 
+The player regression also verifies that leaving/reselecting the playlist layer, moving the playlist or another scene layer, deferred control rebinding, and opening/closing Now playing without a new choice preserve the movie, timestamp, and pause state. Explicit dropdown and keyboard movie choices still navigate, including repeated navigation keys.
+
 ```powershell
 dotnet build -c Release
 dotnet bin/Release/net9.0-windows/lifeviz.dll --smoke-test movie-playlist

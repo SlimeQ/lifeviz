@@ -464,6 +464,8 @@ public partial class LayerEditorWindow : Window
             return;
         }
 
+        _movieSelectionSource = null;
+        _movieSelectionStartId = null;
         _updatingSelection = true;
         try
         {

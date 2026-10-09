@@ -2,6 +2,8 @@
 
 **Movie Playlist** layers play full movies in an editable order and loop the entire list. A dedicated player offers a full-width scrub bar, elapsed/total time, Play/Pause, Previous/Next movie, and a Now playing dropdown that switches movies immediately. Embedded subtitle tracks are listed by language, title, codec, and default/forced flags; external SRTs and Off are also supported, and matching sidecar SRTs are picked up when adding movies. Optional resume restores the movie and time captured on project Save or app shutdown. See [Movie Playlists](wiki/Movie-Playlists.md). After a Release build, run `dotnet bin/Release/net9.0-windows/lifeviz.dll --smoke-test movie-playlist` to validate playback, captions, navigation, persistence, and editor controls.
 
+Selecting or reselecting a Movie Playlist layer, or moving any scene layer, preserves its playing movie, time, and pause state. Now playing changes playback only when you choose a different movie from the dropdown or use its keyboard navigation.
+
 ## Tempo-synced video loops
 
 **Room-mic mode:** Input Gain now goes from 10% to about 3200% (+30 dB) on a dB slider, also right in the Scene Editor monitor. Audio Reactivity → Input Gain adds **Auto gain (room mic)**, which keeps a microphone's level where mastered music sits (up to +36 dB). It cuts quickly when the room gets loud and doesn't pump up silence. The Scene Editor monitor shows the gain in use. Validate with `--smoke-test audio-auto-gain`.
