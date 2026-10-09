@@ -21,6 +21,7 @@
     </Window.TaskbarItemInfo>
     <Grid x:Name="Root"
           Background="#0B0B0B"
+          ContextMenuOpening="Root_ContextMenuOpening"
           PreviewMouseLeftButtonDown="BackgroundDragSurface_OnPreviewMouseLeftButtonDown">
         <Grid.ContextMenu>
             <ContextMenu x:Name="RootContextMenu"

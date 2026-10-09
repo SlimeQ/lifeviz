@@ -1,5 +1,7 @@
 # LifeViz
 
+Update confirmation, ready, and error dialogs opened through the Scene Editor's App Controls belong to the editor, so they appear on its monitor. Updates initiated from the main window keep their dialogs there.
+
 **Movie Playlist** layers play full movies in an editable order and loop the entire list. A dedicated player offers a full-width scrub bar, elapsed/total time, Play/Pause, Previous/Next movie, and a Now playing dropdown that switches movies immediately. Embedded subtitle tracks are listed by language, title, codec, and default/forced flags; external SRTs and Off are also supported, and matching sidecar SRTs are picked up when adding movies. Optional resume restores the movie and time captured on project Save or app shutdown. See [Movie Playlists](wiki/Movie-Playlists.md). After a Release build, run `dotnet bin/Release/net9.0-windows/lifeviz.dll --smoke-test movie-playlist` to validate playback, captions, navigation, persistence, and editor controls.
 
 Selecting or reselecting a Movie Playlist layer, or moving any scene layer, preserves its playing movie, time, and pause state. Now playing changes playback only when you choose a different movie from the dropdown or use its keyboard navigation.

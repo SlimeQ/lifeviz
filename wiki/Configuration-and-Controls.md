@@ -1,5 +1,7 @@
 # Configuration & Controls
 
+**Update to Latest Release...** opens its confirmation, ready, and error dialogs with the window that opened App Controls. Starting an update from the Scene Editor keeps the prompts on the editor's monitor; main-window updates show them on the main window's monitor. If the initiating editor closes during a download, later prompts fall back to the main window.
+
 ## Movie Playlist layers
 
 Selecting/reselecting a Movie Playlist layer, moving any scene layer, and refreshing its controls preserve the current movie, time, and pause state. The Now playing dropdown switches only on a committed user choice (menu close or keyboard navigation), and choosing the current movie does not restart it.

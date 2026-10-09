@@ -1,5 +1,7 @@
 # Build & Install
 
+Update prompts launched through the Scene Editor's App Controls are owned by the editor and appear on its monitor. Main-window update prompts stay with the main window; later prompts fall back there if the initiating editor closes.
+
 ## Validate beat tracking
 
 ```powershell

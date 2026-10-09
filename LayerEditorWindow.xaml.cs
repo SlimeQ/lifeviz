@@ -821,7 +821,7 @@ public partial class LayerEditorWindow : Window
         }
 
         Point anchor = AppControlsButton.PointToScreen(new Point(0, AppControlsButton.ActualHeight + 2));
-        _owner.OpenRootContextMenuAtScreenPoint(anchor.X, anchor.Y);
+        _owner.OpenRootContextMenuAtScreenPoint(anchor.X, anchor.Y, this);
     }
 
     private void NewProject_Click(object sender, RoutedEventArgs e)

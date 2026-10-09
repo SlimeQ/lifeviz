@@ -312,6 +312,7 @@ public partial class MainWindow : Window
     private double _oscillationMinFps = 30;
     private double _oscillationMaxFps = 60;
     private bool _updateInProgress;
+    private Window? _rootContextMenuDialogOwner;
     private double _smoothedEnergy;
     private double _fastAudioLevel;
     private double _smoothedLevelEnergy;
@@ -3587,6 +3588,7 @@ public partial class MainWindow : Window
 
     private void LayerEditorWindow_OnClosed(object? sender, EventArgs e)
     {
+        if (ReferenceEquals(_rootContextMenuDialogOwner, sender)) _rootContextMenuDialogOwner = null;
         _layerEditorWindow = null;
     }
 
@@ -4930,7 +4932,9 @@ public partial class MainWindow : Window
             return;
         }
 
-        var confirm = MessageBox.Show(this,
+        var initiatingWindow = _rootContextMenuDialogOwner;
+        Window DialogOwner() => initiatingWindow is { IsVisible: true } ? initiatingWindow : this;
+        var confirm = MessageBox.Show(DialogOwner(),
             $"Current version: {AppVersionInfo.DisplayVersion}\n\n" +
             "Download and install the latest LifeViz release from GitHub? LifeViz will close while the installer runs.",
             "Update LifeViz",
@@ -4949,7 +4953,7 @@ public partial class MainWindow : Window
             var release = await FetchLatestReleaseAsync();
             if (release == null)
             {
-                MessageBox.Show(this, "Unable to reach the latest GitHub release.", "Update Failed",
+                MessageBox.Show(DialogOwner(), "Unable to reach the latest GitHub release.", "Update Failed",
                     MessageBoxButton.OK, MessageBoxImage.Error);
                 return;
             }
@@ -4958,7 +4962,7 @@ public partial class MainWindow : Window
                 string.Equals(entry.Name, GitHubReleaseAssetName, StringComparison.OrdinalIgnoreCase));
             if (asset == null || string.IsNullOrWhiteSpace(asset.DownloadUrl))
             {
-                MessageBox.Show(this,
+                MessageBox.Show(DialogOwner(),
                     $"The latest release ({release.TagName ?? "unknown"}) does not include {GitHubReleaseAssetName}.",
                     "Update Failed",
                     MessageBoxButton.OK,
@@ -4977,7 +4981,7 @@ public partial class MainWindow : Window
             await DownloadFileAsync(asset.DownloadUrl, installerPath);
             Logger.Info($"Downloaded GitHub release {release.TagName ?? "unknown"} to {installerPath}");
 
-            MessageBox.Show(this,
+            MessageBox.Show(DialogOwner(),
                 "Update downloaded. The installer will launch now; LifeViz will close to finish the update.",
                 "Update Ready",
                 MessageBoxButton.OK,
@@ -4996,7 +5000,7 @@ public partial class MainWindow : Window
         catch (Exception ex)
         {
             Logger.Error("Failed to update from GitHub release.", ex);
-            MessageBox.Show(this, $"Update failed:\n{ex.Message}", "Update Failed",
+            MessageBox.Show(DialogOwner(), $"Update failed:\n{ex.Message}", "Update Failed",
                 MessageBoxButton.OK, MessageBoxImage.Error);
         }
         finally
@@ -5133,7 +5137,12 @@ public partial class MainWindow : Window
         return true;
     }
 
-    internal void OpenRootContextMenuAtScreenPoint(double screenX, double screenY)
+    private void Root_ContextMenuOpening(object sender, ContextMenuEventArgs e)
+    {
+        _rootContextMenuDialogOwner = this;
+    }
+
+    internal void OpenRootContextMenuAtScreenPoint(double screenX, double screenY, Window? dialogOwner = null)
     {
         if (RootContextMenu == null)
         {
@@ -5144,6 +5153,9 @@ public partial class MainWindow : Window
         RootContextMenu.HorizontalOffset = screenX;
         RootContextMenu.VerticalOffset = screenY;
         RootContextMenu.IsOpen = false;
+        // Preserve the initiating window after the popup closes, since menu clicks
+        // may dispatch later. Native/main-window openings reset it to this window.
+        _rootContextMenuDialogOwner = dialogOwner ?? this;
         RootContextMenu.IsOpen = true;
     }
 
