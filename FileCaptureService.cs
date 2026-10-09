@@ -1743,12 +1743,118 @@ internal sealed partial class FileCaptureService : IDisposable
         private readonly bool _loopPlayback;
         private string? _subtitlePath;
         private int? _subtitleTrack;
+        private double _subtitleDelaySeconds;
+        private double _subtitleFilterSeekSeconds;
+        private long _subtitleTimingVersion;
+        private readonly object _subtitleTimingLock = new();
+        private bool _subtitleTimingUpdateScheduled;
+        private Process? _subtitleTimingCommandProcess;
+        private TaskCompletionSource<int>? _subtitleTimingCommandReply;
+        private volatile bool _subtitleTimingRetired;
         private int _audioTrack;
         internal void ConfigureAudioTrack(int track) => _audioTrack = Math.Max(0, track);
-        internal void ConfigureSubtitles(string? path, int? track)
+        internal void ConfigureSubtitles(string? path, int? track, double delaySeconds = 0)
         {
             _subtitlePath = path;
             _subtitleTrack = track;
+            Volatile.Write(ref _subtitleDelaySeconds, MoviePlaylistSettings.NormalizeSubtitleDelay(delaySeconds));
+        }
+        internal void SetSubtitleDelay(double seconds)
+        {
+            seconds = MoviePlaylistSettings.NormalizeSubtitleDelay(seconds);
+            if (Volatile.Read(ref _subtitleDelaySeconds) == seconds) return;
+            Volatile.Write(ref _subtitleDelaySeconds, seconds);
+            Interlocked.Increment(ref _subtitleTimingVersion);
+            if (HasSubtitles) ScheduleSubtitleTimingUpdate();
+        }
+
+        private void ScheduleSubtitleTimingUpdate()
+        {
+            lock (_subtitleTimingLock)
+            {
+                if (_subtitleTimingUpdateScheduled || _isDisposed || _subtitleTimingRetired) return;
+                _subtitleTimingUpdateScheduled = true;
+            }
+            _ = Task.Run(async () =>
+            {
+                while (true)
+                {
+                    long version = Volatile.Read(ref _subtitleTimingVersion);
+                    TaskCompletionSource<int>? commandReply = null;
+                    try
+                    {
+                        if (!_isDisposed && !_subtitleTimingRetired && HasSubtitles)
+                        {
+                            if (_playbackPaused && _allowPausedPreview)
+                            {
+                                // Refresh only the held still; keep its clock and audio state.
+                                StopVideoPipeline(preserveReadyFrame: true);
+                                if (!_isDisposed && !_subtitleTimingRetired && _playbackPaused && _videoPlaybackUrl != null)
+                                    StartVideoDecodeWorker(_videoPlaybackUrl, GetEstimatedPlaybackOffsetSeconds());
+                            }
+                            else
+                            {
+                                Process? process;
+                                double seekSeconds;
+                                lock (_videoPipelineLock)
+                                {
+                                    process = _process;
+                                    seekSeconds = _subtitleFilterSeekSeconds;
+                                    if (process != null)
+                                    {
+                                        commandReply = new(TaskCreationOptions.RunContinuationsAsynchronously);
+                                        lock (_subtitleTimingLock)
+                                        {
+                                            _subtitleTimingCommandProcess = process;
+                                            _subtitleTimingCommandReply = commandReply;
+                                        }
+                                    }
+                                }
+                                if (process != null)
+                                {
+                                    string expression = MoviePlaylistSettings.BuildSubtitleClockExpression(seekSeconds, Volatile.Read(ref _subtitleDelaySeconds));
+                                    await process.StandardInput.WriteLineAsync($"csetpts@lifeviz_subtitles -1 expr {expression}").ConfigureAwait(false);
+                                    await process.StandardInput.FlushAsync().ConfigureAwait(false);
+                                    // Only one command may be in flight. Held/repeated
+                                    // clicks collapse to the newest offset while it applies.
+                                    int result = await commandReply!.Task.WaitAsync(TimeSpan.FromSeconds(2)).ConfigureAwait(false);
+                                    if (result != 0) throw new InvalidOperationException($"FFmpeg rejected the subtitle timing command ({result}).");
+                                }
+                            }
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        // Retirement can close stdin while a nudge is pending. The next
+                        // decoder always starts with the latest saved offset.
+                        if (!_isDisposed && !_subtitleTimingRetired && commandReply?.Task.IsCanceled != true)
+                            Logger.Warn($"Could not send subtitle timing adjustment for {DisplayName}: {ex.Message}");
+                    }
+                    lock (_subtitleTimingLock)
+                    {
+                        _subtitleTimingCommandProcess = null;
+                        _subtitleTimingCommandReply = null;
+                        if (version != Volatile.Read(ref _subtitleTimingVersion) && !_isDisposed && !_subtitleTimingRetired) continue;
+                        _subtitleTimingUpdateScheduled = false;
+                        return;
+                    }
+                }
+            });
+        }
+
+        private void CancelSubtitleTimingCommand(Process? process)
+        {
+            lock (_subtitleTimingLock)
+                if (process != null && ReferenceEquals(_subtitleTimingCommandProcess, process))
+                    _subtitleTimingCommandReply?.TrySetCanceled();
+        }
+
+        internal (long videoGeneration, long audioGeneration, int? videoPid, int? audioPid) GetSubtitlePipelineStateForSmoke()
+        {
+            long videoGeneration;
+            int? videoPid;
+            lock (_videoPipelineLock) { videoGeneration = _videoPipelineGeneration; videoPid = _process?.Id; }
+            lock (_audioLock) { return (videoGeneration, _audioPipelineGeneration, videoPid, _audioDecodeProcess?.Id); }
         }
         internal bool HasSubtitles => _subtitlePath != null;
         private bool _allowPausedPreview;
@@ -2635,6 +2741,7 @@ internal sealed partial class FileCaptureService : IDisposable
 
         internal void RequestRetirement()
         {
+            _subtitleTimingRetired = true;
             CancellationTokenSource? videoCts;
             Process? videoProcess;
             lock (_videoPipelineLock)
@@ -2663,6 +2770,7 @@ internal sealed partial class FileCaptureService : IDisposable
             }
 
             try { videoCts?.Cancel(); } catch { }
+            CancelSubtitleTimingCommand(videoProcess);
             try { audioCts?.Cancel(); } catch { }
             try { audioOutput?.Stop(); } catch { }
             FfmpegProcessManager.Shared.RequestTermination(videoProcess);
@@ -2902,6 +3010,9 @@ internal sealed partial class FileCaptureService : IDisposable
                     ? MaxQueuedOfflineRawFrames
                     : MaxQueuedLiveRawFrames;
                 string args = $"-hide_banner -loglevel warning{BuildDecoderThreadArgs()}"; // increased verbosity for debug
+                // The main CLI loop otherwise checks stdin only every 500 ms.
+                // Filter/decode workers remain independently paced on media PTS.
+                if (_subtitlePath != null) args += " -stats_period 0.05";
                 if (startOffsetSeconds > 0.05)
                 {
                     args += $" -ss {startOffsetSeconds.ToString("0.###", CultureInfo.InvariantCulture)}";
@@ -2914,13 +3025,15 @@ internal sealed partial class FileCaptureService : IDisposable
                 args += BuildPreferredVideoDecoderInputArg(_preferredVideoDecoder);
                 args += $" -i \"{url}\"{BuildDecodeDurationOutputArg()} -map 0:v:0 -an -sn -dn";
                 string videoFilter = BuildVideoOutputFilter(produceExactTargetFrames, processOutputFitMode, processWidth, processHeight);
+                double subtitleDelayAtStartup = Volatile.Read(ref _subtitleDelaySeconds);
+                double subtitleSeekSeconds = startOffsetSeconds > 0.05 ? startOffsetSeconds : 0;
                 if (_subtitlePath != null)
                 {
-                    // Input seeking resets PTS. Restore movie time for subtitle lookup,
-                    // then restore output time before FPS conversion and realtime pacing.
+                    // Keep cadence, geometry and realtime pacing on the movie's
+                    // original clock. Only caption lookup uses the adjustable clock.
                     string subtitleFilter = MoviePlaylistSettings.BuildSubtitleFilter(_subtitlePath, _subtitleTrack,
-                        startOffsetSeconds > 0.05 ? startOffsetSeconds : 0);
-                    videoFilter = subtitleFilter + (string.IsNullOrEmpty(videoFilter) ? "" : "," + videoFilter);
+                        subtitleSeekSeconds, subtitleDelayAtStartup);
+                    videoFilter = (string.IsNullOrEmpty(videoFilter) ? "" : videoFilter + ",") + subtitleFilter;
                 }
                 if (!string.IsNullOrWhiteSpace(videoFilter))
                 {
@@ -2934,6 +3047,7 @@ internal sealed partial class FileCaptureService : IDisposable
                     args += " -filter_threads 1";
                 }
                 if (pausedPreview) args += " -frames:v 1";
+                if (_subtitlePath != null) args += " -fps_mode passthrough";
                 args += $" -f rawvideo -pix_fmt bgra -s {processWidth}x{processHeight} -";
 
                 Logger.Info($"Starting ffmpeg: {args}");
@@ -2945,10 +3059,14 @@ internal sealed partial class FileCaptureService : IDisposable
                     UseShellExecute = false,
                     RedirectStandardOutput = true,
                     RedirectStandardError = true,
+                    RedirectStandardInput = _subtitlePath != null,
                     CreateNoWindow = true
                 };
 
                 process = FfmpegProcessManager.Shared.Start(psi);
+                // FFmpeg terminates interactive lines on either CR or LF. Send
+                // one LF so a leftover CRLF byte cannot consume another poll.
+                if (_subtitlePath != null) process.StandardInput.NewLine = "\n";
                 bool ownsCurrentPipeline;
                 lock (_videoPipelineLock)
                 {
@@ -2959,6 +3077,7 @@ internal sealed partial class FileCaptureService : IDisposable
                     if (ownsCurrentPipeline)
                     {
                         _process = process;
+                        _subtitleFilterSeekSeconds = subtitleSeekSeconds;
                     }
                 }
 
@@ -2966,6 +3085,8 @@ internal sealed partial class FileCaptureService : IDisposable
                 {
                     return;
                 }
+                if (_subtitlePath != null && subtitleDelayAtStartup != Volatile.Read(ref _subtitleDelaySeconds) && !pausedPreview)
+                    ScheduleSubtitleTimingUpdate();
 
                 TryLowerChildProcessPriority(
                     process,
@@ -2974,12 +3095,24 @@ internal sealed partial class FileCaptureService : IDisposable
                     preferThroughput: _offlineRenderEnabled);
                 process.ErrorDataReceived += (s, e) =>
                 {
+                    if (e.Data != null && e.Data.StartsWith("Command reply", StringComparison.Ordinal))
+                    {
+                        var result = Regex.Match(e.Data, @"ret:(-?\d+)");
+                        if (result.Success && int.TryParse(result.Groups[1].Value, out int returnCode))
+                        {
+                            lock (_subtitleTimingLock)
+                                if (ReferenceEquals(_subtitleTimingCommandProcess, process)) _subtitleTimingCommandReply?.TrySetResult(returnCode);
+                        }
+                    }
                     if (!token.IsCancellationRequested &&
                         !_isDisposed &&
                         !string.IsNullOrWhiteSpace(e.Data) &&
                         !IsExpectedRealtimeResetWarning(e.Data))
                     {
-                        Logger.Warn($"[ffmpeg] {e.Data}");
+                        if (e.Data.StartsWith("Enter command:", StringComparison.Ordinal) ||
+                            (e.Data.StartsWith("Command reply", StringComparison.Ordinal) && e.Data.Contains("ret:0", StringComparison.Ordinal)))
+                            Logger.Info($"[ffmpeg-subtitle-timing] {e.Data}");
+                        else Logger.Warn($"[ffmpeg] {e.Data}");
                     }
                 };
                 process.BeginErrorReadLine();
@@ -3109,6 +3242,7 @@ internal sealed partial class FileCaptureService : IDisposable
                         }
                     }
 
+                    CancelSubtitleTimingCommand(process);
                     FfmpegProcessManager.Shared.TerminateAndDispose(
                         process,
                         TimeSpan.FromMilliseconds(750));
@@ -3541,6 +3675,7 @@ internal sealed partial class FileCaptureService : IDisposable
             }
 
             try { cts?.Cancel(); } catch { }
+            CancelSubtitleTimingCommand(process);
             FfmpegProcessManager.Shared.TerminateAndDispose(
                 process,
                 TimeSpan.FromMilliseconds(750));
@@ -4516,7 +4651,11 @@ internal sealed partial class FileCaptureService : IDisposable
                 _paths.Clear();
                 _paths.AddRange(next.Movies.Select(movie => movie.FilePath));
                 _index = index >= 0 ? index : Math.Min(_index, Math.Max(0, _paths.Count - 1));
-                if (keepDecoder && _current != null) return;
+                if (keepDecoder && _current != null)
+                {
+                    _current.SetSubtitleDelay(newMovie!.SubtitleDelaySeconds);
+                    return;
+                }
                 RetireCurrent();
                 _lastFrame = null;
                 _pendingAdvanceTask = null;
@@ -4544,6 +4683,9 @@ internal sealed partial class FileCaptureService : IDisposable
                 return true;
             }
         }
+
+        internal (long videoGeneration, long audioGeneration, int? videoPid, int? audioPid) GetSubtitlePipelineStateForSmoke() =>
+            _current?.GetSubtitlePipelineStateForSmoke() ?? default;
 
         private void RetireCurrent()
         {
@@ -4996,7 +5138,7 @@ internal sealed partial class FileCaptureService : IDisposable
                 {
                     if (!string.IsNullOrWhiteSpace(movie.SubtitlePath) && File.Exists(movie.SubtitlePath))
                     {
-                        session.ConfigureSubtitles(movie.SubtitlePath, null);
+                        session.ConfigureSubtitles(movie.SubtitlePath, null, movie.SubtitleDelaySeconds);
                         SubtitleStatus = "SRT: " + System.IO.Path.GetFileName(movie.SubtitlePath);
                     }
                     else SubtitleStatus = "SRT file missing; playing without subtitles";
@@ -5007,7 +5149,7 @@ internal sealed partial class FileCaptureService : IDisposable
                     string? codec = embeddedTrack?.Codec;
                     if (codec != null && MoviePlaylistSettings.IsTextSubtitle(codec))
                     {
-                        session.ConfigureSubtitles(path, movie.SubtitleTrack);
+                        session.ConfigureSubtitles(path, movie.SubtitleTrack, movie.SubtitleDelaySeconds);
                         SubtitleStatus = "Embedded: " + embeddedTrack!.Label;
                     }
                     else SubtitleStatus = codec == null ? "No embedded subtitle at this track" : "Bitmap subtitles require an external SRT";

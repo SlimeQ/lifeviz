@@ -41,6 +41,14 @@
             <Setter Property="BorderThickness" Value="1" />
             <Setter Property="Foreground" Value="#F2F2F2" />
         </Style>
+        <Style TargetType="RepeatButton">
+            <Setter Property="Background" Value="#262626" />
+            <Setter Property="BorderBrush" Value="#3A3A3A" />
+            <Setter Property="BorderThickness" Value="1" />
+            <Setter Property="Foreground" Value="#F2F2F2" />
+            <Setter Property="Padding" Value="8,3" />
+            <Setter Property="Margin" Value="0,0,6,6" />
+        </Style>
         <Style TargetType="ComboBox">
             <Setter Property="Background" Value="#1A1A1A" />
             <Setter Property="BorderBrush" Value="#3A3A3A" />
@@ -776,6 +784,15 @@
                                                     PreviewKeyDown="MovieScrub_KeyDown" PreviewKeyUp="MovieScrub_KeyUp"
                                                     LostKeyboardFocus="MovieScrub_LostKeyboardFocus" />
                                             <TextBlock Text="{Binding MovieScrubTimeLabel}" Foreground="#C8C8C8" HorizontalAlignment="Right" />
+                                            <WrapPanel DataContext="{Binding PlayingMovie}" Margin="0,6,0,0">
+                                                <TextBlock Text="Subtitles" VerticalAlignment="Center" Margin="0,0,8,6" />
+                                                <RepeatButton Content="Earlier 0.1 s" Tag="-0.1" Click="MovieSubtitleNudge_Click" Delay="400" Interval="100" Margin="0,0,6,6" Padding="8,3"
+                                                              ToolTip="Nudge the playing movie's subtitles earlier. Hold to repeat." />
+                                                <RepeatButton Content="Later 0.1 s" Tag="0.1" Click="MovieSubtitleNudge_Click" Delay="400" Interval="100" Margin="0,0,6,6" Padding="8,3"
+                                                              ToolTip="Nudge the playing movie's subtitles later. Hold to repeat." />
+                                                <Button Content="Reset timing" Click="MovieSubtitleReset_Click" />
+                                                <TextBlock Text="{Binding SubtitleDelayLabel}" VerticalAlignment="Center" Margin="0,0,0,6" />
+                                            </WrapPanel>
                                         </StackPanel>
                                         <TextBlock Text="{Binding CurrentMovieLabel}" Foreground="#C8C8C8" TextWrapping="Wrap" Margin="0,4,0,12" />
                                         <TextBlock Text="Playlist order, audio, and subtitles" Foreground="#C8C8C8" Margin="0,0,0,4" />
@@ -828,6 +845,16 @@
                                                 <WrapPanel>
                                                     <Button Content="Choose SRT..." Click="MovieSrt_Click" />
                                                     <TextBlock Text="{Binding SubtitlePath}" TextWrapping="Wrap" MaxWidth="340" Foreground="#C8C8C8" />
+                                                </WrapPanel>
+                                                <TextBlock Text="Subtitle timing (positive = later, negative = earlier)" Margin="0,8,0,4" />
+                                                <WrapPanel>
+                                                    <TextBox Text="{Binding SubtitleDelaySeconds, Mode=OneWay, StringFormat=F3}" Width="90" Margin="0,0,8,6"
+                                                             LostKeyboardFocus="MovieSubtitleDelay_Commit" KeyDown="MovieSubtitleDelay_KeyDown"
+                                                             ToolTip="Signed offset in seconds. Press Enter or leave the field to apply. The subtitle file stays unchanged." />
+                                                    <TextBlock Text="seconds" VerticalAlignment="Center" Margin="0,0,8,6" />
+                                                    <RepeatButton Content="Earlier 1 s" Tag="-1" Click="MovieSubtitleNudge_Click" Delay="400" Interval="100" Margin="0,0,6,6" Padding="8,3" />
+                                                    <RepeatButton Content="Later 1 s" Tag="1" Click="MovieSubtitleNudge_Click" Delay="400" Interval="100" Margin="0,0,6,6" Padding="8,3" />
+                                                    <Button Content="Reset timing" Click="MovieSubtitleReset_Click" />
                                                 </WrapPanel>
                                                 <TextBlock Text="Embedded text subtitles supported. Bitmap tracks (PGS/DVD) need an external SRT."
                                                            TextWrapping="Wrap" Foreground="#AFAFAF" Margin="0,4,0,0" />

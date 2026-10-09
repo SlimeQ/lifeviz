@@ -1,5 +1,6 @@
 using System;
 using System.IO;
+using System.Globalization;
 using System.Linq;
 using System.Threading.Tasks;
 using System.Windows;
@@ -283,6 +284,42 @@ public partial class LayerEditorWindow
         if (_suppressLiveUpdates || _loadingMovieTrackChoices) return;
         var source = _viewModel?.SelectedSource;
         if (source?.IsMoviePlaylist == true) CommitMoviePlaylist(source);
+    }
+
+    private void MovieSubtitleNudge_Click(object sender, RoutedEventArgs e)
+    {
+        if (_suppressLiveUpdates || sender is not FrameworkElement { DataContext: MoviePlaylistEntry movie, Tag: string step } ||
+            _viewModel.SelectedSource is not { IsMoviePlaylist: true } source || !source.MoviePlaylist.Movies.Contains(movie) ||
+            !double.TryParse(step, NumberStyles.Float, CultureInfo.InvariantCulture, out double seconds)) return;
+        movie.SubtitleDelaySeconds += seconds;
+        CommitMoviePlaylist(source);
+    }
+
+    private void MovieSubtitleReset_Click(object sender, RoutedEventArgs e)
+    {
+        if (_suppressLiveUpdates || sender is not FrameworkElement { DataContext: MoviePlaylistEntry movie } ||
+            _viewModel.SelectedSource is not { IsMoviePlaylist: true } source || !source.MoviePlaylist.Movies.Contains(movie)) return;
+        movie.SubtitleDelaySeconds = 0;
+        CommitMoviePlaylist(source);
+    }
+
+    private void MovieSubtitleDelay_Commit(object sender, RoutedEventArgs e)
+    {
+        if (_suppressLiveUpdates || sender is not TextBox { DataContext: MoviePlaylistEntry movie } textBox ||
+            _viewModel.SelectedSource is not { IsMoviePlaylist: true } source || !source.MoviePlaylist.Movies.Contains(movie)) return;
+        if (double.TryParse(textBox.Text, NumberStyles.Float, CultureInfo.CurrentCulture, out double seconds) && double.IsFinite(seconds))
+        {
+            movie.SubtitleDelaySeconds = seconds;
+            CommitMoviePlaylist(source);
+        }
+        textBox.GetBindingExpression(TextBox.TextProperty)?.UpdateTarget();
+    }
+
+    private void MovieSubtitleDelay_KeyDown(object sender, KeyEventArgs e)
+    {
+        if (e.Key != Key.Enter) return;
+        MovieSubtitleDelay_Commit(sender, new RoutedEventArgs());
+        e.Handled = true;
     }
 
     private void CommitMoviePlaylist(LayerEditorSource source)

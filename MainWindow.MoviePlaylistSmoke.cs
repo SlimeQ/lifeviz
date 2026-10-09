@@ -12,6 +12,7 @@ public partial class MainWindow
 {
     internal void RunMoviePlaylistChecks(string video, string srt, string directory)
     {
+        RunMovieSubtitleTimingChecks(video, srt, directory);
         static void Require(bool value, string message) => SmokeTestRunner.RequireSceneCheck(value, message);
         var first = new MoviePlaylistEntry { FilePath = video, AudioTrack = 1 };
         var second = new MoviePlaylistEntry { FilePath = video, SubtitleMode = "Srt", SubtitlePath = srt };
@@ -127,8 +128,16 @@ public partial class MainWindow
         session.SetPlaybackPaused(false);
 
         var snapshot = BuildSourceConfigs(new List<CaptureSource> { source }).Single();
+        var timed = reordered.Clone();
+        timed.Movies.Single(movie => movie.Id == first.Id).SubtitleDelaySeconds = 0.3;
+        timed.Movies.Single(movie => movie.Id == second.Id).SubtitleDelaySeconds = -0.2;
+        ApplyMoviePlaylistSettings(source, timed);
+        snapshot = BuildSourceConfigs(new List<CaptureSource> { source }).Single();
         Require(snapshot.MoviePlaylist!.BookmarkMovieId == first.Id && snapshot.MoviePlaylist.BookmarkSeconds >= 2.25, "Autosave lost the running bookmark.");
         var saved = JsonSerializer.Deserialize<AppConfig.SourceConfig>(JsonSerializer.Serialize(snapshot))!;
+        Require(saved.MoviePlaylist!.Movies.Single(movie => movie.Id == first.Id).SubtitleDelaySeconds == 0.3 &&
+            saved.MoviePlaylist.Movies.Single(movie => movie.Id == second.Id).SubtitleDelaySeconds == -0.2,
+            "Autosave lost the independent signed subtitle offsets.");
         Require(saved.MoviePlaylist!.Movies.Single(movie => movie.Id == first.Id).AudioTrack == 1,
             "Application autosave lost the audio track selection.");
         var loaded = new List<CaptureSource>();
@@ -144,6 +153,9 @@ public partial class MainWindow
         var model = models.Single();
         var project = LayerConfigFile.FromEditorSources(models, Array.Empty<LayerEditorSimulationLayer>(), new LayerEditorProjectSettings());
         var restoredModel = LayerConfigFile.Parse(JsonSerializer.Serialize(project)).ToEditorSources().Single(item => item.IsMoviePlaylist);
+        Require(restoredModel.MoviePlaylist.Movies.Single(movie => movie.Id == first.Id).SubtitleDelaySeconds == 0.3 &&
+            restoredModel.MoviePlaylist.Movies.Single(movie => movie.Id == second.Id).SubtitleDelaySeconds == -0.2,
+            "Scene export/import lost subtitle offsets.");
         Require(restoredModel.IsMoviePlaylist && restoredModel.MoviePlaylist.Movies.Select(movie => movie.Id).SequenceEqual(reordered.Movies.Select(movie => movie.Id)),
             "Project export/import lost movie order or identity.");
         Require(restoredModel.MoviePlaylist.Movies.Single(movie => movie.Id == first.Id).AudioTrack == 1 &&

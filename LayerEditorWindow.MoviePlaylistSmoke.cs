@@ -4,6 +4,7 @@ using System.IO;
 using System.Linq;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Controls.Primitives;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using System.Windows.Input;
@@ -66,6 +67,22 @@ public partial class LayerEditorWindow
         audioTracks.SelectedIndex = originalAudioTrack;
         SelectAudioTrackUsingPopup(1);
         if (selected.AudioTrack != 1) throw new InvalidOperationException("Draft audio selection did not apply its ordinal.");
+        var laterSecond = Descendants(playlistGroup).OfType<RepeatButton>().Single(item => Equals(item.Content, "Later 1 s"));
+        double draftOffset = selected.SubtitleDelaySeconds;
+        laterSecond.RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent));
+        if (selected.SubtitleDelaySeconds != Math.Round(draftOffset + 1, 3))
+            throw new InvalidOperationException("Draft subtitle nudge did not update the selected entry.");
+        var exactOffset = Descendants(playlistGroup).OfType<TextBox>().Single(item =>
+            item.GetBindingExpression(TextBox.TextProperty)?.ParentBinding.Path.Path == "SubtitleDelaySeconds");
+        exactOffset.SetCurrentValue(TextBox.TextProperty, 0.75.ToString(System.Globalization.CultureInfo.CurrentCulture));
+        MovieSubtitleDelay_Commit(exactOffset, new RoutedEventArgs());
+        if (selected.SubtitleDelaySeconds != 0.75) throw new InvalidOperationException("Exact subtitle offset did not commit.");
+        exactOffset.SetCurrentValue(TextBox.TextProperty, "not a number");
+        MovieSubtitleDelay_Commit(exactOffset, new RoutedEventArgs());
+        if (selected.SubtitleDelaySeconds != 0.75) throw new InvalidOperationException("Invalid subtitle offset changed the saved value.");
+        var selectedReset = Descendants(playlistGroup).OfType<Button>().Single(item => Equals(item.Content, "Reset timing") && ReferenceEquals(item.DataContext, selected));
+        selectedReset.RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent));
+        if (selected.SubtitleDelaySeconds != 0) throw new InvalidOperationException("Subtitle Reset did not clear the draft offset.");
 
         void SelectAudioTrackUsingPopup(int index)
         {
@@ -109,6 +126,16 @@ public partial class LayerEditorWindow
         nextFrame();
         RefreshSelectedVideoTransportState();
         if (!model.VideoPlaybackPaused || Math.Abs(model.MovieScrubSeconds - 1.5) > 0.15) throw new InvalidOperationException("Scrubbing failed to seek or preserve pause.");
+        var laterTenth = Descendants(playlistGroup).OfType<RepeatButton>().Single(item => Equals(item.Content, "Later 0.1 s"));
+        var timingMovie = model.PlayingMovie!;
+        double timingBefore = timingMovie.SubtitleDelaySeconds;
+        for (int i = 0; i < 3; i++) laterTenth.RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent));
+        RefreshSelectedVideoTransportState();
+        if (timingMovie.SubtitleDelaySeconds != Math.Round(timingBefore + 0.3, 3) || !model.VideoPlaybackPaused ||
+            Math.Abs(model.MovieScrubSeconds - 1.5) > 0.15 || selected.SubtitleDelaySeconds != 0)
+            throw new InvalidOperationException("Player subtitle nudges did not target the playing movie or preserve pause/time.");
+        var playingReset = Descendants(playlistGroup).OfType<Button>().Single(item => Equals(item.Content, "Reset timing") && ReferenceEquals(item.DataContext, timingMovie));
+        playingReset.RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent));
         // Change the active entry's track through the real picker while paused.
         model.SelectedMovie = model.PlayingMovie;
         LoadMovieTracksAsync(model.SelectedMovie!).GetAwaiter().GetResult();

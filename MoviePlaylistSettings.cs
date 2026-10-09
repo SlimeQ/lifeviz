@@ -14,11 +14,23 @@ internal sealed class MoviePlaylistEntry : LayerEditorNotify
     private string? _subtitlePath;
     private int _subtitleTrack;
     private int _audioTrack;
+    private double _subtitleDelaySeconds;
     public Guid Id { get; set; } = Guid.NewGuid();
     public string FilePath { get; set; } = string.Empty;
     public string SubtitleMode { get => _subtitleMode; set => SetField(ref _subtitleMode, value); }
     public string? SubtitlePath { get => _subtitlePath; set => SetField(ref _subtitlePath, value); }
     public int SubtitleTrack { get => _subtitleTrack; set => SetField(ref _subtitleTrack, Math.Max(0, value)); }
+    public double SubtitleDelaySeconds
+    {
+        get => _subtitleDelaySeconds;
+        set
+        {
+            if (SetField(ref _subtitleDelaySeconds, MoviePlaylistSettings.NormalizeSubtitleDelay(value)))
+                OnPropertyChanged(nameof(SubtitleDelayLabel));
+        }
+    }
+    [JsonIgnore] public string SubtitleDelayLabel => SubtitleDelaySeconds == 0 ? "0.0 s" :
+        SubtitleDelaySeconds.ToString("+0.0##;-0.0##", CultureInfo.CurrentCulture) + " s (" + (SubtitleDelaySeconds > 0 ? "later" : "earlier") + ")";
     public int AudioTrack
     {
         get => _audioTrack;
@@ -59,7 +71,7 @@ internal sealed class MoviePlaylistEntry : LayerEditorNotify
     }
     private static readonly LayerEditorOption[] Modes = {
         new("Embedded", "Embedded text track"), new("Srt", "External SRT"), new("Off", "Off") };
-    public MoviePlaylistEntry Clone() => new() { Id = Id, FilePath = FilePath, SubtitleMode = SubtitleMode, SubtitlePath = SubtitlePath, SubtitleTrack = SubtitleTrack, AudioTrack = AudioTrack };
+    public MoviePlaylistEntry Clone() => new() { Id = Id, FilePath = FilePath, SubtitleMode = SubtitleMode, SubtitlePath = SubtitlePath, SubtitleTrack = SubtitleTrack, AudioTrack = AudioTrack, SubtitleDelaySeconds = SubtitleDelaySeconds };
 }
 
 internal sealed record MovieAudioTrack(int Index, int StreamIndex, string Codec, string Language, string Title, bool IsDefault, string Channels)
@@ -96,6 +108,7 @@ internal sealed class MoviePlaylistSettings : LayerEditorNotify
         Movies = new(Movies.Select(movie => movie.Clone())), ResumePlayback = ResumePlayback,
         BookmarkMovieId = BookmarkMovieId, BookmarkSeconds = NormalizeSeconds(BookmarkSeconds) };
     internal static double NormalizeSeconds(double seconds) => double.IsFinite(seconds) ? Math.Max(0, seconds) : 0;
+    internal static double NormalizeSubtitleDelay(double seconds) => double.IsFinite(seconds) ? Math.Round(Math.Clamp(seconds, -86400, 86400), 3) : 0;
 
     internal static bool TryParseTime(string text, out double seconds)
     {
@@ -112,13 +125,18 @@ internal sealed class MoviePlaylistSettings : LayerEditorNotify
     }
 
     // FFmpeg filter options have two escaping levels (option and filtergraph).
-    internal static string BuildSubtitleFilter(string path, int? track, double offsetSeconds)
+    internal static string BuildSubtitleClockExpression(double offsetSeconds, double delaySeconds) =>
+        "PTS+(" + (NormalizeSeconds(offsetSeconds) - NormalizeSubtitleDelay(delaySeconds)).ToString("0.######", CultureInfo.InvariantCulture) + ")/TB";
+
+    internal static string BuildSubtitleFilter(string path, int? track, double offsetSeconds, double delaySeconds)
     {
         string escaped = path.Replace('\\', '/').Replace("'", "\\'").Replace(":", "\\:");
         escaped = escaped.Replace("\\", "\\\\").Replace("'", "\\'").Replace(",", "\\,").Replace(";", "\\;").Replace("[", "\\[").Replace("]", "\\]");
         string filter = $"subtitles=filename={escaped}" + (track.HasValue ? $":si={track.Value}" : "");
-        string offset = NormalizeSeconds(offsetSeconds).ToString("0.######", CultureInfo.InvariantCulture);
-        return $"setpts=PTS+{offset}/TB,{filter},setpts=PTS-{offset}/TB";
+        // Caption lookup runs after cadence/geometry/pacing on its own clock.
+        // Raw BGRA consumers use frame order, so restore monotonic output PTS
+        // independently of that clock. Nudges cannot change pacing or frame count.
+        return $"setpts@lifeviz_subtitles={BuildSubtitleClockExpression(offsetSeconds, delaySeconds)},{filter},setpts=N";
     }
 
     internal static MovieSubtitleTrack[] ParseSubtitleTracks(string output)
