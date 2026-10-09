@@ -797,6 +797,7 @@
                                                 <TextBlock Text="Audio track" Margin="0,0,0,4" />
                                                 <ComboBox ItemsSource="{Binding AudioTracks}" SelectedValue="{Binding AudioTrack, Mode=OneWay}"
                                                           SelectedValuePath="Index" HorizontalAlignment="Stretch"
+                                                          SelectionChanged="MovieAudioTrack_SelectionChanged"
                                                           DropDownOpened="MovieAudioTrack_DropDownOpened" DropDownClosed="MovieAudioTrack_DropDownClosed"
                                                           PreviewKeyDown="MovieAudioTrack_KeyDown" PreviewKeyUp="MovieAudioTrack_KeyUp"
                                                           LostKeyboardFocus="MovieAudioTrack_LostKeyboardFocus"

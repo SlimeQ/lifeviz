@@ -4,6 +4,8 @@
 
 ## Movie Playlist layers
 
+Audio selection applies as soon as a track is selected during a user dropdown or keyboard gesture, before popup-close/focus events. Restarting the movie keeps the chosen audio. Opening/closing the picker without a new choice and editor refreshes leave the saved track alone.
+
 Select a movie in the authored playlist, then choose **Audio track** under Selected Movie. Labels show language, title/handler name, codec, channels, and the file's default flag. **Refresh tracks** reloads both audio and subtitle listings. A live audio change preserves the current movie, time, and play/pause state; editing an inactive entry leaves current playback alone. Draft changes apply with Apply. Audio choices save independently for each entry, including duplicate files. New and existing entries without a saved choice use the first audio track. The playback status identifies the chosen track; unavailable saved choices fall back to the first track with a status message.
 
 Selecting/reselecting a Movie Playlist layer, moving any scene layer, and refreshing its controls preserve the current movie, time, and pause state. The Now playing dropdown switches only on a committed user choice (menu close or keyboard navigation), and choosing the current movie does not restart it.

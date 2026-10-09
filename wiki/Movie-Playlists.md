@@ -18,6 +18,8 @@ New movie playlists default to Normal compositing, Fit framing, and Play Audio e
 
 ## Audio tracks
 
+Audio choices commit when selected during an active dropdown or keyboard gesture, before popup-close/focus events. Restarting a movie retains its chosen track. Editor refreshes and opening/closing the picker without a new choice do not change the saved selection.
+
 Select an entry in the authored list and use **Audio track** under Selected Movie to choose its language or commentary track. Labels show the readable language, title (or handler name), codec, channel layout, and default flag when available. **Refresh tracks** refreshes both the audio and subtitle listings. Choices are independent per entry, even when the same file appears more than once, and save with the project and app autosave. Entries with no saved choice use the first audio track, preserving existing playback behavior. If a saved track no longer exists, the player uses the first track and reports the fallback; movies without audio still play video.
 
 Changing the active movie's audio track in Live Mode retains its movie, time, and pause state. Selecting a different authored entry to edit its audio does not switch playback. With Live Mode off, the choice remains in the draft until Apply. The selected track supplies speaker playback, Video Stack (Silent) analysis, and background-bake audio analysis. Play Audio, layer volume, and master source-audio controls still apply. The current playback status displays the chosen audio track.

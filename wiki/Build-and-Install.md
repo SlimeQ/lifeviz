@@ -489,6 +489,8 @@ dotnet bin/Release/net9.0-windows/lifeviz.dll --smoke-test render-failure-cleanu
 
 ## Validate movie playlists
 
+The audio-picker regression opens the actual WPF popup and selects its generated items through the accessibility selection provider and mouse-up path, rather than calling the dropdown handlers directly. It checks that the ordinal is stored before close/focus events, that rebinding does not apply a choice, and that the real decoder emits the selected tone both immediately and after restarting the same movie.
+
 The player regression also verifies that leaving/reselecting the playlist layer, moving the playlist or another scene layer, deferred control rebinding, and opening/closing Now playing without a new choice preserve the movie, timestamp, and pause state. Explicit dropdown and keyboard movie choices still navigate, including repeated navigation keys.
 
 ```powershell

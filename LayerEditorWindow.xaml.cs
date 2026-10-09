@@ -466,6 +466,8 @@ public partial class LayerEditorWindow : Window
 
         _movieSelectionSource = null;
         _movieSelectionStartId = null;
+        _movieAudioSelectionSource = null;
+        _movieAudioSelectionEntry = null;
         _updatingSelection = true;
         try
         {

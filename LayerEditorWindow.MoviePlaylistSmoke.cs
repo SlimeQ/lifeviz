@@ -8,12 +8,14 @@ using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using System.Windows.Input;
 using System.Windows.Threading;
+using System.Windows.Automation.Peers;
+using System.Windows.Automation.Provider;
 
 namespace lifeviz;
 
 public partial class LayerEditorWindow
 {
-    internal void ValidateMoviePlaylistControlsForSmoke(LayerEditorSource model, string imagePath, Action nextFrame, Action<LayerEditorWindow> checkLayerReorder)
+    internal void ValidateMoviePlaylistControlsForSmoke(LayerEditorSource model, string imagePath, Action nextFrame, Action<int> checkSelectedAudio, Action<LayerEditorWindow> checkLayerReorder)
     {
         _suppressLiveUpdates = true;
         ShowActivated = false;
@@ -61,9 +63,30 @@ public partial class LayerEditorWindow
         int originalAudioTrack = selected.AudioTrack;
         audioTracks.SelectedIndex = 1;
         if (selected.AudioTrack != originalAudioTrack) throw new InvalidOperationException("Audio rebinding unexpectedly changed the saved selection.");
-        MovieAudioTrack_DropDownOpened(audioTracks, EventArgs.Empty);
-        MovieAudioTrack_DropDownClosed(audioTracks, EventArgs.Empty);
+        audioTracks.SelectedIndex = originalAudioTrack;
+        SelectAudioTrackUsingPopup(1);
         if (selected.AudioTrack != 1) throw new InvalidOperationException("Draft audio selection did not apply its ordinal.");
+
+        void SelectAudioTrackUsingPopup(int index)
+        {
+            audioTracks.IsDropDownOpen = true;
+            root.UpdateLayout();
+            Dispatcher.Invoke(() => { }, DispatcherPriority.ContextIdle);
+            var item = audioTracks.ItemContainerGenerator.ContainerFromIndex(index) as ComboBoxItem
+                ?? throw new InvalidOperationException("Audio popup did not generate the chosen track's item.");
+            item.Focus();
+            var peer = new ComboBoxAutomationPeer(audioTracks).GetChildren().OfType<ItemAutomationPeer>()
+                .Single(child => Equals(child.Item, audioTracks.Items[index]));
+            var selection = peer.GetPattern(PatternInterface.SelectionItem) as ISelectionItemProvider
+                ?? throw new InvalidOperationException("Audio popup does not support accessible track selection.");
+            selection.Select();
+            if (((MoviePlaylistEntry)audioTracks.DataContext).AudioTrack != index)
+                throw new InvalidOperationException("Audio selection was not saved before popup focus/close events.");
+            item.RaiseEvent(new MouseButtonEventArgs(Mouse.PrimaryDevice, Environment.TickCount, MouseButton.Left)
+                { RoutedEvent = Mouse.MouseUpEvent });
+            Dispatcher.Invoke(() => { }, DispatcherPriority.ContextIdle);
+            if (audioTracks.IsDropDownOpen) throw new InvalidOperationException("Clicking the audio popup item did not close the dropdown.");
+        }
 
         _suppressLiveUpdates = true;
         _viewModel.LiveMode = true;
@@ -92,17 +115,15 @@ public partial class LayerEditorWindow
         root.UpdateLayout();
         var audioMovie = model.SelectedMovie!;
         var beforeAudioChange = audioMovie.AudioTrack;
-        MovieAudioTrack_DropDownOpened(audioTracks, EventArgs.Empty);
-        audioTracks.SelectedIndex = beforeAudioChange == 0 ? 1 : 0;
-        MovieAudioTrack_DropDownClosed(audioTracks, EventArgs.Empty);
+        SelectAudioTrackUsingPopup(beforeAudioChange == 0 ? 1 : 0);
         nextFrame();
         RefreshSelectedVideoTransportState();
         if (audioMovie.AudioTrack == beforeAudioChange || !model.VideoPlaybackPaused || Math.Abs(model.MovieScrubSeconds - 1.5) > 0.15)
             throw new InvalidOperationException("Live audio picker reset playback or failed to change the track.");
-        MovieAudioTrack_DropDownOpened(audioTracks, EventArgs.Empty);
-        audioTracks.SelectedIndex = beforeAudioChange;
-        MovieAudioTrack_DropDownClosed(audioTracks, EventArgs.Empty);
+        checkSelectedAudio(audioMovie.AudioTrack);
+        SelectAudioTrackUsingPopup(beforeAudioChange);
         nextFrame();
+        checkSelectedAudio(audioMovie.AudioTrack);
         model.SelectedMovie = selected;
         root.UpdateLayout();
         _owner.TryGetMoviePlaylistState(model.Id, out var selectedId, out double selectedTime, out _);

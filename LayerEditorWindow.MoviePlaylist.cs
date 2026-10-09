@@ -61,14 +61,27 @@ public partial class LayerEditorWindow
 
     private void MovieAudioTrack_DropDownClosed(object sender, EventArgs e)
     {
-        var source = _movieAudioSelectionSource;
-        var movie = _movieAudioSelectionEntry;
+        ApplyMovieAudioSelection(sender);
         _movieAudioSelectionSource = null;
         _movieAudioSelectionEntry = null;
+    }
+
+    private void MovieAudioTrack_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        // Commit while the user's gesture is still active. Closing a WPF popup
+        // can move keyboard focus before DropDownClosed is delivered.
+        ApplyMovieAudioSelection(sender);
+    }
+
+    private void ApplyMovieAudioSelection(object sender)
+    {
+        var source = _movieAudioSelectionSource;
+        var movie = _movieAudioSelectionEntry;
         if (_loadingMovieTrackChoices || _suppressLiveUpdates || source == null || movie == null ||
             !ReferenceEquals(source, _viewModel.SelectedSource) || !ReferenceEquals(movie, source.SelectedMovie) ||
             sender is not ComboBox { DataContext: MoviePlaylistEntry context, SelectedItem: MovieAudioTrack track } ||
             !ReferenceEquals(context, movie) || !movie.AudioTracks.Contains(track) || track.Index == _movieAudioSelectionStartIndex) return;
+        _movieAudioSelectionStartIndex = track.Index;
         movie.AudioTrack = track.Index;
         CommitMoviePlaylist(source);
     }
@@ -84,8 +97,7 @@ public partial class LayerEditorWindow
     private void MovieAudioTrack_LostKeyboardFocus(object sender, KeyboardFocusChangedEventArgs e)
     {
         if (sender is not ComboBox { IsDropDownOpen: false }) return;
-        _movieAudioSelectionSource = null;
-        _movieAudioSelectionEntry = null;
+        MovieAudioTrack_DropDownClosed(sender, EventArgs.Empty);
     }
 
     private void MovieSubtitleTrack_SelectionChanged(object sender, SelectionChangedEventArgs e)

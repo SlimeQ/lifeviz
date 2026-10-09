@@ -157,8 +157,22 @@ public partial class MainWindow
             Require(reopened.GetBookmark().movieId == second.Id && reopened.GetBookmark().seconds == 0, "Resume off did not start at the beginning of the list.");
 
         var editor = new LayerEditorWindow(this);
-        try { editor.ValidateMoviePlaylistControlsForSmoke(model, Path.Combine(directory, "playlist-editor.png"), () => { NextFrame(); }, CheckLayerReorder); }
+        try { editor.ValidateMoviePlaylistControlsForSmoke(model, Path.Combine(directory, "playlist-editor.png"), () => { NextFrame(); }, CheckSelectedAudio, CheckLayerReorder); }
         finally { editor.Close(); }
+
+        void CheckSelectedAudio(int track)
+        {
+            var bookmark = session.GetBookmark();
+            session.SetPlaybackPaused(false);
+            RequireAudioFrequency(track == 0 ? 440 : 880);
+            // Restart this same entry as the user did: the picked track must persist.
+            session.JumpToMovie(bookmark.movieId, bookmark.seconds);
+            NextFrame();
+            RequireAudioFrequency(track == 0 ? 440 : 880);
+            session.SetPlaybackPaused(true);
+            session.JumpToMovie(bookmark.movieId, bookmark.seconds);
+            NextFrame();
+        }
 
         void CheckLayerReorder(LayerEditorWindow activeEditor)
         {
