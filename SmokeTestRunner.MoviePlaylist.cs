@@ -8,7 +8,7 @@ namespace lifeviz;
 
 internal static partial class SmokeTestRunner
 {
-    private static int RunMoviePlaylistSmokeTest()
+    private static int RunMoviePlaylistSmokeTest(bool clockOnly = false)
     {
         string directory = Path.Combine(Path.GetTempPath(), "lifeviz-playlist-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(directory);
@@ -41,8 +41,11 @@ internal static partial class SmokeTestRunner
             try
             {
                 window = new MainWindow();
-                window.RunMoviePlaylistChecks(video, srt, directory);
-                Console.WriteLine("Movie playlist smoke passed: labelled audio/subtitle tracks, selected-track PCM, ordered loop, duplicate entries, text/SRT captions, punctuation paths, seek timing, pause, resume on/off, edits, missing inputs, project/autosave persistence, draft controls and empty playlist.");
+                if (clockOnly) window.RunMovieClockChecks(directory);
+                else window.RunMoviePlaylistChecks(video, srt, directory);
+                Console.WriteLine(clockOnly
+                    ? "Movie clock smoke passed: delayed/gapped selected-track timestamps, seek, sustained video overload recovery, actual frame/PCM alignment and pause/play."
+                    : "Movie playlist smoke passed: audio clocks/overload recovery, labelled audio/subtitle tracks, selected-track PCM, ordered loop, duplicate entries, text/SRT captions, punctuation paths, seek timing, pause, resume on/off, edits, missing inputs, project/autosave persistence, draft controls and empty playlist.");
             }
             catch (Exception ex) { failure = ex; Console.WriteLine(ex); }
             finally { window?.ShutdownResources(); app.Shutdown(failure == null ? 0 : 1); }

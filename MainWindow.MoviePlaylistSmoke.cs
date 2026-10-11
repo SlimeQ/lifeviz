@@ -12,6 +12,7 @@ public partial class MainWindow
 {
     internal void RunMoviePlaylistChecks(string video, string srt, string directory)
     {
+        RunMovieClockChecks(directory);
         RunMovieSubtitleTimingChecks(video, srt, directory);
         static void Require(bool value, string message) => SmokeTestRunner.RequireSceneCheck(value, message);
         var first = new MoviePlaylistEntry { FilePath = video, AudioTrack = 1 };

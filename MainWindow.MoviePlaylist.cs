@@ -106,6 +106,7 @@ public partial class MainWindow
         {
             string activity = source.VideoPlaybackPaused ? "Paused" : source.VideoSequence.State == FileCaptureService.FileCaptureState.Pending ? "Preparing" : "Playing";
             label = $"{activity} {source.MoviePlaylist.Movies.IndexOf(movie) + 1}/{source.MoviePlaylist.Movies.Count}: {movie.DisplayName}\n{source.VideoSequence.AudioStatus}\n{source.VideoSequence.SubtitleStatus}";
+            if (!string.IsNullOrEmpty(source.VideoSequence.PlaybackStatus)) label += "\n" + source.VideoSequence.PlaybackStatus;
         }
         return true;
     }

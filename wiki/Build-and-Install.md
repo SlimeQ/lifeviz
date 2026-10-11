@@ -530,3 +530,7 @@ dotnet bin/Release/net9.0-windows/lifeviz.dll --smoke-test group-transparency
 
 The isolated blending smoke exercises both compositors, all 64 simulation/group blend combinations, shared inputs, ordered clipping, stacked groups over successive frames, more than eight outputs, empty/disabled groups, editor live/draft controls, and scene roundtrips. It writes `smoke-simulation-blending-editor.png` beside the executable for visual inspection. No saved user scene is loaded or modified. The group-transparency smoke checks the resolved group alpha and its subsequent Normal blend over the input stack separately.
 
+
+### Movie clock regression
+
+After a Release build, run `dotnet bin/Release/net9.0-windows/lifeviz.dll --smoke-test movie-clock`. It checks the selected audio track with a 1.1-second delayed start, a 1.25-second packet gap and a seek after that gap. A separate 23.976-fps fixture encodes source time in video pixels and PCM, continuously limits raw-frame throughput to 13.33 fps, and verifies automatic resynchronization at 12 fps, actual frame/sample alignment and pause/play preservation. This accelerated overload regression takes about 45 seconds; it is not a 30-hour soak. The complete `movie-playlist` smoke includes these checks alongside caption, editor and persistence coverage. Both use isolated diagnostic sessions without changing the running feed or saved project.

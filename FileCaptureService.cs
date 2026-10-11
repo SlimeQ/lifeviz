@@ -556,7 +556,9 @@ internal sealed partial class FileCaptureService : IDisposable
         // sample rates. Normalize them to 1024-sample, 48 kHz frames before the
         // managed sample scheduler. PCM delivery follows the movie clock instead
         // of anchoring an independent FFmpeg wall clock after decoder warm-up.
-        return "aresample=48000,asetnsamples=n=1024:p=1";
+        // Raw PCM has no timestamps. Materialize track start offsets and packet
+        // gaps as silence before counting samples against the movie timeline.
+        return "aresample=48000:async=1:first_pts=0,asetnsamples=n=1024:p=1";
     }
 
     public void BeginOfflineRender(int fps, double startTimeSeconds)
@@ -2184,6 +2186,7 @@ internal sealed partial class FileCaptureService : IDisposable
             _nativeHeight = probe.Height;
             _sourceFrameRate = probe.FrameRate;
             _sourceHasAlpha = probe.HasAlpha;
+            _sourceCodecName = probe.CodecName;
             _preferredVideoDecoder = ResolvePreferredVideoDecoder(probe.CodecName, probe.HasAlpha);
 
             if (!string.IsNullOrEmpty(_preferredVideoDecoder))
@@ -2510,6 +2513,8 @@ internal sealed partial class FileCaptureService : IDisposable
                     result.FrameToken);
             }
 
+            RecoverSustainedLiveVideoLag();
+
             return result;
         }
 
@@ -2615,7 +2620,7 @@ internal sealed partial class FileCaptureService : IDisposable
             };
         }
 
-        private string BuildDecoderThreadArgs()
+        private string BuildDecoderThreadArgs(bool video = false)
         {
             int threadLimit = _decoderThreadLimit;
             if (_lowContentionMode && threadLimit <= 0)
@@ -2626,12 +2631,15 @@ internal sealed partial class FileCaptureService : IDisposable
             // ffmpeg's automatic decoder fanout is wasteful when several file layers
             // are playing concurrently: every process can create a large codec thread
             // pool and retain a correspondingly large set of reference frames. Two
-            // threads comfortably sustain normal HD playback while keeping live scenes
-            // from oversubscribing the machine. Offline rendering keeps ffmpeg's full
+            // threads suit normal HD playback. UHD software fallback gets a bounded
+            // larger pool; explicit limits and low-contention mode still take priority.
+            // Offline rendering keeps ffmpeg's full
             // automatic fanout because throughput, rather than latency, is the goal.
             if (!_offlineRenderEnabled && threadLimit <= 0)
             {
-                threadLimit = 2;
+                threadLimit = video && (_nativeWidth > 1920 || _nativeHeight > 1080)
+                    ? Math.Clamp(Environment.ProcessorCount / 2, 2, 8)
+                    : 2;
             }
 
             if (threadLimit <= 0)
@@ -2655,7 +2663,7 @@ internal sealed partial class FileCaptureService : IDisposable
                 ? BuildDirectOutputVideoFilter(processOutputFitMode, processWidth, processHeight, _sourceHasAlpha)
                 : null;
 
-            int decodeFps = _offlineRenderEnabled ? _offlineRenderFps : _videoDecodeFpsLimit;
+            int decodeFps = _offlineRenderEnabled ? _offlineRenderFps : GetEffectiveLiveDecodeFpsLimit();
             // Captions temporarily change PTS. A defined CFR lets the restoring
             // filter recover seconds without guessing the input time base.
             if (HasSubtitles && decodeFps <= 0)
@@ -2992,9 +3000,11 @@ internal sealed partial class FileCaptureService : IDisposable
             SafeKillProcess(process);
         }
 
-        private void FfmpegWorker(string url, CancellationToken token, double startOffsetSeconds, long generation, bool pausedPreview = false)
+        private void FfmpegWorker(string url, CancellationToken token, double startOffsetSeconds, long generation, bool pausedPreview = false, bool softwareRetry = false)
         {
             Process? process = null;
+            bool hardwareDecode = !softwareRetry && ShouldUseHardwareVideoDecode();
+            bool retryWithoutHardware = false;
             try
             {
                 token.ThrowIfCancellationRequested();
@@ -3005,10 +3015,13 @@ internal sealed partial class FileCaptureService : IDisposable
                 int maxQueuedRawFrames = _offlineRenderEnabled
                     ? MaxQueuedOfflineRawFrames
                     : MaxQueuedLiveRawFrames;
-                string args = $"-hide_banner -loglevel warning{BuildDecoderThreadArgs()}"; // increased verbosity for debug
+                string args = $"-hide_banner -loglevel warning{BuildDecoderThreadArgs(video: true)}"; // increased verbosity for debug
                 // The main CLI loop otherwise checks stdin only every 500 ms.
                 // Filter/decode workers remain independently paced on media PTS.
                 if (_subtitlePath != null) args += " -stats_period 0.05";
+                else if (!_offlineRenderEnabled && !pausedPreview) args += " -stats_period 0.25";
+                if (!_offlineRenderEnabled && !pausedPreview) args += " -progress pipe:2";
+                if (hardwareDecode) args += " -hwaccel d3d11va";
                 if (startOffsetSeconds > 0.05)
                 {
                     args += $" -ss {startOffsetSeconds.ToString("0.###", CultureInfo.InvariantCulture)}";
@@ -3045,10 +3058,10 @@ internal sealed partial class FileCaptureService : IDisposable
                 }
                 if (!_offlineRenderEnabled)
                 {
-                    // Scaling a single live stream does not benefit enough from a
-                    // second filter pool to justify multiplying worker threads across
-                    // every active video layer.
-                    args += " -filter_threads 1";
+                    // Keep software filter pools small across live layers. Large
+                    // hardware-decoded movies can use two scaling workers without
+                    // also paying for a CPU video decoder pool.
+                    args += hardwareDecode && !_lowContentionMode ? " -filter_threads 2" : " -filter_threads 1";
                 }
                 if (pausedPreview) args += " -frames:v 1";
                 if (_subtitlePath != null) args += " -fps_mode passthrough";
@@ -3082,6 +3095,7 @@ internal sealed partial class FileCaptureService : IDisposable
                     {
                         _process = process;
                         _subtitleFilterSeekSeconds = subtitleSeekSeconds;
+                        ResetLiveVideoProgress(startOffsetSeconds > 0.05 ? Math.Round(startOffsetSeconds, 3) : 0);
                     }
                 }
 
@@ -3099,6 +3113,7 @@ internal sealed partial class FileCaptureService : IDisposable
                     preferThroughput: _offlineRenderEnabled);
                 process.ErrorDataReceived += (s, e) =>
                 {
+                    if (ConsumeLiveVideoProgress(e.Data, generation)) return;
                     if (e.Data != null && e.Data.StartsWith("Command reply", StringComparison.Ordinal))
                     {
                         var result = Regex.Match(e.Data, @"ret:(-?\d+)");
@@ -3155,7 +3170,13 @@ internal sealed partial class FileCaptureService : IDisposable
                             // duration. A known non-zero exit is surfaced as an
                             // error; otherwise orderly/just-about-to-exit EOF ends
                             // the live stream normally.
-                            if (_subtitlePath != null && framesRead == 0)
+                            if (hardwareDecode && framesRead == 0)
+                            {
+                                _hardwareVideoDecodeUnavailable = true;
+                                retryWithoutHardware = true;
+                                Logger.Warn($"Hardware video decode unavailable for {DisplayName}; retrying software decode.");
+                            }
+                            else if (_subtitlePath != null && framesRead == 0)
                             {
                                 _hasError = true;
                                 _errorMessage = "FFmpeg subtitle decode produced no frames.";
@@ -3181,6 +3202,8 @@ internal sealed partial class FileCaptureService : IDisposable
                     }
 
                     framesRead++;
+                    if (App.IsDiagnosticTestMode && _liveFrameReadDelayMillisecondsForSmoke > 0 &&
+                        token.WaitHandle.WaitOne(_liveFrameReadDelayMillisecondsForSmoke)) break;
                     if (framesRead == 1 && IsCurrentVideoPipeline(generation))
                     {
                         Interlocked.CompareExchange(
@@ -3252,6 +3275,8 @@ internal sealed partial class FileCaptureService : IDisposable
                         TimeSpan.FromMilliseconds(750));
                 }
             }
+            if (retryWithoutHardware && !token.IsCancellationRequested && IsCurrentVideoPipeline(generation))
+                FfmpegWorker(url, token, startOffsetSeconds, generation, pausedPreview, softwareRetry: true);
         }
 
         private bool IsCurrentVideoPipeline(long generation)
@@ -3307,83 +3332,89 @@ internal sealed partial class FileCaptureService : IDisposable
 
         public void SetPlaybackPaused(bool paused)
         {
-            if (_isDisposed)
+            lock (_playbackCommandLock)
             {
-                return;
-            }
-
-            double seekOffset = 0;
-            bool shouldRestart = false;
-            lock (_audioLock)
-            {
-                if (_playbackPaused == paused)
+                if (_isDisposed)
                 {
                     return;
+                }
+
+                double seekOffset = 0;
+                bool shouldRestart = false;
+                lock (_audioLock)
+                {
+                    if (_playbackPaused == paused)
+                    {
+                        return;
+                    }
+
+                    if (paused)
+                    {
+                        _pausedOffsetSeconds = GetEstimatedPlaybackOffsetSecondsNoLock();
+                        _playbackPaused = true;
+                        _playbackClock.Reset();
+                    }
+                    else
+                    {
+                        _playbackPaused = false;
+                        seekOffset = NormalizeOffsetNoLock(_pausedOffsetSeconds);
+                        _playbackBaseOffsetSeconds = seekOffset;
+                        ResetOrStartPlaybackClockNoLock(paused: false, _offlineRenderEnabled);
+                        shouldRestart = true;
+                    }
                 }
 
                 if (paused)
                 {
-                    _pausedOffsetSeconds = GetEstimatedPlaybackOffsetSecondsNoLock();
-                    _playbackPaused = true;
-                    _playbackClock.Reset();
-                }
-                else
-                {
-                    _playbackPaused = false;
-                    seekOffset = NormalizeOffsetNoLock(_pausedOffsetSeconds);
-                    _playbackBaseOffsetSeconds = seekOffset;
-                    ResetOrStartPlaybackClockNoLock(paused: false, _offlineRenderEnabled);
-                    shouldRestart = true;
-                }
-            }
-
-            if (paused)
-            {
-                StopVideoPipeline();
-                StopAudioPlayback();
-                return;
-            }
-
-            if (shouldRestart)
-            {
-                if (!_initializationTask.IsCompleted && string.IsNullOrWhiteSpace(_videoPlaybackUrl))
-                {
-                    // Local metadata initialization is already running through the
-                    // shared bounded probe. Let it finish; the next capture request
-                    // will start the decoder without spawning a duplicate probe.
+                    StopVideoPipeline();
+                    StopAudioPlayback();
                     return;
                 }
 
-                RestartVideoPipeline(seekOffset, shouldPause: false, forceReResolve: false);
+                if (shouldRestart)
+                {
+                    if (!_initializationTask.IsCompleted && string.IsNullOrWhiteSpace(_videoPlaybackUrl))
+                    {
+                        // Local metadata initialization is already running through the
+                        // shared bounded probe. Let it finish; the next capture request
+                        // will start the decoder without spawning a duplicate probe.
+                        return;
+                    }
+
+                    RestartVideoPipeline(seekOffset, shouldPause: false, forceReResolve: false);
+                }
             }
         }
 
         public void SeekNormalized(double normalizedPosition)
         {
-            if (_isDisposed)
+            lock (_playbackCommandLock)
             {
-                return;
-            }
-
-            double seekOffset;
-            bool paused;
-            lock (_audioLock)
-            {
-                double duration = _estimatedDurationSeconds;
-                if (duration <= 0.001)
+                if (_isDisposed)
                 {
                     return;
                 }
 
-                double clamped = Math.Clamp(normalizedPosition, 0, 1);
-                seekOffset = NormalizeOffsetNoLock(duration * clamped);
-                _pausedOffsetSeconds = seekOffset;
-                _playbackBaseOffsetSeconds = seekOffset;
-                paused = _playbackPaused;
-                ResetOrStartPlaybackClockNoLock(paused, _offlineRenderEnabled);
-            }
+                double seekOffset;
+                bool paused;
+                lock (_audioLock)
+                {
+                    double duration = _estimatedDurationSeconds;
+                    if (duration <= 0.001)
+                    {
+                        return;
+                    }
 
-            RestartVideoPipeline(seekOffset, shouldPause: paused, forceReResolve: false);
+                    double clamped = Math.Clamp(normalizedPosition, 0, 1);
+                    seekOffset = NormalizeOffsetNoLock(duration * clamped);
+                    _pausedOffsetSeconds = seekOffset;
+                    _playbackBaseOffsetSeconds = seekOffset;
+                    paused = _playbackPaused;
+                    ResetOrStartPlaybackClockNoLock(paused, _offlineRenderEnabled);
+                }
+
+                RestartVideoPipeline(seekOffset, shouldPause: paused, forceReResolve: false);
+            }
         }
 
         internal void SetInitialPlaybackOffsetSeconds(double offsetSeconds)
@@ -3506,49 +3537,52 @@ internal sealed partial class FileCaptureService : IDisposable
 
         private void RestartVideoPipeline(double startOffsetSeconds, bool shouldPause, bool forceReResolve)
         {
-            if (_isDisposed)
+            lock (_playbackCommandLock)
             {
-                return;
-            }
-
-            StopVideoPipeline(preserveReadyFrame: true);
-            StopAudioPlayback();
-
-            _ended = false;
-            _hasError = false;
-
-            lock (_audioLock)
-            {
-                double normalized = NormalizeOffsetNoLock(startOffsetSeconds);
-                if (!_offlineRenderEnabled && !shouldPause)
+                if (_isDisposed)
                 {
-                    _livePlaybackActivationPending = true;
-                    _livePlaybackActivationBaselineFrameToken = Volatile.Read(ref _readyFrameToken);
+                    return;
                 }
-                else
+
+                StopVideoPipeline(preserveReadyFrame: true);
+                StopAudioPlayback();
+
+                _ended = false;
+                _hasError = false;
+
+                lock (_audioLock)
                 {
-                    _livePlaybackActivationPending = false;
+                    double normalized = NormalizeOffsetNoLock(startOffsetSeconds);
+                    if (!_offlineRenderEnabled && !shouldPause)
+                    {
+                        _livePlaybackActivationPending = true;
+                        _livePlaybackActivationBaselineFrameToken = Volatile.Read(ref _readyFrameToken);
+                    }
+                    else
+                    {
+                        _livePlaybackActivationPending = false;
+                    }
+                    _pausedOffsetSeconds = normalized;
+                    _playbackBaseOffsetSeconds = normalized;
+                    _playbackPaused = shouldPause;
+                    ResetOrStartPlaybackClockNoLock(shouldPause, _offlineRenderEnabled);
                 }
-                _pausedOffsetSeconds = normalized;
-                _playbackBaseOffsetSeconds = normalized;
-                _playbackPaused = shouldPause;
-                ResetOrStartPlaybackClockNoLock(shouldPause, _offlineRenderEnabled);
-            }
 
-            if (shouldPause)
-            {
-                return;
-            }
+                if (shouldPause)
+                {
+                    return;
+                }
 
-            if (forceReResolve || string.IsNullOrWhiteSpace(_videoPlaybackUrl))
-            {
-                StartVideoReinitializationWorker(startOffsetSeconds);
-                return;
-            }
+                if (forceReResolve || string.IsNullOrWhiteSpace(_videoPlaybackUrl))
+                {
+                    StartVideoReinitializationWorker(startOffsetSeconds);
+                    return;
+                }
 
-            string playbackUrl = _videoPlaybackUrl;
-            StartVideoDecodeWorker(playbackUrl, startOffsetSeconds);
-            RefreshAudioPlayback();
+                string playbackUrl = _videoPlaybackUrl;
+                StartVideoDecodeWorker(playbackUrl, startOffsetSeconds);
+                RefreshAudioPlayback();
+            }
         }
 
         private void EnsureVideoWorkerStarted()
@@ -4730,6 +4764,13 @@ internal sealed partial class FileCaptureService : IDisposable
 
         internal (long videoGeneration, long audioGeneration, int? videoPid, int? audioPid) GetSubtitlePipelineStateForSmoke() =>
             _current?.GetSubtitlePipelineStateForSmoke() ?? default;
+
+        internal void SetLiveFrameReadDelayForSmoke(int milliseconds)
+        {
+            if (_current != null) _current.SetLiveFrameReadDelayForSmoke(milliseconds);
+        }
+
+        public string PlaybackStatus => _current?.LiveVideoRecoveryStatus ?? string.Empty;
 
         private void RetireCurrent()
         {

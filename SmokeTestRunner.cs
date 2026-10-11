@@ -111,6 +111,7 @@ internal static partial class SmokeTestRunner
             {
                 "offline-recording" => RunOfflineRecordingSmokeTest(),
                 "movie-playlist" => RunMoviePlaylistSmokeTest(),
+                "movie-clock" => RunMoviePlaylistSmokeTest(clockOnly: true),
                 "offline-render" => RunOfflineRenderSmokeTest(),
                 "background-bake" => RunBackgroundBakeSmokeTest(),
                 "profile-240" => RunFrameProfileSmokeTest(240, "smoke-mainloop-240p"),
@@ -2670,7 +2671,7 @@ internal static partial class SmokeTestRunner
             lowFpsLiveFilter.EndsWith("," + pacedFilterSuffix, StringComparison.Ordinal) &&
             string.Equals(
                 FileCaptureService.BuildLiveAudioOutputFilter(),
-                "aresample=48000,asetnsamples=n=1024:p=1",
+                "aresample=48000:async=1:first_pts=0,asetnsamples=n=1024:p=1",
                 StringComparison.Ordinal) &&
             Math.Abs(FileCaptureService.ParseVideoFrameRateForSmoke(representativeProbe) - 30) < 0.001 &&
             FileCaptureService.IsExpectedRealtimeResetWarning(

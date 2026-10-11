@@ -4,6 +4,8 @@
 
 ## Movie Playlist layers
 
+Large H.264/HEVC movies use Windows hardware decoding when available. If actual video output remains more than 2.5 seconds behind the movie clock for three seconds after warm-up, playback automatically resynchronizes and halves the decode output frame rate, down to 5 fps. The player reports **Playback adjusted to ... fps to keep audio synchronized**. Recovery briefly holds playback while the decoders reopen; the reduced rate stays with the current movie through pause/seek and resets with a new movie session. Saved scene frame-rate settings and offline export are unchanged. Delayed audio tracks and timestamp gaps retain their intended silence instead of playing early. If resources remain insufficient at the lowest rate, the player explicitly reports that video is still falling behind.
+
 Playback recovers automatically from brief video or audio decoder stalls, with subtitles enabled or disabled. Pause/Play still holds and resumes the current position, but is no longer needed to correct drift caused by independent pacing resets. PCM delivery follows the movie clock and skips expired samples after a stall.
 
 Subtitle timing changes keep a stable movie/audio clock through brief rendering stalls. After updating from a version that accumulated playback drift, adjust the subtitle offset again if a large value was compensating for that drift. Existing saved offsets are preserved; the timing control changes caption lookup, not movie speed.
