@@ -288,7 +288,6 @@ public partial class MainWindow : Window
     private WindowState _previousWindowState = WindowState.Normal;
     private WindowStyle _previousWindowStyle = WindowStyle.None;
     private ResizeMode _previousResizeMode = ResizeMode.NoResize;
-    private bool _previousTopmost;
     private Rect _previousBounds;
     private readonly Stopwatch _stepStopwatch = new();
     private readonly Stopwatch _lifetimeStopwatch = new();
@@ -6244,6 +6243,10 @@ public partial class MainWindow : Window
         {
             FullscreenMenuItem.IsChecked = _isFullscreen;
         }
+        if (AlwaysOnTopMenuItem != null)
+        {
+            AlwaysOnTopMenuItem.IsChecked = Topmost;
+        }
         if (LifeOpacitySlider != null)
         {
             LifeOpacitySlider.Value = _lifeOpacity;
@@ -11990,6 +11993,13 @@ public partial class MainWindow : Window
         SaveConfig();
     }
 
+    private void ToggleAlwaysOnTop_Click(object sender, RoutedEventArgs e)
+    {
+        Topmost = !Topmost;
+        AlwaysOnTopMenuItem.IsChecked = Topmost;
+        SaveConfig();
+    }
+
     private void ToggleFullscreen_Click(object sender, RoutedEventArgs e)
     {
         if (_isFullscreen)
@@ -12012,13 +12022,11 @@ public partial class MainWindow : Window
         _previousWindowState = WindowState;
         _previousWindowStyle = WindowStyle;
         _previousResizeMode = ResizeMode;
-        _previousTopmost = Topmost;
         _previousBounds = WindowState == WindowState.Normal ? new Rect(Left, Top, Width, Height) : RestoreBounds;
 
         WindowState = WindowState.Normal;
         WindowStyle = WindowStyle.None;
         ResizeMode = ResizeMode.NoResize;
-        Topmost = true;
 
         var monitorBounds = GetCurrentMonitorBounds();
         Left = monitorBounds.Left;
@@ -12122,7 +12130,6 @@ public partial class MainWindow : Window
         WindowState = WindowState.Normal;
         WindowStyle = _previousWindowStyle;
         ResizeMode = _previousResizeMode;
-        Topmost = _previousTopmost;
         if (!_previousBounds.IsEmpty)
         {
             Left = _previousBounds.Left;
@@ -20002,6 +20009,8 @@ public partial class MainWindow : Window
             _aspectRatioLocked = config.AspectRatioLocked;
             _lockedAspectRatio = config.LockedAspectRatio > 0 ? config.LockedAspectRatio : DefaultAspectRatio;
             _pendingFullscreen = config.Fullscreen;
+            Topmost = config.AlwaysOnTop;
+            AlwaysOnTopMenuItem.IsChecked = Topmost;
 
             // Apply startup recovery before any heavyweight scene/audio/simulation restore.
             ApplyStartupRecoveryOverridesIfNeeded();
@@ -20288,6 +20297,7 @@ public partial class MainWindow : Window
             NegativeLayerEnabled = BuildLegacyNegativeLayerEnabled(),
             SimulationLayerOrder = BuildLegacySimulationLayerOrder(),
             Fullscreen = _isFullscreen,
+            AlwaysOnTop = Topmost,
             AspectRatioLocked = _aspectRatioLocked,
             LockedAspectRatio = _lockedAspectRatio,
             Sources = BuildSourceConfigsWithMissingInputs()
@@ -21799,6 +21809,7 @@ public partial class MainWindow : Window
         public bool NegativeLayerEnabled { get; set; } = true;
         public List<string> SimulationLayerOrder { get; set; } = new() { "Positive", "Negative" };
         public bool Fullscreen { get; set; }
+        public bool AlwaysOnTop { get; set; }
         public bool AspectRatioLocked { get; set; }
         public double LockedAspectRatio { get; set; } = DefaultAspectRatio;
         public List<SourceConfig> Sources { get; set; } = new();

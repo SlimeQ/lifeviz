@@ -3,6 +3,7 @@ using System.IO;
 using System.Linq;
 using System.Text.Json;
 using System.Threading;
+using System.Windows;
 
 namespace lifeviz;
 
@@ -13,6 +14,7 @@ public partial class MainWindow
         if (!App.IsSmokeTestMode) throw new InvalidOperationException("Persistence checks require smoke mode.");
         _scenePersistenceTestPath = Path.Combine(directory, "session.json");
         _configReady = true;
+        RunAlwaysOnTopChecks();
         var group = CaptureSource.CreateGroup("Scene must survive shutdown");
         var plane = CaptureSource.CreateColorPlane(12, 34, 56, "Nested authored source");
         plane.Opacity = 0.42;
@@ -86,6 +88,37 @@ public partial class MainWindow
         var roundTrip = JsonSerializer.Deserialize<AppConfig>(expected)!;
         SmokeTestRunner.RequireSceneCheck(roundTrip.Sources.Count == 1 && roundTrip.Sources[0].Children[0].Opacity == 0.87,
             "Nested source settings did not survive shutdown.");
+    }
+
+    private void RunAlwaysOnTopChecks()
+    {
+        SmokeTestRunner.RequireSceneCheck(!Topmost && !AlwaysOnTopMenuItem.IsChecked,
+            "Always on Top must default to off.");
+        EnterFullscreen();
+        SmokeTestRunner.RequireSceneCheck(!Topmost, "Fullscreen must respect Always on Top being off.");
+        ToggleAlwaysOnTop_Click(AlwaysOnTopMenuItem, new RoutedEventArgs());
+        ExitFullscreen();
+        SmokeTestRunner.RequireSceneCheck(Topmost && AlwaysOnTopMenuItem.IsChecked,
+            "Enabling Always on Top in fullscreen must survive returning to windowed mode.");
+        EnterFullscreen();
+        SmokeTestRunner.RequireSceneCheck(Topmost, "Fullscreen must preserve Always on Top being on.");
+        ToggleAlwaysOnTop_Click(AlwaysOnTopMenuItem, new RoutedEventArgs());
+        ExitFullscreen();
+        SmokeTestRunner.RequireSceneCheck(!Topmost && !AlwaysOnTopMenuItem.IsChecked,
+            "Disabling Always on Top in fullscreen must survive returning to windowed mode.");
+
+        // Reload real isolated autosave files after changing the in-memory preference.
+        foreach (bool enabled in new[] { true, false })
+        {
+            ToggleAlwaysOnTop_Click(AlwaysOnTopMenuItem, new RoutedEventArgs());
+            FlushPendingConfigSave();
+            _configReady = false;
+            ToggleAlwaysOnTop_Click(AlwaysOnTopMenuItem, new RoutedEventArgs());
+            var (loaded, _) = LoadConfig();
+            SmokeTestRunner.RequireSceneCheck(loaded && Topmost == enabled && AlwaysOnTopMenuItem.IsChecked == enabled,
+                $"Always on Top={enabled} did not restore from autosave.");
+        }
+        Logger.Info("Always on Top checks passed: defaults, fullscreen transitions, menu state, autosave reload on/off.");
     }
 
     private void RunMissingInputChecks(string directory)

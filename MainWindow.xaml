@@ -333,6 +333,10 @@
                           Header="Fullscreen"
                           IsCheckable="True"
                           Click="ToggleFullscreen_Click" />
+                <MenuItem x:Name="AlwaysOnTopMenuItem"
+                          Header="Always on Top"
+                          IsCheckable="True"
+                          Click="ToggleAlwaysOnTop_Click" />
                 <MenuItem Header="Simulation Layers"
                           x:Name="SimulationLayerMenu">
                     <MenuItem Header="Manage In Scene Editor..."

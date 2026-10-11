@@ -1,5 +1,7 @@
 # LifeViz
 
+**Always on Top** in the main context menu (also available through Scene Editor **App Controls...**) keeps the output above other windows. The toggle works in windowed and fullscreen modes, defaults to off, and is remembered across restarts.
+
 Large live H.264/HEVC movies now use Windows hardware decoding with software fallback. Actual decoder timestamps detect sustained video lag: playback resynchronizes and lowers the output frame rate when the renderer cannot keep up, with an explanation in the Movie Playlist player. This detects continuous video slowdown instead of silently letting the picture fall minutes behind audio. Audio also preserves delayed track starts and packet gaps. Run `dotnet bin/Release/net9.0-windows/lifeviz.dll --smoke-test movie-clock` for delayed/gapped audio, seek and sustained-overload recovery checks; see [Build & Install](wiki/Build-and-Install.md).
 
 Live movie/video playback now shares one movie clock with PCM delivery, including when subtitles are off. Brief video stalls catch up without rebasing the video timeline. Audio decoding uses a bounded 120-ms lookahead and discards expired PCM after warm-up or stalls, so an independent audio pacing clock cannot accumulate lag. The regression checks encoded movie-frame numbers and actual PCM timestamps while alternately stalling the video and audio decoders.
