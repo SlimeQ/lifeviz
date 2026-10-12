@@ -5,7 +5,7 @@ A `.lifevizlayers.json` export only stores *paths* to your media, so it breaks o
 ## Sending a scene
 
 1. Open the **Scene Editor** and press **Share...** (next to **Save...**). It packages the scene shown in the editor, including unapplied edits when Live Mode is off, as **Save...** does.
-2. If the scene captures a **Window** or **Webcam**, LifeViz lists them and asks whether to leave them out. These inputs only exist on your PC. **Yes** (recommended) removes them from the shared copy. **No** keeps them, and they appear as missing inputs on the other PC unless it has the same window or camera. Your own scene is not changed either way.
+2. If the scene captures a **Window**, LifeViz lists those layers and asks whether to leave them out, since the windows only exist on your PC. **Yes** (recommended) removes them from the shared copy. **No** keeps them, and they appear as missing inputs on the other PC unless the same window is open there. **Webcam** layers are kept and switched to **Any camera** in the package, so they use the recipient's camera automatically ([Webcam Layers](Webcam-Layers.md)). Your own scene is not changed either way.
 3. Choose where to save. The dialog title shows how many media files are included and their total size.
 4. When the package is written, LifeViz lists anything it could not include and offers to show the file in File Explorer. Send that one file by any method: a USB stick, a cloud drive, or a file-transfer service.
 
@@ -16,7 +16,7 @@ A `.lifevizlayers.json` export only stores *paths* to your media, so it breaks o
 | Image, GIF and video layers | The bundled starter loop (every install has it) |
 | Video Sequence and AutoClip files, including per-file AutoClip overrides | YouTube links (they stream online) |
 | Movie Playlist movies and external `.srt` subtitles | Bundled MilkDrop presets (every install has them) |
-| Custom MilkDrop presets (`.milk` files outside the bundled library) | Window and Webcam layers, if you kept them |
+| Custom MilkDrop presets (`.milk` files outside the bundled library) | Window layers, if you kept them. Webcam layers become **Any camera** |
 
 A file referenced several times is stored once. Files with the same name from different folders get distinct names. A file that is missing when you share is reported and keeps its original path.
 

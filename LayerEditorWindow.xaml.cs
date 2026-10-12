@@ -481,6 +481,10 @@ public partial class LayerEditorWindow : Window
             if (_viewModel.SelectedSource != null)
             {
                 _viewModel.SelectedSource.IsSelected = true;
+                if (_viewModel.SelectedSource.IsWebcam)
+                {
+                    RefreshWebcamOptions(_viewModel.SelectedSource);
+                }
             }
 
             TraceSelection($"SetSelectedSource -> {DescribeSource(_viewModel.SelectedSource)}");
@@ -2589,7 +2593,7 @@ public partial class LayerEditorWindow : Window
                     Id = Guid.NewGuid(),
                     Kind = LayerEditorSourceKind.Webcam,
                     DisplayName = camera.Value.Name,
-                    WebcamId = camera.Value.Id,
+                    WebcamId = string.IsNullOrEmpty(camera.Value.Id) ? null : camera.Value.Id,
                     BlendMode = "Additive",
                     FitMode = "Fill",
                     Opacity = 1.0,
@@ -2970,13 +2974,17 @@ public partial class LayerEditorWindow : Window
     private WebcamCaptureService.CameraInfo? PromptForWebcam()
     {
         var webcams = _owner.GetAvailableWebcams();
+        var any = new WebcamCaptureService.CameraInfo(string.Empty, MainWindow.AnyWebcamName);
         if (webcams.Count == 0)
         {
-            MessageBox.Show(this, "No webcams detected.", "Webcam Sources", MessageBoxButton.OK, MessageBoxImage.Information);
-            return null;
+            // The layer is kept and waits; it starts showing video once a camera is connected.
+            return MessageBox.Show(this, "No webcams detected. Add a webcam layer that uses any camera once one is connected?",
+                "Webcam Sources", MessageBoxButton.YesNo, MessageBoxImage.Question) == MessageBoxResult.Yes ? any : null;
         }
 
-        var items = webcams.Select(camera => new SelectionItem(camera.Name, camera)).ToList();
+        var items = webcams.Select(camera => new SelectionItem(camera.Name, camera))
+            .Prepend(new SelectionItem(MainWindow.AnyWebcamName + " (first available; best for shared scenes)", any))
+            .ToList();
         var dialog = new SelectionDialog("Select Webcam Source", items) { Owner = this };
         if (dialog.ShowDialog() == true && dialog.SelectedValue is WebcamCaptureService.CameraInfo selected)
         {

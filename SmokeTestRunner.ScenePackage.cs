@@ -73,7 +73,10 @@ internal static partial class SmokeTestRunner
             Require(plan.NotIncluded.Any(note => note.Contains("gone.mp4")), "A missing file must be reported.");
             Require(plan.NotIncluded.Any(note => note.Contains("Browser")) && plan.NotIncluded.Any(note => note.Contains("Cam")), "Live inputs must be reported.");
             Require(plan.NotIncluded.Any(note => note.Contains("YouTube")), "YouTube links must be reported.");
-            Require(ScenePackage.DescribeLiveInputs(scene).Count == 2, "Both live inputs must be described.");
+            Require(ScenePackage.DescribeLiveInputs(scene).Count == 1, "Only window captures are live inputs to leave out.");
+            var sharedCam = plan.Scene.Sources[8];
+            Require(sharedCam.Type == "Webcam" && sharedCam.WebcamId == null && sharedCam.DisplayName == MainWindow.AnyWebcamName &&
+                    scene.Sources[8].WebcamId == "cam-1", "Shared webcam layers must become Any camera without changing the sender's scene.");
 
             string package = Path.Combine(directory, "Party Scene" + ScenePackage.Extension);
             ScenePackage.Write(plan, package);
@@ -117,7 +120,8 @@ internal static partial class SmokeTestRunner
 
             var omitted = ScenePackage.CreatePlan(scene, omitLiveInputs: true);
             Require(ScenePackage.DescribeLiveInputs(omitted.Scene).Count == 0 && omitted.Scene.Sources[4].Children.Count == 1 &&
-                    !omitted.NotIncluded.Any(note => note.Contains("Browser")), "Leaving out live inputs must remove nested ones too.");
+                    !omitted.NotIncluded.Any(note => note.Contains("Browser")) && omitted.Scene.Sources.Any(source => source.Type == "Webcam"),
+                "Leaving out window captures must remove nested ones too and keep webcam layers.");
 
             // A hostile package cannot write outside its extraction folder.
             string hostile = Path.Combine(directory, "hostile" + ScenePackage.Extension);
@@ -135,7 +139,7 @@ internal static partial class SmokeTestRunner
             catch (InvalidDataException) { rejected = true; }
             Require(rejected && !File.Exists(Path.Combine(directory, "escaped.txt")), "Path traversal entries must be rejected.");
 
-            Console.WriteLine("Scene package smoke passed: media bundling, name collisions, relinking (files, sequences, AutoClip overrides, movies, subtitles, presets), references kept, missing/live input reporting, live-input omission, re-import reuse, path traversal rejection.");
+            Console.WriteLine("Scene package smoke passed: media bundling, name collisions, relinking (files, sequences, AutoClip overrides, movies, subtitles, presets), references kept, missing/live input reporting, window omission, portable webcams, re-import reuse, path traversal rejection.");
             Directory.Delete(directory, recursive: true);
             return 0;
         }

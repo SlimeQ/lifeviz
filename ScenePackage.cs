@@ -84,6 +84,14 @@ internal static class ScenePackage
             string label = string.IsNullOrWhiteSpace(source.DisplayName) ? source.Type ?? "layer" : source.DisplayName;
             if (IsLiveInput(source))
                 plan.NotIncluded.Add($"{source.Type} \"{label}\" (live input from the sender's PC)");
+            if (source.Type == nameof(LayerEditorSourceKind.Webcam))
+            {
+                // Camera IDs are specific to this PC, so shared webcam layers use the
+                // recipient's first free camera; they can pick another in the layer.
+                plan.NotIncluded.Add($"Webcam \"{label}\" (uses their camera; they can choose which one in the layer's Camera list)");
+                source.WebcamId = null;
+                source.DisplayName = MainWindow.AnyWebcamName;
+            }
             if (source.FilePath?.StartsWith("youtube:", StringComparison.OrdinalIgnoreCase) == true)
                 plan.NotIncluded.Add($"YouTube link \"{label}\" (streams online; not bundled)");
         }
@@ -91,10 +99,11 @@ internal static class ScenePackage
         return plan;
     }
 
-    // Window captures and webcams depend on the sender's PC; on another PC they
-    // are missing inputs, so the sender can choose to leave them out.
+    // Window captures depend on the sender's PC; on another PC they are missing
+    // inputs, so the sender can choose to leave them out. Webcam layers travel as
+    // "Any camera" layers instead (see CreatePlan).
     internal static bool IsLiveInput(LayerConfigSource source) =>
-        source.Type is nameof(LayerEditorSourceKind.Window) or nameof(LayerEditorSourceKind.Webcam);
+        source.Type is nameof(LayerEditorSourceKind.Window);
 
     internal static List<string> DescribeLiveInputs(LayerConfigFile scene) =>
         Enumerate(scene.Sources).Where(IsLiveInput)

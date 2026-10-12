@@ -25,11 +25,11 @@ public partial class LayerEditorWindow
             if (liveInputs.Count > 0)
             {
                 var choice = MessageBox.Show(this,
-                    "This scene captures live inputs from this PC, which can't be put in a package:\n\n" +
+                    "This scene captures windows on this PC, which can't be put in a package:\n\n" +
                     string.Join("\n", liveInputs.Take(12).Select(item => "• " + item)) +
                     (liveInputs.Count > 12 ? $"\n• …and {liveInputs.Count - 12} more" : "") +
                     "\n\nLeave them out of the shared scene?\n\n" +
-                    "Yes: leave them out (recommended unless they have the same window or camera).\n" +
+                    "Yes: leave them out (recommended unless they have the same window open).\n" +
                     "No: keep them; they show up as missing inputs on the other PC.",
                     "Share Scene", MessageBoxButton.YesNoCancel, MessageBoxImage.Question, MessageBoxResult.Yes);
                 if (choice == MessageBoxResult.Cancel) return;

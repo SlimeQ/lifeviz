@@ -137,10 +137,13 @@ public partial class MainWindow
         var webcam = new AppConfig.SourceConfig { Type = "Webcam", WebcamId = "missing-camera-" + Guid.NewGuid(), DisplayName = "Gone camera" };
         RestoreSourceList(new[] { plane, window, group, webcam }, _sources,
             Array.Empty<WindowHandleInfo>(), Array.Empty<WebcamCaptureService.CameraInfo>());
-        SmokeTestRunner.RequireSceneCheck(!_configLoadBlocked && MissingInputCount == 3 && _sources.Count == 2,
-            "Missing inputs must be kept aside without pausing autosave.");
+        // A webcam whose camera is absent stays a live (waiting) layer rather than a hidden missing input.
+        SmokeTestRunner.RequireSceneCheck(!_configLoadBlocked && MissingInputCount == 2 && _sources.Count == 3 &&
+            _sources[2].Type == CaptureSource.SourceType.Webcam && _sources[2].ActiveWebcamId == null,
+            "Missing inputs must be kept aside without pausing autosave; webcam layers must wait for their camera.");
         var saved = BuildSourceConfigsWithMissingInputs();
-        SmokeTestRunner.RequireSceneCheck(saved.Count == 4 && Json(saved[1]) == Json(window) && Json(saved[3]) == Json(webcam) &&
+        SmokeTestRunner.RequireSceneCheck(saved.Count == 4 && Json(saved[1]) == Json(window) &&
+            saved[3].Type == "Webcam" && saved[3].WebcamId == webcam.WebcamId && saved[3].DisplayName == webcam.DisplayName &&
             saved[2].Children.Count == 2 && Json(saved[2].Children[0]) == Json(file) && saved[2].Children[1].DisplayName == "Plane B",
             "Missing inputs must be written back verbatim at their original positions, including inside groups.");
 
@@ -154,7 +157,7 @@ public partial class MainWindow
 
         // Deleting a group deletes the missing inputs it contained.
         _sources.RemoveAll(source => source.Type == CaptureSource.SourceType.Group);
-        SmokeTestRunner.RequireSceneCheck(MissingInputCount == 2, "A deleted group must take its missing inputs with it.");
+        SmokeTestRunner.RequireSceneCheck(MissingInputCount == 1, "A deleted group must take its missing inputs with it.");
 
         // Autosave is live: the kept layers reach disk alongside new work.
         string sessionPath = ConfigPath;
@@ -175,15 +178,16 @@ public partial class MainWindow
         PreserveAutomaticallyRemovedSources(_sources, new System.Collections.Generic.List<CaptureSource> { gone });
         _sources.Remove(gone);
         saved = BuildSourceConfigsWithMissingInputs();
-        SmokeTestRunner.RequireSceneCheck(MissingInputCount == 3 && saved.Count(c => c.WindowTitle == gone.Window!.Title) == 1 &&
+        SmokeTestRunner.RequireSceneCheck(MissingInputCount == 2 && saved.Count(c => c.WindowTitle == gone.Window!.Title) == 1 &&
             saved.FindIndex(c => c.WindowTitle == gone.Window!.Title) < saved.FindIndex(c => c.DisplayName == "Plane C"),
             "An automatically detached input must stay in the saved scene at its position.");
 
         ForgetMissingInputs();
         FlushPendingConfigSave();
         onDisk = JsonSerializer.Deserialize<AppConfig>(File.ReadAllText(ConfigPath))!;
-        SmokeTestRunner.RequireSceneCheck(MissingInputCount == 0 && onDisk.Sources.Count == 1 && onDisk.Sources[0].DisplayName == "Plane C",
-            "Forget Missing Inputs must remove them from the saved scene.");
+        SmokeTestRunner.RequireSceneCheck(MissingInputCount == 0 && onDisk.Sources.Count == 2 &&
+            onDisk.Sources[0].Type == "Webcam" && onDisk.Sources[1].DisplayName == "Plane C",
+            "Forget Missing Inputs must remove them from the saved scene and keep waiting webcam layers.");
 
         // Genuinely blocked autosave: config.json is untouched, the live scene goes to a recovery file.
         string committed = File.ReadAllText(ConfigPath);

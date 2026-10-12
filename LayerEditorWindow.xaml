@@ -754,6 +754,30 @@
                                                 Visibility="{Binding IsFile, Converter={StaticResource BoolToVisibility}}"
                                                 ToolTip="Choose another image or video while keeping this layer's settings and animations."
                                                 Click="ReplaceFile_Click" />
+                                        <StackPanel Margin="0,8,0,0"
+                                                    Visibility="{Binding IsWebcam, Converter={StaticResource BoolToVisibility}}">
+                                            <StackPanel Orientation="Horizontal">
+                                                <TextBlock Text="Camera"
+                                                           VerticalAlignment="Center"
+                                                           Margin="0,0,8,0" />
+                                                <ComboBox
+                                                          Width="260"
+                                                          ItemsSource="{Binding WebcamOptions}"
+                                                          DisplayMemberPath="Label"
+                                                          SelectedValuePath="Value"
+                                                          SelectedValue="{Binding WebcamChoice, Mode=OneWay}"
+                                                          ToolTip="Swap the camera this layer uses while keeping its settings and animations. Any camera uses the first free camera, which is the most portable choice for shared scenes."
+                                                          SelectionChanged="WebcamDevice_SelectionChanged" />
+                                                <Button Content="Refresh"
+                                                        Margin="6,0,0,0"
+                                                        ToolTip="Look for newly connected cameras"
+                                                        Click="WebcamRefresh_Click" />
+                                            </StackPanel>
+                                            <TextBlock Text="{Binding WebcamStatus}"
+                                                       Foreground="#9A9A9A"
+                                                       TextWrapping="Wrap"
+                                                       Margin="0,4,0,0" />
+                                        </StackPanel>
                                     </StackPanel>
                                 </Border>
 

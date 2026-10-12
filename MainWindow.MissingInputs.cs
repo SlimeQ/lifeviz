@@ -84,7 +84,8 @@ public partial class MainWindow
 
     private static bool IsUnavailableInput(CaptureSource source) => source.Type switch
     {
-        CaptureSource.SourceType.Window or CaptureSource.SourceType.Webcam => true,
+        // Webcam layers are never removed; they wait for their camera (see MainWindow.WebcamDevices.cs).
+        CaptureSource.SourceType.Window => true,
         CaptureSource.SourceType.File => !string.IsNullOrWhiteSpace(source.FilePath) &&
             (NormalizeYoutubeKey(source.FilePath) != null || !File.Exists(source.FilePath)),
         CaptureSource.SourceType.VideoSequence or CaptureSource.SourceType.AutoClip =>

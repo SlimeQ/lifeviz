@@ -641,6 +641,30 @@ internal sealed class LayerEditorSource : LayerEditorNotify
             if (SetField(ref _webcamId, value))
             {
                 OnPropertyChanged(nameof(Details));
+                OnPropertyChanged(nameof(WebcamChoice));
+            }
+        }
+    }
+
+    // Empty means "Any camera"; bound to the camera picker, whose values are camera IDs.
+    public string WebcamChoice => WebcamId ?? string.Empty;
+
+    private string _webcamStatus = string.Empty;
+    public string WebcamStatus
+    {
+        get => _webcamStatus;
+        set => SetField(ref _webcamStatus, value);
+    }
+
+    private IReadOnlyList<LayerEditorOption> _webcamOptions = Array.Empty<LayerEditorOption>();
+    public IReadOnlyList<LayerEditorOption> WebcamOptions
+    {
+        get => _webcamOptions;
+        set
+        {
+            if (SetField(ref _webcamOptions, value))
+            {
+                OnPropertyChanged(nameof(WebcamChoice));
             }
         }
     }
@@ -1066,7 +1090,7 @@ internal sealed class LayerEditorSource : LayerEditorNotify
     public string Details => Kind switch
     {
         LayerEditorSourceKind.Window => string.IsNullOrWhiteSpace(WindowTitle) ? "Window source" : WindowTitle,
-        LayerEditorSourceKind.Webcam => string.IsNullOrWhiteSpace(WebcamId) ? "Webcam source" : $"Id: {WebcamId}",
+        LayerEditorSourceKind.Webcam => string.IsNullOrWhiteSpace(WebcamId) ? "Any available camera" : "Camera layer",
         LayerEditorSourceKind.File => string.IsNullOrWhiteSpace(FilePath) ? "File source" : FilePath,
         LayerEditorSourceKind.ProjectM => $"{ProjectM.Presets.Count} presets | {ProjectM.Order} | {ProjectM.Advance}",
         LayerEditorSourceKind.ColorPlane => string.IsNullOrWhiteSpace(ColorHex) ? "Solid color" : ColorHex,

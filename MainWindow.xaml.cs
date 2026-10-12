@@ -6629,7 +6629,7 @@ public partial class MainWindow : Window
         SourcesMenu.Items.Add(new MenuItem { Header = "Loading...", IsEnabled = false });
 
         var windowsTask = Task.Run(() => _windowCapture.EnumerateWindows(_windowHandle));
-        var camerasTask = Task.Run(() => _webcamCapture.EnumerateCameras());
+        var camerasTask = Task.Run(() => EnumerateWebcams());
 
         await Task.WhenAll(windowsTask, camerasTask);
 
@@ -7300,6 +7300,16 @@ public partial class MainWindow : Window
     private MenuItem BuildAddWebcamMenuItem(CaptureSource? parentGroup)
     {
         var addWebcamMenu = new MenuItem { Header = "Add Webcam Source" };
+        // "Any camera" layers wait for a camera, so they can be added with none connected.
+        var anyItem = new MenuItem
+        {
+            Header = AnyWebcamName + " (first available)",
+            Tag = new WebcamAddTarget(new WebcamCaptureService.CameraInfo(string.Empty, AnyWebcamName), parentGroup),
+            IsCheckable = true,
+            IsChecked = ContainsWebcamSource(string.Empty)
+        };
+        anyItem.Click += AddWebcamSourceMenuItem_Click;
+        addWebcamMenu.Items.Add(anyItem);
         if (_cachedCameras.Count == 0)
         {
             addWebcamMenu.Items.Add(new MenuItem
@@ -7907,6 +7917,10 @@ public partial class MainWindow : Window
         sourceItem.Items.Add(primaryItem);
         sourceItem.Items.Add(moveUpItem);
         sourceItem.Items.Add(moveDownItem);
+        if (source.Type == CaptureSource.SourceType.Webcam)
+        {
+            sourceItem.Items.Add(BuildWebcamDeviceMenu(source));
+        }
         sourceItem.Items.Add(mirrorItem);
         sourceItem.Items.Add(keyMenu);
         sourceItem.Items.Add(opacityItem);
@@ -8508,7 +8522,7 @@ public partial class MainWindow : Window
 
     private void AddOrPromoteWebcamSource(WebcamCaptureService.CameraInfo camera, List<CaptureSource> targetList)
     {
-        var existing = FindSource(s => s.Type == CaptureSource.SourceType.Webcam && string.Equals(s.WebcamId, camera.Id, StringComparison.OrdinalIgnoreCase));
+        var existing = FindSource(s => s.Type == CaptureSource.SourceType.Webcam && string.Equals(s.WebcamId ?? "", camera.Id ?? "", StringComparison.OrdinalIgnoreCase));
         if (existing != null)
         {
             Logger.Info($"Updated existing webcam source: {camera.Name}");
@@ -8949,10 +8963,9 @@ public partial class MainWindow : Window
             return;
         }
 
-        if (!effectivelyEnabled && source.Type == CaptureSource.SourceType.Webcam && source.WebcamId != null)
+        if (!effectivelyEnabled && source.Type == CaptureSource.SourceType.Webcam && source.ActiveWebcamId != null)
         {
-            _webcamCapture.Reset(source.WebcamId);
-            source.IsInitialized = false;
+            ReleaseWebcamDevice(source);
             return;
         }
 
@@ -9147,7 +9160,7 @@ public partial class MainWindow : Window
         FindSource(s => s.Type == CaptureSource.SourceType.Window && s.Window != null && s.Window.Handle == handle) != null;
 
     private bool ContainsWebcamSource(string webcamId) =>
-        FindSource(s => s.Type == CaptureSource.SourceType.Webcam && string.Equals(s.WebcamId, webcamId, StringComparison.OrdinalIgnoreCase)) != null;
+        FindSource(s => s.Type == CaptureSource.SourceType.Webcam && string.Equals(s.WebcamId ?? "", webcamId ?? "", StringComparison.OrdinalIgnoreCase)) != null;
 
     private static List<CaptureSource>? FindParentList(List<CaptureSource> sources, CaptureSource target)
     {
@@ -9175,7 +9188,7 @@ public partial class MainWindow : Window
         _windowCapture.EnumerateWindows(_windowHandle);
 
     internal IReadOnlyList<WebcamCaptureService.CameraInfo> GetAvailableWebcams() =>
-        _webcamCapture.EnumerateCameras();
+        EnumerateWebcams();
 
     internal void AddLayerGroupFromEditor(Guid? parentId)
     {
@@ -10094,10 +10107,9 @@ public partial class MainWindow : Window
             return;
         }
 
-        if (source.Type == CaptureSource.SourceType.Webcam && source.WebcamId != null)
+        if (source.Type == CaptureSource.SourceType.Webcam && source.ActiveWebcamId != null)
         {
-            _webcamCapture.Reset(source.WebcamId);
-            source.IsInitialized = false;
+            ReleaseWebcamDevice(source);
         }
         else if (source.Type == CaptureSource.SourceType.Window && source.Window != null)
         {
@@ -11628,13 +11640,23 @@ public partial class MainWindow : Window
                 continue;
             }
 
-            if (!source.IsInitialized && source.Type == CaptureSource.SourceType.Webcam && source.WebcamId != null)
+            if (source.Type == CaptureSource.SourceType.Webcam)
             {
-                var initialized = _webcamCapture.EnsureInitialized(source.WebcamId);
+                RequestWebcamProbe();
+                if (source.ActiveWebcamId == null)
+                {
+                    source.LastFrame = null;
+                    continue;
+                }
+            }
+
+            if (!source.IsInitialized && source.Type == CaptureSource.SourceType.Webcam && source.ActiveWebcamId != null)
+            {
+                var initialized = _webcamCapture.EnsureInitialized(source.ActiveWebcamId);
                 source.IsInitialized = initialized;
                 if (!initialized)
                 {
-                    Logger.Warn($"Failed to initialize {source.DisplayName}, it will be skipped.");
+                    DetachWebcamDevice(source, "it could not be opened");
                     continue;
                 }
             }
@@ -11663,11 +11685,11 @@ public partial class MainWindow : Window
                         }
                     }
                 }
-                else if (source.Type == CaptureSource.SourceType.Webcam && !string.IsNullOrWhiteSpace(source.WebcamId))
+                else if (source.Type == CaptureSource.SourceType.Webcam && !string.IsNullOrWhiteSpace(source.ActiveWebcamId))
                 {
                     var referenceEngine = GetReferenceSimulationEngine();
                     long webcamCaptureStamp = BeginProfileStamp();
-                    var webcamFrame = _webcamCapture.CaptureFrame(source.WebcamId, referenceEngine.Columns, referenceEngine.Rows, source.FitMode, includeSource: includeNativeSource);
+                    var webcamFrame = _webcamCapture.CaptureFrame(source.ActiveWebcamId, referenceEngine.Columns, referenceEngine.Rows, source.FitMode, includeSource: includeNativeSource);
                     EndProfileStamp("capture_webcam_frame_ms", webcamCaptureStamp);
                     if (webcamFrame != null)
                     {
@@ -11679,6 +11701,7 @@ public partial class MainWindow : Window
                         {
                             _primaryAspectRefreshPending = true;
                             source.FirstFrameReceived = true;
+                            source.WebcamFailures = 0;
                             Logger.Info($"Webcam frame acquired for {source.DisplayName}: {webcamFrame.SourceWidth}x{webcamFrame.SourceHeight}");
                         }
                     }
@@ -11774,14 +11797,14 @@ public partial class MainWindow : Window
             if (frame == null)
             {
                 bool isWebcam = source.Type == CaptureSource.SourceType.Webcam;
-                if (isWebcam && source.WebcamId != null)
+                if (isWebcam && source.ActiveWebcamId != null)
                 {
                     source.MissedFrames++;
                     var age = DateTime.UtcNow - source.AddedUtc;
                     if (!source.FirstFrameReceived && !source.RetryInitializationAttempted && source.MissedFrames >= 90)
                     {
                         Logger.Warn($"Webcam frames missing; retrying initialization for {source.DisplayName} after {source.MissedFrames} misses.");
-                        _webcamCapture.Reset(source.WebcamId);
+                        _webcamCapture.Reset(source.ActiveWebcamId);
                         source.IsInitialized = false;
                         source.RetryInitializationAttempted = true;
                         source.MissedFrames = 0;
@@ -11797,8 +11820,7 @@ public partial class MainWindow : Window
                         }
                         continue;
                     }
-                    Logger.Warn($"Webcam frames never arrived; removing source {source.DisplayName} after {source.MissedFrames} misses.");
-                    (removed ??= new List<CaptureSource>()).Add(source);
+                    DetachWebcamDevice(source, $"no frames arrived after {source.MissedFrames} attempts");
                     continue;
                 }
 
@@ -20864,6 +20886,7 @@ public partial class MainWindow : Window
                 WindowTitle = source.Window?.Title,
                 WindowHandle = source.Window?.Handle,
                 WebcamId = source.WebcamId,
+                WebcamStatus = source.Type == CaptureSource.SourceType.Webcam ? DescribeWebcamStatus(source) : string.Empty,
                 FilePath = source.FilePath,
                 ProjectM = source.ProjectM.Clone(),
                 ColorHex = source.Type == CaptureSource.SourceType.ColorPlane
@@ -20991,7 +21014,7 @@ public partial class MainWindow : Window
         var existing = EnumerateSources(_sources).ToDictionary(source => source.Id);
         var used = new HashSet<Guid>();
         var windows = _windowCapture.EnumerateWindows(_windowHandle);
-        var webcams = _webcamCapture.EnumerateCameras();
+        var webcams = EnumerateWebcams();
 
         var rebuilt = BuildSourcesFromEditor(sources, existing, used, windows, webcams);
 
@@ -21063,6 +21086,12 @@ public partial class MainWindow : Window
         {
             throw new InvalidOperationException($"Could not replace file for '{source.DisplayName}': {replacementError}");
         }
+        if (model.IsWebcam && source.Type == CaptureSource.SourceType.Webcam &&
+            !string.Equals(source.WebcamId ?? "", model.WebcamId ?? "", StringComparison.OrdinalIgnoreCase) &&
+            !TrySetWebcamDevice(source, model.WebcamId, model.DisplayName, webcams, out var webcamError))
+        {
+            throw new InvalidOperationException($"Could not switch camera for '{source.DisplayName}': {webcamError}");
+        }
         ApplySourceModel(source, model);
 
         if (source.Type == CaptureSource.SourceType.Group)
@@ -21108,12 +21137,7 @@ public partial class MainWindow : Window
             }
 
             case LayerEditorSourceKind.Webcam:
-            {
-                var camera = webcams.FirstOrDefault(c =>
-                    (!string.IsNullOrWhiteSpace(model.WebcamId) && string.Equals(c.Id, model.WebcamId, StringComparison.OrdinalIgnoreCase)) ||
-                    (!string.IsNullOrWhiteSpace(model.DisplayName) && string.Equals(c.Name, model.DisplayName, StringComparison.OrdinalIgnoreCase)));
-                return !string.IsNullOrWhiteSpace(camera.Id) ? CaptureSource.CreateWebcam(camera.Id, camera.Name) : null;
-            }
+                return CreateWebcamSource(model.WebcamId, model.DisplayName, webcams);
 
             case LayerEditorSourceKind.File:
             {
@@ -21466,7 +21490,7 @@ public partial class MainWindow : Window
         }
 
         var windows = _windowCapture.EnumerateWindows(_windowHandle);
-        var webcams = _webcamCapture.EnumerateCameras();
+        var webcams = EnumerateWebcams();
         RestoreSourceList(configs, _sources, windows, webcams);
         ReportMissingInputsAfterRestore();
         ApplySourceDecodeActivation();
@@ -21530,13 +21554,8 @@ public partial class MainWindow : Window
                     break;
 
                 case CaptureSource.SourceType.Webcam:
-                    var camera = webcams.FirstOrDefault(c =>
-                        (!string.IsNullOrWhiteSpace(config.WebcamId) && string.Equals(c.Id, config.WebcamId, StringComparison.OrdinalIgnoreCase)) ||
-                        (!string.IsNullOrWhiteSpace(config.DisplayName) && string.Equals(c.Name, config.DisplayName, StringComparison.OrdinalIgnoreCase)));
-                    if (!string.IsNullOrWhiteSpace(camera.Id))
-                    {
-                        restored = CaptureSource.CreateWebcam(camera.Id, camera.Name);
-                    }
+                    // Webcam layers are never dropped; an unplugged camera shows nothing until it returns.
+                    restored = CreateWebcamSource(config.WebcamId, config.DisplayName, webcams);
                     break;
 
                 case CaptureSource.SourceType.File:
@@ -22001,8 +22020,15 @@ public partial class MainWindow : Window
         public static CaptureSource CreateWindow(WindowHandleInfo window) =>
             new(SourceType.Window, window, null, null, window.Title, null, null) { AddedUtc = DateTime.UtcNow };
 
-        public static CaptureSource CreateWebcam(string webcamId, string name) =>
-            new(SourceType.Webcam, null, webcamId, null, name, null, null) { AddedUtc = DateTime.UtcNow };
+        // An empty camera ID means "Any camera". A specific camera starts active because
+        // callers pass one they just enumerated; otherwise the device probe resolves it.
+        public static CaptureSource CreateWebcam(string? webcamId, string name) =>
+            new(SourceType.Webcam, null, string.IsNullOrWhiteSpace(webcamId) ? null : webcamId, null, name, null, null)
+            {
+                AddedUtc = DateTime.UtcNow,
+                ActiveWebcamId = string.IsNullOrWhiteSpace(webcamId) ? null : webcamId,
+                ActiveWebcamName = string.IsNullOrWhiteSpace(webcamId) ? null : name
+            };
 
         public static CaptureSource CreateFile(string filePath, string displayName, int width, int height)
         {
@@ -22067,7 +22093,7 @@ public partial class MainWindow : Window
         public SourceType Type { get; }
         public bool IsSequenceVideo => Type is SourceType.VideoSequence or SourceType.MoviePlaylist;
         public WindowHandleInfo? Window { get; set; }
-        public string? WebcamId { get; }
+        public string? WebcamId { get; private set; }
         public string? FilePath { get; private set; }
         public List<string> FilePaths { get; } = new();
         public FileCaptureService.VideoSequenceSession? VideoSequence { get; private set; }
