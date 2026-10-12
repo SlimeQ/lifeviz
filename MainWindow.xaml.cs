@@ -527,6 +527,7 @@ public partial class MainWindow : Window
             }
         });
         RunShutdownStep("audio analysis", _audioBeatDetector.Dispose);
+        RunShutdownStep("stream audio relay", ShutdownStreamAudioRelay);
         RunShutdownStep("timer cleanup", () =>
         {
             MarkStartupComplete();
@@ -6530,6 +6531,8 @@ public partial class MainWindow : Window
                 AudioSourceMenu.Items.Add(item);
             }
         }
+
+        AddStreamAudioRelayMenu(outputDevices);
     }
 
     private async void AudioDeviceMenuItem_Click(object sender, RoutedEventArgs e)
@@ -6563,6 +6566,7 @@ public partial class MainWindow : Window
         _audioReactiveLevelSeedBurstsLastStep = 0;
         _audioReactiveBeatSeedBurstsLastStep = 0;
         UpdateAudioReactiveMenuState();
+        UpdateStreamAudioRelay();
         SaveConfig();
         PopulateAudioMenu();
     }
@@ -6588,6 +6592,7 @@ public partial class MainWindow : Window
         _audioReactiveLevelSeedBurstsLastStep = 0;
         _audioReactiveBeatSeedBurstsLastStep = 0;
         UpdateAudioReactiveMenuState();
+        UpdateStreamAudioRelay();
         SaveConfig();
         PopulateAudioMenu();
         Logger.Info("Audio reactivity source changed to the silent video-stack mix.");
@@ -6614,6 +6619,7 @@ public partial class MainWindow : Window
         _audioReactiveLevelSeedBurstsLastStep = 0;
         _audioReactiveBeatSeedBurstsLastStep = 0;
         UpdateAudioReactiveMenuState();
+        UpdateStreamAudioRelay();
         SaveConfig();
         PopulateAudioMenu();
     }
@@ -20017,6 +20023,7 @@ public partial class MainWindow : Window
                 _audioReactiveSeedPattern = seedPattern;
             }
             _selectedAudioDeviceId = config.AudioDeviceId;
+            _streamAudioRelayDeviceId = string.IsNullOrWhiteSpace(config.StreamAudioRelayDeviceId) ? null : config.StreamAudioRelayDeviceId;
             _sourceAudioMasterEnabled = config.SourceAudioMasterEnabled;
             _sourceAudioMasterVolume = Math.Clamp(config.SourceAudioMasterVolume, 0, 1);
             _lowContentionMode = config.LowContentionMode;
@@ -20050,6 +20057,7 @@ public partial class MainWindow : Window
                 }
             }
             _lastAudioReactiveBeatCount = _audioBeatDetector.BeatCount;
+            UpdateStreamAudioRelay();
 
             _blendMode = ParseBlendModeOrDefault(config.BlendMode, _blendMode);
             bool hasEmbeddedSimulationGroups = ContainsSimulationGroupSource(config.Sources);
@@ -20306,6 +20314,7 @@ public partial class MainWindow : Window
             AudioReactiveSeedCooldownMs = _audioReactiveSeedCooldownMs,
             AudioReactiveSeedPattern = _audioReactiveSeedPattern.ToString(),
             AudioDeviceId = _selectedAudioDeviceId,
+            StreamAudioRelayDeviceId = _streamAudioRelayDeviceId,
             SourceAudioMasterEnabled = _sourceAudioMasterEnabled,
             SourceAudioMasterVolume = _sourceAudioMasterVolume,
             LowContentionMode = _lowContentionMode,
@@ -21815,6 +21824,7 @@ public partial class MainWindow : Window
         public double AudioReactiveSeedCooldownMs { get; set; } = DefaultAudioReactiveSeedCooldownMs;
         public string AudioReactiveSeedPattern { get; set; } = MainWindow.AudioReactiveSeedPattern.Glider.ToString();
         public string? AudioDeviceId { get; set; }
+        public string? StreamAudioRelayDeviceId { get; set; }
         public bool SourceAudioMasterEnabled { get; set; } = true;
         public double SourceAudioMasterVolume { get; set; } = 1.0;
         public bool LowContentionMode { get; set; }

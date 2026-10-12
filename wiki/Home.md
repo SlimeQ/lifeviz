@@ -10,6 +10,8 @@ Welcome to the documentation hub for LifeViz, a minimalist Windows 11 WPF experi
 
 - [Simulation Audio Response](Audio-Response.md)
 
+- [Streaming LifeViz with its audio (Stream Audio Relay)](Streaming-Audio-Relay.md)
+
 - [Particle Erosion, Ripple Field, Chromatic Memory, and Contour Current](More-Simulations.md)
 
 - [Feedback Kaleidoscope](Feedback-Kaleidoscope.md)

@@ -1137,7 +1137,21 @@ internal sealed partial class AudioBeatDetector : IDisposable
         !string.IsNullOrWhiteSpace(selectedId) &&
         selectedId.StartsWith(RenderSelectionPrefix, StringComparison.OrdinalIgnoreCase);
 
-    private static bool TryParseRenderSelectionId(string selectedId, out string? renderDeviceId, out bool useSystemDefault)
+    internal static string? TryGetDefaultRenderDeviceId()
+    {
+        try
+        {
+            using var enumerator = new MMDeviceEnumerator();
+            using var device = enumerator.GetDefaultAudioEndpoint(DataFlow.Render, Role.Multimedia);
+            return device.ID;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    internal static bool TryParseRenderSelectionId(string selectedId, out string? renderDeviceId, out bool useSystemDefault)
     {
         renderDeviceId = null;
         useSystemDefault = false;

@@ -220,6 +220,8 @@ internal static partial class SmokeTestRunner
                 "scene-persistence" => RunScenePersistenceSmokeTest(),
                 "scene-package" => RunScenePackageSmokeTest(),
                 "webcam-devices" => RunWebcamDevicesSmokeTest(),
+                "stream-audio-relay" => RunStreamAudioRelaySmokeTest(),
+                "stream-audio-relay-tone" => RunStreamAudioRelayToneHelper(args),
                 "webcam-devices-live" => RunWebcamDevicesSmokeTest(liveCamera: true),
                 "all" => RunAllSmokeTests(),
                 _ => throw new ArgumentException($"Unknown smoke test target '{target}'. See wiki/Build-and-Install.md for the supported targets, including webm-alpha, autoclip, ffmpeg-lifecycle, gif-source-recovery, color-plane, and chroma-key.")

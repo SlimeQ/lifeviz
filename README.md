@@ -1,5 +1,7 @@
 # LifeViz
 
+**Audio Source → Stream Audio Relay** lets a Discord application stream of LifeViz carry the music LifeViz is reacting to. Discord only captures audio played by the streamed app itself. With an output device as the Audio Source, LifeViz replays the apps playing there from its own process onto a relay device you don't listen to, such as VB-Audio **CABLE Input**. It skips Discord, so the call isn't echoed, and LifeViz's own audio, which already reaches the stream. You hear nothing extra. Windows 11 / 10 build 20348+. See [Streaming Audio Relay](wiki/Streaming-Audio-Relay.md); validate with `--smoke-test stream-audio-relay`.
+
 **Always on Top** in the main context menu (also available through Scene Editor **App Controls...**) keeps the output above other windows. The toggle works in windowed and fullscreen modes, defaults to off, and is remembered across restarts.
 
 Large live H.264/HEVC movies now use Windows hardware decoding with software fallback. Actual decoder timestamps detect sustained video lag: playback resynchronizes and lowers the output frame rate when the renderer cannot keep up, with an explanation in the Movie Playlist player. This detects continuous video slowdown instead of silently letting the picture fall minutes behind audio. Audio also preserves delayed track starts and packet gaps. Run `dotnet bin/Release/net9.0-windows/lifeviz.dll --smoke-test movie-clock` for delayed/gapped audio, seek and sustained-overload recovery checks; see [Build & Install](wiki/Build-and-Install.md).

@@ -522,6 +522,14 @@ The persistence smoke also checks **Always on Top** defaults, menu check state, 
 
 The persistence smoke uses a unique temporary directory and leaves failed fixtures for diagnosis. It also writes `smoke-scene-recovery-editor.png` beside the test executable for layout inspection. It verifies real locked-file retry, backups/corruption/conflict behavior, and an in-flight save during shutdown without overwriting the user's scene. See [Scene Saving & Recovery](Scene-Saving-and-Recovery.md). Changes take effect in builds/installers containing this code; existing installed releases retain their previous behavior.
 
+## Validate the stream audio relay
+
+```powershell
+dotnet bin/Release/net9.0-windows/lifeviz.dll --smoke-test stream-audio-relay
+```
+
+Needs two virtual output devices so nothing is audible: VB-Audio CABLE and/or Voicemeeter inputs. **CABLE Input** and **CABLE In 16ch** are the same cable and count as one. Without them the test prints *SKIPPED* and exits 0. A helper process (`--smoke-test stream-audio-relay-tone`) plays 440 Hz on the analyzed device while the test process plays 660 Hz there. The relay must pick up the helper, deliver its tone to the relay device at full level with no mixer discontinuities, and exclude LifeViz's own 660 Hz tone. The test also checks the Discord process-name exclusions and a clean stop. Before the device test, it checks the **Stream Audio Relay** submenu: the analyzed device is disabled, the chosen device is checked and saved, a missing device fails cleanly, and the relay waits while the Audio Source is not an output device. See [Streaming Audio Relay](Streaming-Audio-Relay.md).
+
 ## Validate simulation group blending
 
 ```powershell
