@@ -4,6 +4,8 @@ Movie Playlist sources optionally resume using a stable movie-entry ID and times
 
 LifeViz autosaves the applied scene to `%APPDATA%\lifeviz\config.json`. A graphics failure must not turn resource cleanup into an empty saved scene. Shutdown captures a complete scene snapshot before closing the editor, stopping recording, or disposing source sessions, then prevents further scene snapshots during teardown. The background writer drains that immutable snapshot after media cleanup.
 
+Saved scenes and exports reference media by path. To send a scene with its media to someone else, use **Share...**; see [Sharing Scenes](Sharing-Scenes.md).
+
 ## Autosave and failure handling
 
 - Edits are coalesced in a 500 ms window. Continuous slider movement does not restart the timer indefinitely. Identical snapshots are skipped; at most one write runs at a time, with the newest pending revision retained separately.

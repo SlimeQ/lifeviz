@@ -19,7 +19,7 @@ public partial class LayerEditorWindow
         Show();
         UpdateLayout();
         var root = (FrameworkElement)Content;
-        foreach (var control in new[] { NewProjectButton, LoadLayersButton, SaveLayersButton, RecoverLayersButton, ApplyButton })
+        foreach (var control in new[] { NewProjectButton, LoadLayersButton, SaveLayersButton, ShareSceneButton, RecoverLayersButton, ApplyButton })
         {
             Point position = control.TranslatePoint(new Point(), root);
             if (control.ActualWidth <= 0 || position.X < 0 || position.X + control.ActualWidth > root.ActualWidth + 1)

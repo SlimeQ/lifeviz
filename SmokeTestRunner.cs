@@ -218,6 +218,7 @@ internal static partial class SmokeTestRunner
                 "startup-recovery" => RunStartupRecoverySmokeTest(),
                 "config-save-coalescing" => RunConfigSaveCoalescingSmokeTest(),
                 "scene-persistence" => RunScenePersistenceSmokeTest(),
+                "scene-package" => RunScenePackageSmokeTest(),
                 "all" => RunAllSmokeTests(),
                 _ => throw new ArgumentException($"Unknown smoke test target '{target}'. See wiki/Build-and-Install.md for the supported targets, including webm-alpha, autoclip, ffmpeg-lifecycle, gif-source-recovery, color-plane, and chroma-key.")
             };

@@ -874,13 +874,7 @@ public partial class LayerEditorWindow : Window
 
         try
         {
-            RefreshMovieBookmarksForSave();
-            var projectSettings = _pendingProjectSettings ?? _owner.GetProjectSettingsForEditor();
-            var config = LayerConfigFile.FromEditorSources(
-                _viewModel.Sources,
-                Array.Empty<LayerEditorSimulationLayer>(),
-                projectSettings);
-            string json = JsonSerializer.Serialize(config, LayerConfigJsonOptions);
+            string json = JsonSerializer.Serialize(BuildSceneForExport(), LayerConfigJsonOptions);
             SceneFileStore.Write(dialog.FileName, json);
         }
         catch (Exception ex)
@@ -888,6 +882,15 @@ public partial class LayerEditorWindow : Window
             MessageBox.Show(this, $"Failed to save layer configuration:\n{ex.Message}", "Save Failed",
                 MessageBoxButton.OK, MessageBoxImage.Error);
         }
+    }
+
+    private LayerConfigFile BuildSceneForExport()
+    {
+        RefreshMovieBookmarksForSave();
+        return LayerConfigFile.FromEditorSources(
+            _viewModel.Sources,
+            Array.Empty<LayerEditorSimulationLayer>(),
+            _pendingProjectSettings ?? _owner.GetProjectSettingsForEditor());
     }
 
     private void LoadLayerConfig_Click(object sender, RoutedEventArgs e)
@@ -901,7 +904,8 @@ public partial class LayerEditorWindow : Window
         var dialog = new OpenFileDialog
         {
             Title = recoverAutosave ? "Recover Scene Revision" : "Load Layer Configuration",
-            Filter = "LifeViz Layer Config (*.lifevizlayers.json)|*.lifevizlayers.json|JSON Files|*.json|All Files|*.*",
+            Filter = "LifeViz Scenes (*.lifevizlayers.json;*.lifevizscene)|*.lifevizlayers.json;*.lifevizscene|" +
+                     ScenePackage.DialogFilter + "|LifeViz Layer Config (*.lifevizlayers.json)|*.lifevizlayers.json|JSON Files|*.json|All Files|*.*",
             CheckFileExists = true,
             Multiselect = false
         };
@@ -917,6 +921,12 @@ public partial class LayerEditorWindow : Window
             return;
         }
 
+        if (!recoverAutosave && ScenePackage.IsPackagePath(dialog.FileName))
+        {
+            ImportScenePackage(dialog.FileName);
+            return;
+        }
+
         try
         {
             string json = File.ReadAllText(dialog.FileName);
@@ -928,33 +938,39 @@ public partial class LayerEditorWindow : Window
                 return;
             }
 
-            var sources = config.ToEditorSources();
-            var projectSettings = config.ToEditorProjectSettings();
-            if (_viewModel.LiveMode)
-            {
-                _owner.BeginSceneReplacement();
-                bool complete = false;
-                try
-                {
-                    _owner.ApplyProjectSettingsFromEditor(projectSettings);
-                    _owner.ApplyLayerEditorSources(sources);
-                    complete = EnumerateSources(_owner.BuildLayerEditorSources()).Count() == EnumerateSources(sources).Count();
-                    if (complete) RefreshFromSources();
-                }
-                finally { _owner.CompleteSceneReplacement(complete); }
-            }
-            else
-            {
-                _pendingProjectSettings = projectSettings;
-                _viewModel.Sources = new ObservableCollection<LayerEditorSource>(sources);
-                SetSelectedSource(_viewModel.Sources.FirstOrDefault());
-                RefreshProjectSettingsState();
-            }
+            ApplyLoadedScene(config);
         }
         catch (Exception ex)
         {
             MessageBox.Show(this, $"Failed to load layer configuration:\n{ex.Message}", "Load Failed",
                 MessageBoxButton.OK, MessageBoxImage.Error);
+        }
+    }
+
+    // Live Mode applies immediately; otherwise the scene becomes the unapplied draft.
+    private void ApplyLoadedScene(LayerConfigFile config)
+    {
+        var sources = config.ToEditorSources();
+        var projectSettings = config.ToEditorProjectSettings();
+        if (_viewModel.LiveMode)
+        {
+            _owner.BeginSceneReplacement();
+            bool complete = false;
+            try
+            {
+                _owner.ApplyProjectSettingsFromEditor(projectSettings);
+                _owner.ApplyLayerEditorSources(sources);
+                complete = EnumerateSources(_owner.BuildLayerEditorSources()).Count() == EnumerateSources(sources).Count();
+                if (complete) RefreshFromSources();
+            }
+            finally { _owner.CompleteSceneReplacement(complete); }
+        }
+        else
+        {
+            _pendingProjectSettings = projectSettings;
+            _viewModel.Sources = new ObservableCollection<LayerEditorSource>(sources);
+            SetSelectedSource(_viewModel.Sources.FirstOrDefault());
+            RefreshProjectSettingsState();
         }
     }
 

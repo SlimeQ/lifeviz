@@ -31,6 +31,7 @@ Welcome to the documentation hub for LifeViz, a minimalist Windows 11 WPF experi
 - [Background Baking](Background-Baking.md)
 - [Configuration & Controls](Configuration-and-Controls.md)
 - [Scene Saving & Recovery](Scene-Saving-and-Recovery.md)
+- [Sharing Scenes](Sharing-Scenes.md)
 - [Logs and Crash Reports](Logs-and-Crash-Reports.md)
 - [Build & Install](Build-and-Install.md)
 - [Optimizations](Optimizations.md)

@@ -571,6 +571,10 @@
                 <Button x:Name="SaveLayersButton"
                         Content="Save..."
                         Click="SaveLayerConfig_Click" />
+                <Button x:Name="ShareSceneButton"
+                        Content="Share..."
+                        ToolTip="Package this scene and every media file it uses into one .lifevizscene file to send to someone"
+                        Click="ShareScene_Click" />
                 <Button x:Name="RecoverLayersButton" Content="Recover..."
                         ToolTip="Load an earlier autosaved scene revision"
                         Click="RecoverAutosave_Click" />
