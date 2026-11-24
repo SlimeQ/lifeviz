@@ -218,7 +218,8 @@ public partial class MainWindow
         for (int p = 0; p < rgba.Length; p += 4)
         {
             rgba[p] = 72; rgba[p + 1] = 93; rgba[p + 2] = 117;
-            rgba[p + 3] = p / 4 % width < width / 2 ? (byte)128 : (byte)255;
+            int x = p / 4 % width;
+            rgba[p + 3] = x < width / 3 ? (byte)0 : x < 2 * width / 3 ? (byte)128 : (byte)255;
         }
         sibling.LastFrame = new SourceFrame(rgba, width, height, null, width, height);
         BlendMode oldGroup = group.BlendMode, oldChild = source.BlendMode;
@@ -239,13 +240,13 @@ public partial class MainWindow
                     double a = rgba[p + 3] / 255.0;
                     for (int c = 0; c < 3; c++)
                     {
-                        double expected = sampledMilkDrop[p + c] * (1 - a + a * rgba[p + c] / 255.0);
-                        if (Math.Abs(resolved[p + c] - expected) > 3 || resolved[p + 3] != 255)
+                        double expected = a * rgba[p + c] * (1 - source.Opacity * (1 - sampledMilkDrop[p + c] / 255.0));
+                        if (Math.Abs(resolved[p + c] - expected) > 3 || Math.Abs(resolved[p + 3] - rgba[p + 3]) > 1)
                             throw new InvalidOperationException($"Native MilkDrop Multiply changed with outer {outer}: pixel ({x},{y}), channel {c} was {resolved[p+c]}, expected {expected:0.0}.");
                     }
                 }
             }
-            Logger.Info("Native MilkDrop preset: opaque readback and isolated Multiply over both opaque and partial-alpha siblings passed.");
+            Logger.Info("Native MilkDrop preset: opaque readback and isolated Multiply over transparent, partial-alpha, and opaque siblings passed.");
         }
         finally
         {
