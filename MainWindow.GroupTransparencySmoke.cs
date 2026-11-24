@@ -115,6 +115,91 @@ public partial class MainWindow
                 Check(cpuBlend.Downscaled, group.Opacity, overBlue, "CPU group Normal");
             }
         }
+        // Exercise the real recursive capture path, not a precomposed Normal fixture.
+        // A default Additive child must not flatten alpha before its Normal parent
+        // reaches the scene's lower blue layer, even through a nested group.
+        var additive = CaptureSource.CreateFile("alpha-inner-additive", "Alpha Additive", width, height);
+        additive.BlendMode = BlendMode.Additive;
+        additive.FitMode = FitMode.Stretch;
+        additive.Opacity = media.Opacity;
+        additive.UsePinnedFrameForSmoke = true;
+        additive.LastFrame = new SourceFrame(pixels, width, height, null, width, height);
+        var faded = CaptureSource.CreateFile("alpha-inner-faded", "Zero-opacity Multiply", width, height);
+        faded.BlendMode = BlendMode.Multiply;
+        faded.FitMode = FitMode.Stretch;
+        faded.Opacity = 0;
+        faded.UsePinnedFrameForSmoke = true;
+        faded.LastFrame = new SourceFrame(
+            BuildSmokeSolidBgra(width, height, 0, 255, 0), width, height, null, width, height);
+        var inner = CaptureSource.CreateGroup("Nested Additive group");
+        inner.BlendMode = BlendMode.Additive;
+        inner.FitMode = FitMode.Stretch;
+        inner.Children.Add(additive);
+        inner.Children.Add(faded);
+        var outer = CaptureSource.CreateGroup("Normal group with Additive child");
+        outer.BlendMode = BlendMode.Normal;
+        outer.FitMode = FitMode.Stretch;
+        outer.Opacity = 0.6;
+        outer.Children.Add(inner);
+        background.UsePinnedFrameForSmoke = true;
+
+        var nestedStack = new List<CaptureSource> { background, outer };
+        CaptureSourceList(nestedStack, animationTime: 0);
+        Check(outer.LastFrame?.Downscaled ?? throw new InvalidOperationException("Nested group capture missing."),
+            1, false, "Recursive Normal group capture");
+
+        byte[]? coverageBuffer = null;
+        var cpuCovered = _inlineSourceCompositor.BuildCompositeFrame(inner.Children, ref coverageBuffer,
+            useEngineDimensions: false, animationTime: 0, preserveGroupCoverage: true);
+        Check(cpuCovered?.Downscaled ?? throw new InvalidOperationException("CPU group coverage output missing."),
+            1, false, "CPU child Additive/zero-opacity Multiply coverage");
+
+        byte[]? cpuNestedBuffer = null;
+        var cpuNested = BuildInlineCompositeFrameCpu(nestedStack, ref cpuNestedBuffer, true, 0, 0, ref injected, ref stepped);
+        Check(cpuNested?.Downscaled ?? throw new InvalidOperationException("CPU inline nested group missing."),
+            outer.Opacity, true, "CPU inline nested Normal group");
+        byte[]? gpuNestedBuffer = null;
+        var gpuNested = BuildInlineCompositeFrameGpu(nestedStack, ref gpuNestedBuffer, true, 0, 0, ref injected, ref stepped,
+            includeCpuReadback: true);
+        if (gpuNested?.GpuSurface == null)
+            throw new InvalidOperationException("Nested group alpha smoke requires the real GPU inline path.");
+        Check(gpuNested.Downscaled, outer.Opacity, true, "GPU inline nested Normal group");
+
+        // Multiply is not just ignored: it acts where both layers cover a pixel,
+        // while uncovered areas get the source color, not an opaque black blend.
+        faded.Opacity = 0.5;
+        void CheckMultiplyOverlap(byte[] composite, string phase)
+        {
+            for (int i = 0; i < width * height; i++)
+            {
+                double underAlpha = pixels[i * 4 + 3] / 255.0 * additive.Opacity;
+                double[] expected = { 0, 255 * 0.5 * (1 - underAlpha),
+                    pixels[i * 4 + 2] * underAlpha * 0.5, 255 * (0.5 + 0.5 * underAlpha) };
+                for (int c = 0; c < 4; c++)
+                    if (Math.Abs(composite[i * 4 + c] - expected[c]) > 3)
+                        throw new InvalidOperationException($"{phase}: unexpected byte at {i * 4 + c}.");
+            }
+        }
+        coverageBuffer = null;
+        var cpuOverlap = _inlineSourceCompositor.BuildCompositeFrame(inner.Children, ref coverageBuffer,
+            useEngineDimensions: false, animationTime: 0, preserveGroupCoverage: true);
+        CheckMultiplyOverlap(cpuOverlap?.Downscaled ?? throw new InvalidOperationException("CPU Multiply coverage missing."),
+            "CPU Multiply overlap");
+        coverageBuffer = null;
+        using (var gpuOverlapCompositor = new GpuSourceCompositor(this))
+        {
+            var gpuOverlap = gpuOverlapCompositor.BuildCompositeFrame(inner.Children, ref coverageBuffer,
+                useEngineDimensions: false, animationTime: 0, includeCpuReadback: true, preserveGroupCoverage: true);
+            if (gpuOverlap?.GpuSurface == null)
+                throw new InvalidOperationException("GPU Multiply coverage missing.");
+            CheckMultiplyOverlap(gpuOverlap.Downscaled, "GPU Multiply overlap");
+        }
+        // Top-level artistic blends still use their historical opacity/RGB semantics.
+        byte[]? legacyBuffer = null;
+        var legacy = _inlineSourceCompositor.BuildCompositeFrame(new List<CaptureSource> { additive },
+            ref legacyBuffer, useEngineDimensions: false, animationTime: 0);
+        if (legacy == null || legacy.Downscaled[3] != 255 || legacy.Downscaled[2] < 180)
+            throw new InvalidOperationException("Top-level Additive must not inherit Normal group coverage.");
         // A transparent image border also exercises Fill/Stretch's clamped edge sampling.
         for (int row = 0; row < height; row++)
             for (int col = 0; col < width; col++)
@@ -158,7 +243,7 @@ public partial class MainWindow
                     throw new InvalidOperationException($"DVD Bounce coverage wrong: blue={revealedBlue}, visible={visibleImage}.");
             }
         }
-        Logger.Info("Group transparency smoke passed: transparent/partial/opaque black pixels, Pixel Sort, CPU/GPU, first-layer and Normal over blue, media/group opacity, moving DVD Bounce grouped/direct parity.");
+        Logger.Info("Group transparency smoke passed: transparent/partial/opaque black pixels, Pixel Sort, CPU/GPU, first-layer and Normal over blue, media/group opacity, nested Additive coverage, moving DVD Bounce grouped/direct parity.");
         return true;
     }
 }

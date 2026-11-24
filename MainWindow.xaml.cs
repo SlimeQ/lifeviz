@@ -403,6 +403,7 @@ public partial class MainWindow : Window
         };
         _configSaveTimer.Tick += ConfigSaveTimer_Tick;
         InitializeComponent();
+        InitializeLiveVjControls();
         Closing += BackgroundBakeWindow_Closing;
         StateChanged += MainWindow_StateChanged;
         ApplyVersionIdentity();
@@ -462,6 +463,7 @@ public partial class MainWindow : Window
         }
 
         _isShuttingDown = true;
+        StopLiveVjControls();
         AbortBackgroundBakes();
         DetachRenderLoop();
         _uiThreadLatencyProbe.Stop();
@@ -11053,7 +11055,8 @@ public partial class MainWindow : Window
 
         if (EnumerateSimulationLeafLayers(_simulationLayers).Any(layer =>
                 layer.Enabled &&
-                layer.ReactiveMappings.Any(mapping => SimulationReactivity.RequiresSpectrum(mapping.Input))))
+                ((layer.Engine is GpuPixelSortBackend performanceBackend && performanceBackend.IsPerformanceEffect) ||
+                 layer.ReactiveMappings.Any(mapping => SimulationReactivity.RequiresSpectrum(mapping.Input)))))
         {
             return true;
         }
@@ -11203,8 +11206,14 @@ public partial class MainWindow : Window
     {
         Span<double> inputs = stackalloc double[8];
         for (int i = 0; i < inputs.Length; i++) inputs[i] = GetReactiveInputValue((SimulationReactiveInput)i);
+        bool performanceHasAudio = HasSimulationReactiveAudioInput() && _audioBeatDetector.HasFreshReactiveSamples;
+        long performanceBeat = _audioBeatDetector.BeatCount;
         foreach (var layer in EnumerateSimulationLeafLayers(_simulationLayers))
         {
+            if (layer.Engine is GpuPixelSortBackend performanceBackend && performanceBackend.IsPerformanceEffect)
+                UpdatePerformanceSimulation(layer, performanceBackend, deltaSeconds, performanceHasAudio, performanceBeat, inputs);
+            else
+                layer.Performance = null;
             layer.EffectiveEffects.CopyFrom(layer.Effects);
             layer.EffectiveDatamoshFeedback = Math.Clamp(layer.DatamoshFeedback, 0, 0.98);
             layer.EffectiveDatamoshDisplacement = Math.Clamp(layer.DatamoshDisplacement, 0, 1);
@@ -11567,7 +11576,8 @@ public partial class MainWindow : Window
     private bool CaptureSourceList(
         List<CaptureSource> sources,
         double animationTime,
-        ref bool removedFailedMedia)
+        ref bool removedFailedMedia,
+        bool preserveGroupCoverage = false)
     {
         bool removedAny = false;
         List<CaptureSource>? removed = null;
@@ -11615,14 +11625,16 @@ public partial class MainWindow : Window
 
             if (source.Type == CaptureSource.SourceType.Group)
             {
+                bool childCoverage = preserveGroupCoverage || source.BlendMode == BlendMode.Normal;
                 if (source.Children.Count > 0)
                 {
-                    removedAny |= CaptureSourceList(source.Children, animationTime, ref removedFailedMedia);
+                    removedAny |= CaptureSourceList(source.Children, animationTime, ref removedFailedMedia, childCoverage);
                 }
 
                 var groupDownscaled = source.CompositeDownscaledBuffer;
                 long groupCompositeStamp = BeginProfileStamp();
-                var groupComposite = BuildCompositeFrame(source.Children, ref groupDownscaled, useEngineDimensions: false, animationTime);
+                var groupComposite = BuildCompositeFrame(source.Children, ref groupDownscaled, useEngineDimensions: false, animationTime,
+                    preserveGroupCoverage: childCoverage);
                 EndProfileStamp("capture_group_composite_ms", groupCompositeStamp);
                 source.CompositeDownscaledBuffer = groupDownscaled;
                 if (groupComposite != null)
@@ -12718,7 +12730,11 @@ public partial class MainWindow : Window
         ParticleErosion,
         RippleField,
         ChromaticMemory,
-        ContourCurrent
+        ContourCurrent,
+        Faultline,
+        MagnetChoir,
+        Stampede,
+        InkTrap
     }
 
     private enum AudioReactiveSeedPattern
@@ -12730,6 +12746,7 @@ public partial class MainWindow : Window
 
     private sealed class SimulationLayerState
     {
+        public PerformanceSimulationState? Performance { get; set; }
         public Guid Id { get; set; }
         public LayerEditorSimulationItemKind Kind { get; set; } = LayerEditorSimulationItemKind.Layer;
         public SimulationLayerType LayerType { get; set; } = SimulationLayerType.Life;
@@ -14463,11 +14480,12 @@ public partial class MainWindow : Window
 
     private readonly struct KeyingSettings
     {
-        public KeyingSettings(bool enabled, bool useAlpha, byte r, byte g, byte b, double tolerance, bool premultiplied = false)
+        public KeyingSettings(bool enabled, bool useAlpha, byte r, byte g, byte b, double tolerance, bool premultiplied = false, bool opaqueInput = false)
         {
             Enabled = enabled;
             UseAlpha = useAlpha;
             Premultiplied = premultiplied;
+            OpaqueInput = opaqueInput;
             R = r;
             G = g;
             B = b;
@@ -14477,21 +14495,23 @@ public partial class MainWindow : Window
         public bool Enabled { get; }
         public bool UseAlpha { get; }
         public bool Premultiplied { get; }
+        public bool OpaqueInput { get; }
         public byte R { get; }
         public byte G { get; }
         public byte B { get; }
         public double Tolerance { get; }
     }
 
-    private static (BlendMode BlendMode, KeyingSettings Keying) ResolveSourceCompositeSettings(CaptureSource source)
+    private static (BlendMode BlendMode, KeyingSettings Keying) ResolveSourceCompositeSettings(CaptureSource source, bool preserveGroupCoverage = false)
     {
         string? framePath = source.Type == CaptureSource.SourceType.AutoClip ? source.AutoClip?.CurrentFramePath : null;
-        return ResolveSourceCompositeSettingsForPath(source, framePath);
+        return ResolveSourceCompositeSettingsForPath(source, framePath, preserveGroupCoverage);
     }
 
     private static (BlendMode BlendMode, KeyingSettings Keying) ResolveSourceCompositeSettingsForPath(
         CaptureSource source,
-        string? framePath)
+        string? framePath,
+        bool preserveGroupCoverage = false)
     {
         BlendMode blendMode = source.BlendMode;
         bool keyEnabled = source.KeyEnabled;
@@ -14518,8 +14538,9 @@ public partial class MainWindow : Window
         }
 
         bool normal = blendMode == BlendMode.Normal;
-        return (blendMode, new KeyingSettings(keyEnabled && normal, normal, keyR, keyG, keyB, keyTolerance,
-            source.Type is CaptureSource.SourceType.Group or CaptureSource.SourceType.SimGroup));
+        return (blendMode, new KeyingSettings(keyEnabled && normal, normal || preserveGroupCoverage, keyR, keyG, keyB, keyTolerance,
+            source.Type is CaptureSource.SourceType.Group or CaptureSource.SourceType.SimGroup,
+            opaqueInput: preserveGroupCoverage && (source.Type is CaptureSource.SourceType.Window or CaptureSource.SourceType.Webcam)));
     }
 
     internal static bool RunAutoClipVideoOverrideResolutionSmoke(FileCaptureService.AutoClipSession session, string path)
@@ -14570,10 +14591,11 @@ public partial class MainWindow : Window
         return keyedOk && additiveOk && retainedFrameOwnerOk;
     }
 
-    private CompositeFrame? BuildCompositeFrame(List<CaptureSource> sources, ref byte[]? downscaledBuffer, bool useEngineDimensions, double animationTime, bool includeCpuReadback = true)
+    private CompositeFrame? BuildCompositeFrame(List<CaptureSource> sources, ref byte[]? downscaledBuffer, bool useEngineDimensions,
+        double animationTime, bool includeCpuReadback = true, bool preserveGroupCoverage = false)
     {
         UpdateVisibilityGroups(sources);
-        return _renderBackend.BuildCompositeFrame(sources, ref downscaledBuffer, useEngineDimensions, animationTime, includeCpuReadback);
+        return _renderBackend.BuildCompositeFrame(sources, ref downscaledBuffer, useEngineDimensions, animationTime, includeCpuReadback, preserveGroupCoverage);
     }
 
     private bool HasEmbeddedSimulationGroups(IEnumerable<CaptureSource> sources)
@@ -14646,7 +14668,8 @@ public partial class MainWindow : Window
         int simulationStepsThisFrame,
         ref bool injectedAnyLayer,
         ref int steppedPassCount,
-        bool includeCpuReadback)
+        bool includeCpuReadback,
+        bool preserveGroupCoverage = false)
     {
         UpdateVisibilityGroups(sources);
         if (sources.Count == 0)
@@ -14707,7 +14730,7 @@ public partial class MainWindow : Window
                     animationTime,
                     firstLayer: !wroteAny,
                     ref scratchBuffer,
-                    includeCpuReadback: false);
+                    includeCpuReadback: false, preserveGroupCoverage: preserveGroupCoverage);
                 if (simulationComposite == null)
                 {
                     return null;
@@ -14740,7 +14763,7 @@ public partial class MainWindow : Window
                     simulationStepsThisFrame,
                     ref injectedAnyLayer,
                     ref steppedPassCount,
-                    out var preparedLayer))
+                    out var preparedLayer, preserveGroupCoverage))
                 {
                     segmentInputs.Add(preparedLayer);
                 }
@@ -14761,7 +14784,7 @@ public partial class MainWindow : Window
                 animationTime,
                 firstLayer: !wroteAny,
                 ref scratchBuffer,
-                includeCpuReadback: false);
+                includeCpuReadback: false, preserveGroupCoverage: preserveGroupCoverage);
             if (nextComposite == null)
             {
                 return null;
@@ -14789,7 +14812,8 @@ public partial class MainWindow : Window
         int simulationStepsThisFrame,
         ref bool injectedAnyLayer,
         ref int steppedPassCount,
-        out GpuSourceCompositor.PreparedLayerInput preparedLayer)
+        out GpuSourceCompositor.PreparedLayerInput preparedLayer,
+        bool preserveGroupCoverage)
     {
         preparedLayer = default;
 
@@ -14801,6 +14825,7 @@ public partial class MainWindow : Window
         if (source.Type == CaptureSource.SourceType.Group)
         {
             var groupBuffer = source.CompositeDownscaledBuffer;
+            bool childCoverage = preserveGroupCoverage || source.BlendMode == BlendMode.Normal;
             var groupComposite = HasEmbeddedSimulationGroups(source.Children)
                 ? BuildInlineCompositeFrameGpu(
                     source.Children,
@@ -14810,8 +14835,9 @@ public partial class MainWindow : Window
                     simulationStepsThisFrame,
                     ref injectedAnyLayer,
                     ref steppedPassCount,
-                    includeCpuReadback: false)
-                : BuildCompositeFrame(source.Children, ref groupBuffer, useEngineDimensions: false, animationTime, includeCpuReadback: false);
+                    includeCpuReadback: false, preserveGroupCoverage: childCoverage)
+                : BuildCompositeFrame(source.Children, ref groupBuffer, useEngineDimensions: false, animationTime,
+                    includeCpuReadback: false, preserveGroupCoverage: childCoverage);
             source.CompositeDownscaledBuffer = groupBuffer;
             if (groupComposite == null)
             {
@@ -14863,7 +14889,8 @@ public partial class MainWindow : Window
         double animationTime,
         int simulationStepsThisFrame,
         ref bool injectedAnyLayer,
-        ref int steppedPassCount)
+        ref int steppedPassCount,
+        bool preserveGroupCoverage = false)
     {
         UpdateVisibilityGroups(sources);
         if (sources.Count == 0)
@@ -14931,7 +14958,7 @@ public partial class MainWindow : Window
                     simulationFrame,
                     source,
                     animationTime,
-                    firstLayer: !wroteAny);
+                    firstLayer: !wroteAny, preserveGroupCoverage: preserveGroupCoverage);
                 currentComposite = new CompositeFrame(downscaledBuffer, downscaledWidth, downscaledHeight);
                 wroteAny = true;
                 continue;
@@ -14941,6 +14968,7 @@ public partial class MainWindow : Window
             if (source.Type == CaptureSource.SourceType.Group)
             {
                 var groupBuffer = source.CompositeDownscaledBuffer;
+                bool childCoverage = preserveGroupCoverage || source.BlendMode == BlendMode.Normal;
                 var groupComposite = HasEmbeddedSimulationGroups(source.Children)
                     ? BuildInlineCompositeFrameCpu(
                         source.Children,
@@ -14949,8 +14977,9 @@ public partial class MainWindow : Window
                         animationTime,
                         simulationStepsThisFrame,
                         ref injectedAnyLayer,
-                        ref steppedPassCount)
-                    : BuildCompositeFrame(source.Children, ref groupBuffer, useEngineDimensions: false, animationTime);
+                        ref steppedPassCount, childCoverage)
+                    : BuildCompositeFrame(source.Children, ref groupBuffer, useEngineDimensions: false, animationTime,
+                        preserveGroupCoverage: childCoverage);
                 source.CompositeDownscaledBuffer = groupBuffer;
                 if (groupComposite != null)
                 {
@@ -14980,7 +15009,7 @@ public partial class MainWindow : Window
                 frame,
                 source,
                 animationTime,
-                firstLayer: !wroteAny);
+                firstLayer: !wroteAny, preserveGroupCoverage: preserveGroupCoverage);
 
             currentComposite = new CompositeFrame(downscaledBuffer, downscaledWidth, downscaledHeight);
             wroteAny = true;

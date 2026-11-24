@@ -95,7 +95,7 @@ AutoClip playlists can be edited during playback without restarting the active c
 
 Closing the main LifeViz window while a bake is active or queued now asks for confirmation, with **No** selected by default. Declining keeps the bake and queue running; confirming cancels queued work and saves the active partial video before exiting. Closing only the Bake Queue window still leaves bakes running.
 
-Normal-blended groups now preserve image transparency, including the empty space around DVD Bounce animations. Layer Groups and Pixel Sort Sim Groups retain alpha through intermediate CPU/GPU composites, so transparent backgrounds reveal the scene underneath without darkening soft edges. Validate with `dotnet bin\Release\net9.0-windows\lifeviz.dll --smoke-test group-transparency` after a Release build.
+Normal-blended groups now preserve image transparency, including the empty space around DVD Bounce animations. Layer Groups and Pixel Sort Sim Groups retain alpha through intermediate CPU/GPU composites. A Normal Layer Group also preserves the coverage of Additive and other artistic child layers, including nested groups, so transparent backgrounds reveal the scene underneath without darkening soft edges. Validate with `dotnet bin\Release\net9.0-windows\lifeviz.dll --smoke-test group-transparency` after a Release build.
 
 Builds compile shaders before embedding WPF resources, so an ordinary build or release publish includes the current shader changes in one pass.
 
@@ -466,3 +466,7 @@ If an installer reports a failure, inspect `%TEMP%\lifeviz-install.log` for the 
 All technical details (rendering pipeline, controls, install flow) live in `/wiki`. Update the relevant page whenever you change the app; see `agents.md` for documentation expectations.
 
 Simulation blending regression: after `dotnet build -c Release`, run `dotnet bin/Release/net9.0-windows/lifeviz.dll --smoke-test simulation-blending`. It checks shared inputs, all blend combinations, ordered clamping, stacked groups, CPU/GPU parity, and editor/persistence controls.
+
+### Performance Sim Group layers
+
+Add **Faultline**, **Magnet Choir**, **Stampede**, or **Ink Trap** inside a Sim Group for bold, built-in frequency-band responses. On Windows, right-click the output → **Live VJ**, enable it for this session and pick a new sim layer as the target. An Xbox One controller uses **A** Hold, **B** Release and **X** Slam; keyboard and mouse alternatives are available. See [Configuration & Controls](wiki/Configuration-and-Controls.md#live-vj-and-performance-sim-layers).

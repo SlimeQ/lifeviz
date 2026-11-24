@@ -1172,6 +1172,10 @@ public partial class LayerEditorWindow : Window
     private void AddSimulationParticleErosion_Click(object sender, RoutedEventArgs e) => AddSimulationLayer(LayerEditorSimulationLayerType.ParticleErosion);
     private void AddSimulationRippleField_Click(object sender, RoutedEventArgs e) => AddSimulationLayer(LayerEditorSimulationLayerType.RippleField);
     private void AddSimulationChromaticMemory_Click(object sender, RoutedEventArgs e) => AddSimulationLayer(LayerEditorSimulationLayerType.ChromaticMemory);
+    private void AddSimulationFaultline_Click(object sender, RoutedEventArgs e) => AddSimulationLayer(LayerEditorSimulationLayerType.Faultline);
+    private void AddSimulationMagnetChoir_Click(object sender, RoutedEventArgs e) => AddSimulationLayer(LayerEditorSimulationLayerType.MagnetChoir);
+    private void AddSimulationStampede_Click(object sender, RoutedEventArgs e) => AddSimulationLayer(LayerEditorSimulationLayerType.Stampede);
+    private void AddSimulationInkTrap_Click(object sender, RoutedEventArgs e) => AddSimulationLayer(LayerEditorSimulationLayerType.InkTrap);
     private void AddSimulationContourCurrent_Click(object sender, RoutedEventArgs e) => AddSimulationLayer(LayerEditorSimulationLayerType.ContourCurrent);
 
     private void AddSimulationFeedbackKaleidoscope_Click(object sender, RoutedEventArgs e) => AddSimulationLayer(LayerEditorSimulationLayerType.FeedbackKaleidoscope);

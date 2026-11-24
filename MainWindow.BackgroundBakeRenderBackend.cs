@@ -28,14 +28,14 @@ public partial class MainWindow
             return _buffer;
         }
         public CompositeFrame? BuildCompositeFrame(List<CaptureSource> sources, ref byte[]? downscaledBuffer,
-            bool useEngineDimensions, double animationTime, bool includeCpuReadback = true)
+            bool useEngineDimensions, double animationTime, bool includeCpuReadback = true, bool preserveGroupCoverage = false)
         {
             if (_gpu.IsAvailable)
             {
-                var frame = _gpu.BuildCompositeFrame(sources, ref downscaledBuffer, useEngineDimensions, animationTime, includeCpuReadback);
+                var frame = _gpu.BuildCompositeFrame(sources, ref downscaledBuffer, useEngineDimensions, animationTime, includeCpuReadback, preserveGroupCoverage);
                 if (frame != null || sources.Count == 0) return frame;
             }
-            return _cpu.BuildCompositeFrame(sources, ref downscaledBuffer, useEngineDimensions, animationTime);
+            return _cpu.BuildCompositeFrame(sources, ref downscaledBuffer, useEngineDimensions, animationTime, preserveGroupCoverage);
         }
         public void PresentFrame(byte[] pixelBuffer, int stride) { }
         public void PresentUnderlay(byte[]? underlayBuffer, int stride) { }

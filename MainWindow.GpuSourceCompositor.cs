@@ -56,6 +56,7 @@ public partial class MainWindow
         private const uint FlagKeyEnabled = 1u << 2;
         private const uint FlagFirstLayer = 1u << 3;
         private const uint FlagPremultiplied = 1u << 4;
+        private const uint FlagOpaqueInput = 1u << 5;
         private const int MaxCachedSourceResources = 8;
         private const long MaxCachedSourceResourceBytes = 64L * 1024 * 1024;
 
@@ -183,7 +184,7 @@ public partial class MainWindow
 
         public bool IsAvailable => _gpuAvailable;
 
-        public CompositeFrame? BuildCompositeFrame(List<CaptureSource> sources, ref byte[]? downscaledBuffer, bool useEngineDimensions, double animationTime, bool includeCpuReadback = true)
+        public CompositeFrame? BuildCompositeFrame(List<CaptureSource> sources, ref byte[]? downscaledBuffer, bool useEngineDimensions, double animationTime, bool includeCpuReadback = true, bool preserveGroupCoverage = false)
         {
             if (!_gpuAvailable || sources.Count == 0)
             {
@@ -248,7 +249,7 @@ public partial class MainWindow
                     var downscaledTransform = _owner.BuildAnimationTransform(source, downscaledWidth, downscaledHeight, animationTime);
                     double animationOpacity = _owner.BuildAnimationOpacity(source, animationTime);
                     double effectiveOpacity = Math.Clamp(source.Opacity * animationOpacity, 0.0, 1.0);
-                    var compositeSettings = MainWindow.ResolveSourceCompositeSettings(source);
+                    var compositeSettings = MainWindow.ResolveSourceCompositeSettings(source, preserveGroupCoverage);
                     var keying = compositeSettings.Keying;
 
                     int sourceWidth = frame.Source != null ? frame.SourceWidth : frame.DownscaledWidth;
@@ -321,7 +322,7 @@ public partial class MainWindow
             double animationTime,
             bool firstLayer,
             ref byte[]? downscaledBuffer,
-            bool includeCpuReadback = true)
+            bool includeCpuReadback = true, bool preserveGroupCoverage = false)
         {
             int sourceWidth = frame.Source != null ? frame.SourceWidth : frame.DownscaledWidth;
             int sourceHeight = frame.Source != null ? frame.SourceHeight : frame.DownscaledHeight;
@@ -337,7 +338,7 @@ public partial class MainWindow
                 animationTime,
                 firstLayer,
                 ref downscaledBuffer,
-                includeCpuReadback);
+                includeCpuReadback, preserveGroupCoverage);
         }
 
         public CompositeFrame? ComposeCompositeFrameOntoSurface(
@@ -349,7 +350,7 @@ public partial class MainWindow
             double animationTime,
             bool firstLayer,
             ref byte[]? downscaledBuffer,
-            bool includeCpuReadback = true)
+            bool includeCpuReadback = true, bool preserveGroupCoverage = false)
         {
             if (frame.GpuSurface != null)
             {
@@ -364,7 +365,7 @@ public partial class MainWindow
                     animationTime,
                     firstLayer,
                     ref downscaledBuffer,
-                    includeCpuReadback);
+                    includeCpuReadback, preserveGroupCoverage);
             }
 
             return ComposePixelBufferOntoSurface(
@@ -378,7 +379,7 @@ public partial class MainWindow
                 animationTime,
                 firstLayer,
                 ref downscaledBuffer,
-                includeCpuReadback);
+                includeCpuReadback, preserveGroupCoverage);
         }
 
         public CompositeFrame? CreateCompositeFrameFromSurface(
@@ -426,7 +427,7 @@ public partial class MainWindow
             double animationTime,
             bool firstLayer,
             ref byte[]? downscaledBuffer,
-            bool includeCpuReadback = true)
+            bool includeCpuReadback = true, bool preserveGroupCoverage = false)
         {
             if (!_gpuAvailable || layers.Count == 0 || destWidth <= 0 || destHeight <= 0)
             {
@@ -486,7 +487,7 @@ public partial class MainWindow
                     var source = layer.Source;
                     double animationOpacity = _owner.BuildAnimationOpacity(source, animationTime);
                     double effectiveOpacity = Math.Clamp(source.Opacity * animationOpacity, 0.0, 1.0);
-                    var compositeSettings = MainWindow.ResolveSourceCompositeSettings(source);
+                    var compositeSettings = MainWindow.ResolveSourceCompositeSettings(source, preserveGroupCoverage);
                     DrawSourceIntoComposite(
                         currentCompositeSrv,
                         targetRtv,
@@ -568,7 +569,7 @@ public partial class MainWindow
             double animationTime,
             bool firstLayer,
             ref byte[]? downscaledBuffer,
-            bool includeCpuReadback)
+            bool includeCpuReadback, bool preserveGroupCoverage = false)
         {
             if (!_gpuAvailable || sourceWidth <= 0 || sourceHeight <= 0 || destWidth <= 0 || destHeight <= 0)
             {
@@ -596,7 +597,7 @@ public partial class MainWindow
                     animationTime,
                     firstLayer,
                     ref downscaledBuffer,
-                    includeCpuReadback);
+                    includeCpuReadback, preserveGroupCoverage);
             }
         }
 
@@ -635,7 +636,7 @@ public partial class MainWindow
             double animationTime,
             bool firstLayer,
             ref byte[]? downscaledBuffer,
-            bool includeCpuReadback)
+            bool includeCpuReadback, bool preserveGroupCoverage = false)
         {
             if (!_gpuAvailable || destWidth <= 0 || destHeight <= 0)
             {
@@ -676,7 +677,7 @@ public partial class MainWindow
                 ID3D11ShaderResourceView targetSrv = drawIntoA ? _compositeSrvA : _compositeSrvB;
                 ID3D11RenderTargetView targetRtv = drawIntoA ? _compositeRtvA : _compositeRtvB;
                 IntPtr targetSharedHandle = drawIntoA ? _compositeSharedHandleA : _compositeSharedHandleB;
-                var compositeSettings = MainWindow.ResolveSourceCompositeSettings(source);
+                var compositeSettings = MainWindow.ResolveSourceCompositeSettings(source, preserveGroupCoverage);
 
                 DrawSourceIntoComposite(
                     currentCompositeSrv,
@@ -931,10 +932,8 @@ public partial class MainWindow
 
             var mapping = ImageFit.GetMapping(fitMode, sourceWidth, sourceHeight, destWidth, destHeight);
             uint flags = 0;
-            if (keying.Premultiplied)
-            {
-                flags |= FlagPremultiplied;
-            }
+            if (keying.Premultiplied) flags |= FlagPremultiplied;
+            if (keying.OpaqueInput) flags |= FlagOpaqueInput;
             if (mirror)
             {
                 flags |= FlagMirror;

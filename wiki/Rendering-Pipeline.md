@@ -98,7 +98,9 @@ The built-in starter video uses the same FFmpeg file-session and GPU compositing
 
 Normal source composites retain alpha instead of flattening every intermediate pixel onto opaque black. Their RGB stays premultiplied, preserving the existing display/recording result over black. When Layer Group or Sim Group output becomes a Normal source, the CPU and GPU compositors account for that premultiplication before applying opacity/keying; soft edges therefore receive alpha once. Unmapped first-layer Normal pixels (including DVD Bounce's moving margins) remain transparent. Pixel Sort carries this alpha through its work textures, and the final simulation compositor now samples all four channels and resolves Normal layers with premultiplied source-over alpha on both GPU and CPU. Existing non-Normal blend identities are retained.
 
-The `group-transparency` smoke covers fully transparent, partial-alpha, opaque colored, and opaque black pixels; source/group opacity; CPU/GPU Pixel Sort output; first-layer and over-background Normal group composition; and grouped-versus-direct DVD Bounce at several animation times.
+An isolated **Normal Layer Group** carries coverage through nested children even if their own blend is Additive or another artistic blend. The first child retains its sampled alpha and opacity; later artistic blends affect overlapping coverage only, and uncovered pixels remain transparent. Opaque captures use their geometric coverage rather than undefined native alpha bytes. Outside a Normal Layer Group, artistic source blending retains its existing behavior.
+
+The `group-transparency` smoke covers nested Additive children, zero-opacity Multiply, top-level Additive compatibility, fully transparent, partial-alpha, opaque colored, and opaque black pixels; source/group opacity; CPU/GPU Pixel Sort output; first-layer and over-background Normal group composition; and grouped-versus-direct DVD Bounce at several animation times.
 
 The shared final-composite shader has two compiled entry points: `PSGroupMain` retains intermediate alpha, while `PSMain` makes the final display surface opaque. CPU presentation similarly marks only the copied display buffer opaque; it never modifies the reusable group buffer.
 
@@ -399,3 +401,9 @@ WPF can report `UCEERR_RENDERTHREADFAILURE` (`0x88980406`) after its render part
 ## Simulation group blending validation
 
 `simulation-blending` verifies independently computed colors for every simulation/group blend combination, shared sibling inputs on CPU and GPU, ordered additive/subtractive clipping, live group controls and draft isolation, scene-file roundtrips, and frame-fresh input across stacked groups. Up to eight visible outputs resolve in one GPU group pass. Larger groups resolve already-stepped output on CPU and upload the result locally, without restarting the scene or reinjecting earlier groups. Empty groups, zero-opacity outputs, and disabled containers are no-ops. A group without lower layers receives transparent black. The first visible output initializes the group; subsequent outputs blend in list order.
+
+## Performance simulation effects
+
+Faultline, Magnet Choir, Stampede and Ink Trap are bounded procedural GPU image effects. Faultline uses a propagating Voronoi fracture with residual black gaps, Magnet Choir uses spatially distinct orbital groups, Stampede uses periodic three-lane geometry, and Ink Trap uses merged lobes with transparent apertures. These paths use the existing shader publication/alpha model without allocating large feedback or history buffers.
+
+The renderer uses presentation seconds and per-layer envelopes instead of the simulation step number. Low-band onsets trigger kicks; mid/high onsets drive distinct effects. Threshold rearming suppresses repeated triggers on sustained input. Live VJ controls are communicated with per-action sequence numbers; offline export does not consume them. Shapes and vents use premultiplied BGRA, so negative space composites correctly on transparent sources.

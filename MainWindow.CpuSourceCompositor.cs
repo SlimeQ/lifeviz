@@ -15,7 +15,7 @@ public partial class MainWindow
             _owner = owner;
         }
 
-        public CompositeFrame? BuildCompositeFrame(List<CaptureSource> sources, ref byte[]? downscaledBuffer, bool useEngineDimensions, double animationTime)
+        public CompositeFrame? BuildCompositeFrame(List<CaptureSource> sources, ref byte[]? downscaledBuffer, bool useEngineDimensions, double animationTime, bool preserveGroupCoverage = false)
         {
             if (sources.Count == 0)
             {
@@ -57,7 +57,7 @@ public partial class MainWindow
                 var downscaledTransform = _owner.BuildAnimationTransform(source, downscaledWidth, downscaledHeight, animationTime);
                 double animationOpacity = _owner.BuildAnimationOpacity(source, animationTime);
                 double effectiveOpacity = Math.Clamp(source.Opacity * animationOpacity, 0.0, 1.0);
-                var compositeSettings = MainWindow.ResolveSourceCompositeSettings(source);
+                var compositeSettings = MainWindow.ResolveSourceCompositeSettings(source, preserveGroupCoverage);
                 var keying = compositeSettings.Keying;
 
                 if (!primedDownscaled)
@@ -111,7 +111,8 @@ public partial class MainWindow
             SourceFrame frame,
             CaptureSource source,
             double animationTime,
-            bool firstLayer)
+            bool firstLayer,
+            bool preserveGroupCoverage = false)
         {
             if (destination.Length < destWidth * destHeight * 4)
             {
@@ -121,7 +122,7 @@ public partial class MainWindow
             var transform = _owner.BuildAnimationTransform(source, destWidth, destHeight, animationTime);
             double animationOpacity = _owner.BuildAnimationOpacity(source, animationTime);
             double effectiveOpacity = Math.Clamp(source.Opacity * animationOpacity, 0.0, 1.0);
-            var compositeSettings = MainWindow.ResolveSourceCompositeSettings(source);
+            var compositeSettings = MainWindow.ResolveSourceCompositeSettings(source, preserveGroupCoverage);
             var keying = compositeSettings.Keying;
 
             if (firstLayer)
@@ -239,6 +240,7 @@ public partial class MainWindow
                         byte sr = source[srcIndex + 2];
                         byte sa = source[srcIndex + 3];
 
+                        if (keyingLocal.OpaqueInput) sa = 255;
                         UnpremultiplyGroupColor(ref sb, ref sg, ref sr, sa, keyingLocal);
                         double keyAlpha = ComputeKeyAlpha(sb, sg, sr, keyingLocal);
                         double alpha = keyingLocal.UseAlpha ? (sa / 255.0) : 1.0;
@@ -278,6 +280,7 @@ public partial class MainWindow
                             col + 0.5, row + 0.5, mirror, out sb, out sg, out sr, out sa);
                     }
 
+                    if (keyingLocal.OpaqueInput) sa = 255;
                     UnpremultiplyGroupColor(ref sb, ref sg, ref sr, sa, keyingLocal);
                     double keyAlpha = ComputeKeyAlpha(sb, sg, sr, keyingLocal);
                     double alpha = keyingLocal.UseAlpha ? (sa / 255.0) : 1.0;
@@ -330,13 +333,14 @@ public partial class MainWindow
                         byte sg = source[srcIndex + 1];
                         byte sr = source[srcIndex + 2];
                         byte sa = source[srcIndex + 3];
+                        if (keyingLocal.OpaqueInput) sa = 255;
                         UnpremultiplyGroupColor(ref sb, ref sg, ref sr, sa, keyingLocal);
                         if (applyKeying)
                         {
                             double keyAlpha = ComputeKeyAlpha(sb, sg, sr, keyingLocal);
                             sa = ClampToByte((int)Math.Round(sa * keyAlpha));
                         }
-                        BlendInto(destination, destIndex, sb, sg, sr, sa, mode, opacity);
+                        BlendInto(destination, destIndex, sb, sg, sr, sa, mode, opacity, keyingLocal.UseAlpha);
                     }
                 });
                 return;
@@ -372,13 +376,14 @@ public partial class MainWindow
                         continue;
                     }
 
+                    if (keyingLocal.OpaqueInput) sa = 255;
                     UnpremultiplyGroupColor(ref sb, ref sg, ref sr, sa, keyingLocal);
                     if (applyKeying)
                     {
                         double keyAlpha = ComputeKeyAlpha(sb, sg, sr, keyingLocal);
                         sa = ClampToByte((int)Math.Round(sa * keyAlpha));
                     }
-                    BlendInto(destination, destIndex, sb, sg, sr, sa, mode, opacity);
+                    BlendInto(destination, destIndex, sb, sg, sr, sa, mode, opacity, keyingLocal.UseAlpha);
                 }
             });
         }
@@ -393,12 +398,27 @@ public partial class MainWindow
             r = a == 0 ? (byte)0 : ClampToByte((int)Math.Round(r * 255.0 / a));
         }
 
-        private static void BlendInto(byte[] destination, int destIndex, byte sb, byte sg, byte sr, byte sa, BlendMode mode, double opacity)
+        private static void BlendInto(byte[] destination, int destIndex, byte sb, byte sg, byte sr, byte sa, BlendMode mode, double opacity, bool useAlpha)
         {
             opacity = Math.Clamp(opacity, 0.0, 1.0);
             byte db = destination[destIndex];
             byte dg = destination[destIndex + 1];
             byte dr = destination[destIndex + 2];
+
+            // Isolated Layer Groups carry coverage even for artistic blends.
+            // Blend against the unassociated backdrop only where it exists.
+            if (useAlpha && mode != BlendMode.Normal)
+            {
+                double sourceAlpha = (sa / 255.0) * opacity;
+                if (sourceAlpha <= 0.0) return;
+                double destAlpha = destination[destIndex + 3] / 255.0;
+                double outAlpha = sourceAlpha + destAlpha * (1.0 - sourceAlpha);
+                destination[destIndex] = BlendCoveredChannel(db, sb, mode, sourceAlpha, destAlpha);
+                destination[destIndex + 1] = BlendCoveredChannel(dg, sg, mode, sourceAlpha, destAlpha);
+                destination[destIndex + 2] = BlendCoveredChannel(dr, sr, mode, sourceAlpha, destAlpha);
+                destination[destIndex + 3] = ClampToByte((int)Math.Round(outAlpha * 255));
+                return;
+            }
 
             int b;
             int g;
@@ -461,6 +481,26 @@ public partial class MainWindow
             destination[destIndex + 1] = ClampToByte((int)(dg + (g - dg) * opacity));
             destination[destIndex + 2] = ClampToByte((int)(dr + (r - dr) * opacity));
             destination[destIndex + 3] = 255;
+        }
+
+        private static byte BlendCoveredChannel(byte backdrop, byte source, BlendMode mode, double sourceAlpha, double backdropAlpha)
+        {
+            double cs = source / 255.0;
+            double cb = backdropAlpha > 0.0 ? Math.Clamp(backdrop / (255.0 * backdropAlpha), 0.0, 1.0) : 0.0;
+            double overlap = mode switch
+            {
+                BlendMode.Additive => cb + cs,
+                BlendMode.Multiply => cb * cs,
+                BlendMode.Screen => 1.0 - (1.0 - cb) * (1.0 - cs),
+                BlendMode.Overlay => cb < 0.5 ? 2.0 * cb * cs : 1.0 - 2.0 * (1.0 - cb) * (1.0 - cs),
+                BlendMode.Lighten => Math.Max(cb, cs),
+                BlendMode.Darken => Math.Min(cb, cs),
+                BlendMode.Subtractive => cb - cs,
+                _ => cs
+            };
+            double result = (backdrop / 255.0) * (1.0 - sourceAlpha)
+                + sourceAlpha * ((1.0 - backdropAlpha) * cs + backdropAlpha * Math.Clamp(overlap, 0.0, 1.0));
+            return ClampToByte((int)Math.Round(result * 255));
         }
     }
 }

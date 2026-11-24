@@ -29,7 +29,7 @@ public partial class MainWindow
 
         byte[]? EnsureSurface(int width, int height, bool force);
 
-        CompositeFrame? BuildCompositeFrame(List<CaptureSource> sources, ref byte[]? downscaledBuffer, bool useEngineDimensions, double animationTime, bool includeCpuReadback = true);
+        CompositeFrame? BuildCompositeFrame(List<CaptureSource> sources, ref byte[]? downscaledBuffer, bool useEngineDimensions, double animationTime, bool includeCpuReadback = true, bool preserveGroupCoverage = false);
 
         void PresentFrame(byte[] pixelBuffer, int stride);
 
@@ -63,7 +63,7 @@ public partial class MainWindow
 
         public byte[]? EnsureSurface(int width, int height, bool force) => null;
 
-        public CompositeFrame? BuildCompositeFrame(List<CaptureSource> sources, ref byte[]? downscaledBuffer, bool useEngineDimensions, double animationTime, bool includeCpuReadback = true)
+        public CompositeFrame? BuildCompositeFrame(List<CaptureSource> sources, ref byte[]? downscaledBuffer, bool useEngineDimensions, double animationTime, bool includeCpuReadback = true, bool preserveGroupCoverage = false)
             => null;
 
         public void PresentFrame(byte[] pixelBuffer, int stride)
@@ -121,8 +121,8 @@ public partial class MainWindow
 
         public byte[]? EnsureSurface(int width, int height, bool force) => _presentationBackend.EnsureSurface(width, height, force);
 
-        public CompositeFrame? BuildCompositeFrame(List<CaptureSource> sources, ref byte[]? downscaledBuffer, bool useEngineDimensions, double animationTime, bool includeCpuReadback = true)
-            => _sourceCompositor.BuildCompositeFrame(sources, ref downscaledBuffer, useEngineDimensions, animationTime);
+        public CompositeFrame? BuildCompositeFrame(List<CaptureSource> sources, ref byte[]? downscaledBuffer, bool useEngineDimensions, double animationTime, bool includeCpuReadback = true, bool preserveGroupCoverage = false)
+            => _sourceCompositor.BuildCompositeFrame(sources, ref downscaledBuffer, useEngineDimensions, animationTime, preserveGroupCoverage);
 
         public void PresentFrame(byte[] pixelBuffer, int stride) => _presentationBackend.PresentFrame(pixelBuffer, stride);
 
@@ -173,13 +173,13 @@ public partial class MainWindow
 
         public byte[]? EnsureSurface(int width, int height, bool force) => _presentationBackend.EnsureSurface(width, height, force);
 
-        public CompositeFrame? BuildCompositeFrame(List<CaptureSource> sources, ref byte[]? downscaledBuffer, bool useEngineDimensions, double animationTime, bool includeCpuReadback = true)
+        public CompositeFrame? BuildCompositeFrame(List<CaptureSource> sources, ref byte[]? downscaledBuffer, bool useEngineDimensions, double animationTime, bool includeCpuReadback = true, bool preserveGroupCoverage = false)
         {
             if (_useGpuSourceCompositor)
             {
                 try
                 {
-                    var composite = _gpuSourceCompositor.BuildCompositeFrame(sources, ref downscaledBuffer, useEngineDimensions, animationTime, includeCpuReadback);
+                    var composite = _gpuSourceCompositor.BuildCompositeFrame(sources, ref downscaledBuffer, useEngineDimensions, animationTime, includeCpuReadback, preserveGroupCoverage);
                     if (composite != null || sources.Count == 0)
                     {
                         return composite;
@@ -192,7 +192,7 @@ public partial class MainWindow
                 }
             }
 
-            return _cpuSourceCompositor.BuildCompositeFrame(sources, ref downscaledBuffer, useEngineDimensions, animationTime);
+            return _cpuSourceCompositor.BuildCompositeFrame(sources, ref downscaledBuffer, useEngineDimensions, animationTime, preserveGroupCoverage);
         }
 
         public void PresentFrame(byte[] pixelBuffer, int stride) => _presentationBackend.PresentFrame(pixelBuffer, stride);
