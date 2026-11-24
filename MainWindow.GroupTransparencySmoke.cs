@@ -243,7 +243,89 @@ public partial class MainWindow
                     throw new InvalidOperationException($"DVD Bounce coverage wrong: blue={revealedBlue}, visible={visibleImage}.");
             }
         }
+        CheckMilkDropGroupMultiplySmoke(width, height);
         Logger.Info("Group transparency smoke passed: transparent/partial/opaque black pixels, Pixel Sort, CPU/GPU, first-layer and Normal over blue, media/group opacity, nested Additive coverage, moving DVD Bounce grouped/direct parity.");
         return true;
     }
+
+    private void CheckMilkDropGroupMultiplySmoke(int width, int height)
+    {
+        var background = MakeLayer("Outside backdrop", new byte[] {36, 50, 28}, false);
+        var lower = MakeLayer("Earlier sibling", new byte[] {200, 100, 40}, true);
+        var milk = CreateProjectMSource(new ProjectMSettings(), "Pinned MilkDrop frame");
+        milk.BlendMode = BlendMode.Multiply;
+        milk.LastFrame = new SourceFrame(MakePixels(new byte[] {128, 64, 192}, false), width, height, null, width, height);
+        milk.UsePinnedFrameForSmoke = true;
+        var group = CaptureSource.CreateGroup("Independent composite");
+        group.FitMode = FitMode.Stretch;
+        group.Opacity = 0.5;
+        group.Children.Add(lower);
+        group.Children.Add(milk);
+
+        byte[] MakePixels(byte[] rgb, bool bands)
+        {
+            var output = new byte[width * height * 4];
+            for (int y = 0; y < height; y++)
+            for (int x = 0; x < width; x++)
+            {
+                int i = (y * width + x) * 4;
+                output[i] = rgb[0]; output[i+1] = rgb[1]; output[i+2] = rgb[2];
+                output[i+3] = !bands ? (byte)255 : x < width/3 ? (byte)0 : x < 2*width/3 ? (byte)128 : (byte)255;
+            }
+            return output;
+        }
+        CaptureSource MakeLayer(string name, byte[] rgb, bool bands)
+        {
+            var s = CaptureSource.CreateFile("multiply-smoke", name, width, height);
+            s.BlendMode = BlendMode.Normal;
+            s.FitMode = FitMode.Stretch;
+            s.LastFrame = new SourceFrame(MakePixels(rgb, bands), width, height, null, width, height);
+            s.UsePinnedFrameForSmoke = true;
+            return s;
+        }
+        void Check(byte[] bytes, BlendMode mode, string path, bool internalGroup)
+        {
+            double[] external = {36, 50, 28}, backdrop = {200, 100, 40}, milkdrop = {128, 64, 192};
+            foreach (var (x, coverage) in new[] { (width / 6, 0.0), (width / 2, 128.0 / 255), (width * 5 / 6, 1.0) })
+            {
+                int at = ((height / 2) * width + x) * 4;
+                for (int channel = 0; channel < 3; channel++)
+                {
+                    double inside = milkdrop[channel] * ((1 - coverage) + coverage * backdrop[channel] / 255);
+                    double outside = external[channel];
+                    double expected = internalGroup ? inside : mode switch
+                    {
+                        BlendMode.Additive => outside + inside * 0.5,
+                        BlendMode.Multiply => outside * (0.5 + inside / 510),
+                        _ => (outside + inside) * 0.5
+                    };
+                    if (Math.Abs(bytes[at + channel] - expected) > 3 || bytes[at + 3] != 255)
+                        throw new InvalidOperationException($"MilkDrop group {mode}/{path} coverage {coverage:0.00}, channel {channel}: got {bytes[at + channel]}, expected {expected:0.0}.");
+                }
+            }
+        }
+
+        var stack = new List<CaptureSource> { background, group };
+        foreach (var mode in new[] { BlendMode.Normal, BlendMode.Additive, BlendMode.Multiply })
+        {
+            group.BlendMode = mode;
+            CaptureSourceList(stack, animationTime: 0);
+            Check(group.LastFrame?.Downscaled ?? throw new InvalidOperationException("Group capture unavailable."), mode, "captured group", true);
+            byte[]? buffer = null;
+            bool injected = false;
+            int stepped = 0;
+            var ordinary = BuildCompositeFrame(stack, ref buffer, true, 0, includeCpuReadback: true);
+            Check(ordinary?.Downscaled ?? throw new InvalidOperationException("Ordinary program composite unavailable."), mode, "program", false);
+            buffer = null;
+            var inlineCpu = BuildInlineCompositeFrameCpu(stack, ref buffer, true, 0, 0, ref injected, ref stepped);
+            Check(inlineCpu?.Downscaled ?? throw new InvalidOperationException("CPU composite unavailable."), mode, "inline CPU", false);
+            buffer = null;
+            var inlineGpu = BuildInlineCompositeFrameGpu(stack, ref buffer, true, 0, 0, ref injected, ref stepped,
+                includeCpuReadback: true);
+            if (inlineGpu?.GpuSurface == null) throw new InvalidOperationException("D3D11 composite unavailable.");
+            Check(inlineGpu.Downscaled, mode, "inline GPU", false);
+        }
+        Logger.Info("MilkDrop Multiply: isolated inner blend and independent outer Normal/Additive/Multiply passed with opaque, partial and transparent siblings.");
+    }
+
 }
