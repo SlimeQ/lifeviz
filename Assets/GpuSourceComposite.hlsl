@@ -39,6 +39,7 @@ cbuffer SourceCompositeParams : register(b0)
 static const uint FlagMirror = 1u << 0;
 static const uint FlagUseAlpha = 1u << 1;
 static const uint FlagPremultiplied = 1u << 4;
+static const uint FlagOpaqueInput = 1u << 5;
 static const uint FlagKeyEnabled = 1u << 2;
 static const uint FlagFirstLayer = 1u << 3;
 static const float MaxColorDistance = 441.6729559300637f;
@@ -140,10 +141,50 @@ float ComputeKeyAlpha(float3 sourceRgb)
     return edge * edge * (3.0f - (2.0f * edge));
 }
 
+float3 ApplyArtisticBlend(float3 backdropRgb, float3 sourceRgb)
+{
+    float3 blended = sourceRgb;
+    if (BlendMode == 0u) // Additive
+    {
+        blended = backdropRgb + sourceRgb;
+    }
+    else if (BlendMode == 2u) // Multiply
+    {
+        blended = backdropRgb * sourceRgb;
+    }
+    else if (BlendMode == 3u) // Screen
+    {
+        blended = 1.0f - ((1.0f - backdropRgb) * (1.0f - sourceRgb));
+    }
+    else if (BlendMode == 4u) // Overlay
+    {
+        blended = lerp(2.0f * backdropRgb * sourceRgb,
+                       1.0f - (2.0f * (1.0f - backdropRgb) * (1.0f - sourceRgb)),
+                       step(0.5f, backdropRgb));
+    }
+    else if (BlendMode == 5u) // Lighten
+    {
+        blended = max(backdropRgb, sourceRgb);
+    }
+    else if (BlendMode == 6u) // Darken
+    {
+        blended = min(backdropRgb, sourceRgb);
+    }
+    else if (BlendMode == 7u) // Subtractive
+    {
+        blended = backdropRgb - sourceRgb;
+    }
+
+    return blended;
+}
+
 float4 BlendColors(float4 currentColor, float4 sourceColor)
 {
     // Media arrives straight-alpha; resolved groups already contain premultiplied RGB.
-    if (BlendMode == 1u && (Flags & FlagPremultiplied) != 0u)
+    bool useAlpha = (Flags & FlagUseAlpha) != 0u;
+    // GDI/other opaque capture paths do not guarantee meaningful alpha bytes.
+    if ((Flags & FlagOpaqueInput) != 0u) sourceColor.a = 1.0f;
+    if (useAlpha && (Flags & FlagPremultiplied) != 0u)
     {
         sourceColor.rgb = sourceColor.a > 0.0f ? sourceColor.rgb / sourceColor.a : 0.0f;
     }
@@ -151,52 +192,32 @@ float4 BlendColors(float4 currentColor, float4 sourceColor)
     if ((Flags & FlagFirstLayer) != 0u)
     {
         float keyAlpha = ComputeKeyAlpha(sourceColor.rgb);
-        float alpha = ((Flags & FlagUseAlpha) != 0u) ? sourceColor.a : 1.0f;
+        float alpha = useAlpha ? sourceColor.a : 1.0f;
         float effectiveOpacity = Opacity * keyAlpha * alpha;
-        result = float4(sourceColor.rgb * effectiveOpacity, BlendMode == 1u ? effectiveOpacity : 1.0f);
+        result = float4(sourceColor.rgb * effectiveOpacity, useAlpha ? effectiveOpacity : 1.0f);
     }
     else if (BlendMode == 1u) // Normal
     {
         float keyAlpha = ComputeKeyAlpha(sourceColor.rgb);
-        float alpha = (((Flags & FlagUseAlpha) != 0u) ? sourceColor.a : 1.0f) * Opacity * keyAlpha;
+        float alpha = (useAlpha ? sourceColor.a : 1.0f) * Opacity * keyAlpha;
         result = float4(lerp(currentColor.rgb, sourceColor.rgb, saturate(alpha)),
                         alpha + currentColor.a * (1.0f - alpha));
     }
+    else if (useAlpha)
+    {
+        // In an isolated Normal group, preserve coverage for child artistic blends.
+        // The blend formula applies only where both child and backdrop have alpha.
+        float a = sourceColor.a * Opacity;
+        float b = currentColor.a;
+        float3 backdrop = b > 0.0f ? saturate(currentColor.rgb / b) : 0.0f;
+        float3 overlap = saturate(ApplyArtisticBlend(backdrop, sourceColor.rgb));
+        result = float4(currentColor.rgb * (1.0f - a)
+                        + a * lerp(sourceColor.rgb, overlap, b),
+                        a + b * (1.0f - a));
+    }
     else
     {
-        float3 blended = sourceColor.rgb;
-        if (BlendMode == 0u) // Additive
-        {
-            blended = currentColor.rgb + sourceColor.rgb;
-        }
-        else if (BlendMode == 2u) // Multiply
-        {
-            blended = currentColor.rgb * sourceColor.rgb;
-        }
-        else if (BlendMode == 3u) // Screen
-        {
-            blended = 1.0f - ((1.0f - currentColor.rgb) * (1.0f - sourceColor.rgb));
-        }
-        else if (BlendMode == 4u) // Overlay
-        {
-            blended = lerp(2.0f * currentColor.rgb * sourceColor.rgb,
-                           1.0f - (2.0f * (1.0f - currentColor.rgb) * (1.0f - sourceColor.rgb)),
-                           step(0.5f, currentColor.rgb));
-        }
-        else if (BlendMode == 5u) // Lighten
-        {
-            blended = max(currentColor.rgb, sourceColor.rgb);
-        }
-        else if (BlendMode == 6u) // Darken
-        {
-            blended = min(currentColor.rgb, sourceColor.rgb);
-        }
-        else if (BlendMode == 7u) // Subtractive
-        {
-            blended = currentColor.rgb - sourceColor.rgb;
-        }
-
-        result = float4(saturate(lerp(currentColor.rgb, blended, Opacity)), 1.0f);
+        result = float4(saturate(lerp(currentColor.rgb, ApplyArtisticBlend(currentColor.rgb, sourceColor.rgb), Opacity)), 1.0f);
     }
 
     return result;
@@ -215,7 +236,7 @@ float4 PSMain(PSInput input) : SV_TARGET
     float2 samplePoint;
     if (!TryMapSamplePoint(transformed, samplePoint))
     {
-        return ((Flags & FlagFirstLayer) != 0u) ? float4(0.0f, 0.0f, 0.0f, BlendMode == 1u ? 0.0f : 1.0f) : currentColor;
+        return ((Flags & FlagFirstLayer) != 0u) ? float4(0.0f, 0.0f, 0.0f, (Flags & FlagUseAlpha) != 0u ? 0.0f : 1.0f) : currentColor;
     }
 
     if ((Flags & FlagMirror) != 0u)

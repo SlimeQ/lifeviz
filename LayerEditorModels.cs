@@ -41,7 +41,11 @@ internal enum LayerEditorSimulationLayerType
     ParticleErosion,
     RippleField,
     ChromaticMemory,
-    ContourCurrent
+    ContourCurrent,
+    Faultline,
+    MagnetChoir,
+    Stampede,
+    InkTrap
 }
 
 internal sealed class LayerEditorOption
@@ -1883,6 +1887,7 @@ internal sealed class LayerEditorSimulationLayer : LayerEditorNotify
     public bool IsFluidInkLayer => !IsGroup && LayerType == LayerEditorSimulationLayerType.FluidInk;
     public bool IsTimeDisplacementLayer => !IsGroup && LayerType == LayerEditorSimulationLayerType.TimeDisplacement;
     public bool IsReactionDiffusionLayer => !IsGroup && LayerType == LayerEditorSimulationLayerType.ReactionDiffusion;
+    private bool IsPerformanceSimulationLayer => !IsGroup && (LayerType is LayerEditorSimulationLayerType.Faultline or LayerEditorSimulationLayerType.MagnetChoir or LayerEditorSimulationLayerType.Stampede or LayerEditorSimulationLayerType.InkTrap);
     public string TypeLabel => SimulationEffectSettings.DisplayName(LayerType.ToString());
 
     public string KindLabel => IsGroup ? "Sim Group" : TypeLabel;
@@ -1893,7 +1898,7 @@ internal sealed class LayerEditorSimulationLayer : LayerEditorNotify
 
     public string Details => IsGroup
         ? $"{(Enabled ? "Enabled" : "Disabled")} | {Children.Count} item{(Children.Count == 1 ? string.Empty : "s")}"
-        : IsFluidInkLayer || IsTimeDisplacementLayer || IsReactionDiffusionLayer || IsFeedbackKaleidoscopeLayer || IsParticleErosionLayer || IsRippleFieldLayer || IsChromaticMemoryLayer || IsContourCurrentLayer
+        : IsFluidInkLayer || IsTimeDisplacementLayer || IsReactionDiffusionLayer || IsFeedbackKaleidoscopeLayer || IsParticleErosionLayer || IsRippleFieldLayer || IsChromaticMemoryLayer || IsContourCurrentLayer || IsPerformanceSimulationLayer
             ? $"{(Enabled ? "Enabled" : "Disabled")} | {TypeLabel} | {BlendMode} | Opacity {LifeOpacity:P0} | Reactive {ReactiveMappings.Count}"
         : IsDatamoshLayer
             ? $"{(Enabled ? "Enabled" : "Disabled")} | Datamosh | {BlendMode} | Feedback {DatamoshFeedback:P0} | Displacement {DatamoshDisplacement:P0} | Block {DatamoshBlockSize}px | Reactive {ReactiveMappings.Count}"

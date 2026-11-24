@@ -9,7 +9,13 @@ namespace lifeviz;
 internal sealed partial class GpuPixelSortBackend
 {
     public ImageSimulationEffect Effect { get; }
-    public bool IsFieldEffect => Effect is ImageSimulationEffect.FluidInk or ImageSimulationEffect.TimeDisplacement or ImageSimulationEffect.ReactionDiffusion or ImageSimulationEffect.FeedbackKaleidoscope
+    public bool IsPerformanceEffect => Effect is ImageSimulationEffect.Faultline or ImageSimulationEffect.MagnetChoir or ImageSimulationEffect.Stampede or ImageSimulationEffect.InkTrap;
+    private PerformanceSimulationFrame _performanceFrame;
+    public void SetPerformanceFrame(PerformanceSimulationFrame frame)
+    {
+        lock (_sync) _performanceFrame = frame;
+    }
+    public bool IsFieldEffect => IsPerformanceEffect || Effect is ImageSimulationEffect.FluidInk or ImageSimulationEffect.TimeDisplacement or ImageSimulationEffect.ReactionDiffusion or ImageSimulationEffect.FeedbackKaleidoscope
         or ImageSimulationEffect.ParticleErosion or ImageSimulationEffect.RippleField or ImageSimulationEffect.ChromaticMemory or ImageSimulationEffect.ContourCurrent;
     private readonly SimulationEffectSettings _effects = new();
     private ID3D11ComputeShader? _advanceFieldShader, _captureHistoryShader;
@@ -37,6 +43,8 @@ internal sealed partial class GpuPixelSortBackend
         public float RippleImpulse, RippleSpeed, RippleDamping, RippleRefraction;
         public float ChromaticRed, ChromaticGreen, ChromaticBlue, ChromaticDrift;
         public float ContourFlow, ContourThickness, ContourPersistence, ToyPadding;
+        public float PerformanceTime, PerformanceKick, PerformanceSnare, PerformanceHighs;
+        public float PerformanceSlam, PerformanceHeld, PerformancePadding0, PerformancePadding1;
     }
 
     public void SetEffectSettings(SimulationEffectSettings settings)
@@ -55,7 +63,7 @@ internal sealed partial class GpuPixelSortBackend
 
     private void EnsureFieldTextures()
     {
-        if (!IsFieldEffect || (Effect is ImageSimulationEffect.FeedbackKaleidoscope or ImageSimulationEffect.ParticleErosion or ImageSimulationEffect.ChromaticMemory or ImageSimulationEffect.ContourCurrent) || _fieldA != null || _timeHistory != null) return;
+        if (!IsFieldEffect || IsPerformanceEffect || (Effect is ImageSimulationEffect.FeedbackKaleidoscope or ImageSimulationEffect.ParticleErosion or ImageSimulationEffect.ChromaticMemory or ImageSimulationEffect.ContourCurrent) || _fieldA != null || _timeHistory != null) return;
         // Bound both solver work and history memory, including very wide scenes.
         double scale = Math.Min(1, Math.Min(360d / _rows, Math.Sqrt(262144d / ((double)_columns * _rows))));
         _fieldWidth = Math.Max(1, (int)(_columns * scale));
@@ -114,7 +122,10 @@ internal sealed partial class GpuPixelSortBackend
             ChromaticDrift = (float)_effects.ChromaticDrift,
             ContourFlow = (float)_effects.ContourFlow,
             ContourThickness = (float)_effects.ContourThickness,
-            ContourPersistence = (float)_effects.ContourPersistence
+            ContourPersistence = (float)_effects.ContourPersistence,
+            PerformanceTime = _performanceFrame.Time, PerformanceKick = _performanceFrame.Kick,
+            PerformanceSnare = _performanceFrame.Snare, PerformanceHighs = _performanceFrame.Highs,
+            PerformanceSlam = _performanceFrame.Slam, PerformanceHeld = _performanceFrame.Held ? 1 : 0
         };
         _context!.UpdateSubresource(in p, _effectBuffer!);
         _context.CSSetConstantBuffers(1, new[] { _effectBuffer! });

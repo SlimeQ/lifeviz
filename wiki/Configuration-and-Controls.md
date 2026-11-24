@@ -90,7 +90,7 @@ The Scene Editor header has a live **tempo and audio monitor** next to the title
 
 Closing the main window with an active or queued bake shows a **Bake in progress** warning. **No** (the default) keeps LifeViz and its bakes running; **Yes** cancels the queue and saves active partial output before exiting. Closing the Bake Queue window alone does not prompt or stop rendering.
 
-Use **Normal** on both a transparent image and its containing **Layer Group** to reveal the background beneath the group. This also preserves the empty area around **DVD Bounce** and partially transparent image edges. Pixel Sort Sim Groups retain the transparency of their Normal input/output. Opaque black image pixels remain opaque; transparency is taken from alpha or the configured keying mask.
+Use **Normal** on a **Layer Group** to reveal the background beneath the group. Transparent child images retain coverage even when they use an artistic blend such as **Additive**, and nested groups retain it too. This also preserves the empty area around **DVD Bounce** and partially transparent image edges. Pixel Sort Sim Groups retain the transparency of their Normal input/output. Opaque black image pixels remain opaque; transparency is taken from alpha or the configured keying mask.
 
 ### Replace a file layer's media
 
@@ -262,3 +262,17 @@ A WPF rendering-thread failure (`0x88980406`) now stops the failed session and p
 Select a scene **Sim Group** to set **Layer Blend** and **Layer Opacity** under **Layer Settings**. Select a simulation inside it to set that simulation's **Blend** and **Opacity**. Both levels offer Normal, Additive, Multiply, Screen, Overlay, Lighten, Darken, and Subtractive, with independent saved values. Live Mode updates immediately; draft edits apply with Apply.
 
 Every enabled simulation in a `Sim Group` reads the same composited scene input at that group's position. Outputs resolve in simulation list order (first to last), using each simulation's `Blend` and `Opacity`. The group's `Layer Blend` and `Layer Opacity` then composite that result into the lower scene stack once. A second group reads that updated stack, including the first group's blend and opacity. Use separate scene Sim Groups for serial effects. The first visible simulation initializes the group; later simulations blend over it. To replace an opaque input with a Pixel Sort result, use Normal at both levels. Normal preserves transparency and blends translucent output over the lower stack. Existing saved group blend/opacity values now take effect, so older scenes that relied on the ignored group controls can look different.
+
+## Live VJ and performance sim layers
+
+In the Scene Editor's Sim Group, add **Faultline**, **Magnet Choir**, **Stampede**, or **Ink Trap**. Pick an audio source to drive the built-in bass, mid and high band responses; no reactive mapping is required. Ordinary opacity/hue mappings still apply. Layer type and its standard settings are saved in scenes.
+
+Right-click the output, open **Live VJ**, enable it for this session and pick **Target simulation layer**. It controls only the chosen compatible layer. Live controls are off at startup and apply only to the live output.
+
+| Action | Xbox One (Windows XInput) | Keyboard | Effect |
+| --- | --- | --- | --- |
+| Hold | A | Ctrl+Shift+F9 | Latch the current motion/envelopes; collect audio accents |
+| Release | B | Ctrl+Shift+F10 | Resume and play a kick plus queued mid/high accents |
+| Slam | X | Ctrl+Shift+F11 | Release Hold and fire the layer's strongest accent immediately |
+
+The three actions are also clickable in the menu. Gamepad and shortcuts only operate when the output window has focus. To verify hardware, connect your controller, neutralize the buttons, and try A/B/X in order. Unplug while holding: normal motion must resume without firing an accent. Reconnecting with a button down does not trigger it.

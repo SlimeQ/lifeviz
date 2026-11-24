@@ -17,6 +17,8 @@ cbuffer EffectParameters : register(b1)
     float RippleImpulse; float RippleSpeed; float RippleDamping; float RippleRefraction;
     float ChromaticRed; float ChromaticGreen; float ChromaticBlue; float ChromaticDrift;
     float ContourFlow; float ContourThickness; float ContourPersistence; float ToyPadding;
+    float PerformanceTime; float PerformanceKick; float PerformanceSnare; float PerformanceHighs;
+    float PerformanceSlam; float PerformanceHeld; float PerformancePadding0; float PerformancePadding1;
 
 };
 Texture2D<uint4> Previous : register(t0);
@@ -233,6 +235,11 @@ float4 Contours(int2 p,float2 uv)
     return thread+old*(1-thread.a);
 }
 
+#include "SimFaultline.hlsli"
+#include "SimMagnetChoir.hlsli"
+#include "SimStampede.hlsli"
+#include "SimInkTrap.hlsli"
+
 [numthreads(8,8,1)]
 void EffectOutputCS(uint3 id : SV_DispatchThreadID)
 {
@@ -277,5 +284,9 @@ void EffectOutputCS(uint3 id : SV_DispatchThreadID)
     }
     else if(Effect==8) result=Chromatic(int2(id.xy),fresh);
     else if(Effect==9) result=Contours(int2(id.xy),uv);
+    else if(Effect==10) result=SimFaultline(int2(id.xy),uv,PerformanceTime,PerformanceKick,PerformanceSnare,PerformanceHighs,PerformanceSlam,PerformanceHeld);
+    else if(Effect==11) result=SimMagnetChoir(int2(id.xy),uv,PerformanceTime,PerformanceKick,PerformanceSnare,PerformanceHighs,PerformanceSlam,PerformanceHeld);
+    else if(Effect==12) result=SimStampede(int2(id.xy),uv,PerformanceTime,PerformanceKick,PerformanceSnare,PerformanceHighs,PerformanceSlam,PerformanceHeld);
+    else if(Effect==13) result=SimInkTrap(int2(id.xy),uv,PerformanceTime,PerformanceKick,PerformanceSnare,PerformanceHighs,PerformanceSlam,PerformanceHeld);
     Output[id.xy]=(uint4)round(saturate(result)*255.0);
 }

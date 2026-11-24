@@ -84,6 +84,8 @@
   </ItemGroup>
   <ItemGroup>
     <Compile Remove="Native\**\*.cs" />
+    <!-- Standalone exploratory utility with top-level statements, not a WPF app compile unit. -->
+    <Compile Remove="inspect_vortice.cs" />
     <None Remove="Native\**;artifacts\projectm\**" />
   </ItemGroup>
   <ItemGroup>

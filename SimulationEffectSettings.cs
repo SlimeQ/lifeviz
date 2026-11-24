@@ -4,7 +4,7 @@ using System.Runtime.CompilerServices;
 namespace lifeviz;
 
 // Numeric values are shared with GpuFieldEffects.hlsl.
-internal enum ImageSimulationEffect { PixelSort = 0, Datamosh = 1, FluidInk = 2, TimeDisplacement = 3, ReactionDiffusion = 4, FeedbackKaleidoscope = 5, ParticleErosion = 6, RippleField = 7, ChromaticMemory = 8, ContourCurrent = 9 }
+internal enum ImageSimulationEffect { PixelSort = 0, Datamosh = 1, FluidInk = 2, TimeDisplacement = 3, ReactionDiffusion = 4, FeedbackKaleidoscope = 5, ParticleErosion = 6, RippleField = 7, ChromaticMemory = 8, ContourCurrent = 9, Faultline = 10, MagnetChoir = 11, Stampede = 12, InkTrap = 13 }
 
 // Shared by editor, autosave, scene projects and bake snapshots. Each owner gets a clone.
 internal sealed class SimulationEffectSettings : INotifyPropertyChanged
@@ -97,6 +97,10 @@ internal sealed class SimulationEffectSettings : INotifyPropertyChanged
         "ParticleErosion" => "Particle Erosion",
         "RippleField" => "Ripple Field",
         "ChromaticMemory" => "Chromatic Memory",
+        "Faultline" => "Faultline",
+        "MagnetChoir" => "Magnet Choir",
+        "Stampede" => "Stampede",
+        "InkTrap" => "Ink Trap",
         "ContourCurrent" => "Contour Current",
         "FeedbackKaleidoscope" => "Feedback Kaleidoscope",
         "FluidInk" => "Fluid Ink", "TimeDisplacement" => "Time Displacement",

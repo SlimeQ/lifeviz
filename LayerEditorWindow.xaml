@@ -1512,6 +1512,10 @@
                                             <Button Content="Add Ripple Field" Click="AddSimulationRippleField_Click" />
                                             <Button Content="Add Chromatic Memory" Click="AddSimulationChromaticMemory_Click" />
                                             <Button Content="Add Contour Current" Click="AddSimulationContourCurrent_Click" />
+                                            <Button Content="Add Faultline" Click="AddSimulationFaultline_Click" />
+                                            <Button Content="Add Magnet Choir" Click="AddSimulationMagnetChoir_Click" />
+                                            <Button Content="Add Stampede" Click="AddSimulationStampede_Click" />
+                                            <Button Content="Add Ink Trap" Click="AddSimulationInkTrap_Click" />
 
 
                                             <Button Content="Move Up"
@@ -2294,6 +2298,10 @@
                                             <Button Content="Add Ripple Field" Click="AddSimulationRippleField_Click" />
                                             <Button Content="Add Chromatic Memory" Click="AddSimulationChromaticMemory_Click" />
                                             <Button Content="Add Contour Current" Click="AddSimulationContourCurrent_Click" />
+                                            <Button Content="Add Faultline" Click="AddSimulationFaultline_Click" />
+                                            <Button Content="Add Magnet Choir" Click="AddSimulationMagnetChoir_Click" />
+                                            <Button Content="Add Stampede" Click="AddSimulationStampede_Click" />
+                                            <Button Content="Add Ink Trap" Click="AddSimulationInkTrap_Click" />
 
 
                                                 <Button Content="Add Sim Group"
