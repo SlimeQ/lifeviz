@@ -165,16 +165,16 @@ public partial class MainWindow
             throw new InvalidOperationException("Nested group alpha smoke requires the real GPU inline path.");
         Check(gpuNested.Downscaled, outer.Opacity, true, "GPU inline nested Normal group");
 
-        // Multiply is not just ignored: it acts where both layers cover a pixel,
-        // while uncovered areas get the source color, not an opaque black blend.
+        // A full-frame Multiply source modulates only the backdrop color;
+        // it does not paint into holes or thicken a translucent edge.
         faded.Opacity = 0.5;
         void CheckMultiplyOverlap(byte[] composite, string phase)
         {
             for (int i = 0; i < width * height; i++)
             {
                 double underAlpha = pixels[i * 4 + 3] / 255.0 * additive.Opacity;
-                double[] expected = { 0, 255 * 0.5 * (1 - underAlpha),
-                    pixels[i * 4 + 2] * underAlpha * 0.5, 255 * (0.5 + 0.5 * underAlpha) };
+                double[] expected = { 0, 0,
+                    pixels[i * 4 + 2] * underAlpha * 0.5, 255 * underAlpha };
                 for (int c = 0; c < 4; c++)
                     if (Math.Abs(composite[i * 4 + c] - expected[c]) > 3)
                         throw new InvalidOperationException($"{phase}: unexpected byte at {i * 4 + c}.");
@@ -291,15 +291,17 @@ public partial class MainWindow
                 int at = ((height / 2) * width + x) * 4;
                 for (int channel = 0; channel < 3; channel++)
                 {
-                    double inside = milkdrop[channel] * ((1 - coverage) + coverage * backdrop[channel] / 255);
+                    double inside = backdrop[channel] * (1 - milk.Opacity * (1 - milkdrop[channel] / 255));
                     double outside = external[channel];
-                    double expected = internalGroup ? inside : mode switch
+                    double amount = group.Opacity * coverage;
+                    double expected = internalGroup ? inside * coverage : mode switch
                     {
-                        BlendMode.Additive => outside + inside * 0.5,
-                        BlendMode.Multiply => outside * (0.5 + inside / 510),
-                        _ => (outside + inside) * 0.5
+                        BlendMode.Additive => outside + inside * amount,
+                        BlendMode.Multiply => outside * (1 - amount * (1 - inside / 255)),
+                        _ => outside * (1 - amount) + inside * amount
                     };
-                    if (Math.Abs(bytes[at + channel] - expected) > 3 || bytes[at + 3] != 255)
+                    if (Math.Abs(bytes[at + channel] - expected) > 3 ||
+                        Math.Abs(bytes[at + 3] - (internalGroup ? 255 * coverage : 255)) > 1)
                         throw new InvalidOperationException($"MilkDrop group {mode}/{path} coverage {coverage:0.00}, channel {channel}: got {bytes[at + channel]}, expected {expected:0.0}.");
                 }
             }
@@ -307,8 +309,10 @@ public partial class MainWindow
 
         var stack = new List<CaptureSource> { background, group };
         foreach (var mode in new[] { BlendMode.Normal, BlendMode.Additive, BlendMode.Multiply })
+        foreach (double opacity in new[] { 0.0, 0.5, 1.0 })
         {
             group.BlendMode = mode;
+            milk.Opacity = opacity;
             CaptureSourceList(stack, animationTime: 0);
             Check(group.LastFrame?.Downscaled ?? throw new InvalidOperationException("Group capture unavailable."), mode, "captured group", true);
             byte[]? buffer = null;
@@ -325,7 +329,61 @@ public partial class MainWindow
             if (inlineGpu?.GpuSurface == null) throw new InvalidOperationException("D3D11 composite unavailable.");
             Check(inlineGpu.Downscaled, mode, "inline GPU", false);
         }
-        Logger.Info("MilkDrop Multiply: isolated inner blend and independent outer Normal/Additive/Multiply passed with opaque, partial and transparent siblings.");
+        // A pure black group still darkens opaque pixels. Its holes are neutral,
+        // and the backdrop keeps its exact alpha when the group is nested.
+        var black = MakeLayer("Black with transparent bands", new byte[] {0, 0, 0}, true);
+        var mask = CaptureSource.CreateGroup("Outer Multiply alpha bands");
+        mask.BlendMode = BlendMode.Multiply;
+        mask.FitMode = FitMode.Stretch;
+        mask.Children.Add(black);
+        var nested = CaptureSource.CreateGroup("Parent with translucent backdrop");
+        nested.BlendMode = BlendMode.Normal;
+        nested.FitMode = FitMode.Stretch;
+        nested.Children.Add(lower);
+        nested.Children.Add(mask);
+        var nestedStack = new List<CaptureSource> { nested };
+        CaptureSourceList(nestedStack, animationTime: 0);
+
+        void CheckBlackFilter(byte[] pixels, bool translucentBackdrop)
+        {
+            double[] backdrop = translucentBackdrop ? new[] {200.0, 100.0, 40.0} : new[] {36.0, 50.0, 28.0};
+            foreach (var (x, amount) in new[] { (width / 6, 0.0), (width / 2, 128.0 / 255), (width * 5 / 6, 1.0) })
+            {
+                int at = ((height / 2) * width + x) * 4;
+                double alpha = translucentBackdrop ? amount : 1.0;
+                if (Math.Abs(pixels[at + 3] - alpha * 255) > 1)
+                    throw new InvalidOperationException($"Black Multiply changed backdrop alpha at {x}: {pixels[at + 3]}.");
+                for (int c = 0; c < 3; c++)
+                    if (Math.Abs(pixels[at + c] - backdrop[c] * alpha * (1 - amount)) > 3)
+                        throw new InvalidOperationException($"Black Multiply changed a transparent source pixel or failed to darken a covered one at {x}/{c}.");
+            }
+        }
+
+        CheckBlackFilter(nested.LastFrame!.Downscaled, translucentBackdrop: true);
+        foreach (bool inline in new[] { false, true })
+        {
+            byte[]? cpuBuffer = null, gpuBuffer = null;
+            bool injected = false;
+            int stepped = 0;
+            var blackStack = new List<CaptureSource> { background, mask };
+            var cpu = inline ? BuildInlineCompositeFrameCpu(blackStack, ref cpuBuffer, true, 0, 0, ref injected, ref stepped)
+                : _inlineSourceCompositor.BuildCompositeFrame(blackStack, ref cpuBuffer, true, 0);
+            using var gpuSource = new GpuSourceCompositor(this);
+            var gpu = inline ? BuildInlineCompositeFrameGpu(blackStack, ref gpuBuffer, true, 0, 0, ref injected, ref stepped, includeCpuReadback: true)
+                : gpuSource.BuildCompositeFrame(blackStack, ref gpuBuffer, true, 0, includeCpuReadback: true);
+            if (cpu == null || gpu?.GpuSurface == null) throw new InvalidOperationException("Black Multiply compositors unavailable.");
+            CheckBlackFilter(cpu.Downscaled, translucentBackdrop: false);
+            CheckBlackFilter(gpu.Downscaled, translucentBackdrop: false);
+        }
+
+        // A first enabled Multiply layer has no backdrop, even at full opacity.
+        milk.Opacity = 1;
+        lower.Enabled = false;
+        group.BlendMode = BlendMode.Normal;
+        CaptureSourceList(stack, animationTime: 0);
+        if (group.LastFrame == null || group.LastFrame.Downscaled.Any(value => value != 0))
+            throw new InvalidOperationException("Multiply with no enabled backdrop must have zero color and alpha.");
+        Logger.Info("MilkDrop Multiply: coverage retained at 0/50/100% in child, nested group, and independent outer blends.");
     }
 
 }

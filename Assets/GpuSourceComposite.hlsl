@@ -191,10 +191,19 @@ float4 BlendColors(float4 currentColor, float4 sourceColor)
     float4 result = float4(currentColor.rgb, 1.0f);
     if ((Flags & FlagFirstLayer) != 0u)
     {
-        float keyAlpha = ComputeKeyAlpha(sourceColor.rgb);
-        float alpha = useAlpha ? sourceColor.a : 1.0f;
-        float effectiveOpacity = Opacity * keyAlpha * alpha;
-        result = float4(sourceColor.rgb * effectiveOpacity, useAlpha ? effectiveOpacity : 1.0f);
+        // There is no backdrop to modulate. In particular do not turn a
+        // lone full-frame Multiply child into an opaque group texture.
+        if (BlendMode == 2u)
+        {
+            result = float4(0.0f, 0.0f, 0.0f, 0.0f);
+        }
+        else
+        {
+            float keyAlpha = ComputeKeyAlpha(sourceColor.rgb);
+            float alpha = useAlpha ? sourceColor.a : 1.0f;
+            float effectiveOpacity = Opacity * keyAlpha * alpha;
+            result = float4(sourceColor.rgb * effectiveOpacity, useAlpha ? effectiveOpacity : 1.0f);
+        }
     }
     else if (BlendMode == 1u) // Normal
     {
@@ -203,9 +212,15 @@ float4 BlendColors(float4 currentColor, float4 sourceColor)
         result = float4(lerp(currentColor.rgb, sourceColor.rgb, saturate(alpha)),
                         alpha + currentColor.a * (1.0f - alpha));
     }
+    else if (BlendMode == 2u && useAlpha) // Multiply
+    {
+        // Modulate the premultiplied backdrop without changing its coverage.
+        float amount = sourceColor.a * Opacity;
+        result = float4(currentColor.rgb * lerp(1.0f, sourceColor.rgb, amount), currentColor.a);
+    }
     else if (useAlpha)
     {
-        // In an isolated Normal group, preserve coverage for child artistic blends.
+        // In an isolated Layer Group, preserve coverage for child artistic blends.
         // The blend formula applies only where both child and backdrop have alpha.
         float a = sourceColor.a * Opacity;
         float b = currentColor.a;

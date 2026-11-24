@@ -14538,9 +14538,10 @@ public partial class MainWindow : Window
         }
 
         bool normal = blendMode == BlendMode.Normal;
-        return (blendMode, new KeyingSettings(keyEnabled && normal, normal || preserveGroupCoverage || source.Type == CaptureSource.SourceType.Group, keyR, keyG, keyB, keyTolerance,
+        bool multiply = blendMode == BlendMode.Multiply;
+        return (blendMode, new KeyingSettings(keyEnabled && normal, normal || multiply || preserveGroupCoverage || source.Type == CaptureSource.SourceType.Group, keyR, keyG, keyB, keyTolerance,
             source.Type is CaptureSource.SourceType.Group or CaptureSource.SourceType.SimGroup,
-            opaqueInput: preserveGroupCoverage && (source.Type is CaptureSource.SourceType.Window or CaptureSource.SourceType.Webcam)));
+            opaqueInput: (preserveGroupCoverage || multiply) && (source.Type is CaptureSource.SourceType.Window or CaptureSource.SourceType.Webcam)));
     }
 
     internal static bool RunAutoClipVideoOverrideResolutionSmoke(FileCaptureService.AutoClipSession session, string path)

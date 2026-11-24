@@ -62,18 +62,21 @@ public partial class MainWindow
 
                 if (!primedDownscaled)
                 {
-                    CopyIntoBuffer(
-                        downscaledBuffer,
-                        downscaledWidth,
-                        downscaledHeight,
-                        frame.Downscaled,
-                        frame.DownscaledWidth,
-                        frame.DownscaledHeight,
-                        effectiveOpacity,
-                        source.Mirror && source.Type == CaptureSource.SourceType.Webcam,
-                        source.FitMode,
-                        downscaledTransform,
-                        keying);
+                    if (compositeSettings.BlendMode == BlendMode.Multiply)
+                        Array.Clear(downscaledBuffer);
+                    else
+                        CopyIntoBuffer(
+                                downscaledBuffer,
+                                downscaledWidth,
+                                downscaledHeight,
+                                frame.Downscaled,
+                                frame.DownscaledWidth,
+                                frame.DownscaledHeight,
+                                effectiveOpacity,
+                                source.Mirror && source.Type == CaptureSource.SourceType.Webcam,
+                                source.FitMode,
+                                downscaledTransform,
+                                keying);
                     primedDownscaled = true;
                     wroteDownscaled = true;
                 }
@@ -127,7 +130,10 @@ public partial class MainWindow
 
             if (firstLayer)
             {
-                CopyIntoBuffer(
+                if (compositeSettings.BlendMode == BlendMode.Multiply)
+                    Array.Clear(destination, 0, destWidth * destHeight * 4);
+                else
+                    CopyIntoBuffer(
                     destination,
                     destWidth,
                     destHeight,
@@ -405,6 +411,17 @@ public partial class MainWindow
             byte dg = destination[destIndex + 1];
             byte dr = destination[destIndex + 2];
 
+            // Multiply modulates the existing premultiplied backdrop only. It cannot
+            // fill holes or increase opacity, even with an opaque source.
+            if (mode == BlendMode.Multiply && useAlpha)
+            {
+                double amount = sa / 255.0 * opacity;
+                destination[destIndex] = MultiplyBackdropChannel(db, sb, amount);
+                destination[destIndex + 1] = MultiplyBackdropChannel(dg, sg, amount);
+                destination[destIndex + 2] = MultiplyBackdropChannel(dr, sr, amount);
+                return;
+            }
+
             // Isolated Layer Groups carry coverage even for artistic blends.
             // Blend against the unassociated backdrop only where it exists.
             if (useAlpha && mode != BlendMode.Normal)
@@ -483,6 +500,9 @@ public partial class MainWindow
             destination[destIndex + 3] = 255;
         }
 
+        private static byte MultiplyBackdropChannel(byte backdrop, byte source, double amount)
+            => ClampToByte((int)Math.Round(backdrop * (1.0 - amount * (1.0 - source / 255.0))));
+
         private static byte BlendCoveredChannel(byte backdrop, byte source, BlendMode mode, double sourceAlpha, double backdropAlpha)
         {
             double cs = source / 255.0;
@@ -490,7 +510,6 @@ public partial class MainWindow
             double overlap = mode switch
             {
                 BlendMode.Additive => cb + cs,
-                BlendMode.Multiply => cb * cs,
                 BlendMode.Screen => 1.0 - (1.0 - cb) * (1.0 - cs),
                 BlendMode.Overlay => cb < 0.5 ? 2.0 * cb * cs : 1.0 - 2.0 * (1.0 - cb) * (1.0 - cs),
                 BlendMode.Lighten => Math.Max(cb, cs),
