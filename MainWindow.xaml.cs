@@ -366,6 +366,7 @@ public partial class MainWindow : Window
     private readonly UiStallWatchdog? _uiStallWatchdog;
     private readonly CpuSourceCompositor _inlineSourceCompositor;
     private readonly GpuSourceCompositor _inlineGpuSourceCompositor;
+    private readonly List<GpuSourceCompositor> _nestedInlineGpuSourceCompositors = new();
     private readonly GpuSimulationGroupCompositor _gpuSimulationGroupCompositor;
     private readonly GpuPresentationSurfaceSnapshotter _inlineGpuPresentationSnapshotter;
     private int _pendingInlineSimulationStepsThisFrame;
@@ -499,6 +500,8 @@ public partial class MainWindow : Window
             _pixelBuffer = null;
             renderBackend.Dispose();
             _inlineGpuSourceCompositor.Dispose();
+            foreach (var compositor in _nestedInlineGpuSourceCompositors) compositor.Dispose();
+            _nestedInlineGpuSourceCompositors.Clear();
             _gpuSimulationGroupCompositor.Dispose();
             _inlineGpuPresentationSnapshotter.Dispose();
             foreach (var backend in EnumerateSimulationLeafLayers(_simulationLayers).Select(layer => layer.Engine).OfType<ISimulationBackend>().Distinct())
@@ -14670,8 +14673,18 @@ public partial class MainWindow : Window
         ref bool injectedAnyLayer,
         ref int steppedPassCount,
         bool includeCpuReadback,
-        bool preserveGroupCoverage = false)
+        bool preserveGroupCoverage = false,
+        int groupDepth = 0)
     {
+        // Nested inline groups may render while the parent still owns its current
+        // surface. A separate ping-pong pair per recursion level keeps it intact.
+        while (_nestedInlineGpuSourceCompositors.Count < groupDepth)
+            _nestedInlineGpuSourceCompositors.Add(new GpuSourceCompositor(this));
+        var compositor = groupDepth == 0
+            ? _inlineGpuSourceCompositor
+            : _nestedInlineGpuSourceCompositors[groupDepth - 1];
+        if (!compositor.IsAvailable) return null;
+
         UpdateVisibilityGroups(sources);
         if (sources.Count == 0)
         {
@@ -14722,7 +14735,7 @@ public partial class MainWindow : Window
                     continue;
                 }
 
-                simulationComposite = _inlineGpuSourceCompositor.ComposeCompositeFrameOntoSurface(
+                simulationComposite = compositor.ComposeCompositeFrameOntoSurface(
                     currentComposite?.GpuSurface,
                     simulationComposite,
                     source,
@@ -14764,12 +14777,15 @@ public partial class MainWindow : Window
                     simulationStepsThisFrame,
                     ref injectedAnyLayer,
                     ref steppedPassCount,
-                    out var preparedLayer, preserveGroupCoverage))
+                    out var preparedLayer, groupDepth))
                 {
                     segmentInputs.Add(preparedLayer);
                 }
 
                 sourceIndex++;
+                // A resolved group's SRV points to reusable scratch. Consume it
+                // before preparing another group can overwrite the texture.
+                if (source.Type == CaptureSource.SourceType.Group) break;
             }
 
             if (segmentInputs.Count == 0)
@@ -14777,7 +14793,7 @@ public partial class MainWindow : Window
                 continue;
             }
 
-            var nextComposite = _inlineGpuSourceCompositor.ComposePreparedLayersOntoSurface(
+            var nextComposite = compositor.ComposePreparedLayersOntoSurface(
                 currentComposite?.GpuSurface,
                 segmentInputs,
                 downscaledWidth,
@@ -14800,7 +14816,7 @@ public partial class MainWindow : Window
             return null;
         }
 
-        var finalComposite = _inlineGpuSourceCompositor.CreateCompositeFrameFromSurface(
+        var finalComposite = compositor.CreateCompositeFrameFromSurface(
             currentComposite.GpuSurface,
             ref downscaledBuffer,
             includeCpuReadback);
@@ -14814,7 +14830,7 @@ public partial class MainWindow : Window
         ref bool injectedAnyLayer,
         ref int steppedPassCount,
         out GpuSourceCompositor.PreparedLayerInput preparedLayer,
-        bool preserveGroupCoverage)
+        int groupDepth)
     {
         preparedLayer = default;
 
@@ -14836,7 +14852,7 @@ public partial class MainWindow : Window
                     simulationStepsThisFrame,
                     ref injectedAnyLayer,
                     ref steppedPassCount,
-                    includeCpuReadback: false, preserveGroupCoverage: childCoverage)
+                    includeCpuReadback: false, preserveGroupCoverage: childCoverage, groupDepth: groupDepth + 1)
                 : BuildCompositeFrame(source.Children, ref groupBuffer, useEngineDimensions: false, animationTime,
                     includeCpuReadback: false, preserveGroupCoverage: childCoverage);
             source.CompositeDownscaledBuffer = groupBuffer;
