@@ -43,6 +43,7 @@ public partial class MainWindow
             Check(latest.Where((_, i) => i % 4 != 3).Any(b => b > 5), "ProjectM output was black.");
             var engine = GetReferenceSimulationEngine();
             SaveProjectMSmokeImage(latest, engine.Columns, engine.Rows, Path.Combine(folder, "native-output.png"));
+            CheckNativeMilkDropMultiply(source, group, engine.Columns, engine.Rows);
             byte[]? buffer = null;
             ResetGpuSourceCompositeSmokeCounters();
             var composite = BuildCompositeFrame(_sources, ref buffer, true, 1.5, includeCpuReadback: true);
@@ -201,4 +202,58 @@ public partial class MainWindow
         Check(worstCrossfadeGap < 250, $"The projectM layer froze for {worstCrossfadeGap:F0} ms during a crossfaded preset switch.");
         Logger.Info($"projectM live playback stayed off the UI thread: worst frame-loop tick {worst:F1} ms; crossfaded switches kept the layer moving (longest frame gap {worstCrossfadeGap:F0} ms, {playback.CrossfadeFrames} blended frames); feedback-only preset stayed visible ({playback.InPlaceSwitches} in-place switches).");
     }
+
+    private void CheckNativeMilkDropMultiply(CaptureSource source, CaptureSource group, int width, int height)
+    {
+        var nativeFrame = source.LastFrame ?? throw new InvalidOperationException("Native MilkDrop frame unavailable.");
+        byte[] sampledMilkDrop = nativeFrame.Downscaled;
+        if (sampledMilkDrop.Where((_, i) => i % 4 == 3).Any(alpha => alpha != 255))
+            throw new InvalidOperationException("projectM readback must publish a known opaque alpha.");
+
+        var sibling = CaptureSource.CreateFile("native-projectm-multiply-fixture", "Known sibling", width, height);
+        sibling.BlendMode = BlendMode.Normal;
+        sibling.FitMode = FitMode.Stretch;
+        sibling.UsePinnedFrameForSmoke = true;
+        var rgba = new byte[width * height * 4];
+        for (int p = 0; p < rgba.Length; p += 4)
+        {
+            rgba[p] = 72; rgba[p + 1] = 93; rgba[p + 2] = 117;
+            rgba[p + 3] = p / 4 % width < width / 2 ? (byte)128 : (byte)255;
+        }
+        sibling.LastFrame = new SourceFrame(rgba, width, height, null, width, height);
+        BlendMode oldGroup = group.BlendMode, oldChild = source.BlendMode;
+        try
+        {
+            source.UsePinnedFrameForSmoke = true;
+            source.BlendMode = BlendMode.Multiply;
+            group.Children.Insert(0, sibling);
+            foreach (BlendMode outer in new[] { BlendMode.Normal, BlendMode.Additive, BlendMode.Multiply })
+            {
+                group.BlendMode = outer;
+                CaptureSourceList(_sources, 1.5);
+                byte[] resolved = group.LastFrame?.Downscaled ?? throw new InvalidOperationException("Native MilkDrop group resolve failed.");
+                for (int y = 0; y < height; y += 7)
+                for (int x = 1; x < width; x += 7)
+                {
+                    int p = (y * width + x) * 4;
+                    double a = rgba[p + 3] / 255.0;
+                    for (int c = 0; c < 3; c++)
+                    {
+                        double expected = sampledMilkDrop[p + c] * (1 - a + a * rgba[p + c] / 255.0);
+                        if (Math.Abs(resolved[p + c] - expected) > 3 || resolved[p + 3] != 255)
+                            throw new InvalidOperationException($"Native MilkDrop Multiply changed with outer {outer}: pixel ({x},{y}), channel {c} was {resolved[p+c]}, expected {expected:0.0}.");
+                    }
+                }
+            }
+            Logger.Info("Native MilkDrop preset: opaque readback and isolated Multiply over both opaque and partial-alpha siblings passed.");
+        }
+        finally
+        {
+            group.Children.Remove(sibling);
+            group.BlendMode = oldGroup;
+            source.BlendMode = oldChild;
+            source.UsePinnedFrameForSmoke = false;
+        }
+    }
+
 }

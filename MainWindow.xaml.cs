@@ -11625,7 +11625,7 @@ public partial class MainWindow : Window
 
             if (source.Type == CaptureSource.SourceType.Group)
             {
-                bool childCoverage = preserveGroupCoverage || source.BlendMode == BlendMode.Normal;
+                const bool childCoverage = true; // Child blending is independent of the outer blend.
                 if (source.Children.Count > 0)
                 {
                     removedAny |= CaptureSourceList(source.Children, animationTime, ref removedFailedMedia, childCoverage);
@@ -14538,7 +14538,7 @@ public partial class MainWindow : Window
         }
 
         bool normal = blendMode == BlendMode.Normal;
-        return (blendMode, new KeyingSettings(keyEnabled && normal, normal || preserveGroupCoverage, keyR, keyG, keyB, keyTolerance,
+        return (blendMode, new KeyingSettings(keyEnabled && normal, normal || preserveGroupCoverage || source.Type == CaptureSource.SourceType.Group, keyR, keyG, keyB, keyTolerance,
             source.Type is CaptureSource.SourceType.Group or CaptureSource.SourceType.SimGroup,
             opaqueInput: preserveGroupCoverage && (source.Type is CaptureSource.SourceType.Window or CaptureSource.SourceType.Webcam)));
     }
@@ -14825,7 +14825,7 @@ public partial class MainWindow : Window
         if (source.Type == CaptureSource.SourceType.Group)
         {
             var groupBuffer = source.CompositeDownscaledBuffer;
-            bool childCoverage = preserveGroupCoverage || source.BlendMode == BlendMode.Normal;
+            const bool childCoverage = true; // Child blending is independent of the outer blend.
             var groupComposite = HasEmbeddedSimulationGroups(source.Children)
                 ? BuildInlineCompositeFrameGpu(
                     source.Children,
@@ -14968,7 +14968,7 @@ public partial class MainWindow : Window
             if (source.Type == CaptureSource.SourceType.Group)
             {
                 var groupBuffer = source.CompositeDownscaledBuffer;
-                bool childCoverage = preserveGroupCoverage || source.BlendMode == BlendMode.Normal;
+                const bool childCoverage = true; // Child blending is independent of the outer blend.
                 var groupComposite = HasEmbeddedSimulationGroups(source.Children)
                     ? BuildInlineCompositeFrameCpu(
                         source.Children,

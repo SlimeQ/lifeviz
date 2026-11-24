@@ -90,7 +90,7 @@ The Scene Editor header has a live **tempo and audio monitor** next to the title
 
 Closing the main window with an active or queued bake shows a **Bake in progress** warning. **No** (the default) keeps LifeViz and its bakes running; **Yes** cancels the queue and saves active partial output before exiting. Closing the Bake Queue window alone does not prompt or stop rendering.
 
-Use **Normal** on a **Layer Group** to reveal the background beneath the group. Transparent child images retain coverage even when they use an artistic blend such as **Additive**, and nested groups retain it too. This also preserves the empty area around **DVD Bounce** and partially transparent image edges. Pixel Sort Sim Groups retain the transparency of their Normal input/output. Opaque black image pixels remain opaque; transparency is taken from alpha or the configured keying mask.
+A **Layer Group** composites its children in listed order, from the first drawable layer to the last. A child set to **Multiply** only multiplies earlier children where they overlap within the group. The completed group then blends once against the outside stack with its own blend and opacity, regardless of any child settings. Use **Normal** on the group for source-over. Transparent child images retain coverage even when they use an artistic blend such as **Additive**, and nested groups retain it too. This also preserves the empty area around **DVD Bounce** and partially transparent image edges. Pixel Sort Sim Groups retain the transparency of their Normal input/output. Opaque black image pixels remain opaque; transparency is taken from alpha or the configured keying mask.
 
 ### Replace a file layer's media
 
