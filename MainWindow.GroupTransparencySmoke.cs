@@ -244,6 +244,7 @@ public partial class MainWindow
             }
         }
         CheckMilkDropGroupMultiplySmoke(width, height);
+        CheckSiblingGroupOpacitySmoke(width, height);
         Logger.Info("Group transparency smoke passed: transparent/partial/opaque black pixels, Pixel Sort, CPU/GPU, first-layer and Normal over blue, media/group opacity, nested Additive coverage, moving DVD Bounce grouped/direct parity.");
         return true;
     }
@@ -386,4 +387,69 @@ public partial class MainWindow
         Logger.Info("MilkDrop Multiply: coverage retained at 0/50/100% in child, nested group, and independent outer blends.");
     }
 
+
+    private void CheckSiblingGroupOpacitySmoke(int width, int height)
+    {
+        var lower = MakeGroup("Earlier group", 120, 70, 30);
+        var upper = MakeGroup("Later group", 30, 110, 200);
+        var stack = new List<CaptureSource> { lower, upper };
+        var disabledSim = CaptureSource.CreateSimulationGroup("Nested inline path");
+        disabledSim.Enabled = false;
+        foreach (bool nestedInline in new[] { false, true })
+        {
+            // Force recursive inline rendering without introducing another visual
+            // effect. The parent is already holding its lower group when this runs.
+            if (nestedInline) upper.Children.Add(disabledSim);
+            foreach (var mode in new[] { BlendMode.Normal, BlendMode.Additive, BlendMode.Multiply })
+            foreach (double opacity in new[] { 0.0, 0.5, 1.0 })
+            {
+                upper.BlendMode = mode;
+                upper.Opacity = opacity;
+                CaptureSourceList(stack, animationTime: 0);
+                byte[]? ordinary = null, cpu = null, gpu = null;
+                bool injected = false;
+                int stepped = 0;
+                var program = BuildCompositeFrame(stack, ref ordinary, true, 0, includeCpuReadback: true);
+                var inlineCpu = BuildInlineCompositeFrameCpu(stack, ref cpu, true, 0, 0, ref injected, ref stepped);
+                var inlineGpu = BuildInlineCompositeFrameGpu(stack, ref gpu, true, 0, 0, ref injected, ref stepped,
+                    includeCpuReadback: true);
+                if (inlineGpu?.GpuSurface == null) throw new InvalidOperationException("Sibling Group smoke requires D3D11.");
+                Check(program?.Downscaled, "ordinary program");
+                Check(inlineCpu?.Downscaled, "inline CPU");
+                Check(inlineGpu.Downscaled, "inline GPU");
+
+                void Check(byte[]? pixels, string path)
+                {
+                    if (pixels == null) throw new InvalidOperationException($"Missing {path} output.");
+                    int at = ((height / 2) * width + (width / 2)) * 4;
+                    double[] earlier = {120, 70, 30}, later = {30, 110, 200};
+                    for (int c = 0; c < earlier.Length; c++)
+                    {
+                        double expected = mode switch
+                        {
+                            BlendMode.Additive => earlier[c] + later[c] * opacity,
+                            BlendMode.Multiply => earlier[c] * (1 - opacity * (1 - later[c] / 255)),
+                            _ => earlier[c] * (1 - opacity) + later[c] * opacity
+                        };
+                        if (Math.Abs(pixels[at + c] - expected) > 2 || pixels[at + 3] != 255)
+                            throw new InvalidOperationException($"Sibling Group {path}, nested={nestedInline}, {mode} at {opacity:P0}, channel {c}: got {pixels[at+c]}, alpha {pixels[at+3]}, expected {expected:0.##} / 255.");
+                    }
+                }
+            }
+        }
+        Logger.Info("Sibling Group opacity passed at 0%, 50%, 100% for Normal/Additive/Multiply in ordinary, CPU and D3D11 inline composition, including nested inline.");
+
+        CaptureSource MakeGroup(string name, byte b, byte g, byte r)
+        {
+            var file = CaptureSource.CreateFile("sibling-group-opacity-fixture", name + " pixels", width, height);
+            file.UsePinnedFrameForSmoke = true;
+            file.FitMode = FitMode.Stretch;
+            file.BlendMode = BlendMode.Normal;
+            file.LastFrame = new SourceFrame(BuildSmokeSolidBgra(width, height, b, g, r), width, height, null, width, height);
+            var group = CaptureSource.CreateGroup(name);
+            group.FitMode = FitMode.Stretch;
+            group.Children.Add(file);
+            return group;
+        }
+    }
 }
